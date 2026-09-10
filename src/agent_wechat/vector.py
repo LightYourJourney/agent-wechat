@@ -13,7 +13,7 @@ from typing import Callable, Sequence
 
 import sqlite_vec
 
-from . import paths, store
+from . import paths, store, tasks
 
 MODEL_NAME = "BAAI/bge-small-zh-v1.5"
 DIM = 512                                   # 必须与 store.VECTOR_SCHEMA 的 float[512] 一致
@@ -346,3 +346,14 @@ def semantic_search(query: str, chat_id: str | None = None, limit: int = 10,
                 "total": len(hits[:limit]), "hits": hits[:limit]}
     finally:
         con.close()
+
+
+def start_build_task(account: str | None, rebuild: bool) -> str:
+    """登记向量索引长任务（MCP 用）。account=None 表示全部账号。"""
+    def _run(tid: str) -> int:
+        res = build_index(account=account, rebuild=rebuild,
+                          progress=lambda n: tasks.update(tid, rows=n))
+        tasks.update(tid, skipped=res["skipped"])
+        return res["embedded"]
+
+    return tasks.start("vector", _run, account=account, rebuild=rebuild)

@@ -7,7 +7,7 @@ import json
 from mcp.server.mcpserver import MCPServer
 
 from . import account as acc_mod
-from . import export, keys, reader, search, store
+from . import export, keys, reader, search, store, vector
 
 server = MCPServer(
     name="agent-wechat",
@@ -126,6 +126,30 @@ def search_history(query: str, contact: str | None = None, limit: int = 20,
     return res
 
 
+@server.tool()
+def semantic_search(query: str, contact: str | None = None, limit: int = 10,
+                    account: str | None = None) -> dict:
+    """按语义（意思相近）检索聊天记录，适合关键词记不清时使用；需先运行 build_vector_index。
+
+    与 search_history 的分工：精确关键词/人名/专名用 search_history（FTS 更快更准），
+    模糊意图（「上次说的那个爬山的安排」）用本工具。contact 可选限定会话，
+    展示名歧义时返回 need_confirm。返回 hits: [{chat_id, display, ts, sender,
+    is_self, content, media_hint, distance}]，distance 越小越相近（cosine 距离）。
+    """
+    acct = _acct(account)
+    r = reader.MessageReader(acct)
+    chat_id = None
+    if contact:
+        chat_id = _resolve_chat(r, contact)
+        if isinstance(chat_id, dict):   # need_confirm / error 原样返回
+            return chat_id
+    res = vector.semantic_search(query, chat_id=chat_id,
+                                 limit=max(1, min(limit, 50)), account=acct)
+    for h in res.get("hits", []):
+        h["display"] = r.display_name(h["chat_id"])   # reader 实例内缓存，只解密一次 contact.db
+    return res
+
+
 def _resolve_chat(r: reader.MessageReader, contact: str) -> str | dict:
     """contact 参数解析为唯一 chat_id；歧义/未命中返回结构化结果而非猜测。"""
     chat_id, cands = r.resolve_one(contact)
@@ -138,14 +162,15 @@ def _resolve_chat(r: reader.MessageReader, contact: str) -> str | dict:
 
 
 @server.tool()
-def build_vector_index(rebuild: bool = False) -> dict:
-    """[预留] 构建向量语义索引。当前版本未启用向量层，调用返回说明。
+def build_vector_index(rebuild: bool = False, account: str | None = None) -> dict:
+    """[长任务] 构建本地向量语义索引（供 semantic_search 使用）。
 
-    全文检索已可用；语义检索属于后续增强（sqlite-vec + 本地 embedding）。
+    嵌入跑在本机 CPU（fastembed + bge-small-zh-v1.5），聊天内容不外发；
+    首次调用会下载约 95MB 模型文件到 ~/.agent-wechat/models，之后完全离线。
+    全量构建预计 25 分钟–2.4 小时（取决于消息长度分布），中断后重跑自动续传。
+    立即返回 task_id，用 get_task_status 查进度；rebuild=True 会先清空索引重新嵌入。
     """
-    return {"status": "unavailable",
-            "reason": "向量索引尚未启用；FTS5 全文检索已覆盖 search_history 需求",
-            "upgrade": "后续版本将提供 sqlite-vec + 本地 bge-small-zh 语义检索"}
+    return {"task_id": vector.start_build_task(account, rebuild), "status": "running"}
 
 
 def _index_ready() -> bool:
