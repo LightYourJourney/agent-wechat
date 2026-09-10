@@ -44,6 +44,30 @@ def test_connect_creates_vector_tables(tmp_path, monkeypatch):
         con.close()
 
 
+def test_connect_wraps_extension_load_failure_in_vector_error(tmp_path, monkeypatch):
+    """扩展加载失败必须是 VectorError（带可执行的修复指引），且不留半配置连接。"""
+    monkeypatch.setattr(store, "DB_PATH", tmp_path / "index.db")
+    opened = []
+    real_connect = store.connect
+
+    def recording_connect(*args, **kwargs):
+        con = real_connect(*args, **kwargs)
+        opened.append(con)
+        return con
+
+    monkeypatch.setattr(store, "connect", recording_connect)
+
+    def boom(con):
+        raise sqlite3.OperationalError("boom")
+
+    monkeypatch.setattr("sqlite_vec.load", boom)
+    with pytest.raises(vector.VectorError, match="sqlite-vec"):
+        vector.connect()
+    assert len(opened) == 1
+    with pytest.raises(sqlite3.ProgrammingError):
+        opened[0].execute("SELECT 1")     # 失败路径必须关掉连接，不把半配置连接漏给调用方
+
+
 def test_should_embed_rules():
     assert vector.should_embed(mk_row("a", "c", 1, "明天开会吗")) is True
     assert vector.should_embed(mk_row("a", "c", 1, "好的")) is True          # 2 字保留
@@ -84,6 +108,45 @@ def test_doc_text_self_and_unknown_sender():
 
 def test_query_text_adds_instruction():
     assert vector.query_text(" 爬山安排 ") == vector.QUERY_INSTRUCTION + "爬山安排"
+
+
+def test_embedder_prefers_offline_loading_when_model_cached(monkeypatch):
+    """模型已在本地时，默认 embedder 必须走 local_files_only=True（运行期零网络请求）。"""
+    calls = []
+
+    class FakeTE:
+        def __init__(self, **kwargs):
+            calls.append(kwargs)
+
+        def embed(self, texts, batch_size=256):
+            return [[0.0] * vector.DIM for _ in texts]
+
+    monkeypatch.setattr("fastembed.TextEmbedding", FakeTE)
+    vector.FastEmbedEmbedder().embed(["x"])
+    assert len(calls) == 1 and calls[0]["local_files_only"] is True
+
+
+def test_embedder_falls_back_to_download_only_when_cache_missing(monkeypatch):
+    """缓存缺失（离线加载抛错）时才允许下载；显式 local_files_only 调用必须保持失败语义。"""
+    calls = []
+
+    class FakeTE:
+        def __init__(self, **kwargs):
+            calls.append(kwargs)
+            if kwargs.get("local_files_only"):
+                raise ValueError("model not cached")
+
+        def embed(self, texts, batch_size=256):
+            return [[0.0] * vector.DIM for _ in texts]
+
+    monkeypatch.setattr("fastembed.TextEmbedding", FakeTE)
+    vector.FastEmbedEmbedder().embed(["x"])
+    assert [c["local_files_only"] for c in calls] == [True, False]
+
+    calls.clear()
+    with pytest.raises(ValueError, match="not cached"):
+        vector.FastEmbedEmbedder(local_files_only=True).embed(["x"])
+    assert [c["local_files_only"] for c in calls] == [True]
 
 
 class FakeEmbedder:
@@ -163,6 +226,21 @@ def test_build_index_account_scoped(env):
     wm = {(r["account"], r["last_rowid"]) for r in
           env.execute("SELECT account, last_rowid FROM vector_watermark")}
     assert len(wm) == 1 and wm.pop()[0] == "acct1"
+
+
+def test_build_index_large_batch_crosses_vec_chunk_boundary(env):
+    """spec §9 的合成用例：vec0 内部按 1024 行分块（sqlite-vec issue #245 的回归点），
+    跨过该边界时构建必须跑完，且一行不漏。"""
+    n = 1100
+    store.upsert_batch(env, [mk_row("acct", "chatA", i, f"第 {i} 条消息") for i in range(1, n + 1)])
+
+    res = vector.build_index(embedder=FakeEmbedder())
+
+    assert res["embedded"] == n
+    assert env.execute("SELECT count(*) FROM vec_messages").fetchone()[0] == n
+    max_id = env.execute("SELECT max(id) FROM messages").fetchone()[0]
+    wm = env.execute("SELECT last_rowid FROM vector_watermark WHERE account='acct'").fetchone()
+    assert wm["last_rowid"] == max_id
 
 
 def test_build_index_mid_run_commit_keeps_rows_and_watermark_in_sync(env, monkeypatch):

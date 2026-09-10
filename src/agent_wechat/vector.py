@@ -112,9 +112,17 @@ class FastEmbedEmbedder:
         if self._model is None:
             from fastembed import TextEmbedding
             MODEL_CACHE_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
-            self._model = TextEmbedding(model_name=MODEL_NAME,
-                                        cache_dir=str(MODEL_CACHE_DIR),
-                                        local_files_only=self._local_only)
+            kwargs = dict(model_name=MODEL_NAME, cache_dir=str(MODEL_CACHE_DIR))
+            if not self._local_only:
+                try:
+                    # 默认先纯离线加载：模型已在本地时绝不发起网络请求（Global Constraint #4：
+                    # 运行期不得发起任何网络请求）。只有首次（缓存缺失）才允许下载。
+                    self._model = TextEmbedding(local_files_only=True, **kwargs)
+                    return self._model
+                except Exception:
+                    pass
+            # 显式 local_files_only=True 的调用方要求「失败即报错」，不做下载回退
+            self._model = TextEmbedding(local_files_only=self._local_only, **kwargs)
         return self._model
 
     def embed(self, texts: list[str]) -> list[Sequence[float]]:

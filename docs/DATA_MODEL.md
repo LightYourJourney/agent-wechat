@@ -64,6 +64,8 @@ CREATE VIRTUAL TABLE messages_fts USING fts5(
 天然支持中文子串与专名/人名匹配；代价是无法匹配 <3 字符的查询——由 `search.py`
 的 LIKE 路由兜底（1-2 字查询）。见 ARCHITECTURE.md §4。
 
+向量表（`vec_messages` / `vector_meta` / `vector_watermark`）见 ARCHITECTURE.md §3.6。
+
 ## 4. 去重主键与增量策略
 
 ### msg_key

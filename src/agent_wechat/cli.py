@@ -191,9 +191,12 @@ def cmd_semantic(args: argparse.Namespace) -> int:
         if not chat_id:
             print(f"无法唯一解析「{args.contact}」", file=sys.stderr)
             return 1
-    res = vector.semantic_search(args.query, chat_id=chat_id, limit=args.n, account=acct)
+    # 与 MCP 层同一上限：-n 超过 50 只会拿到 K_MAX 条候选后被截断，静默少返回
+    limit = max(1, min(args.n, 50))
+    res = vector.semantic_search(args.query, chat_id=chat_id, limit=limit, account=acct)
     if res.get("error"):
-        print(f"{res['error']}（{res.get('hint', '')}）", file=sys.stderr)
+        hint = res.get("hint")
+        print(res["error"] + (f"（{hint}）" if hint else ""), file=sys.stderr)
         return 1
     print(f"mode={res['mode']} total={res['total']}")
     for h in res["hits"]:
