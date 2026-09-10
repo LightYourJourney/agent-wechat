@@ -150,7 +150,22 @@ def cmd_export(args: argparse.Namespace) -> int:
 def cmd_search(args: argparse.Namespace) -> int:
     import json as _json
     from . import search
-    res = search.search(args.query, chat_id=args.contact, limit=args.n)
+    acct = account.resolve_account(args.account)
+    chat_id = None
+    if args.contact:
+        if _is_id(args.contact):
+            chat_id = args.contact
+        else:
+            from . import reader
+            r = reader.MessageReader(acct)
+            cands = r.resolve_chat(args.contact)
+            if len(cands) != 1:
+                print(f"无法唯一解析「{args.contact}」；候选: "
+                      + _json.dumps([{"username": c["username"], "display": c["display"]}
+                                     for c in cands[:10]], ensure_ascii=False))
+                return 1
+            chat_id = cands[0]["username"]
+    res = search.search(args.query, chat_id=chat_id, limit=args.n, account=acct)
     print(f"mode={res['mode']} total={res['total']}")
     for h in res["hits"]:
         print(f"  [{h['ts']}] {h['chat_id']} {h['sender_name'] or h['sender_id'] or '?'}: "

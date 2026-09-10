@@ -72,7 +72,7 @@ CREATE TABLE IF NOT EXISTS watermark (
 
 
 def connect(db_path: pathlib.Path | None = None) -> sqlite3.Connection:
-    paths.HOME_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    paths.ensure_home_dirs()
     con = sqlite3.connect(db_path or DB_PATH)
     con.executescript(SCHEMA)
     con.execute("PRAGMA synchronous=NORMAL")

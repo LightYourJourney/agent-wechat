@@ -1,73 +1,147 @@
-# agent-wechat
+# agent-wechat（WeChat History MCP）
 
-macOS 微信（4.1+）聊天记录读取 + MCP Server。让 Claude Code / Codex 直接读取本机
-已登录微信账号的聊天记录，为指定联系人生成回复建议；支持全量导出到本地检索库。
+> 一个运行在 macOS 上的 **MCP 服务器**：读取本机微信的登录态与聊天记录，供
+> Claude Code / Codex 等 Agent 调用——按联系人读取近期记录生成回复建议，
+> 或全量导出聊天记录到本地检索库，用于本地分析与 LLM 蒸馏。
 
-> ⚠️ **仅限本机本人已登录账号、仅本地使用**。解密自己的聊天数据库涉及合规争议
-> （chatlog 等同类项目 2025 年被微信官方函件后删库），**请勿公开分发本仓库**。
-> 隐私细节见文末。
+**仅限本机、本人已登录的微信账号、纯本地处理。** 解密自己的聊天数据库涉及合规争议
+（同类开源项目 chatlog 于 2025-10 被微信官方函件后删库），**请勿公开分发本仓库**。
+详见 [SECURITY.md](docs/SECURITY.md)。
 
-## 架构
+## 核心特性
 
-- **一次性特权引导**：`bootstrap` 用 lldb 断点捕获登录派生的 32 字节 passphrase
-  （唯一需要 sudo 的环节），之后一切操作无特权、纯文件读取
-- **流式导出**：逐分片解密（用后即焚）→ 解码（WCDB zstd / 类型掩码 / 群前缀）→
-  幂等 upsert 到 `~/.agent-wechat/index.db`（SQLite + FTS5 trigram）
-- **MCP 薄适配层**：7 个工具，核心逻辑可独立用 CLI
+| 特性 | 说明 |
+|---|---|
+| 🔐 登录态检测 | 检测微信是否运行/登录，识别当前登录账号（无侵入：`pgrep` + `lsof`） |
+| 👥 多账号支持 | 账号数据目录按 `wxid` 隔离；passphrase 缓存按账号分键；支持账号切换 |
+| 💬 近期记录读取 | 按联系人实时解密读取最近 N 条（秒级），供 Agent 生成回复建议 |
+| 📦 历史全量导出 | 流式落库、幂等去重、断点续传；本机实测 84 万条消息约 1.5-2 分钟 |
+| 🔍 本地全文检索 | SQLite + FTS5 trigram（≥3 字精确子串）+ LIKE 兜底（1-2 字） |
+| 🤖 Agent 集成 | MCP Server（7 个工具）+ Claude Code Skill + 同源 CLI |
 
-真实 schema 实测文档：[docs/schema-4.1.13.md](docs/schema-4.1.13.md)
+## 适用场景
 
-## 使用
+- **回复建议**：把「帮我回复 XXX」交给 Agent，它读近期上下文后给出候选回复，
+  替代手动截图聊天记录。
+- **历史检索**：「我和 XXX 聊过 XX 吗」——本地毫秒级全文检索。
+- **LLM 蒸馏**：全量导出为结构化数据，供本地分析对话风格、构建个人知识库。
 
-```bash
-# 0. 一次性引导（仅首次 / 微信升级后；详见 bootstrap.py 文档串）
-killall WeChat
-sudo codesign --force --deep --sign - /Applications/WeChat.app   # 去掉 Hardened Runtime
-open /Applications/WeChat.app                                     # 登录
-sudo uv run --directory ~/agent-wechat agent-wechat bootstrap
-#    启动后 5 分钟内：在微信里 退出登录 → 重新登录，触发密钥捕获
+## 架构概览
 
-# 1. 状态
-uv run agent-wechat status --verify-keys
-
-# 2. 近期消息（实时解密，秒级）
-uv run agent-wechat recent filehelper -n 5
-uv run agent-wechat contacts <名字>          # 解析口述名字 → username
-
-# 3. 全量导出（84 万行约 2 分钟；增量续传）
-uv run agent-wechat export                   # 全部会话
-uv run agent-wechat export --contact <username|名字>
-
-# 4. 检索（基于本地索引）
-uv run agent-wechat search "好莱坞"          # ≥3 字走 trigram，1-2 字自动 LIKE
+```
+┌────────────────────────────────────────────────────────────┐
+│ 消费层   Claude Code (MCP+Skill) │ Codex (MCP) │ 终端 CLI  │
+└──────────┬───────────────────────┬──────────────┬───────────┘
+           │      stdio (JSON-RPC) │              │
+┌──────────▼───────────────────────▼──────────────▼───────────┐
+│ mcp_server.py —— 7 个工具的薄适配层（无业务逻辑）             │
+├──────────────────────────────────────────────────────────────┤
+│ 核心层（Python，可脱离 MCP 独立使用）                         │
+│  account   登录态/账号发现（pgrep + lsof，只读）              │
+│  keys      passphrase 缓存 + PBKDF2 派生 + HMAC 自验证        │
+│  bootstrap lldb 断点捕获 passphrase（唯一需要 sudo 的环节）   │
+│  decrypt   db+wal+shm 快照 → sqlcipher 解密（用后即焚）       │
+│  reader    消息解码（zstd/类型掩码/群前缀）与流式产出          │
+│  export    流式导出管道（幂等 upsert + 水位线 + 长任务）      │
+│  store     本地检索库（SQLite + FTS5 trigram）                │
+│  search    检索路由（trigram / LIKE 兜底）                    │
+├──────────────────────────────────────────────────────────────┤
+│ 数据层                                                        │
+│  微信容器（只读） │ ~/.agent-wechat/（0700：密钥缓存+索引库） │
+└──────────────────────────────────────────────────────────────┘
 ```
 
-**MCP 接入**：Claude Code 用仓库里的 [.mcp.json](.mcp.json)（项目级自动加载）；
-Codex 已在 `~/.codex/config.toml` 追加 `[mcp_servers.agent-wechat]`。
-Claude Code 另有 `~/.claude/skills/wechat-reply/SKILL.md`（说「帮我回复 XXX」触发）。
+核心设计：**一次性特权引导 → 之后完全无特权**。`bootstrap` 是唯一需要 sudo 的
+环节，产出 passphrase 缓存；此后 MCP Server 常驻运行零特权。详见
+[ARCHITECTURE.md](docs/ARCHITECTURE.md)。
 
-## MCP 工具
+## 快速开始
 
-| 工具 | 说明 |
+```bash
+# 1. 安装（macOS + 微信 4.1.x，见 INSTALL.md 的完整前置条件）
+cd ~/agent-wechat && uv sync
+
+# 2. 一次性引导（仅首次 / 微信升级后；需 sudo，期间要在微信里重新登录一次）
+killall WeChat
+sudo codesign --force --deep --sign - /Applications/WeChat.app
+open /Applications/WeChat.app        # 然后在微信中登录
+sudo uv run --directory ~/agent-wechat agent-wechat bootstrap
+#    启动后 5 分钟内：微信内 退出登录 → 重新登录，触发密钥捕获
+
+# 3. 验证
+uv run agent-wechat status --verify-keys     # 期望：HMAC 33/33
+
+# 4. 使用
+uv run agent-wechat recent filehelper -n 5   # 实时读取
+uv run agent-wechat export                   # 全量导出（~2 分钟）
+uv run agent-wechat search "关键词"           # 检索
+```
+
+接入 Claude Code / Codex 的 MCP 配置见 [INSTALL.md](docs/INSTALL.md)；
+工具清单见 [TOOLS.md](docs/TOOLS.md)。
+
+## 支持的平台与版本
+
+| 项 | 状态 |
 |---|---|
-| `get_account_status` | 登录态 / 当前账号 / 密钥就绪 / 索引规模 |
-| `list_contacts(query)` | 人名 → username（备注/昵称/微信号模糊匹配） |
-| `get_recent_messages(contact, limit)` | 近期记录（实时解密，最新分片优先） |
-| `export_full_history(contact?)` | [长任务] 全量导出，返回 task_id |
-| `get_task_status(task_id?)` | 任务进度 |
-| `search_history(query, contact?)` | 全文检索（本地索引） |
-| `build_vector_index` | 预留（语义检索后续增强） |
+| macOS（Apple Silicon / Intel） | ✅ 本机实测 |
+| 微信 4.1.13.63 | ✅ 本机实测（2026-09） |
+| 微信 4.1.x 其他版本 | ⚠️ 密钥路线与库结构同族，**需自行验证**（见 TROUBLESHOOTING） |
+| 微信 4.0.x / 3.x / Windows / Linux | ❌ 不支持（4.0.x 的内存缓存密钥方案在本项目未实现） |
 
-## 多账号
+## 目录结构
 
-- 数据目录按 `wxid_<id>_<hex4>` 隔离；当前登录账号由 `lsof` 判定
-- 每个账号各自的 passphrase 独立捕获：登录到哪个账号，就 bootstrap 一次
-- `--account wxid_xxx_hex4` 显式指定目标账号；省略时操作当前登录账号
+```
+agent-wechat/
+├── README.md              ← 本文件
+├── .mcp.json              Claude Code 项目级 MCP 配置
+├── src/agent_wechat/      核心包（模块职责见 ARCHITECTURE.md）
+│   ├── account.py         登录态检测与账号识别
+│   ├── keys.py            密钥派生/校验/缓存
+│   ├── bootstrap.py       lldb 捕获（sudo）
+│   ├── decrypt.py         快照与解密
+│   ├── reader.py          消息读取与解码
+│   ├── export.py          导出管道与长任务
+│   ├── store.py           本地检索库
+│   ├── search.py          检索路由
+│   ├── mcp_server.py      MCP 工具层
+│   └── cli.py             命令行入口
+├── tests/                 集成测试（合成加密库，不依赖真机）
+├── spike/                 密钥可行性探索脚本（一次性，留档）
+└── docs/
+    ├── INSTALL.md         安装与配置
+    ├── USAGE.md           使用指南
+    ├── TOOLS.md           MCP 工具参考
+    ├── ARCHITECTURE.md    架构设计
+    ├── DATA_MODEL.md      数据与存储
+    ├── SECURITY.md        隐私与安全
+    ├── TROUBLESHOOTING.md 故障排查
+    ├── FAQ.md             常见问题
+    ├── schema-4.1.13.md   微信库结构实测记录
+    ├── CHANGELOG.md       版本记录
+    └── CONTRIBUTING.md    贡献指南
+```
 
-## 隐私与合规
+## 文档索引
 
-- 绝不写入微信容器目录；解密副本在 `~/.agent-wechat/tmp/`（0700）用后即焚
-- `~/.agent-wechat/` 已加入 Time Machine 排除（`tmutil addexclusion`）
-- passphrase 缓存 0600；索引库明文依赖 FileVault 全盘加密
-- embedding/检索全部本地，聊天内容不出本机
-- `uv run agent-wechat purge` 未实现前，手动 `rm -rf ~/.agent-wechat` 即可销毁全部数据
+| 文档 | 用途 |
+|---|---|
+| [INSTALL.md](docs/INSTALL.md) | 环境要求、依赖、权限、微信适配、MCP 配置 |
+| [USAGE.md](docs/USAGE.md) | 典型场景、工作流、命令示例 |
+| [TOOLS.md](docs/TOOLS.md) | 7 个 MCP 工具的参数/返回/错误 |
+| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | 模块划分、数据流、设计决策 |
+| [DATA_MODEL.md](docs/DATA_MODEL.md) | 表结构、去重与增量策略 |
+| [SECURITY.md](docs/SECURITY.md) | 隐私、密钥安全、法律风险 |
+| [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | 常见故障与修复 |
+| [FAQ.md](docs/FAQ.md) | 用户常见疑问 |
+| [CHANGELOG.md](docs/CHANGELOG.md) / [CONTRIBUTING.md](docs/CONTRIBUTING.md) | 版本与贡献 |
+
+## 许可证与免责声明
+
+本项目为**个人自用工具**，未设开源许可证（默认保留所有权利），**不得公开分发**。
+
+> **免责声明**：本项目通过读取本机微信进程内存（仅一次、断点瞬间）获取本人账号的
+> 数据库密钥，并解密本人设备上的聊天数据库。此行为可能违反《微信软件许可及服务协议》，
+> 且"规避技术保护措施"的法律定性存在争议。使用本项目的一切后果由使用者自行承担，
+> 包括但不限于账号受限。开发者不对任何人因使用本项目而遭受的损失负责。请勿用于
+> 读取他人账号数据、二次分发或任何商业用途。

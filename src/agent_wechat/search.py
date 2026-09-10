@@ -12,11 +12,17 @@ def _fts_safe(q: str) -> str:
 
 
 def search(query: str, chat_id: str | None = None, limit: int = 20,
-           after_ts: int | None = None, before_ts: int | None = None) -> dict:
-    """返回 {"hits": [...], "mode": "fts"|"like", "total": n}。"""
+           after_ts: int | None = None, before_ts: int | None = None,
+           account: str | None = None) -> dict:
+    """返回 {"hits": [...], "mode": "fts"|"like", "total": n}。
+
+    account 必传：检索严格限定该账号的数据（多账号索引隔离）。
+    """
     con = store.connect()
     con.row_factory = sqlite3.Row
-    where, args = ["m.account = (SELECT account FROM messages LIMIT 1)"], []
+    if not account:
+        raise ValueError("search 需要显式 account（多账号索引隔离）")
+    where, args = ["m.account = ?"], [account]
     if chat_id:
         where.append("m.chat_id = ?")
         args.append(chat_id)

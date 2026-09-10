@@ -116,25 +116,34 @@ def search_history(query: str, contact: str | None = None, limit: int = 20,
                    account: str | None = None) -> dict:
     """在本地检索库中做全文检索（trigram 精确子串；1-2 字自动 LIKE 兜底）。
 
-    需先运行 export_full_history。contact 可选限定会话。
+    需先运行 export_full_history。contact 可选限定会话（username 或展示名；
+    展示名命中多个联系人时返回 need_confirm，不命中返回 error，不会静默扩大范围）。
     返回 hits: [{chat_id, time, sender, is_self, content, snippet}]。
     """
-    _acct(account)
+    acct = _acct(account)
     chat_id = None
     if contact:
-        if not _looks_like_id(contact):
-            with store.connect() as con:
-                row = con.execute(
-                    "SELECT DISTINCT chat_id FROM messages WHERE chat_id LIKE ? LIMIT 5",
-                    (f"%{contact}%",)).fetchall()
-            cands = [r[0] for r in row]
-            chat_id = cands[0] if len(cands) == 1 else (cands[0] if cands else None)
-        else:
-            chat_id = contact
-    res = search.search(query, chat_id=chat_id, limit=limit)
+        chat_id = _resolve_chat_id(acct, contact)
+        if isinstance(chat_id, dict):   # need_confirm / error 原样返回
+            return chat_id
+    res = search.search(query, chat_id=chat_id, limit=limit, account=acct)
     if res["total"] == 0 and not _index_ready():
         res["hint"] = "本地索引为空：请先运行 export_full_history"
     return res
+
+
+def _resolve_chat_id(acct: str, contact: str) -> str | dict:
+    """把 contact 参数解析为唯一 chat_id；歧义/未命中返回结构化结果而非猜测。"""
+    if _looks_like_id(contact):
+        return contact
+    r = reader.MessageReader(acct)
+    cands = r.resolve_chat(contact)
+    if not cands:
+        return {"error": f"找不到联系人「{contact}」，请用 list_contacts 查询"}
+    if len(cands) > 1:
+        return {"need_confirm": [{"username": c["username"], "display": c["display"],
+                                  "kind": c["kind"]} for c in cands[:10]]}
+    return cands[0]["username"]
 
 
 @server.tool()

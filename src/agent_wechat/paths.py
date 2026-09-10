@@ -25,6 +25,22 @@ SHARD_RE = re.compile(r"^message_(\d+)\.db$")
 # 本项目数据目录（0700）：密钥缓存、临时明文、导出库。可用环境变量覆盖。
 HOME_DIR = pathlib.Path(os.environ.get("AGENT_WECHAT_HOME", str(pathlib.Path.home() / ".agent-wechat")))
 
+_tm_exclusion_checked = False
+
+
+def ensure_home_dirs() -> None:
+    """确保数据目录存在（0700）并排除出 Time Machine（幂等，失败静默）。"""
+    global _tm_exclusion_checked
+    HOME_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if not _tm_exclusion_checked:
+        _tm_exclusion_checked = True
+        try:
+            import subprocess
+            subprocess.run(["tmutil", "addexclusion", str(HOME_DIR)],
+                           capture_output=True, timeout=10)
+        except Exception:
+            pass  # 无 tmutil/权限不足时由用户按 INSTALL.md 手动排除
+
 
 def account_dirs() -> list[str]:
     """枚举本机所有账号数据目录名（wxid_xxx_hex4）。"""

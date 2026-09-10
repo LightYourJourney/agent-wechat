@@ -21,8 +21,8 @@ from . import keys, paths
 
 
 def ensure_home_dirs() -> None:
-    for d in (paths.HOME_DIR, paths.HOME_DIR / "tmp"):
-        d.mkdir(mode=0o700, parents=True, exist_ok=True)
+    paths.ensure_home_dirs()
+    (paths.HOME_DIR / "tmp").mkdir(mode=0o700, parents=True, exist_ok=True)
 
 
 def snapshot(db: pathlib.Path, td: pathlib.Path) -> pathlib.Path:
