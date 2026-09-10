@@ -110,14 +110,13 @@ def cmd_contacts(args: argparse.Namespace) -> int:
 
 
 def cmd_recent(args: argparse.Namespace) -> int:
-    import json as _json
     from . import reader
     r = reader.MessageReader(account.resolve_account(args.account))
-    chat_id = args.contact if _is_id(args.contact) else _one(r.resolve_chat(args.contact))
+    chat_id, cands = r.resolve_one(args.contact)
     if not chat_id:
         print(f"无法唯一解析「{args.contact}」；候选: "
-              + _json.dumps([{"username": c["username"], "display": c["display"]}
-                             for c in r.resolve_chat(args.contact)[:10]], ensure_ascii=False))
+              + json.dumps([{"username": c["username"], "display": c["display"]}
+                            for c in cands[:10]], ensure_ascii=False))
         return 1
     for m in r.recent(chat_id, limit=args.n):
         who = "我" if m.is_self else (m.sender_name or m.sender_id or "?")
@@ -133,7 +132,7 @@ def cmd_export(args: argparse.Namespace) -> int:
     if args.contact:
         from . import reader
         r = reader.MessageReader(acct)
-        chat_id = args.contact if _is_id(args.contact) else _one(r.resolve_chat(args.contact))
+        chat_id, _cands = r.resolve_one(args.contact)
         if not chat_id:
             print(f"无法唯一解析「{args.contact}」", file=sys.stderr)
             return 1
@@ -148,37 +147,24 @@ def cmd_export(args: argparse.Namespace) -> int:
 
 
 def cmd_search(args: argparse.Namespace) -> int:
-    import json as _json
     from . import search
     acct = account.resolve_account(args.account)
     chat_id = None
     if args.contact:
-        if _is_id(args.contact):
-            chat_id = args.contact
-        else:
-            from . import reader
-            r = reader.MessageReader(acct)
-            cands = r.resolve_chat(args.contact)
-            if len(cands) != 1:
-                print(f"无法唯一解析「{args.contact}」；候选: "
-                      + _json.dumps([{"username": c["username"], "display": c["display"]}
-                                     for c in cands[:10]], ensure_ascii=False))
-                return 1
-            chat_id = cands[0]["username"]
+        from . import reader
+        r = reader.MessageReader(acct)
+        chat_id, cands = r.resolve_one(args.contact)
+        if not chat_id:
+            print(f"无法唯一解析「{args.contact}」；候选: "
+                  + json.dumps([{"username": c["username"], "display": c["display"]}
+                                for c in cands[:10]], ensure_ascii=False))
+            return 1
     res = search.search(args.query, chat_id=chat_id, limit=args.n, account=acct)
     print(f"mode={res['mode']} total={res['total']}")
     for h in res["hits"]:
         print(f"  [{h['ts']}] {h['chat_id']} {h['sender_name'] or h['sender_id'] or '?'}: "
               f"{(h['content'] or '')[:120]}")
     return 0
-
-
-def _is_id(s: str) -> bool:
-    return s.endswith("@chatroom") or s.startswith(("wxid_", "gh_", "filehelper"))
-
-
-def _one(cands) -> str | None:
-    return cands[0]["username"] if len(cands) == 1 else None
 
 
 def main(argv: list[str] | None = None) -> None:

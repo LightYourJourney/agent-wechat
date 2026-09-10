@@ -94,14 +94,18 @@ def upsert_batch(con: sqlite3.Connection, rows: list[dict]) -> None:
              sender_name=excluded.sender_name, exported_at=excluded.exported_at
            WHERE messages.content IS NOT excluded.content""",
         [{**r, "exported_at": now} for r in rows])
-    for r in rows:  # 水位线：单调推进
-        con.execute(
-            """INSERT INTO watermark (account, shard, chat_md5, max_local_id, updated_at)
-               VALUES (?,?,?,?,?)
-               ON CONFLICT(account, shard, chat_md5) DO UPDATE SET
-                 max_local_id=max(max_local_id, excluded.max_local_id),
-                 updated_at=excluded.updated_at""",
-            (r["account"], r["shard"], r["chat_md5"], r["local_id"], now))
+    wm: dict[tuple[str, str, str], int] = {}
+    for r in rows:  # 水位线：批内按会话聚合后一条语句推进（单调 max）
+        k = (r["account"], r["shard"], r["chat_md5"])
+        if r["local_id"] > wm.get(k, 0):
+            wm[k] = r["local_id"]
+    con.executemany(
+        """INSERT INTO watermark (account, shard, chat_md5, max_local_id, updated_at)
+           VALUES (?,?,?,?,?)
+           ON CONFLICT(account, shard, chat_md5) DO UPDATE SET
+             max_local_id=max(max_local_id, excluded.max_local_id),
+             updated_at=excluded.updated_at""",
+        [(a, s, m, mx, now) for (a, s, m), mx in wm.items()])
     con.commit()
 
 

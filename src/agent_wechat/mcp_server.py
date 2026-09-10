@@ -70,16 +70,9 @@ def get_recent_messages(contact: str, limit: int = 50,
     """
     acct = _acct(account)
     r = reader.MessageReader(acct)
-    if _looks_like_id(contact):
-        chat_id = contact
-    else:
-        cands = r.resolve_chat(contact)
-        if not cands:
-            return {"error": f"找不到联系人「{contact}」，请用 list_contacts 查询"}
-        if len(cands) > 1:
-            return {"need_confirm": [{"username": c["username"], "display": c["display"],
-                                      "kind": c["kind"]} for c in cands[:10]]}
-        chat_id = cands[0]["username"]
+    chat_id = _resolve_chat(r, contact)
+    if isinstance(chat_id, dict):   # need_confirm / error 原样返回
+        return chat_id
     msgs = r.recent(chat_id, limit=max(1, min(limit, 500)))
     return {"chat_id": chat_id, "display": r.display_name(chat_id),
             "messages": [_msg_dict(m) for m in msgs]}
@@ -98,7 +91,7 @@ def export_full_history(contact: str | None = None, full: bool = False,
     chat_id = None
     if contact:
         r = reader.MessageReader(acct)
-        chat_id = contact if _looks_like_id(contact) else _resolve_one(r, contact)
+        chat_id, _cands = r.resolve_one(contact)
         if not chat_id:
             return {"error": f"找不到联系人「{contact}」"}
     task_id = export.start_task(acct, chat_id, full)
@@ -118,12 +111,13 @@ def search_history(query: str, contact: str | None = None, limit: int = 20,
 
     需先运行 export_full_history。contact 可选限定会话（username 或展示名；
     展示名命中多个联系人时返回 need_confirm，不命中返回 error，不会静默扩大范围）。
-    返回 hits: [{chat_id, time, sender, is_self, content, snippet}]。
+    返回 hits: [{chat_id, ts, sender_id, sender_name, is_self, content, media_hint, snip}]。
     """
     acct = _acct(account)
     chat_id = None
     if contact:
-        chat_id = _resolve_chat_id(acct, contact)
+        r = reader.MessageReader(acct)
+        chat_id = _resolve_chat(r, contact)
         if isinstance(chat_id, dict):   # need_confirm / error 原样返回
             return chat_id
     res = search.search(query, chat_id=chat_id, limit=limit, account=acct)
@@ -132,18 +126,15 @@ def search_history(query: str, contact: str | None = None, limit: int = 20,
     return res
 
 
-def _resolve_chat_id(acct: str, contact: str) -> str | dict:
-    """把 contact 参数解析为唯一 chat_id；歧义/未命中返回结构化结果而非猜测。"""
-    if _looks_like_id(contact):
-        return contact
-    r = reader.MessageReader(acct)
-    cands = r.resolve_chat(contact)
+def _resolve_chat(r: reader.MessageReader, contact: str) -> str | dict:
+    """contact 参数解析为唯一 chat_id；歧义/未命中返回结构化结果而非猜测。"""
+    chat_id, cands = r.resolve_one(contact)
+    if chat_id:
+        return chat_id
     if not cands:
         return {"error": f"找不到联系人「{contact}」，请用 list_contacts 查询"}
-    if len(cands) > 1:
-        return {"need_confirm": [{"username": c["username"], "display": c["display"],
-                                  "kind": c["kind"]} for c in cands[:10]]}
-    return cands[0]["username"]
+    return {"need_confirm": [{"username": c["username"], "display": c["display"],
+                              "kind": c["kind"]} for c in cands[:10]]}
 
 
 @server.tool()
@@ -155,15 +146,6 @@ def build_vector_index(rebuild: bool = False) -> dict:
     return {"status": "unavailable",
             "reason": "向量索引尚未启用；FTS5 全文检索已覆盖 search_history 需求",
             "upgrade": "后续版本将提供 sqlite-vec + 本地 bge-small-zh 语义检索"}
-
-
-def _looks_like_id(s: str) -> bool:
-    return s.endswith("@chatroom") or s.startswith(("wxid_", "gh_", "filehelper"))
-
-
-def _resolve_one(r: reader.MessageReader, name: str) -> str | None:
-    cands = r.resolve_chat(name)
-    return cands[0]["username"] if len(cands) == 1 else None
 
 
 def _index_ready() -> bool:

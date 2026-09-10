@@ -18,6 +18,7 @@ import os
 import platform
 import re
 import select
+import shutil
 import subprocess
 import tempfile
 import time
@@ -45,7 +46,7 @@ def _parse_passphrase(out: str) -> str | None:
 
 def capture_passphrase_lldb(timeout: int = DEFAULT_TIMEOUT) -> str:
     """attach 微信并在 CCKeyDerivationPBKDF 断点等待重新登录触发。返回 64 hex 字符。"""
-    if not __import__("shutil").which("lldb"):
+    if not shutil.which("lldb"):
         raise CaptureError("未检测到 lldb，请先: xcode-select --install")
     pid = account.wechat_pid()
     if not pid:
@@ -89,13 +90,15 @@ def capture_passphrase_lldb(timeout: int = DEFAULT_TIMEOUT) -> str:
             if _parse_passphrase(buf):
                 break
     finally:
-        for killer in (["terminate"], ["kill"]):
+        try:                      # 先温和终止，超时/失败再强杀
+            proc.terminate()
+            proc.wait(timeout=3)
+        except Exception:
             try:
-                getattr(proc, killer[0])()
+                proc.kill()
                 proc.wait(timeout=3)
-                break
             except Exception:
-                continue
+                pass
         try:
             os.unlink(sp)
         except OSError:

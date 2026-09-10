@@ -74,6 +74,11 @@ def _s(v) -> str | None:
     return v.decode("utf-8", "replace") if isinstance(v, bytes) else str(v)
 
 
+def is_chat_id(s: str) -> bool:
+    """wxid / 群 / 公众号 / filehelper 形态的 username 可直接当会话 id 用，无需解析。"""
+    return s.endswith("@chatroom") or s.startswith(("wxid_", "gh_", "filehelper"))
+
+
 class MessageReader:
     """按账号读取消息。只读微信目录；解密副本用后即焚。"""
 
@@ -81,6 +86,14 @@ class MessageReader:
         self.acct = acct
         self.passphrase = keys.get_passphrase(acct)
         self.self_wxid = paths.bare_wxid(acct)
+        self._contacts_all: list[dict] | None = None   # 实例级缓存，见 _contacts_all_cached
+
+    def _contacts_all_cached(self) -> list[dict]:
+        """全量联系人。同一 reader 生命周期内只解密一次 contact.db
+        （resolve_chat + display_name 常在同一次工具调用里先后执行）。"""
+        if self._contacts_all is None:
+            self._contacts_all = self.contacts(limit=5000)
+        return self._contacts_all
 
     @contextlib.contextmanager
     def _open(self, rel: str):
@@ -143,16 +156,21 @@ class MessageReader:
 
     def resolve_chat(self, name_or_id: str) -> list[dict]:
         """把口述名字解析成会话 id 候选。"""
-        hits = [c for c in self.contacts(limit=5000)
-                if name_or_id.lower() in (c["display"] or "").lower()
-                or name_or_id.lower() in (c["username"] or "").lower()]
-        return hits
+        q = name_or_id.lower()
+        return [c for c in self._contacts_all_cached()
+                if q in (c["display"] or "").lower()
+                or q in (c["username"] or "").lower()]
+
+    def resolve_one(self, name_or_id: str) -> tuple[str | None, list[dict]]:
+        """名字/ID → 唯一会话 id。返回 (chat_id, 候选列表)；唯一命中时 chat_id 非 None。"""
+        if is_chat_id(name_or_id):
+            return name_or_id, []
+        cands = self.resolve_chat(name_or_id)
+        return (cands[0]["username"] if len(cands) == 1 else None), cands
 
     def display_name(self, chat_id: str) -> str:
-        for c in self.contacts(limit=5000):
-            if c["username"] == chat_id:
-                return c["display"]
-        return chat_id
+        return next((c["display"] for c in self._contacts_all_cached()
+                     if c["username"] == chat_id), chat_id)
 
     # ---------- 消息 ----------
 
@@ -224,7 +242,8 @@ class MessageReader:
                  batch: int | None = None):
         """全量流式导出（生成器）。逐分片→逐表→按批 yield。
 
-        resume: {chat_md5: 已导出的 max(local_id)}（来自 store.watermark）。
+        resume: {(shard, chat_md5): 已导出的 max(local_id)}（来自 store.watermark；
+        local_id 是分片内序号，键必须含 shard）。
         yield 批次为 list[dict]，字段与 store.upsert_batch 对齐。
         """
         batch = batch or store.BATCH
@@ -238,7 +257,7 @@ class MessageReader:
                     md5hex = table[4:]
                     if want_md5 and md5hex != want_md5:
                         continue
-                    start = resume.get(md5hex, 0)
+                    start = resume.get((shard.name, md5hex), 0)
                     cur = con.execute(
                         f"SELECT local_id, local_type, real_sender_id, create_time, "
                         f"message_content, WCDB_CT_message_content FROM '{table}' "
