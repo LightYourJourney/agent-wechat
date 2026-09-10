@@ -303,3 +303,45 @@ def test_semantic_search_accepts_degraded_md5_chat_id(env):
     degraded = "md5:" + hashlib.md5(b"chatA").hexdigest()
     res = vector.semantic_search("爬山", chat_id=degraded, account="acct", embedder=fake)
     assert res["total"] == 1 and res["hits"][0]["chat_id"] == "chatA"
+
+
+def test_build_index_refuses_when_any_meta_row_is_foreign(env):
+    """多行 meta（旧模型行 + 当前模型行）也必须被拦住——只看「最新一行」会漏，
+    因为异模型行可能比当前模型行更旧（built_at 只有秒级分辨率）。"""
+    store.upsert_batch(env, [mk_row("acct", "chatA", 1, "第一条消息")])
+    vector.build_index(embedder=FakeEmbedder())
+    env.execute("INSERT INTO vector_meta(model_id, dim, built_at, embedded, skipped) "
+                "VALUES ('fastembed:other:512', 512, 1, 7, 0)")   # 比当前模型行更旧
+    env.commit()
+    with pytest.raises(vector.VectorError, match="rebuild"):
+        vector.build_index(embedder=FakeEmbedder())
+
+
+def test_build_index_refuses_real_model_change(env, monkeypatch):
+    """守卫的真正场景：模型常量变了（而非手工改 meta 行）。"""
+    store.upsert_batch(env, [mk_row("acct", "chatA", 1, "第一条消息")])
+    vector.build_index(embedder=FakeEmbedder())
+    monkeypatch.setattr(vector, "MODEL_ID", "fastembed:other:512")
+    with pytest.raises(vector.VectorError, match="rebuild"):
+        vector.build_index(embedder=FakeEmbedder())
+
+
+def test_semantic_search_model_mismatch_wins_over_empty(env):
+    """存在异模型行且当前模型行 embedded=0 时，必须报「不一致」而非「索引为空」
+    ——这正是两个检查顺序真正起作用的场景。"""
+    store.upsert_batch(env, [mk_row("acct", "chatA", 1, "第一条消息")])
+    vector.build_index(embedder=FakeEmbedder())
+    env.execute("UPDATE vector_meta SET embedded = 0")
+    env.execute("INSERT INTO vector_meta(model_id, dim, built_at, embedded, skipped) "
+                "VALUES ('fastembed:other:512', 512, 1, 0, 0)")
+    env.commit()
+    res = vector.semantic_search("x", account="acct", embedder=FakeEmbedder())
+    assert "不一致" in res["error"]
+
+
+def test_semantic_search_rejects_non_positive_limit(env):
+    """CLI 的 -n 可为负：不能把 k=-1 透传给 sqlite（会抛裸 OperationalError）。"""
+    store.upsert_batch(env, [mk_row("acct", "chatA", 1, "第一条消息")])
+    vector.build_index(embedder=FakeEmbedder())
+    res = vector.semantic_search("x", account="acct", limit=-1, embedder=FakeEmbedder())
+    assert res["error"] == "limit 必须为正整数"

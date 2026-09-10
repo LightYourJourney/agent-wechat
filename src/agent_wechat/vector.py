@@ -143,14 +143,16 @@ def _meta(con) -> sqlite3.Row | None:
     return con.execute("SELECT * FROM vector_meta WHERE model_id = ?", (MODEL_ID,)).fetchone()
 
 
-def _any_meta(con) -> sqlite3.Row | None:
-    """当前索引的 meta 行，**模型无关**地读。
+def _foreign_model(con) -> str | None:
+    """索引里是否存在**别的模型**构建的 meta 行；有则返回那个 model_id，否则 None。
 
-    用途是识别「索引由别的模型构建」——`_meta()` 按 MODEL_ID 过滤，异模型的
-    行对它不可见，那恰恰是需要报错的场景（用 `_meta()` 会让该分支永不可达）。
+    这是「模型不匹配」的唯一判据，刻意**不看「最新一行」**：`built_at` 只有秒级
+    分辨率，多行状态下顺序不确定（取哪行是碰运气）；而且只要存在异模型行，
+    就既不允许查询、也不允许继续构建——否则新模型的向量会被追加进旧模型的向量表。
     """
-    return con.execute(
-        "SELECT * FROM vector_meta ORDER BY built_at DESC LIMIT 1").fetchone()
+    row = con.execute("SELECT model_id FROM vector_meta WHERE model_id != ? LIMIT 1",
+                      (MODEL_ID,)).fetchone()
+    return row[0] if row else None
 
 
 def _ensure_meta(con) -> None:
@@ -259,13 +261,14 @@ def build_index(account: str | None = None, rebuild: bool = False, embedder=None
             con.executescript(store.VECTOR_DROP)
             con.executescript(store.VECTOR_SCHEMA)
             con.commit()
-        # 换模型必须重建：否则新模型的行会被追加进装着旧模型向量的表里，
-        # 查询结果将是两个向量空间的混合（无意义的距离）。不静默混用，直接报错。
-        existing = _any_meta(con)
-        if existing is not None and existing["model_id"] != MODEL_ID:
+        # 换模型必须重建。不重建的两种真实失败形态（实测）：
+        #   1) 模型常量变了 → 新模型的水位线从 0 起 → 重嵌 → 撞 vec_messages 主键（裸 OperationalError）
+        #   2) 只改了 meta 行 → 水位线仍在 → 静默返回 {"embedded": 0}，索引停摆
+        # 二者都不是「静默混用向量」，但都必须由用户显式 rebuild 才能继续。
+        foreign = _foreign_model(con)
+        if foreign:
             raise VectorError(
-                f"索引由 {existing['model_id']} 构建，与当前模型 {MODEL_ID} 不一致："
-                "请改用 rebuild=True 重建（混用两个模型的向量会得到无意义的结果）")
+                f"索引由 {foreign} 构建，与当前模型 {MODEL_ID} 不一致：请改用 rebuild=True 重建")
         _ensure_meta(con)
         accounts = ([account] if account else
                     [r[0] for r in con.execute("SELECT DISTINCT account FROM messages")])
@@ -299,11 +302,16 @@ def semantic_search(query: str, chat_id: str | None = None, limit: int = 10,
         return {"error": "semantic_search 需要显式 account（多账号索引隔离）"}
     con = connect()
     try:
-        meta = _any_meta(con)
-        # 顺序要紧：先判模型是否匹配，再判是否为空——不匹配的索引一律不得查询
-        if meta is not None and meta["model_id"] != MODEL_ID:
-            return {"error": f"索引由 {meta['model_id']} 构建，与当前模型 {MODEL_ID} 不一致",
+        if limit < 1:
+            return {"error": "limit 必须为正整数"}
+        # 顺序要紧：先判模型是否匹配，再判是否为空——不匹配的索引一律不得查询。
+        # 判据必须模型无关（`_meta()` 按 MODEL_ID 过滤，异模型的行对它不可见，
+        # 用它会让本分支永不可达），且必须看「是否存在任何异模型行」而非「最新一行」。
+        foreign = _foreign_model(con)
+        if foreign:
+            return {"error": f"索引由 {foreign} 构建，与当前模型 {MODEL_ID} 不一致",
                     "hint": "运行 vector-build --rebuild 或 build_vector_index(rebuild=True)"}
+        meta = _meta(con)
         if meta is None or meta["embedded"] == 0:
             return {"error": "向量索引为空", "hint": "请先运行 build_vector_index"}
         k = min(max(limit * 3, limit), K_MAX)          # 多取候选，过滤后再截断
