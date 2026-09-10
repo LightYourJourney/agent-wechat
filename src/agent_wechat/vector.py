@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+import time
 from typing import Sequence
 
 from . import paths, store
@@ -44,3 +45,50 @@ def connect() -> sqlite3.Connection:
     con.execute("SELECT vec_version()").fetchone()      # 探活：真正验证扩展可用
     con.executescript(store.VECTOR_SCHEMA)
     return con
+
+
+def should_embed(row) -> bool:
+    """文本与带标题的 appmsg 才入向量；纯媒体占位与过短消息跳过（spec §5）。"""
+    if row["msg_type"] not in EMBED_TYPES:
+        return False
+    content = (row["content"] or "").strip()
+    if len(content) < 2:
+        return False
+    if row["msg_type"] == 49:
+        return content.startswith("[appmsg: ") and content != "[appmsg]"
+    return True
+
+
+def display_text(row) -> str:
+    """一行消息的展示文本：正文优先，媒体消息退回 media_hint。"""
+    return (row["content"] or row["media_hint"] or "").strip()
+
+
+def _who(row) -> str:
+    if row["is_self"]:
+        return "我"
+    return row["sender_name"] or row["sender_id"] or "?"
+
+
+def _date(ts: int) -> str:
+    return time.strftime("%Y-%m-%d", time.localtime(ts))
+
+
+def doc_text(row, prev: str | None) -> str:
+    """入库文本 = 确定性上下文前缀 + 正文。
+
+    前缀解决「好的」「在吗」这类短消息单条 embedding 语义不可靠的问题
+    （Anthropic Contextual Retrieval 方法学：失败检索率 -49%，见 spec §5）。
+    """
+    parts = [f"[{_date(row['ts'])} {_who(row)}]"]
+    if prev:
+        head = prev.replace("\n", " ")[:30]
+        if head:
+            parts.append(f"上文: {head}…")
+    parts.append(f"| {(row['content'] or '').strip()}")
+    return " ".join(parts)
+
+
+def query_text(q: str) -> str:
+    """查询侧加 BGE 官方 s2p 指令（文档侧不加；两侧策略固定，见 spec §5）。"""
+    return QUERY_INSTRUCTION + q.strip()
