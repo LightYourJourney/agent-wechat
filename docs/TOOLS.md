@@ -142,8 +142,8 @@
 ```
 
 `status`: `running` / `done` / `failed`；失败时 `error` 含中文原因。向量索引任务
-（`kind: "vector"`）额外带 `rebuild`，`rows` 为本轮**已嵌入行数**，`skipped` 为按规则
-跳过的行数（非文本/无标题的 appmsg、正文短于 2 字符的消息）。
+（`kind: "vector"`）额外带 `rebuild`，`rows` 为本轮**已嵌入行数**，`skipped` 为**本轮**按
+规则跳过的行数（非文本/无标题的 appmsg、正文短于 2 字符的消息）。
 
 ---
 
@@ -200,14 +200,15 @@
 ```
 
 - 嵌入在本机 CPU 完成（fastembed + `BAAI/bge-small-zh-v1.5`），**聊天内容不外发**。
-- 首次调用下载约 95MB 模型文件到 `~/.agent-wechat/models`，之后完全离线可用。
+- 模型仅首次下载（约 95MB，存于 `~/.agent-wechat/models`），之后从本地缓存加载
+  （如需强制离线可设 `HF_HUB_OFFLINE=1`）。
 - 全量构建预计 25 分钟–2.4 小时（视消息长度分布）；中断/崩溃后重跑自动从水位线续传。
 - 数据源是 `export_full_history` 落库的**本地消息库**（不直接读微信）：先导出，再建向量索引；
   之后新增导出的消息再跑一次本工具（省略 `rebuild`）即增量补齐。
 - **增量运行会丢失每个会话首条消息的上下文前缀**：`上文:` 前缀在**同一轮运行内**按会话累积，
   增量运行从水位线开始，因此各会话本轮第一条被嵌入的消息没有前缀（即便它确有前一条消息）。
   需要完整连续的上下文时用 `rebuild: true` 全量重建。
-- 进度见 `get_task_status`（`kind: "vector"`，`rows` 为本轮已嵌入行数，`skipped` 为跳过行数）。
+- 进度见 `get_task_status`（`kind: "vector"`，`rows` 为本轮已嵌入行数，`skipped` 为本轮跳过行数）。
 
 ---
 
@@ -242,17 +243,17 @@
 - **没有相关性阈值**：KNN 恒返回距离最近的 `limit` 条（无论多不相关）；`total` 是本次
   返回的条数（≤ `limit`），**不代表相关程度**——结果是否可用由调用方按 `distance` 判断，
   不要把 `hits` 直接当作「相关结果」呈现。
-- `contact` 给出展示名且命中多个联系人时返回 `need_confirm`，不会静默扩大范围。
-- **无法解析的 `chat_id` 静默返回 0 命中，不报错**：会话过滤按 `md5(chat_id)` 计算
-  （reader 对无法反查的会话给出的 `md5:<hex>` 退化形式已特判支持），只有 canonical 用户名
-  （`wxid_*` / `*@chatroom` / `filehelper`）能匹配。传昵称/备注等展示名、或裸 md5 串时
-  算出的 md5 匹配不到任何会话——**返回空结果而不是报错，与「确实没有命中」不可区分**。
-  展示名 → 用户名的解析是调用方的工作：MCP 走 `contact` 参数（未命中返回 `error`、
-  命中多个返回 `need_confirm`），或先调 `list_contacts` 取 username。
+- **展示名必须经 `contact` 参数解析**（解析发生在算 md5 之前）：未命中返回 `error`、
+  命中多个返回 `need_confirm`——**失败是显式的**，不会静默返回空，也不会静默扩大范围。
+  CLI 的 `semantic --contact` 同理（无法唯一解析时非零退出）。
+- **会话过滤按 `md5(chat_id)` 匹配**：只有 canonical 用户名（`wxid_*` / `*@chatroom` /
+  `gh_*` / `filehelper`；reader 对无法反查的会话给出的 `md5:<hex>` 退化形式也特判支持）
+  能命中。一个能解析、但**没有任何已入索引消息**的会话（该会话从未导出，或消息全被跳过）
+  返回 `{"total": 0, "hits": []}` 且**不带 hint**——与「确实没有命中」不可区分。
 - 索引未构建返回 `{"error": ..., "hint": "请先运行 build_vector_index"}`；
   索引由其他模型构建时返回错误并提示重建（`vector-build --rebuild` 或
   `build_vector_index(rebuild=True)`），不会混用不同模型的向量。
-- 单会话检索延迟 P50 < 300ms（实测估计）；不限会话的全局检索约 0.5–1s（暴力扫描，无 ANN）。
+- 单会话检索延迟 P50 < 300ms（设计估算，未实测）；不限会话的全局检索约 0.5–1s（暴力扫描，无 ANN）。
 
 ---
 

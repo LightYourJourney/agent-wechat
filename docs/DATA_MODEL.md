@@ -125,7 +125,7 @@ con.row_factory = sqlite3.Row
 for chat, in con.execute("SELECT DISTINCT chat_id FROM messages"):
     rows = con.execute("""SELECT sender_id, is_self, ts, content FROM messages
                           WHERE chat_id=? AND msg_type=1 ORDER BY ts""", (chat,))
-    # 此处依赖具体分块策略（按时间间隔切片等），见 USAGE.md §4 的最小脚本
+    # 此处依赖具体分块策略（按时间间隔切片等），见 USAGE.md §5 的最小脚本
 ```
 
 > 📌 按对话窗口自动切片（如 30 分钟静默切段）的蒸馏导出格式为**规划中功能**，

@@ -72,5 +72,5 @@ lldb attach 需要 `task_for_pid` 权限；Hardened Runtime 会阻止它，所�
 检索（MCP 对应 `build_vector_index` / `semantic_search`）；首次构建会下载约 95MB 模型文件到
 `~/.agent-wechat/models`，之后完全离线。精确关键词/人名仍建议用 `search`（FTS5 更快更准），
 `semantic` 用于记不清原话时。用法与前提见 USAGE.md 场景四；**已知限制**（增量运行不保留
-每个会话首条消息的「上文」前缀、没有相关性阈值、无法反查的 `chat_id` 静默返回 0 命中）
+每个会话首条消息的「上文」前缀、没有相关性阈值、没有任何已入索引消息的会话返回 0 命中且无提示）
 见 TOOLS.md §7–§8 与 ARCHITECTURE.md §7。

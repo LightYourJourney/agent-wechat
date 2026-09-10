@@ -134,8 +134,9 @@ agent-wechat semantic "合同什么时候签" --contact 小李 -n 5
   最近的 N 条，需要自己看 `distance` 判断可用性
 - **增量运行**（不带 `--rebuild`）不保留每个会话首条被嵌入消息的「上文」前缀；
   需要完整上下文时用 `--rebuild` 全量重建
-- 会话过滤按 `md5(会话 id)` 匹配：无法反查的会话 id 会**静默返回 0 命中**（不报错），
-  与「确实没有命中」不可区分——`--contact` 请传 `contacts` 查到的 username，别传昵称
+- `--contact` 传展示名时**重名/未命中会报错**（不猜，也不会静默返回空）；无法确定时先用
+  `contacts` 取 username。能解析但没有任何已入索引消息的会话返回 0 命中且无提示，
+  与「确实没有命中」不可区分
 
 **Agent 方式**：Agent 调 MCP `build_vector_index`（长任务，用 `get_task_status` 查进度）与
 `semantic_search(query, contact=...)`——与 CLI 同源，参数与返回结构见 TOOLS.md §7–§8。

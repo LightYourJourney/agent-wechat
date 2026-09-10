@@ -96,13 +96,13 @@ search.search(query)
 ```
 vector.build_index(account, rebuild)        # 长任务，读的是已导出的本地 messages 表
   → 按账号水位线（vector_watermark.last_rowid）续扫 messages
-  → 逐条构造嵌入文本：`[日期 发送者] 上文: <前一条前 30 字>… | 正文`（确定性前缀）
+  → 逐条构造嵌入文本：`[日期 发送者] 上文: <上一条入索引消息的前 30 字>… | 正文`（确定性前缀）
   → fastembed（ONNX，CPU）批量嵌入 → vec0 虚表 vec_messages（cosine，512 维）
   → 每 COMMIT_ROWS 行提交（数据+水位线同事务）；rebuild 时先 DROP 再重建
 
 vector.semantic_search(query, chat_id, limit, account)
   → 模型一致性检查（存在异模型 meta 行 → 报错，要求 rebuild）
-  → query 侧加 BGE s2p 指令 → KNN k=limit*3（可加 acct_chat partition key 约束）
+  → query 侧加 BGE s2p 指令 → KNN k≈limit*3（上限 4096；可加 acct_chat partition key 约束）
   → 按 msg_rowid 回查 messages 取正文 → 截断到 limit，返回 distance（cosine）
 ```
 
@@ -159,6 +159,8 @@ vector.semantic_search(query, chat_id, limit, account)
   越小越近）原样返回，由调用方判断可用性——不要直接把结果当作「相关结果」
 - **全局检索无 ANN**：不限会话的 KNN 是暴力扫描（50 万行约 0.5–1s）；单会话靠 `acct_chat`
   partition key 收窄扫描面
-- **会话过滤按 `md5(chat_id)`**：传无法反查的 id（昵称、裸 md5 串）时静默返回 0 命中而非
-  报错，与「确实没有命中」不可区分；展示名 → username 的解析由调用方负责
+- **会话过滤按 `md5(chat_id)`**：只有 canonical 用户名（`wxid_*` / `*@chatroom` / `gh_*` /
+  `filehelper`）能命中；能解析、但没有任何已入索引消息的会话（未导出 / 消息全被跳过）返回
+  0 命中且无提示，与「确实没有命中」不可区分。展示名必须经 `contact` 参数解析
+  （未命中 / 重名会显式报错，不会静默返回空）
 - 索引由其它模型构建时必须 `rebuild`（不混用不同模型的向量）；换模型不会自动迁移
