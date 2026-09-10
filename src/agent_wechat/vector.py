@@ -143,6 +143,16 @@ def _meta(con) -> sqlite3.Row | None:
     return con.execute("SELECT * FROM vector_meta WHERE model_id = ?", (MODEL_ID,)).fetchone()
 
 
+def _any_meta(con) -> sqlite3.Row | None:
+    """当前索引的 meta 行，**模型无关**地读。
+
+    用途是识别「索引由别的模型构建」——`_meta()` 按 MODEL_ID 过滤，异模型的
+    行对它不可见，那恰恰是需要报错的场景（用 `_meta()` 会让该分支永不可达）。
+    """
+    return con.execute(
+        "SELECT * FROM vector_meta ORDER BY built_at DESC LIMIT 1").fetchone()
+
+
 def _ensure_meta(con) -> None:
     con.execute("INSERT OR IGNORE INTO vector_meta(model_id, dim, built_at, embedded, skipped) "
                 "VALUES (?,?,?,0,0)", (MODEL_ID, DIM, int(time.time())))
@@ -249,6 +259,13 @@ def build_index(account: str | None = None, rebuild: bool = False, embedder=None
             con.executescript(store.VECTOR_DROP)
             con.executescript(store.VECTOR_SCHEMA)
             con.commit()
+        # 换模型必须重建：否则新模型的行会被追加进装着旧模型向量的表里，
+        # 查询结果将是两个向量空间的混合（无意义的距离）。不静默混用，直接报错。
+        existing = _any_meta(con)
+        if existing is not None and existing["model_id"] != MODEL_ID:
+            raise VectorError(
+                f"索引由 {existing['model_id']} 构建，与当前模型 {MODEL_ID} 不一致："
+                "请改用 rebuild=True 重建（混用两个模型的向量会得到无意义的结果）")
         _ensure_meta(con)
         accounts = ([account] if account else
                     [r[0] for r in con.execute("SELECT DISTINCT account FROM messages")])
@@ -261,5 +278,63 @@ def build_index(account: str | None = None, rebuild: bool = False, embedder=None
         total = con.execute("SELECT count(*) FROM vec_messages").fetchone()[0]
         _write_meta(con, embedded=total, skipped=prev_skipped + skipped)
         return {"embedded": embedded, "skipped": skipped}
+    finally:
+        con.close()
+
+
+# ---------- KNN 查询 ----------
+
+_SELECT_MSGS = ("SELECT id, chat_id, shard, local_id, ts, msg_type, sender_id, sender_name, "
+                "is_self, content, media_hint FROM messages WHERE id IN ({ph})")
+
+
+def semantic_search(query: str, chat_id: str | None = None, limit: int = 10,
+                    account: str = "", embedder=None) -> dict:
+    """KNN 语义检索。account 必传（多账号隔离，与 search.search 规则一致）。
+
+    先 KNN 取 rowid 与 distance，再单独查 messages —— 不用 JOIN+LIMIT
+    （sqlite-vec issue #96：JOIN 与标准 LIMIT 子句在 KNN 下不兼容）。
+    """
+    if not account:
+        return {"error": "semantic_search 需要显式 account（多账号索引隔离）"}
+    con = connect()
+    try:
+        meta = _any_meta(con)
+        # 顺序要紧：先判模型是否匹配，再判是否为空——不匹配的索引一律不得查询
+        if meta is not None and meta["model_id"] != MODEL_ID:
+            return {"error": f"索引由 {meta['model_id']} 构建，与当前模型 {MODEL_ID} 不一致",
+                    "hint": "运行 vector-build --rebuild 或 build_vector_index(rebuild=True)"}
+        if meta is None or meta["embedded"] == 0:
+            return {"error": "向量索引为空", "hint": "请先运行 build_vector_index"}
+        k = min(max(limit * 3, limit), K_MAX)          # 多取候选，过滤后再截断
+        qvec = sqlite_vec.serialize_float32(
+            list((embedder or default_embedder()).embed_query(query_text(query))))
+        sql = ("SELECT msg_rowid, distance FROM vec_messages "
+               "WHERE embedding MATCH ? AND k = ? AND account = ?")
+        args: list = [qvec, k, account]
+        if chat_id:
+            # reader 对无法反查的会话返回 "md5:<hex>" 形式的 chat_id（reader.py 的退化值），
+            # 它本身就是 md5；不特判的话该会话永远过滤不到任何消息（静默返回空）
+            chat_md5 = (chat_id[4:] if chat_id.startswith("md5:")
+                        else hashlib.md5(chat_id.encode()).hexdigest())
+            sql += " AND acct_chat = ?"
+            args.append(f"{account}|{chat_md5}")
+        rows = con.execute(sql, args).fetchall()
+        if not rows:
+            return {"mode": "semantic", "model": MODEL_ID, "total": 0, "hits": []}
+        ids = [r["msg_rowid"] for r in rows]
+        msgs = {m["id"]: m for m in con.execute(
+            _SELECT_MSGS.format(ph=",".join("?" * len(ids))), ids)}
+        hits = []
+        for r in rows:
+            m = msgs.get(r["msg_rowid"])
+            if m is None:
+                continue
+            hits.append({"chat_id": m["chat_id"], "ts": m["ts"],
+                         "sender": m["sender_name"] or m["sender_id"] or "?",
+                         "is_self": bool(m["is_self"]), "content": m["content"],
+                         "media_hint": m["media_hint"], "distance": r["distance"]})
+        return {"mode": "semantic", "model": MODEL_ID,
+                "total": len(hits[:limit]), "hits": hits[:limit]}
     finally:
         con.close()

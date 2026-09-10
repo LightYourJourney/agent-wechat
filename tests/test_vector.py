@@ -215,3 +215,91 @@ def test_build_index_crash_mid_run_leaves_watermark_and_rows_consistent(env, mon
     assert env.execute("SELECT count(DISTINCT msg_rowid) FROM vec_messages").fetchone()[0] == total
     wm2 = env.execute("SELECT last_rowid FROM vector_watermark WHERE account='acct'").fetchone()
     assert wm2["last_rowid"] == total
+
+
+def _seed_search_fixture(env):
+    """三条消息、三个可区分向量：问爬山 → A 最相近。"""
+    store.upsert_batch(env, [
+        mk_row("acct", "chatA", 1, "周末爬山的安排定了吗", ts=1757462400),
+        mk_row("acct", "chatB", 2, "明天的会议改到下午三点", ts=1757462500),
+        mk_row("acct2", "chatA", 3, "别的账号的爬山消息", ts=1757462600),
+    ])
+    fake = FakeEmbedder(mapping={
+        vector.query_text("爬山"): vec(1.0),
+        vector.doc_text(mk_row("acct", "chatA", 1, "周末爬山的安排定了吗", ts=1757462400), None): vec(0.9, 0.1),
+        vector.doc_text(mk_row("acct", "chatB", 2, "明天的会议改到下午三点", ts=1757462500), None): vec(0.0, 1.0),
+        vector.doc_text(mk_row("acct2", "chatA", 3, "别的账号的爬山消息", ts=1757462600), None): vec(0.95, 0.05),
+    }, default=vec(0.0, 1.0))
+    vector.build_index(embedder=fake)
+    return fake
+
+
+def test_semantic_search_ranks_and_isolates_account(env):
+    fake = _seed_search_fixture(env)
+    res = vector.semantic_search("爬山", account="acct", limit=5, embedder=fake)
+    assert res["mode"] == "semantic" and res["model"] == vector.MODEL_ID
+    # KNN 只保证「最近的 k 条」，设计里没有相关性阈值（spec §6）：acct 下两条都会返回。
+    # 刻意不断言条数——那会隐含一个设计里不存在的阈值；要钉的是排序与账号隔离。
+    assert [h["chat_id"] for h in res["hits"]] == ["chatA", "chatB"]
+    assert res["hits"][0]["distance"] < res["hits"][1]["distance"]
+    assert res["hits"][0]["distance"] < 0.5
+    assert all("别的账号" not in (h["content"] or "") for h in res["hits"])
+
+
+def test_semantic_search_chat_filter_and_limit(env):
+    fake = _seed_search_fixture(env)
+    # chat 过滤真的限定在该会话：chatA 查询只返回 chatA 自己的那条
+    a_hits = vector.semantic_search("会议", chat_id="chatA", account="acct", limit=5,
+                                    embedder=fake)["hits"]
+    assert [h["chat_id"] for h in a_hits] == ["chatA"]
+    assert [h["content"] for h in a_hits] == ["周末爬山的安排定了吗"]
+    hits = vector.semantic_search("会议", chat_id="chatB", account="acct", limit=5,
+                                  embedder=fake)["hits"]
+    assert [h["content"] for h in hits] == ["明天的会议改到下午三点"]
+    one = vector.semantic_search("爬山", account="acct", limit=1, embedder=fake)
+    assert len(one["hits"]) == 1
+
+
+def test_semantic_search_errors(env):
+    fake = FakeEmbedder()
+    assert vector.semantic_search("x", account="")["error"].startswith("semantic_search 需要")
+    assert vector.semantic_search("x", account="acct", embedder=fake)["error"] == "向量索引为空"
+    # 模型不匹配：手工塞一条别的 model_id 的 meta 行
+    vector.build_index(embedder=fake)
+    env.execute("UPDATE vector_meta SET model_id='fastembed:other:512'")
+    env.commit()
+    res = vector.semantic_search("x", account="acct", embedder=fake)
+    assert "不一致" in res["error"] and "rebuild" in res["hint"]
+
+
+def test_semantic_search_requires_account_arg():
+    import inspect
+    sig = inspect.signature(vector.semantic_search)
+    assert sig.parameters["account"].default == ""
+
+
+def test_build_index_refuses_model_change_without_rebuild(env):
+    """换模型不重建 = 往旧模型的向量表里追加新模型的向量 → 必须报错而非静默混用。"""
+    store.upsert_batch(env, [mk_row("acct", "chatA", 1, "第一条消息")])
+    vector.build_index(embedder=FakeEmbedder())
+    env.execute("UPDATE vector_meta SET model_id='fastembed:other:512'")
+    env.commit()
+    with pytest.raises(vector.VectorError, match="rebuild"):
+        vector.build_index(embedder=FakeEmbedder())
+    assert vector.build_index(rebuild=True, embedder=FakeEmbedder())["embedded"] == 1
+
+
+def test_semantic_search_accepts_degraded_md5_chat_id(env):
+    """reader 对无法反查的会话返回 "md5:<hex>"（reader.py 的退化值）；
+    把它当过滤条件时必须仍能命中，否则该会话静默搜不到任何东西。"""
+    import hashlib
+    row = mk_row("acct", "chatA", 1, "周末爬山的安排定了吗")
+    store.upsert_batch(env, [row])
+    fake = FakeEmbedder(mapping={
+        vector.query_text("爬山"): vec(1.0),
+        vector.doc_text(row, None): vec(0.9, 0.1),
+    }, default=vec(1.0))
+    vector.build_index(embedder=fake)
+    degraded = "md5:" + hashlib.md5(b"chatA").hexdigest()
+    res = vector.semantic_search("爬山", chat_id=degraded, account="acct", embedder=fake)
+    assert res["total"] == 1 and res["hits"][0]["chat_id"] == "chatA"
