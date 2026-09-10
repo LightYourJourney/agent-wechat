@@ -10,6 +10,8 @@ requires-python = ">=3.12"
 dependencies = [
     "mcp>=2.2.0",
     "zstandard>=0.25.0",
+    "fastembed==0.8.*",
+    "sqlite-vec==0.1.9",
 ]
 
 [project.scripts]
@@ -26,4 +28,9 @@ packages = ["src/agent_wechat"]
 [dependency-groups]
 dev = [
     "pytest>=9.1.1",
+]
+
+[tool.pytest.ini_options]
+markers = [
+    "slow: 需要真实 fastembed 模型（默认不跑；用 -m slow 运行）",
 ]

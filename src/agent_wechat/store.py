@@ -70,6 +70,40 @@ CREATE TABLE IF NOT EXISTS watermark (
 );
 """
 
+# ---------- 向量索引（sqlite-vec；由 vector.py 在加载扩展后建表） ----------
+
+VECTOR_SCHEMA = """
+CREATE VIRTUAL TABLE IF NOT EXISTS vec_messages USING vec0(
+    msg_rowid   INTEGER PRIMARY KEY,          -- = messages.id，查回原表取正文
+    embedding   float[512] distance_metric=cosine,
+    acct_chat   TEXT partition key,           -- "{account}|{chat_md5}"，扫描面缩到单会话
+    account     TEXT,                         -- metadata：全局检索的账号隔离
+    ts          INTEGER,                      -- metadata：时间过滤
+    +preview    TEXT                          -- 辅助列（不参与过滤），调试用
+);
+CREATE TABLE IF NOT EXISTS vector_meta (
+    model_id   TEXT PRIMARY KEY,              -- 如 fastembed:BAAI/bge-small-zh-v1.5:512
+    dim        INTEGER NOT NULL,
+    built_at   INTEGER NOT NULL,
+    embedded   INTEGER NOT NULL DEFAULT 0,    -- 索引内当前行数
+    skipped    INTEGER NOT NULL DEFAULT 0     -- 累计按规则跳过的行数
+);
+CREATE TABLE IF NOT EXISTS vector_watermark (
+    model_id   TEXT NOT NULL,
+    account    TEXT NOT NULL,
+    last_rowid INTEGER NOT NULL DEFAULT 0,    -- 已嵌入的 max(messages.id)
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (model_id, account)
+);
+"""
+
+# rebuild 用 DROP 而非 DELETE：vec0 的删除只在整块清空时回收空间，且 DELETE 路径有已知 bug
+VECTOR_DROP = """
+DROP TABLE IF EXISTS vec_messages;
+DROP TABLE IF EXISTS vector_meta;
+DROP TABLE IF EXISTS vector_watermark;
+"""
+
 
 def connect(db_path: pathlib.Path | None = None) -> sqlite3.Connection:
     paths.ensure_home_dirs()
