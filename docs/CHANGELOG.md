@@ -67,7 +67,26 @@
 
 ## [未发布]
 
-- 向量语义检索（sqlite-vec + 本地 bge-small-zh）
+### 向量语义检索（semantic_search）
+
+- 新增 `semantic_search` MCP 工具与 `agent-wechat semantic` CLI：本地语义检索，与 FTS5 关键词检索互补
+- `build_vector_index` 由占位 stub 落地为完整实现：后台长任务 + 断点续跑；新增 `agent-wechat vector-build`
+- 嵌入全程本机（fastembed + bge-small-zh-v1.5，无 torch），聊天内容零外发
+- 新增依赖：fastembed、sqlite-vec（单文件索引内建 vec0 虚表）
+- 既有 `search_history` / `search` 行为不变
+
+### 已知限制（向量语义检索）
+
+- 增量运行（省略 `--rebuild`）的上下文前缀不连续：`上文:` 前缀在同一轮运行内按会话累积，
+  各会话本轮第一条被嵌入的消息没有前缀；需要完整上下文时用 `--rebuild` 全量重建
+- 语义检索没有相关性阈值：KNN 恒返回最近的 `k` 条（无论距离多远），`distance`（cosine，
+  越小越近）原样返回，由调用方判断可用性
+- 全局（不限会话）检索是暴力扫描、无 ANN；会话过滤按 `md5(chat_id)`，传无法反查的 id
+  （昵称、裸 md5 串）时静默返回 0 命中而非报错，与「确实没有命中」不可区分
+- 索引由其它模型构建时必须 `--rebuild`，不会混用不同模型的向量
+
+### 其他规划
+
 - 蒸馏导出格式（按对话窗口切片的 JSONL）
 - 群成员昵称解析（chatroom_member）
 - `purge` 一键销毁命令

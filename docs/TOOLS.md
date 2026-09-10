@@ -1,12 +1,13 @@
 # TOOLS — MCP 工具参考
 
-> 本文档逐个说明 agent-wechat MCP Server 暴露的 7 个工具：用途、参数、返回结构、
+> 本文档逐个说明 agent-wechat MCP Server 暴露的 8 个工具：用途、参数、返回结构、
 > 示例与错误。所有工具经 stdio JSON-RPC 调用；示例为 Agent 视角的调用与实际返回。
 
 通用约定：
 
 - `account` 参数（可选）：目标账号目录名（如 `wxid_xxx_ab12`）。省略时操作**当前
-  登录账号**；指定的账号目录不存在时报错。
+  登录账号**；指定的账号目录不存在时报错。**唯一例外是 `build_vector_index`**
+  （省略表示索引全部账号，见 §7）。
 - 时间字段一律 **unix 秒**。
 - 非文本消息的 `content` 为 `[image]` / `[appmsg: 标题]` / `[voice]` 等提示。
 - 错误返回中文说明与修复指引；工具不抛异常到传输层。
@@ -125,7 +126,8 @@
 
 ## 5. get_task_status
 
-**用途**：查询导出长任务进度。
+**用途**：查询长任务进度（`export_full_history` 的 `kind: "export"`、
+`build_vector_index` 的 `kind: "vector"`）。
 
 | 参数 | 类型 | 必填 | 默认 | 说明 |
 |---|---|---|---|---|
@@ -139,7 +141,9 @@
   "started_at": 1789044000, "finished_at": 1789044110, "error": null }
 ```
 
-`status`: `running` / `done` / `failed`；失败时 `error` 含中文原因。
+`status`: `running` / `done` / `failed`；失败时 `error` 含中文原因。向量索引任务
+（`kind: "vector"`）额外带 `rebuild`，`rows` 为本轮**已嵌入行数**，`skipped` 为按规则
+跳过的行数（非文本/无标题的 appmsg、正文短于 2 字符的消息）。
 
 ---
 
@@ -178,15 +182,77 @@
 
 ---
 
-## 7. build_vector_index（预留）
+## 7. build_vector_index
 
-**用途**：构建向量语义索引。**当前版本未实现**，调用返回说明而不报错：
+**用途**：构建本地向量语义索引（`semantic_search` 的数据源）。**长任务**：立即返回 `task_id`，
+用 `get_task_status` 查进度。
+
+| 参数 | 类型 | 必填 | 默认 | 说明 |
+|---|---|---|---|---|
+| `rebuild` | bool | 否 | false | true 时先清空索引再全量重嵌（取得连续上下文） |
+| `account` | string | 否 | null | **省略则索引全部账号**（与其它工具相反）；水位线按账号分别记录 |
 
 ```json
-{ "status": "unavailable",
-  "reason": "向量索引尚未启用；FTS5 全文检索已覆盖 search_history 需求",
-  "upgrade": "后续版本将提供 sqlite-vec + 本地 bge-small-zh 语义检索" }
+// 入参
+{ "rebuild": false, "account": null }
+// 返回
+{ "task_id": "a1b2c3d4e5f6", "status": "running" }
 ```
+
+- 嵌入在本机 CPU 完成（fastembed + `BAAI/bge-small-zh-v1.5`），**聊天内容不外发**。
+- 首次调用下载约 95MB 模型文件到 `~/.agent-wechat/models`，之后完全离线可用。
+- 全量构建预计 25 分钟–2.4 小时（视消息长度分布）；中断/崩溃后重跑自动从水位线续传。
+- 数据源是 `export_full_history` 落库的**本地消息库**（不直接读微信）：先导出，再建向量索引；
+  之后新增导出的消息再跑一次本工具（省略 `rebuild`）即增量补齐。
+- **增量运行会丢失每个会话首条消息的上下文前缀**：`上文:` 前缀在**同一轮运行内**按会话累积，
+  增量运行从水位线开始，因此各会话本轮第一条被嵌入的消息没有前缀（即便它确有前一条消息）。
+  需要完整连续的上下文时用 `rebuild: true` 全量重建。
+- 进度见 `get_task_status`（`kind: "vector"`，`rows` 为本轮已嵌入行数，`skipped` 为跳过行数）。
+
+---
+
+## 8. semantic_search
+
+**用途**：按**语义**（意思相近）检索聊天记录，适合关键词记不全时使用。
+
+与 `search_history` 的分工：精确关键词、人名、专名用 `search_history`（FTS5 更快更准）；
+模糊意图（如「上次说的那个爬山的安排」）用 `semantic_search`。需先运行 `build_vector_index`。
+
+| 参数 | 类型 | 必填 | 默认 | 说明 |
+|---|---|---|---|---|
+| `query` | string | **是** | — | 自然语言检索意图（不是关键词） |
+| `contact` | string | 否 | null | 限定会话：username 直接使用；展示名解析出多个联系人时返回 `need_confirm`，未命中返回 `error` |
+| `limit` | int | 否 | 10 | 返回上限（1-50，超出按 50 处理） |
+| `account` | string | 否 | null | 同通用约定 |
+
+```json
+// 入参
+{ "query": "上次说的那个爬山的安排", "contact": null, "limit": 10, "account": null }
+// 返回
+{ "mode": "semantic",
+  "model": "fastembed:BAAI/bge-small-zh-v1.5:512",
+  "total": 1,
+  "hits": [ { "chat_id": "wxid_xxx", "display": "张三", "ts": 1757462400,
+              "sender": "张三", "is_self": false,
+              "content": "周末爬山的安排定了吗", "media_hint": null,
+              "distance": 0.1842 } ] }
+```
+
+- `distance` 为 cosine 距离，越小越相近。
+- **没有相关性阈值**：KNN 恒返回距离最近的 `limit` 条（无论多不相关）；`total` 是本次
+  返回的条数（≤ `limit`），**不代表相关程度**——结果是否可用由调用方按 `distance` 判断，
+  不要把 `hits` 直接当作「相关结果」呈现。
+- `contact` 给出展示名且命中多个联系人时返回 `need_confirm`，不会静默扩大范围。
+- **无法解析的 `chat_id` 静默返回 0 命中，不报错**：会话过滤按 `md5(chat_id)` 计算
+  （reader 对无法反查的会话给出的 `md5:<hex>` 退化形式已特判支持），只有 canonical 用户名
+  （`wxid_*` / `*@chatroom` / `filehelper`）能匹配。传昵称/备注等展示名、或裸 md5 串时
+  算出的 md5 匹配不到任何会话——**返回空结果而不是报错，与「确实没有命中」不可区分**。
+  展示名 → 用户名的解析是调用方的工作：MCP 走 `contact` 参数（未命中返回 `error`、
+  命中多个返回 `need_confirm`），或先调 `list_contacts` 取 username。
+- 索引未构建返回 `{"error": ..., "hint": "请先运行 build_vector_index"}`；
+  索引由其他模型构建时返回错误并提示重建（`vector-build --rebuild` 或
+  `build_vector_index(rebuild=True)`），不会混用不同模型的向量。
+- 单会话检索延迟 P50 < 300ms（实测估计）；不限会话的全局检索约 0.5–1s（暴力扫描，无 ANN）。
 
 ---
 
@@ -199,6 +265,9 @@
 | `{"error": "找不到联系人…"}` | 名字未命中 | 用 `list_contacts` 查准确名 |
 | `{"need_confirm": [...]}` | 名字命中多个联系人 | 让用户选择后用 username 重调 |
 | `search_history` 无 hint 但 0 命中 | 该词从未出现 | 换词 / 放宽 contact 过滤 |
+| `semantic_search` 0 命中且 `hint` 指向 `build_vector_index` | 向量索引未构建/为空 | 先 `export_full_history`，再 `build_vector_index` |
+| `semantic_search` 报「与当前模型不一致」 | 索引由其它模型构建 | `build_vector_index(rebuild=true)` 重建 |
+| `semantic_search` 命中却看着不相关 | 无语义相关性阈值，KNN 恒返回最近 k 条 | 按 `distance` 判断，必要时收窄 `contact` |
 
 ## 附：Server stdio 手动验证
 
@@ -224,4 +293,4 @@ async def main():
 asyncio.run(main())
 ```
 
-期望输出包含 7 个工具名与 `get_account_status` 的 JSON。
+期望输出包含 8 个工具名与 `get_account_status` 的 JSON。

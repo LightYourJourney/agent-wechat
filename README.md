@@ -17,7 +17,8 @@
 | 💬 近期记录读取 | 按联系人实时解密读取最近 N 条（秒级），供 Agent 生成回复建议 |
 | 📦 历史全量导出 | 流式落库、幂等去重、断点续传；本机实测 84 万条消息约 1.5-2 分钟 |
 | 🔍 本地全文检索 | SQLite + FTS5 trigram（≥3 字精确子串）+ LIKE 兜底（1-2 字） |
-| 🤖 Agent 集成 | MCP Server（7 个工具）+ Claude Code Skill + 同源 CLI |
+| 🧠 向量语义检索 | 本地嵌入（fastembed + bge-small-zh-v1.5，聊天内容零外发）+ sqlite-vec KNN；关键词记不全时按语义找（`semantic_search`） |
+| 🤖 Agent 集成 | MCP Server（8 个工具）+ Claude Code Skill + 同源 CLI |
 
 ## 适用场景
 
@@ -34,7 +35,7 @@
 └──────────┬───────────────────────┬──────────────┬───────────┘
            │      stdio (JSON-RPC) │              │
 ┌──────────▼───────────────────────▼──────────────▼───────────┐
-│ mcp_server.py —— 7 个工具的薄适配层（无业务逻辑）             │
+│ mcp_server.py —— 8 个工具的薄适配层（无业务逻辑）             │
 ├──────────────────────────────────────────────────────────────┤
 │ 核心层（Python，可脱离 MCP 独立使用）                         │
 │  account   登录态/账号发现（pgrep + lsof，只读）              │
@@ -45,6 +46,7 @@
 │  export    流式导出管道（幂等 upsert + 水位线 + 长任务）      │
 │  store     本地检索库（SQLite + FTS5 trigram）                │
 │  search    检索路由（trigram / LIKE 兜底）                    │
+│  vector    向量索引与语义检索（本地 fastembed + sqlite-vec）  │
 ├──────────────────────────────────────────────────────────────┤
 │ 数据层                                                        │
 │  微信容器（只读） │ ~/.agent-wechat/（0700：密钥缓存+索引库） │
@@ -75,6 +77,10 @@ uv run agent-wechat status --verify-keys     # 期望：HMAC 33/33
 uv run agent-wechat recent filehelper -n 5   # 实时读取
 uv run agent-wechat export                   # 全量导出（~2 分钟）
 uv run agent-wechat search "关键词"           # 检索
+
+# 5.（可选）向量语义检索：先建索引（首次会下载约 95MB 本地模型，之后完全离线）
+uv run agent-wechat vector-build
+uv run agent-wechat semantic "上次说的那个爬山的安排"
 ```
 
 接入 Claude Code / Codex 的 MCP 配置见 [INSTALL.md](docs/INSTALL.md)；
@@ -104,6 +110,7 @@ agent-wechat/
 │   ├── export.py          导出管道与长任务
 │   ├── store.py           本地检索库
 │   ├── search.py          检索路由
+│   ├── vector.py          向量索引与语义检索
 │   ├── mcp_server.py      MCP 工具层
 │   └── cli.py             命令行入口
 ├── tests/                 集成测试（合成加密库，不依赖真机）
@@ -128,7 +135,7 @@ agent-wechat/
 |---|---|
 | [INSTALL.md](docs/INSTALL.md) | 环境要求、依赖、权限、微信适配、MCP 配置 |
 | [USAGE.md](docs/USAGE.md) | 典型场景、工作流、命令示例 |
-| [TOOLS.md](docs/TOOLS.md) | 7 个 MCP 工具的参数/返回/错误 |
+| [TOOLS.md](docs/TOOLS.md) | 8 个 MCP 工具的参数/返回/错误 |
 | [ARCHITECTURE.md](docs/ARCHITECTURE.md) | 模块划分、数据流、设计决策 |
 | [DATA_MODEL.md](docs/DATA_MODEL.md) | 表结构、去重与增量策略 |
 | [SECURITY.md](docs/SECURITY.md) | 隐私、密钥安全、法律风险 |

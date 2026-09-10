@@ -28,7 +28,8 @@ src/agent_wechat/
 ├── export.py       导出管道：流式批处理 + 水位线 + 后台长任务注册表
 ├── store.py        本地检索库：DDL、幂等 upsert、水位线、FTS 触发器
 ├── search.py       检索路由：trigram FTS / LIKE 兜底
-├── mcp_server.py   MCP 薄适配层（7 工具，无业务逻辑）
+├── vector.py       向量索引与语义检索（唯一接触 fastembed 与 sqlite-vec 的隔离带）
+├── mcp_server.py   MCP 薄适配层（8 工具，无业务逻辑）
 └── cli.py          命令行入口（与 mcp_server 调用同一批核心函数）
 ```
 
@@ -90,6 +91,24 @@ search.search(query)
   → 1-2 字符：LIKE '%q%' 兜底（建议限定 contact，否则全表扫描）
 ```
 
+### 3.6 语义检索（本地嵌入，手动触发）
+
+```
+vector.build_index(account, rebuild)        # 长任务，读的是已导出的本地 messages 表
+  → 按账号水位线（vector_watermark.last_rowid）续扫 messages
+  → 逐条构造嵌入文本：`[日期 发送者] 上文: <前一条前 30 字>… | 正文`（确定性前缀）
+  → fastembed（ONNX，CPU）批量嵌入 → vec0 虚表 vec_messages（cosine，512 维）
+  → 每 COMMIT_ROWS 行提交（数据+水位线同事务）；rebuild 时先 DROP 再重建
+
+vector.semantic_search(query, chat_id, limit, account)
+  → 模型一致性检查（存在异模型 meta 行 → 报错，要求 rebuild）
+  → query 侧加 BGE s2p 指令 → KNN k=limit*3（可加 acct_chat partition key 约束）
+  → 按 msg_rowid 回查 messages 取正文 → 截断到 limit，返回 distance（cosine）
+```
+
+嵌入文本里的「上文」前缀只解决**同一轮运行内**的短消息语义（「好的」「在吗」），
+跨运行的连续性由 `rebuild` 保证（见 §7）。
+
 ## 4. 关键设计决策与取舍
 
 | 决策 | 备选 | 理由 |
@@ -101,7 +120,7 @@ search.search(query)
 | 每会话一张表的全量枚举（不解析表名来源） | 只导出 session 列表中的会话 | Msg_ 表含历史会话；未解析 md5 的会话以 `md5:xxx` 为 id 仍完整导出，不丢数据 |
 | 幂等 upsert（ON CONFLICT DO UPDATE） | INSERT OR IGNORE | 撤回/编辑后重扫能修正内容而非跳过 |
 | 水位线与数据同事务 | 先写数据后改水位线 | 任意时刻被杀都一致：最多重复扫一批（幂等吸收），绝不丢数据 |
-| 导出与向量化解耦（预留） | 导出时同时嵌入 | 嵌入是 CPU 密集长任务，与 I/O 管道耦合会互相拖累 |
+| 导出与向量化解耦 | 导出时同时嵌入 | 嵌入是 CPU 密集长任务，与 I/O 管道耦合会互相拖累。已落地：`vector.py` 独立嵌入管道，手动/按需触发 |
 
 ## 5. 安全设计要点
 
@@ -119,7 +138,7 @@ search.search(query)
 
 | 方向 | 现状 | 路径 |
 |---|---|---|
-| 向量语义检索 | `build_vector_index` 为 stub | store 预留扩展位：加载 sqlite-vec 扩展建 `vec0` 虚表，嵌入用本地模型（如 bge-small-zh，ONNX CPU 推理）；导出管道无需改动 |
+| 向量语义检索 | 已实现：`vector.py`（fastembed 本地嵌入 + sqlite-vec KNN） | 逐条消息 + 确定性上下文前缀；`vec0` 表按 `account\|chat_md5` partition key 分片、`account` metadata 做账号隔离；水位线按 `messages.id` 续跑；导出与嵌入解耦（手动触发） |
 | 1-2 字高频查询 | LIKE 兜底（限 contact 时够用） | 增加 bigram 影子 FTS 表（存储约 +2×，做成配置项） |
 | 更大规模（千万级） | 单文件 SQLite（百万级实测流畅） | 分库（按账号/年份）或迁移 PostgreSQL + pgvector |
 | 媒体导出 | 仅元数据提示 | 数据层已保留 `msg_type` 与源路径解析点，按需扩展 |
@@ -133,3 +152,13 @@ search.search(query)
   （当前实现直接报错，重跑即可）
 - `key_info.db` 明文库的存在说明微信本地留存了被包裹的密钥材料；若未来微信改为
   更强的包裹算法，LLDB 路线不受影响（它读的是内存中已解出的 passphrase）
+- **增量嵌入的上下文前缀不连续**：`上文:` 前缀在单次运行内按会话累积，增量运行从水位线
+  开始，各会话本轮第一条被嵌入的消息没有前缀（即便确有前一条）；需要连续上下文时用
+  `vector-build --rebuild` 全量重建
+- **语义检索没有相关性阈值**：KNN 恒返回最近的 `k` 条（无论距离多远），`distance`（cosine，
+  越小越近）原样返回，由调用方判断可用性——不要直接把结果当作「相关结果」
+- **全局检索无 ANN**：不限会话的 KNN 是暴力扫描（50 万行约 0.5–1s）；单会话靠 `acct_chat`
+  partition key 收窄扫描面
+- **会话过滤按 `md5(chat_id)`**：传无法反查的 id（昵称、裸 md5 串）时静默返回 0 命中而非
+  报错，与「确实没有命中」不可区分；展示名 → username 的解析由调用方负责
+- 索引由其它模型构建时必须 `rebuild`（不混用不同模型的向量）；换模型不会自动迁移
