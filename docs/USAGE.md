@@ -1,7 +1,7 @@
 # USAGE — 使用指南
 
 > 本文档面向使用者，覆盖典型场景与工作流：读取近期记录、生成回复建议、全量导出、
-> 检索历史。工具参数与返回结构的完整说明见 [TOOLS.md](TOOLS.md)。
+> 检索历史（关键词与语义）。工具参数与返回结构的完整说明见 [TOOLS.md](TOOLS.md)。
 
 ## 0. 两种使用方式
 
@@ -90,7 +90,57 @@ agent-wechat export --full
 **规模参考（本机实测）**：约 500MB 加密源库、84.1 万条消息 / 772 个会话，
 全量约 1.5-2 分钟；微信在线时的增量更新秒级完成。
 
-## 4. 场景四：LLM 蒸馏准备
+## 4. 场景四：语义检索（关键词记不全时）
+
+> 前提：先做一次全量导出（见场景三），再建一次向量索引。索引读的是本地已导出的消息库，
+> 不是实时微信数据——新消息要重新 `export`，再跑一次 `vector-build`（增量）才能检索到。
+
+```bash
+# 1) 构建本地向量索引（长任务，本机 CPU 推理；首次会下载约 95MB 模型文件）
+agent-wechat vector-build
+#   已嵌入 5120 行…
+# 完成：本轮嵌入 812345 行，跳过 29239 行
+
+# 2) 语义检索：按「意思」找，不要求原话一致
+agent-wechat semantic "上次说的那个爬山的安排"
+# mode=semantic total=3
+#   [1789045400] wxid_abc123def456 小李: 周末爬山的安排定了吗  distance=0.1842
+
+# 限定单个会话 / 调整返回条数（默认 10）
+agent-wechat semantic "合同什么时候签" --contact 小李 -n 5
+```
+
+**与 `search` 的分工**：精确关键词、人名、专名用 `search`（FTS5 更快更准）；
+**记不清原话**的模糊意图（「上次说的那个…」）用 `semantic`。两者索引互不影响，可同时使用。
+
+**参数**：
+
+| 参数 | 适用 | 说明 |
+|---|---|---|
+| `--account <wxid_xxx_hex4>` | 两者 | `vector-build` **省略时索引全部账号**——与其它子命令（省略即当前登录账号）相反；`semantic` 省略即当前登录账号 |
+| `--rebuild` | `vector-build` | 先清空索引再全量重嵌：换模型后必须，也是重新生成上下文前缀的办法 |
+| `--contact 名字` | `semantic` | 限定单个会话（username 或展示名；重名会提示，不会猜） |
+| `-n N` | `semantic` | 返回条数，默认 10 |
+
+**特性**：
+
+- **断点续传**：中断 / 崩溃后直接重跑 `vector-build`，从水位线继续（不重复嵌入）
+- **进度**：每约 5120 行打印一次「已嵌入 N 行…」，结束打印本轮嵌入/跳过行数
+- **本机闭环**：嵌入在本机 CPU 完成（fastembed + bge-small-zh-v1.5），聊天内容不外发
+
+**已知限制**（细节见 TOOLS.md §7–§8）：
+
+- 输出中的 `distance` 越小越相近，但**没有相关性阈值**——即使没有合适的结果也会返回
+  最近的 N 条，需要自己看 `distance` 判断可用性
+- **增量运行**（不带 `--rebuild`）不保留每个会话首条被嵌入消息的「上文」前缀；
+  需要完整上下文时用 `--rebuild` 全量重建
+- 会话过滤按 `md5(会话 id)` 匹配：无法反查的会话 id 会**静默返回 0 命中**（不报错），
+  与「确实没有命中」不可区分——`--contact` 请传 `contacts` 查到的 username，别传昵称
+
+**Agent 方式**：Agent 调 MCP `build_vector_index`（长任务，用 `get_task_status` 查进度）与
+`semantic_search(query, contact=...)`——与 CLI 同源，参数与返回结构见 TOOLS.md §7–§8。
+
+## 5. 场景五：LLM 蒸馏准备
 
 导出后的数据在 `~/.agent-wechat/index.db`（SQLite），每条消息含
 `chat_id / sender_id / is_self / ts / msg_type / content` 结构化字段，可直接 SQL
@@ -112,7 +162,7 @@ EOF
 > ⚠️ 蒸馏产物是明文聊天档案：注意存放位置与清理时机（见 SECURITY.md §4）。
 > 未来的按对话窗口切片/分块蒸馏格式为规划中功能（见 CHANGELOG）。
 
-## 5. 常用辅助命令
+## 6. 常用辅助命令
 
 ```bash
 agent-wechat status                 # 登录态/账号/密钥缓存一览
@@ -123,14 +173,15 @@ agent-wechat decrypt message/message_0.db --out m0.db   # 导出明文库（调�
 # ⚠️ --out 产物是持久明文库（~/.agent-wechat/m0.db），用后手动删除
 ```
 
-## 6. 账号切换
+## 7. 账号切换
 
-- 读取/导出**默认操作当前登录账号**；`--account <wxid_xxx_hex4>` 可显式指定
+- 读取/导出/`semantic` **默认操作当前登录账号**；`--account <wxid_xxx_hex4>` 可显式指定
+- **例外**：`vector-build` 省略 `--account` 表示索引**全部账号**（见场景四）
 - 微信内切换登录后，重新运行 `status` 即可看到 `当前登录` 变化，无需其他配置
 - 每个账号首次使用前需**在该账号登录状态下**各跑一次 `bootstrap`
   （passphrase 按账号独立缓存，详见 FAQ）
 
-## 7. 输出约定与错误提示
+## 8. 输出约定与错误提示
 
 - 所有失败都会给出中文原因与下一步指引（如密钥缺失时会提示 bootstrap 命令）
 - 非文本消息以 `[image]` / `[appmsg: 标题]` / `[voice]` 等提示代替正文，

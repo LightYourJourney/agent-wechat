@@ -33,7 +33,9 @@
 `[appmsg: 标题]` 等提示占位，保留"此处有一条图片"的事实与类型/时间元数据。
 
 **Q7：数据会上传云端吗？**
-不会。全链路本机闭环：解密、索引、embedding（预留）、MCP（stdio）均无网络路径。
+不会。全链路本机闭环：解密、索引、embedding（本地 ONNX 推理）、MCP（stdio）均无网络路径。
+唯一一次联网是首次构建向量索引时下载约 95MB 的模型文件（fastembed + `bge-small-zh-v1.5`）
+到 `~/.agent-wechat/models`；模型就位后嵌入与检索完全离线（见 Q15）。
 MCP 只在你的 Agent 客户端与本地 Server 之间通信。
 
 **Q8：为什么需要 sudo 和重签名？能避免吗？**
@@ -63,3 +65,12 @@ lldb attach 需要 `task_for_pid` 权限；Hardened Runtime 会阻止它，所�
 **Q14：能给别人用，或者把代码发出去吗？**
 不能。本项目的合规边界是**个人自用、不分发**（同类项目因公开分发被微信官方函件后
 删库，见 SECURITY.md §5）。请勿 push 到公开仓库或打包传播。
+
+**Q15：向量语义检索（「意思相近」的搜索）怎么用？**
+已实现，全程本机：本地 ONNX 推理（fastembed + `bge-small-zh-v1.5`），**不调用任何外部服务**。
+索引先建后查——CLI 用 `agent-wechat vector-build` 构建、`agent-wechat semantic "上次说的那个爬山的安排"`
+检索（MCP 对应 `build_vector_index` / `semantic_search`）；首次构建会下载约 95MB 模型文件到
+`~/.agent-wechat/models`，之后完全离线。精确关键词/人名仍建议用 `search`（FTS5 更快更准），
+`semantic` 用于记不清原话时。用法与前提见 USAGE.md 场景四；**已知限制**（增量运行不保留
+每个会话首条消息的「上文」前缀、没有相关性阈值、无法反查的 `chat_id` 静默返回 0 命中）
+见 TOOLS.md §7–§8 与 ARCHITECTURE.md §7。
