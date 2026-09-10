@@ -1,53 +1,19 @@
-"""导出管道：流式、幂等、断点续传；附长任务注册表（MCP 后台执行用）。"""
+"""导出管道：流式、幂等、断点续传；长任务注册转发到 tasks（MCP 后台执行用）。"""
 from __future__ import annotations
 
-import json
-import threading
 import time
-import uuid
 
-from . import paths, reader, store
-
-TASKS_FILE = paths.HOME_DIR / "tasks.json"
-_tasks: dict[str, dict] = {}
-_lock = threading.Lock()
-
-
-def _persist() -> None:
-    paths.HOME_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
-    TASKS_FILE.write_text(json.dumps(_tasks, ensure_ascii=False, indent=1))
+from . import reader, store, tasks
 
 
 def start_task(account: str, chat_id: str | None, full: bool) -> str:
-    task_id = uuid.uuid4().hex[:12]
-    with _lock:
-        _tasks[task_id] = {"id": task_id, "kind": "export", "account": account,
-                           "chat_id": chat_id, "status": "running", "rows": 0,
-                           "started_at": int(time.time()), "error": None}
-        _persist()
-    t = threading.Thread(target=_run_task, args=(task_id, account, chat_id, full), daemon=True)
-    t.start()
-    return task_id
-
-
-def _run_task(task_id: str, account: str, chat_id: str | None, full: bool) -> None:
-    try:
-        n = run_export(account, chat_id=chat_id, full=full)
-        with _lock:
-            _tasks[task_id].update(status="done", rows=n, finished_at=int(time.time()))
-            _persist()
-    except Exception as e:  # 任务失败不能崩掉 MCP 进程
-        with _lock:
-            _tasks[task_id].update(status="failed", error=str(e)[:500],
-                                   finished_at=int(time.time()))
-            _persist()
+    """登记导出长任务（后台线程执行）。签名与行为保持不变。"""
+    return tasks.start("export", lambda tid: run_export(account, chat_id=chat_id, full=full),
+                       account=account, chat_id=chat_id)
 
 
 def task_status(task_id: str | None = None) -> dict | list:
-    with _lock:
-        if task_id:
-            return _tasks.get(task_id) or {"error": f"未知任务 {task_id}"}
-        return sorted(_tasks.values(), key=lambda t: t["started_at"], reverse=True)[:10]
+    return tasks.status(task_id)
 
 
 def run_export(acct: str, chat_id: str | None = None, full: bool = False,
