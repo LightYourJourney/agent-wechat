@@ -1,4 +1,5 @@
 """向量层：纯函数、索引管道、KNN 查询。默认用确定性假 embedder，不下载模型。"""
+import argparse
 import sqlite3
 
 import pytest
@@ -345,3 +346,17 @@ def test_semantic_search_rejects_non_positive_limit(env):
     vector.build_index(embedder=FakeEmbedder())
     res = vector.semantic_search("x", account="acct", limit=-1, embedder=FakeEmbedder())
     assert res["error"] == "limit 必须为正整数"
+
+
+def test_cmd_vector_build_prints_progress(tmp_path, monkeypatch, capsys):
+    from agent_wechat import cli
+    monkeypatch.setattr(store, "DB_PATH", tmp_path / "index.db")
+    con = store.connect()
+    store.upsert_batch(con, [mk_row("acct", "chatA", 1, "明天开评审会")])
+    con.close()
+    monkeypatch.setattr(vector, "default_embedder", lambda: FakeEmbedder())
+
+    args = argparse.Namespace(account="acct", rebuild=False)
+    assert cli.cmd_vector_build(args) == 0
+    out = capsys.readouterr().out
+    assert "完成" in out and "嵌入 1 行" in out

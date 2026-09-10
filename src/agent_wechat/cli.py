@@ -167,6 +167,42 @@ def cmd_search(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_vector_build(args: argparse.Namespace) -> int:
+    """构建向量索引。故意不解析当前账号：省略 --account 表示「全部账号」，
+    与其它子命令（省略即当前登录账号）语义相反，别照抄 resolve_account。"""
+    from . import vector
+
+    def progress(n: int) -> None:
+        print(f"  已嵌入 {n} 行…", flush=True)
+
+    res = vector.build_index(account=args.account, rebuild=args.rebuild, progress=progress)
+    print(f"完成：本轮嵌入 {res['embedded']} 行，跳过 {res['skipped']} 行")
+    return 0
+
+
+def cmd_semantic(args: argparse.Namespace) -> int:
+    """语义检索。chat_id 原样打印（与 search 子命令一致），展示名富化只属于 MCP 层。"""
+    from . import reader, vector
+    acct = account.resolve_account(args.account)
+    chat_id = None
+    if args.contact:
+        r = reader.MessageReader(acct)
+        chat_id, _cands = r.resolve_one(args.contact)
+        if not chat_id:
+            print(f"无法唯一解析「{args.contact}」", file=sys.stderr)
+            return 1
+    res = vector.semantic_search(args.query, chat_id=chat_id, limit=args.n, account=acct)
+    if res.get("error"):
+        print(f"{res['error']}（{res.get('hint', '')}）", file=sys.stderr)
+        return 1
+    print(f"mode={res['mode']} total={res['total']}")
+    for h in res["hits"]:
+        who = "我" if h["is_self"] else h["sender"]
+        print(f"  [{h['ts']}] {h['chat_id']} {who}: {(h['content'] or '')[:120]}"
+              f"  distance={h['distance']:.4f}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(prog="agent-wechat",
                                 description="macOS 微信聊天记录读取 + MCP Server（仅限本人已登录账号）")
@@ -215,6 +251,18 @@ def main(argv: list[str] | None = None) -> None:
     sp.add_argument("-n", type=int, default=20)
     sp.add_argument("--account")
     sp.set_defaults(fn=cmd_search)
+
+    sp = sub.add_parser("vector-build", help="构建向量语义索引（本地嵌入，长任务）")
+    sp.add_argument("--rebuild", action="store_true", help="先清空索引再全量重建")
+    sp.add_argument("--account", help="仅索引该账号；省略则索引全部账号")
+    sp.set_defaults(fn=cmd_vector_build)
+
+    sp = sub.add_parser("semantic", help="语义检索（需先 vector-build）")
+    sp.add_argument("query")
+    sp.add_argument("--contact", help="仅检索该会话（username 或展示名）")
+    sp.add_argument("-n", type=int, default=10)
+    sp.add_argument("--account")
+    sp.set_defaults(fn=cmd_semantic)
 
     args = p.parse_args(argv)
     raise SystemExit(args.fn(args))
