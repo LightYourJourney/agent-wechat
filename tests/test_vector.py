@@ -83,3 +83,82 @@ def test_doc_text_self_and_unknown_sender():
 
 def test_query_text_adds_instruction():
     assert vector.query_text(" 爬山安排 ") == vector.QUERY_INSTRUCTION + "爬山安排"
+
+
+class FakeEmbedder:
+    """确定性假 embedder：按文本查表出向量，不下载模型（spec §9 的依赖注入点）。"""
+
+    def __init__(self, mapping=None, default=None):
+        self.mapping = mapping or {}
+        self.default = default or vec(1.0)
+        self.calls = []
+
+    def embed(self, texts):
+        self.calls.append(list(texts))
+        return [self.mapping.get(t, self.default) for t in texts]
+
+    def embed_query(self, text):
+        return self.mapping.get(text, self.default)
+
+
+@pytest.fixture()
+def env(tmp_path, monkeypatch):
+    monkeypatch.setattr(store, "DB_PATH", tmp_path / "index.db")
+    con = vector.connect()          # 需 sqlite-vec 与 Row：断言直接查 vec_messages、按列名取值
+    yield con
+    con.close()
+
+
+def test_build_index_embeds_text_and_skips_others(env):
+    store.upsert_batch(env, [
+        mk_row("acct", "chatA", 1, "明天上午十点开评审会", ts=1757462400),
+        mk_row("acct", "chatA", 2, "嗯", ts=1757462460),                       # <2 字跳过
+        mk_row("acct", "chatA", 3, "[image]", ts=1757462520, msg_type=3,
+               media_hint="[image]"),                                          # 媒体跳过
+        mk_row("acct", "chatA", 4, "[appmsg: 分享标题]", ts=1757462580, msg_type=49,
+               media_hint="[appmsg: 分享标题]"),                                # appmsg 保留
+    ])
+    fake = FakeEmbedder()
+    res = vector.build_index(embedder=fake)
+    assert res == {"embedded": 2, "skipped": 2}
+    meta = env.execute("SELECT embedded, skipped, model_id FROM vector_meta").fetchone()
+    assert (meta["embedded"], meta["skipped"], meta["model_id"]) == (2, 2, vector.MODEL_ID)
+    # 前缀文本确实进了 embedder（第 2 条带上了第 1 条的「上文」）
+    flat = [t for call in fake.calls for t in call]
+    assert any(f"[{vector._date(1757462400)}" in t and "明天上午十点开评审会" in t for t in flat)
+    assert any("上文: " in t for t in flat)
+    # acct_chat 分区键 = "{account}|{md5(chat_id)}"
+    import hashlib
+    parts = {r[0] for r in env.execute("SELECT DISTINCT acct_chat FROM vec_messages")}
+    assert parts == {f"acct|{hashlib.md5('chatA'.encode()).hexdigest()}"}
+
+
+def test_build_index_second_run_is_noop(env):
+    store.upsert_batch(env, [mk_row("acct", "chatA", 1, "第一条消息")])
+    assert vector.build_index(embedder=FakeEmbedder())["embedded"] == 1
+    assert vector.build_index(embedder=FakeEmbedder())["embedded"] == 0      # 水位线生效
+
+
+def test_build_index_resumes_after_new_rows(env):
+    store.upsert_batch(env, [mk_row("acct", "chatA", 1, "第一条消息")])
+    vector.build_index(embedder=FakeEmbedder())
+    store.upsert_batch(env, [mk_row("acct", "chatA", 2, "第二条消息")])
+    assert vector.build_index(embedder=FakeEmbedder())["embedded"] == 1      # 只补新增
+    assert env.execute("SELECT count(*) FROM vec_messages").fetchone()[0] == 2
+
+
+def test_build_index_rebuild_drops_and_reembeds(env):
+    store.upsert_batch(env, [mk_row("acct", "chatA", 1, "第一条消息")])
+    vector.build_index(embedder=FakeEmbedder())
+    res = vector.build_index(rebuild=True, embedder=FakeEmbedder())
+    assert res["embedded"] == 1
+    assert env.execute("SELECT count(*) FROM vec_messages").fetchone()[0] == 1   # 未翻倍
+
+
+def test_build_index_account_scoped(env):
+    store.upsert_batch(env, [mk_row("acct1", "chatA", 1, "账号一的消息"),
+                             mk_row("acct2", "chatA", 2, "账号二的消息")])
+    assert vector.build_index(account="acct1", embedder=FakeEmbedder())["embedded"] == 1
+    wm = {(r["account"], r["last_rowid"]) for r in
+          env.execute("SELECT account, last_rowid FROM vector_watermark")}
+    assert len(wm) == 1 and wm.pop()[0] == "acct1"
