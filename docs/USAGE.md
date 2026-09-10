@@ -11,7 +11,9 @@
 | **命令行** | 脚本、探索、排障 | `uv run agent-wechat <子命令>` |
 
 两者共享同一核心逻辑，结果一致。以下命令均省略前缀
-`uv run --directory ~/agent-wechat`。
+`uv run --directory ~/agent-wechat`；若已做全局安装
+（[INSTALL.md](INSTALL.md) §2.1，`uv tool install --editable`），则任何目录直接裸敲
+`agent-wechat <子命令>` 即可。
 
 ## 1. 场景一：为某联系人生成回复建议（最常用）
 

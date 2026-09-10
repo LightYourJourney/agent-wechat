@@ -33,6 +33,19 @@ uv run agent-wechat status
 
 依赖极简：运行时仅 `mcp`（MCP SDK）+ `zstandard`（WCDB 压缩解码），其余全为标准库。
 
+### 2.1 全局命令（可选，推荐）
+
+默认情况下 `agent-wechat` 只存在于项目 `.venv/bin/`，需经 `uv run` 前缀调用（见
+[USAGE.md](USAGE.md) §0）。若想在**任何目录**裸敲 `agent-wechat`，做一次性全局安装：
+
+```bash
+uv tool install --editable ~/agent-wechat
+# 生成 ~/.local/bin/agent-wechat 与 agent-wechat-mcp；--editable 改代码即时生效
+```
+
+> ⚠️ sudo 场景（bootstrap）写全路径：`sudo ~/.local/bin/agent-wechat bootstrap`
+> （`~/.local/bin` 不在 sudo 的 PATH 中）。卸载：`uv tool uninstall agent-wechat`。
+
 ## 3. macOS 权限配置
 
 本项目**不需要**辅助功能（Accessibility）权限，**不需要**关闭 SIP。涉及的权限只有两项：
