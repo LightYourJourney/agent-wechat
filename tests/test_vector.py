@@ -162,3 +162,56 @@ def test_build_index_account_scoped(env):
     wm = {(r["account"], r["last_rowid"]) for r in
           env.execute("SELECT account, last_rowid FROM vector_watermark")}
     assert len(wm) == 1 and wm.pop()[0] == "acct1"
+
+
+def test_build_index_mid_run_commit_keeps_rows_and_watermark_in_sync(env, monkeypatch):
+    """中途提交路径：把阈值缩到 2，逼出 COMMIT_ROWS 分支；行数/水位线/返回值三者一致。"""
+    monkeypatch.setattr(vector, "BATCH", 2)
+    monkeypatch.setattr(vector, "COMMIT_ROWS", 2)
+    store.upsert_batch(env, [mk_row("acct", "chatA", i, f"第 {i} 条需要嵌入的消息")
+                             for i in range(1, 6)])
+
+    res = vector.build_index(account="acct", embedder=FakeEmbedder())
+
+    assert res == {"embedded": 5, "skipped": 0}
+    assert env.execute("SELECT count(*) FROM vec_messages").fetchone()[0] == 5
+    wm = env.execute("SELECT last_rowid FROM vector_watermark WHERE account='acct'").fetchone()
+    assert wm["last_rowid"] == 5                   # 第 2、4 行各提交过一次，末批补齐第 5 行
+
+
+class _FailingOnSecondBatch(FakeEmbedder):
+    """第二次 embed 抛错：模拟两次提交之间进程被杀（此时新批还没写进 vec_messages）。"""
+
+    def __init__(self):
+        super().__init__()
+        self.embed_calls = 0
+
+    def embed(self, texts):
+        self.embed_calls += 1
+        if self.embed_calls == 2:
+            raise RuntimeError("boom")
+        return super().embed(texts)
+
+
+def test_build_index_crash_mid_run_leaves_watermark_and_rows_consistent(env, monkeypatch):
+    """崩溃后「已提交的向量行」必须等于水位线；续跑只补缺口、绝不重复嵌入。"""
+    monkeypatch.setattr(vector, "BATCH", 2)
+    monkeypatch.setattr(vector, "COMMIT_ROWS", 2)
+    total = 5
+    store.upsert_batch(env, [mk_row("acct", "chatA", i, f"第 {i} 条需要嵌入的消息")
+                             for i in range(1, total + 1)])
+
+    with pytest.raises(RuntimeError, match="boom"):
+        vector.build_index(account="acct", embedder=_FailingOnSecondBatch())
+
+    committed = env.execute("SELECT count(*) FROM vec_messages").fetchone()[0]
+    wm = env.execute("SELECT last_rowid FROM vector_watermark WHERE account='acct'").fetchone()
+    assert committed > 0, "第一批（2 行）应已在中段提交点落盘，未提交批在 con.close() 时回滚"
+    assert wm is not None and wm["last_rowid"] == committed, "水位线必须与其批次同事务提交"
+
+    res = vector.build_index(account="acct", embedder=FakeEmbedder())
+    assert res["embedded"] == total - committed               # 只补未嵌入的行
+    assert env.execute("SELECT count(*) FROM vec_messages").fetchone()[0] == total
+    assert env.execute("SELECT count(DISTINCT msg_rowid) FROM vec_messages").fetchone()[0] == total
+    wm2 = env.execute("SELECT last_rowid FROM vector_watermark WHERE account='acct'").fetchone()
+    assert wm2["last_rowid"] == total
