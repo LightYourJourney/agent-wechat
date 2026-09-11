@@ -438,3 +438,23 @@ def test_cmd_vector_build_prints_progress(tmp_path, monkeypatch, capsys):
     assert cli.cmd_vector_build(args) == 0
     out = capsys.readouterr().out
     assert "完成" in out and "嵌入 1 行" in out
+
+
+def test_build_index_embeds_length_sorted(env):
+    """spec §7：同批文本按长度升序嵌入，压掉混合长度批次的 padding 浪费。"""
+    store.upsert_batch(env, [
+        mk_row("acct", "chatA", 1, "这是一条相当长的消息内容需要占用不少字符" * 6),
+        mk_row("acct", "chatA", 2, "短消息"),
+        mk_row("acct", "chatA", 3, "中等长度的消息内容大概这样子"),
+    ])
+    seen: list[list[str]] = []
+
+    class Capturing(FakeEmbedder):
+        def embed(self, texts):
+            seen.append(list(texts))
+            return [vec(1.0)] * len(texts)
+
+    vector.build_index(embedder=Capturing())
+    assert len(seen) == 1                       # 单批
+    lens = [len(t) for t in seen[0]]
+    assert lens == sorted(lens)                 # 批内按长度升序

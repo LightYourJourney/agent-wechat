@@ -36,7 +36,6 @@ def connect() -> sqlite3.Connection:
     con.row_factory = sqlite3.Row
     try:
         con.enable_load_extension(True)
-        import sqlite_vec
         sqlite_vec.load(con)
     except Exception as e:
         con.close()
@@ -50,7 +49,7 @@ def connect() -> sqlite3.Connection:
     return con
 
 
-def should_embed(row) -> bool:
+def should_embed(row: sqlite3.Row | dict) -> bool:
     """文本与带标题的 appmsg 才入向量；纯媒体占位与过短消息跳过（spec §5）。"""
     if row["msg_type"] not in EMBED_TYPES:
         return False
@@ -62,12 +61,12 @@ def should_embed(row) -> bool:
     return True
 
 
-def display_text(row) -> str:
+def display_text(row: sqlite3.Row | dict) -> str:
     """一行消息的展示文本：正文优先，媒体消息退回 media_hint。"""
     return (row["content"] or row["media_hint"] or "").strip()
 
 
-def _who(row) -> str:
+def _who(row: sqlite3.Row | dict) -> str:
     if row["is_self"]:
         return "我"
     return row["sender_name"] or row["sender_id"] or "?"
@@ -77,7 +76,7 @@ def _date(ts: int) -> str:
     return time.strftime("%Y-%m-%d", time.localtime(ts))
 
 
-def doc_text(row, prev: str | None) -> str:
+def doc_text(row: sqlite3.Row | dict, prev: str | None) -> str:
     """入库文本 = 确定性上下文前缀 + 正文。
 
     前缀解决「好的」「在吗」这类短消息单条 embedding 语义不可靠的问题
@@ -95,6 +94,20 @@ def doc_text(row, prev: str | None) -> str:
 def query_text(q: str) -> str:
     """查询侧加 BGE 官方 s2p 指令（文档侧不加；两侧策略固定，见 spec §5）。"""
     return QUERY_INSTRUCTION + q.strip()
+
+
+def _chat_md5(chat_id: str) -> str:
+    """会话 id → Msg_<md5> 的 md5 部分。
+
+    reader 对无法反查的会话产出 "md5:<hex>" 退化 id，其本身即 md5——
+    该约定以本函数为唯一实现点（评审指出此前在 vector 与 reader 两处各有一份）。
+    """
+    return chat_id[4:] if chat_id.startswith("md5:") else hashlib.md5(chat_id.encode()).hexdigest()
+
+
+def _acct_chat(account: str, chat_md5: str) -> str:
+    """vec0 分区键 "{account}|{chat_md5}"。构建与查询两侧共用，防格式漂移。"""
+    return f"{account}|{chat_md5}"
 
 
 class FastEmbedEmbedder:
@@ -147,11 +160,11 @@ def default_embedder() -> FastEmbedEmbedder:
 
 # ---------- meta / 水位线 ----------
 
-def _meta(con) -> sqlite3.Row | None:
+def _meta(con: sqlite3.Connection) -> sqlite3.Row | None:
     return con.execute("SELECT * FROM vector_meta WHERE model_id = ?", (MODEL_ID,)).fetchone()
 
 
-def _foreign_model(con) -> str | None:
+def _foreign_model(con: sqlite3.Connection) -> str | None:
     """索引里是否存在**别的模型**构建的 meta 行；有则返回那个 model_id，否则 None。
 
     这是「模型不匹配」的唯一判据，刻意**不看「最新一行」**：`built_at` 只有秒级
@@ -163,25 +176,25 @@ def _foreign_model(con) -> str | None:
     return row[0] if row else None
 
 
-def _ensure_meta(con) -> None:
+def _ensure_meta(con: sqlite3.Connection) -> None:
     con.execute("INSERT OR IGNORE INTO vector_meta(model_id, dim, built_at, embedded, skipped) "
                 "VALUES (?,?,?,0,0)", (MODEL_ID, DIM, int(time.time())))
     con.commit()
 
 
-def _write_meta(con, *, embedded: int, skipped: int) -> None:
+def _write_meta(con: sqlite3.Connection, *, embedded: int, skipped: int) -> None:
     con.execute("UPDATE vector_meta SET embedded=?, skipped=?, built_at=? WHERE model_id=?",
                 (embedded, skipped, int(time.time()), MODEL_ID))
     con.commit()
 
 
-def _watermark(con, account: str) -> int:
+def _watermark(con: sqlite3.Connection, account: str) -> int:
     row = con.execute("SELECT last_rowid FROM vector_watermark WHERE model_id=? AND account=?",
                       (MODEL_ID, account)).fetchone()
     return row[0] if row else 0
 
 
-def _set_watermark(con, account: str, rowid: int) -> None:
+def _set_watermark(con: sqlite3.Connection, account: str, rowid: int) -> None:
     con.execute(
         """INSERT INTO vector_watermark(model_id, account, last_rowid, updated_at)
            VALUES (?,?,?,?)
@@ -199,7 +212,8 @@ _INSERT_VEC = ("INSERT INTO vec_messages(msg_rowid, embedding, acct_chat, accoun
                "VALUES (?,?,?,?,?,?)")
 
 
-def _build_account(con, acct: str, embedder, progress: Callable[[int], None] | None):
+def _build_account(con: sqlite3.Connection, acct: str, embedder: FastEmbedEmbedder,
+                   progress: Callable[[int], None] | None) -> tuple[int, int]:
     """单账号增量嵌入。返回 (embedded, skipped)。
 
     事务边界：每 COMMIT_ROWS 行提交一次（含水位线，二者同事务 → 崩溃后不会重复嵌入）。
@@ -214,10 +228,15 @@ def _build_account(con, acct: str, embedder, progress: Callable[[int], None] | N
         nonlocal embedded
         if not buf_rows:
             return
-        vecs = embedder.embed(buf_texts)
+        # 长度排序后成批嵌入，压掉混合长度批次的 padding 浪费（spec §7；
+        # 实测混长吞吐仅为等长的 1/5）。结果向量按原扫描顺序配对回去——
+        # 单事务内行序无影响。
+        order = sorted(range(len(buf_texts)), key=lambda i: len(buf_texts[i]))
+        vecs = embedder.embed([buf_texts[i] for i in order])
         con.executemany(_INSERT_VEC,
-                        [(rid, sqlite_vec.serialize_float32(v), acct_chat, acct, ts, prev)
-                         for (rid, acct_chat, ts, prev), v in zip(buf_rows, vecs)])
+                        [(buf_rows[i][0], sqlite_vec.serialize_float32(v), buf_rows[i][1],
+                          acct, buf_rows[i][2], buf_rows[i][3])
+                         for i, v in zip(order, vecs)])
         embedded += len(buf_rows)
         buf_texts.clear()
         buf_rows.clear()
@@ -229,7 +248,7 @@ def _build_account(con, acct: str, embedder, progress: Callable[[int], None] | N
             break
         for row in page:
             last_id = row["id"]
-            chat_key = f"{row['account']}|{row['chat_md5']}"
+            chat_key = _acct_chat(row["account"], row["chat_md5"])
             prev = prev_by_chat.get(chat_key)
             if should_embed(row):
                 buf_texts.append(doc_text(row, prev))
@@ -256,7 +275,8 @@ def _build_account(con, acct: str, embedder, progress: Callable[[int], None] | N
     return embedded, skipped
 
 
-def build_index(account: str | None = None, rebuild: bool = False, embedder=None,
+def build_index(account: str | None = None, rebuild: bool = False,
+                embedder: FastEmbedEmbedder | None = None,
                 progress: Callable[[int], None] | None = None) -> dict:
     """全量/增量构建向量索引。返回本次运行 {"embedded": n, "skipped": n}。
 
@@ -300,18 +320,19 @@ _SELECT_MSGS = ("SELECT id, chat_id, shard, local_id, ts, msg_type, sender_id, s
 
 
 def semantic_search(query: str, chat_id: str | None = None, limit: int = 10,
-                    account: str = "", embedder=None) -> dict:
+                    account: str = "", embedder: FastEmbedEmbedder | None = None) -> dict:
     """KNN 语义检索。account 必传（多账号隔离，与 search.search 规则一致）。
 
     先 KNN 取 rowid 与 distance，再单独查 messages —— 不用 JOIN+LIMIT
     （sqlite-vec issue #96：JOIN 与标准 LIMIT 子句在 KNN 下不兼容）。
     """
     if not account:
-        return {"error": "semantic_search 需要显式 account（多账号索引隔离）"}
+        return {"error": "semantic_search 需要显式 account（多账号索引隔离）",
+                "hint": "传入目标账号目录名；MCP/CLI 层会先解析当前登录账号"}
     con = connect()
     try:
         if limit < 1:
-            return {"error": "limit 必须为正整数"}
+            return {"error": "limit 必须为正整数", "hint": "limit 应为 ≥1 的整数"}
         # 顺序要紧：先判模型是否匹配，再判是否为空——不匹配的索引一律不得查询。
         # 判据必须模型无关（`_meta()` 按 MODEL_ID 过滤，异模型的行对它不可见，
         # 用它会让本分支永不可达），且必须看「是否存在任何异模型行」而非「最新一行」。
@@ -322,19 +343,17 @@ def semantic_search(query: str, chat_id: str | None = None, limit: int = 10,
         meta = _meta(con)
         if meta is None or meta["embedded"] == 0:
             return {"error": "向量索引为空", "hint": "请先运行 build_vector_index"}
-        k = min(max(limit * 3, limit), K_MAX)          # 多取候选，过滤后再截断
+        k = min(limit * 3, K_MAX)          # 多取候选，过滤后再截断（limit ≥ 1 时 limit*3 ≥ limit）
         qvec = sqlite_vec.serialize_float32(
             list((embedder or default_embedder()).embed_query(query_text(query))))
         sql = ("SELECT msg_rowid, distance FROM vec_messages "
                "WHERE embedding MATCH ? AND k = ? AND account = ?")
         args: list = [qvec, k, account]
         if chat_id:
-            # reader 对无法反查的会话返回 "md5:<hex>" 形式的 chat_id（reader.py 的退化值），
-            # 它本身就是 md5；不特判的话该会话永远过滤不到任何消息（静默返回空）
-            chat_md5 = (chat_id[4:] if chat_id.startswith("md5:")
-                        else hashlib.md5(chat_id.encode()).hexdigest())
+            # 特判 reader 的 "md5:<hex>" 退化 id（见 _chat_md5），
+            # 否则该会话永远过滤不到任何消息（静默返回空）
             sql += " AND acct_chat = ?"
-            args.append(f"{account}|{chat_md5}")
+            args.append(_acct_chat(account, _chat_md5(chat_id)))
         rows = con.execute(sql, args).fetchall()
         if not rows:
             return {"mode": "semantic", "model": MODEL_ID, "total": 0, "hits": []}
