@@ -197,6 +197,25 @@ def test_build_index_embeds_text_and_skips_others(env):
     assert parts == {f"acct|{hashlib.md5('chatA'.encode()).hexdigest()}"}
 
 
+def test_build_index_progress_is_monotonic_across_accounts(env):
+    """多账号构建时进度必须单调递增，且终点等于总嵌入数。
+
+    缺陷背景：`_build_account` 的计数是每账号局部的（各自从 0 起），`build_index`
+    循环时未累加却把同一个 progress 回调透传下去，于是切换到第二个账号时 `rows`
+    从大跳回小。MCP 默认 `account=None`（全部账号）正好踩中。
+    """
+    store.upsert_batch(env, [
+        mk_row("acctA", "chatA", i, f"账号A的第{i}条消息") for i in (1, 2, 3)
+    ] + [
+        mk_row("acctB", "chatB", i, f"账号B的第{i}条消息") for i in (1, 2, 3)
+    ])
+    seen: list[int] = []
+    res = vector.build_index(embedder=FakeEmbedder(), progress=seen.append)
+
+    assert seen == sorted(seen), f"进度倒退: {seen}"
+    assert seen[-1] == res["embedded"] == 6, f"进度终点不等于总嵌入数: {seen}"
+
+
 def test_build_index_second_run_is_noop(env):
     store.upsert_batch(env, [mk_row("acct", "chatA", 1, "第一条消息")])
     assert vector.build_index(embedder=FakeEmbedder())["embedded"] == 1

@@ -302,7 +302,12 @@ def build_index(account: str | None = None, rebuild: bool = False,
                     [r[0] for r in con.execute("SELECT DISTINCT account FROM messages")])
         embedded = skipped = 0
         for acct in accounts:
-            e, s = _build_account(con, acct, embedder, progress)
+            # 进度带偏移：_build_account 的计数是每账号局部的（各自从 0 起），直接
+            # 透传会让多账号构建时 rows 在切换账号处从大跳回小。TOOLS.md 把 rows 定
+            # 为「本轮已嵌入行数」，所以补上前序账号的累计，保证本轮内单调递增。
+            base = embedded
+            e, s = _build_account(con, acct, embedder,
+                                  (lambda n: progress(base + n)) if progress else None)
             embedded += e
             skipped += s
         prev_skipped = _meta(con)["skipped"]
