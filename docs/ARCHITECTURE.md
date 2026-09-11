@@ -157,7 +157,7 @@ vector.semantic_search(query, chat_id, limit, account)
   `vector-build --rebuild` 全量重建
 - **语义检索没有相关性阈值**：KNN 恒返回最近的 `k` 条（无论距离多远），`distance`（cosine，
   越小越近）原样返回，由调用方判断可用性——不要直接把结果当作「相关结果」
-- **全局检索无 ANN**：不限会话的 KNN 是暴力扫描（50 万行约 0.5–1s）；单会话靠 `acct_chat`
+- **全局检索无 ANN**：不限会话的 KNN 是暴力扫描（68 万行实测：热 ~0.6s / 冷 ~2.6s）；单会话靠 `acct_chat`
   partition key 收窄扫描面
 - **会话过滤按 `md5(chat_id)`**：只有 canonical 用户名（`wxid_*` / `*@chatroom` / `gh_*` /
   `filehelper`）能命中；能解析、但没有任何已入索引消息的会话（未导出 / 消息全被跳过）返回
