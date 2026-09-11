@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent_wechat import account, cli, reader, search
+from agent_wechat import account, cli, reader, search, vector
 
 
 @pytest.fixture()
@@ -58,3 +58,54 @@ def test_search_clamps_non_positive_limit(monkeypatch):
     for n in (-1, 0):
         cli.cmd_search(SimpleNamespace(account=None, contact=None, query="会议", n=n))
         assert seen["limit"] == 1, f"-n {n} 未被夹到 1"
+
+
+# ---------- C1：统一错误契约（core 抛项目异常，CLI 翻转成 stderr + 退出码 1） ----------
+
+def test_main_prints_project_error_to_stderr_and_exits_1(monkeypatch, capsys):
+    """错误路径必须是单行中文 + 退出码 1，且**不得**出现 Traceback。"""
+    monkeypatch.setattr(account.paths, "account_dirs", lambda: [])
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["contacts", "--account", "wxid_missing_0000"])
+    assert ei.value.code == 1
+    err = capsys.readouterr().err
+    assert "账号目录不存在" in err and "wxid_missing_0000" in err
+    assert "Traceback" not in err
+
+
+def test_main_keeps_argparse_exit_code_2():
+    """退出码维持 0/1；argparse 自己的参数错（SystemExit(2)）必须原样保留。"""
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["definitely-not-a-subcommand"])
+    assert ei.value.code == 2
+
+
+def test_main_success_still_exits_0(monkeypatch):
+    class _StubReader:
+        def __init__(self, acct):
+            pass
+
+        def contacts(self, query=None):
+            return []
+
+    monkeypatch.setattr(account, "resolve_account", lambda a: "acct")
+    monkeypatch.setattr(reader, "MessageReader", _StubReader)
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["contacts"])
+    assert ei.value.code == 0
+
+
+def test_semantic_core_error_reaches_stderr_with_hint(monkeypatch, capsys):
+    """semantic_search 现在抛异常而非返回 error dict；CLI 的翻转必须含 hint 单行输出。"""
+    monkeypatch.setattr(account, "resolve_account", lambda a: "acct")
+
+    def boom(*a, **k):
+        raise vector.VectorError("向量索引为空", hint="请先运行 build_vector_index")
+
+    monkeypatch.setattr(vector, "semantic_search", boom)
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["semantic", "爬山"])
+    assert ei.value.code == 1
+    err = capsys.readouterr().err
+    assert "向量索引为空（请先运行 build_vector_index）" in err
+    assert "Traceback" not in err

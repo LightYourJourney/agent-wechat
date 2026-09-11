@@ -6,7 +6,7 @@ import json
 import sqlite3
 import sys
 
-from . import account, bootstrap, decrypt, keys, paths
+from . import account, bootstrap, decrypt, errors, keys, paths
 
 
 def _positive_limit(n: int) -> int:
@@ -205,10 +205,6 @@ def cmd_semantic(args: argparse.Namespace) -> int:
     # 与 MCP 层同一上限：-n 超过 50 只会拿到 K_MAX 条候选后被截断，静默少返回
     limit = max(1, min(args.n, 50))
     res = vector.semantic_search(args.query, chat_id=chat_id, limit=limit, account=acct)
-    if res.get("error"):
-        hint = res.get("hint")
-        print(res["error"] + (f"（{hint}）" if hint else ""), file=sys.stderr)
-        return 1
     print(f"mode={res['mode']} total={res['total']}")
     for h in res["hits"]:
         who = "我" if h["is_self"] else h["sender"]
@@ -279,4 +275,11 @@ def main(argv: list[str] | None = None) -> None:
     sp.set_defaults(fn=cmd_semantic)
 
     args = p.parse_args(argv)
-    raise SystemExit(args.fn(args))
+    try:
+        code = args.fn(args)
+    except errors.AgentWeChatError as exc:
+        # 项目错误 → 单行中文（含 hint）打到 stderr，退出码 1。argparse 自己的
+        # SystemExit(2) 在 parse_args 处先抛出，不经过这里，故参数错仍是 2。
+        print(errors.to_text(exc), file=sys.stderr)
+        code = 1
+    raise SystemExit(code)

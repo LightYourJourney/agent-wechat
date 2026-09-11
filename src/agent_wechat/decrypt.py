@@ -18,6 +18,7 @@ import subprocess
 import tempfile
 
 from . import keys, paths
+from .errors import DecryptError
 
 
 def ensure_home_dirs() -> None:
@@ -44,7 +45,7 @@ def decrypted(db: pathlib.Path, passphrase: bytes, tmpdir: pathlib.Path | None =
         snap = snapshot(db, td)
         page1 = snap.read_bytes()[:keys.PAGE_SZ]
         if len(page1) < keys.PAGE_SZ:
-            raise RuntimeError(f"{db.name}: 文件不足一页，无法解密")
+            raise DecryptError(f"{db.name}: 文件不足一页，无法解密")
         enc_key = keys.derive_key(passphrase, page1[:keys.SALT_SZ])
 
         out = td / "plain.db"
@@ -56,7 +57,7 @@ def decrypted(db: pathlib.Path, passphrase: bytes, tmpdir: pathlib.Path | None =
         ]
         r = subprocess.run(["sqlcipher", str(snap), *cmds], capture_output=True, text=True)
         if r.returncode != 0 or not out.exists():
-            raise RuntimeError(f"sqlcipher 解密失败: {r.stderr.strip()[:300]}")
+            raise DecryptError(f"sqlcipher 解密失败: {r.stderr.strip()[:300]}")
         yield out
     finally:
         shutil.rmtree(td, ignore_errors=True)

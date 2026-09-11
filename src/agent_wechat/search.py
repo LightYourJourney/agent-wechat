@@ -4,6 +4,7 @@ from __future__ import annotations
 import sqlite3
 
 from . import store
+from .errors import SearchInputError
 
 
 def _fts_safe(q: str) -> str:
@@ -21,7 +22,7 @@ def search(query: str, chat_id: str | None = None, limit: int = 20,
     con = store.connect()
     con.row_factory = sqlite3.Row
     if not account:
-        raise ValueError("search 需要显式 account（多账号索引隔离）")
+        raise SearchInputError("search 需要显式 account（多账号索引隔离）")
     where, args = ["m.account = ?"], [account]
     if chat_id:
         where.append("m.chat_id = ?")

@@ -14,6 +14,7 @@ from typing import Callable, Sequence
 import sqlite_vec
 
 from . import paths, store, tasks
+from .errors import SearchInputError, VectorError
 
 MODEL_NAME = "BAAI/bge-small-zh-v1.5"
 DIM = 512                                   # 必须与 store.VECTOR_SCHEMA 的 float[512] 一致
@@ -24,10 +25,6 @@ BATCH = 256                                  # fastembed 实测最优批大小
 COMMIT_ROWS = 5120                           # 每 ~20 批一个事务：频繁 commit 会让插入掉 ~43%
 K_MAX = 4096                                 # sqlite-vec 硬上限
 EMBED_TYPES = (1, 49)                        # 1=文本；49=appmsg（content 形如 "[appmsg: 标题]"）
-
-
-class VectorError(RuntimeError):
-    """向量层不可用（扩展缺失/模型不可用）。消息里带用户可执行的修复指引。"""
 
 
 def connect() -> sqlite3.Connection:
@@ -332,22 +329,24 @@ def semantic_search(query: str, chat_id: str | None = None, limit: int = 10,
     （sqlite-vec issue #96：JOIN 与标准 LIMIT 子句在 KNN 下不兼容）。
     """
     if not account:
-        return {"error": "semantic_search 需要显式 account（多账号索引隔离）",
-                "hint": "传入目标账号目录名；MCP/CLI 层会先解析当前登录账号"}
+        raise SearchInputError(
+            "semantic_search 需要显式 account（多账号索引隔离）",
+            hint="传入目标账号目录名；MCP/CLI 层会先解析当前登录账号")
     con = connect()
     try:
         if limit < 1:
-            return {"error": "limit 必须为正整数", "hint": "limit 应为 ≥1 的整数"}
+            raise SearchInputError("limit 必须为正整数", hint="limit 应为 ≥1 的整数")
         # 顺序要紧：先判模型是否匹配，再判是否为空——不匹配的索引一律不得查询。
         # 判据必须模型无关（`_meta()` 按 MODEL_ID 过滤，异模型的行对它不可见，
         # 用它会让本分支永不可达），且必须看「是否存在任何异模型行」而非「最新一行」。
         foreign = _foreign_model(con)
         if foreign:
-            return {"error": f"索引由 {foreign} 构建，与当前模型 {MODEL_ID} 不一致",
-                    "hint": "运行 vector-build --rebuild 或 build_vector_index(rebuild=True)"}
+            raise VectorError(
+                f"索引由 {foreign} 构建，与当前模型 {MODEL_ID} 不一致",
+                hint="运行 vector-build --rebuild 或 build_vector_index(rebuild=True)")
         meta = _meta(con)
         if meta is None or meta["embedded"] == 0:
-            return {"error": "向量索引为空", "hint": "请先运行 build_vector_index"}
+            raise VectorError("向量索引为空", hint="请先运行 build_vector_index")
         k = min(limit * 3, K_MAX)          # 多取候选，过滤后再截断（limit ≥ 1 时 limit*3 ≥ limit）
         qvec = sqlite_vec.serialize_float32(
             list((embedder or default_embedder()).embed_query(query_text(query))))

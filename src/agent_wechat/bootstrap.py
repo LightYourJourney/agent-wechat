@@ -24,14 +24,11 @@ import tempfile
 import time
 
 from . import account, keys, paths
+from .errors import CaptureError
 
 DEFAULT_TIMEOUT = 300
 
 _MIN_HEXDUMP_LINE = re.compile(r"\s*0x[0-9a-f]+:\s+((?:0x[0-9a-f]{2}\s*)+)$")
-
-
-class CaptureError(RuntimeError):
-    pass
 
 
 def _parse_passphrase(out: str) -> str | None:

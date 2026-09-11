@@ -360,14 +360,20 @@ def test_semantic_search_chat_filter_and_limit(env):
 
 def test_semantic_search_errors(env):
     fake = FakeEmbedder()
-    assert vector.semantic_search("x", account="")["error"].startswith("semantic_search 需要")
-    assert vector.semantic_search("x", account="acct", embedder=fake)["error"] == "向量索引为空"
+    # C1 错误契约：core 不再返回 {"error"} dict，而是抛项目异常（hint 走异常属性），
+    # 由适配层翻回同样的对外信封。故断言从「dict 字段」改为「异常类型+文案+hint」。
+    with pytest.raises(vector.SearchInputError, match="semantic_search 需要"):
+        vector.semantic_search("x", account="")
+    with pytest.raises(vector.VectorError, match="向量索引为空") as e:
+        vector.semantic_search("x", account="acct", embedder=fake)
+    assert e.value.hint == "请先运行 build_vector_index"
     # 模型不匹配：手工塞一条别的 model_id 的 meta 行
     vector.build_index(embedder=fake)
     env.execute("UPDATE vector_meta SET model_id='fastembed:other:512'")
     env.commit()
-    res = vector.semantic_search("x", account="acct", embedder=fake)
-    assert "不一致" in res["error"] and "rebuild" in res["hint"]
+    with pytest.raises(vector.VectorError, match="不一致") as e:
+        vector.semantic_search("x", account="acct", embedder=fake)
+    assert "rebuild" in e.value.hint
 
 
 def test_semantic_search_requires_account_arg():
@@ -433,16 +439,17 @@ def test_semantic_search_model_mismatch_wins_over_empty(env):
     env.execute("INSERT INTO vector_meta(model_id, dim, built_at, embedded, skipped) "
                 "VALUES ('fastembed:other:512', 512, 1, 0, 0)")
     env.commit()
-    res = vector.semantic_search("x", account="acct", embedder=FakeEmbedder())
-    assert "不一致" in res["error"]
+    with pytest.raises(vector.VectorError, match="不一致"):
+        vector.semantic_search("x", account="acct", embedder=FakeEmbedder())
 
 
 def test_semantic_search_rejects_non_positive_limit(env):
     """CLI 的 -n 可为负：不能把 k=-1 透传给 sqlite（会抛裸 OperationalError）。"""
     store.upsert_batch(env, [mk_row("acct", "chatA", 1, "第一条消息")])
     vector.build_index(embedder=FakeEmbedder())
-    res = vector.semantic_search("x", account="acct", limit=-1, embedder=FakeEmbedder())
-    assert res["error"] == "limit 必须为正整数"
+    # C1：错误改为抛 SearchInputError，文案不变（原为返回 {"error": ...}）
+    with pytest.raises(vector.SearchInputError, match="limit 必须为正整数"):
+        vector.semantic_search("x", account="acct", limit=-1, embedder=FakeEmbedder())
 
 
 def test_cmd_vector_build_prints_progress(tmp_path, monkeypatch, capsys):

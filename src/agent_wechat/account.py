@@ -11,6 +11,7 @@ import dataclasses
 import subprocess
 
 from . import paths
+from .errors import AccountNotFound
 
 
 @dataclasses.dataclass
@@ -61,9 +62,9 @@ def resolve_account(account: str | None) -> str:
     """把 None 解析成当前登录账号；显式指定但目录不存在时报错。"""
     if account:
         if account not in paths.account_dirs():
-            raise SystemExit(f"账号目录不存在: {account}（已知: {paths.account_dirs()}）")
+            raise AccountNotFound(f"账号目录不存在: {account}（已知: {paths.account_dirs()}）")
         return account
     st = status()
     if not st.logged_in:
-        raise SystemExit("微信未运行或无法确定当前登录账号；请先登录，或用 --account 显式指定")
+        raise AccountNotFound("微信未运行或无法确定当前登录账号；请先登录，或用 --account 显式指定")
     return st.current  # type: ignore[return-value]

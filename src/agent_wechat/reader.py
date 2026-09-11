@@ -13,6 +13,7 @@ import sqlite3
 from dataclasses import dataclass, asdict
 
 from . import decrypt, keys, paths, store
+from .errors import DataNotFound, DependencyMissing
 
 try:
     import zstandard
@@ -50,7 +51,7 @@ def _decode_content(raw, ct_flag) -> str | None:
         return raw
     if ct_flag == 4:
         if _ZSTD is None:
-            raise RuntimeError("缺少 zstandard：uv add zstandard")
+            raise DependencyMissing("缺少 zstandard：uv add zstandard")
         return _ZSTD.decompress(raw).decode("utf-8", "replace")
     return raw.decode("utf-8", "replace")
 
@@ -99,7 +100,7 @@ class MessageReader:
     def _open(self, rel: str):
         db = paths.db_storage(self.acct) / rel
         if not db.exists():
-            raise FileNotFoundError(f"{db} 不存在")
+            raise DataNotFound(f"{db} 不存在")
         with decrypt.decrypted(db, self.passphrase) as plain:
             con = sqlite3.connect(f"file:{plain}?mode=ro", uri=True)
             con.text_factory = bytes   # 库内 TEXT 含非 UTF-8 字节，统一按 bytes 取
@@ -119,14 +120,14 @@ class MessageReader:
                 with self._open(rel) as con:
                     pool |= {u.decode("utf-8", "replace")
                              for (u,) in con.execute(sql) if isinstance(u, bytes)}
-            except FileNotFoundError:
+            except DataNotFound:
                 continue
         for shard in paths.message_shards(self.acct):
             try:
                 with self._open(f"message/{shard.name}") as con:
                     pool |= {u.decode("utf-8", "replace")
                              for (u,) in con.execute("SELECT user_name FROM Name2Id")}
-            except FileNotFoundError:
+            except DataNotFound:
                 continue
         return pool
 

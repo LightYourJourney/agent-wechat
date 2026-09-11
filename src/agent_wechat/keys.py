@@ -25,6 +25,7 @@ import struct
 import time
 
 from . import paths
+from .errors import KeyNotFound
 
 KDF_ITER = 256_000
 FAST_KDF_ITER = 2
@@ -35,10 +36,6 @@ RESERVE = 80          # IV(16) + HMAC-SHA512(64)
 HMAC_SZ = 64
 
 CACHE_FILE = paths.HOME_DIR / "passphrase.json"
-
-
-class KeyNotFound(RuntimeError):
-    """passphrase 不可用。附带给用户的修复指引。"""
 
 
 # ---------- 缓存 ----------

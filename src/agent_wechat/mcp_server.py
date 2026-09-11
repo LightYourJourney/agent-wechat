@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 
 from mcp.server.mcpserver import MCPServer
 
 from . import account as acc_mod
-from . import export, keys, reader, search, store, vector
+from . import errors, export, keys, reader, search, store, vector
 
 server = MCPServer(
     name="agent-wechat",
@@ -22,6 +23,25 @@ def _acct(account: str | None) -> str:
     return acc_mod.resolve_account(account)
 
 
+def _guard(fn):
+    """把 core 抛出的项目异常翻成 {"error"[, "hint"]} 信封。
+
+    必须包住每个工具：MCP SDK 的兜底是 `except Exception`，SystemExit（不是
+    Exception 子类）会直接杀死常驻 stdio server；且 SDK 会把任何异常改写成语焉
+    不详的 "Error executing tool <name>"，core 写好的中文修复指引到不了 agent。
+    对外信封与旧的手写 dict 返回逐字节一致（errors.to_payload）。
+    """
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except errors.AgentWeChatError as exc:
+            return errors.to_payload(exc)
+        except Exception as exc:      # 第三方裸异常（fastembed/sqlite3…）兜底
+            return errors.generic_payload(exc)
+    return wrapper
+
+
 def _msg_dict(m) -> dict:
     return {"time": m.ts, "sender": m.sender_name or m.sender_id or "?",
             "is_self": m.is_self, "type": m.type_name,
@@ -29,6 +49,7 @@ def _msg_dict(m) -> dict:
 
 
 @server.tool()
+@_guard
 def get_account_status(account: str | None = None) -> dict:
     """检测微信登录状态、当前账号、密钥就绪情况与本地索引规模。
 
@@ -49,7 +70,9 @@ def get_account_status(account: str | None = None) -> dict:
 
 
 @server.tool()
-def list_contacts(query: str = "", limit: int = 20, account: str | None = None) -> list[dict]:
+@_guard
+def list_contacts(query: str = "", limit: int = 20,
+                  account: str | None = None) -> list[dict] | dict:
     """按备注/昵称/微信号模糊查找联系人，返回 username（稳定 id）与展示名。
 
     用于把用户口述的「XXX」解析成后续工具的 contact 参数。返回 kind:
@@ -60,6 +83,7 @@ def list_contacts(query: str = "", limit: int = 20, account: str | None = None) 
 
 
 @server.tool()
+@_guard
 def get_recent_messages(contact: str, limit: int = 50,
                         account: str | None = None) -> dict:
     """读取与指定联系人的最近聊天记录（时间正序），用于生成回复建议。
@@ -79,6 +103,7 @@ def get_recent_messages(contact: str, limit: int = 50,
 
 
 @server.tool()
+@_guard
 def export_full_history(contact: str | None = None, full: bool = False,
                         account: str | None = None) -> dict:
     """[长任务] 全量导出聊天记录到本地检索库（流式落库、幂等、断点续传）。
@@ -99,12 +124,14 @@ def export_full_history(contact: str | None = None, full: bool = False,
 
 
 @server.tool()
+@_guard
 def get_task_status(task_id: str | None = None) -> dict | list:
     """查询长任务进度。task_id 省略则列出近期任务。"""
     return export.task_status(task_id)
 
 
 @server.tool()
+@_guard
 def search_history(query: str, contact: str | None = None, limit: int = 20,
                    account: str | None = None) -> dict:
     """在本地检索库中做全文检索（trigram 精确子串；1-2 字自动 LIKE 兜底）。
@@ -127,6 +154,7 @@ def search_history(query: str, contact: str | None = None, limit: int = 20,
 
 
 @server.tool()
+@_guard
 def semantic_search(query: str, contact: str | None = None, limit: int = 10,
                     account: str | None = None) -> dict:
     """按语义（意思相近）检索聊天记录，适合关键词记不清时使用；需先运行 build_vector_index。
@@ -156,12 +184,13 @@ def _resolve_chat(r: reader.MessageReader, contact: str) -> str | dict:
     if chat_id:
         return chat_id
     if not cands:
-        return {"error": f"找不到联系人「{contact}」，请用 list_contacts 查询"}
+        raise errors.ContactNotFound(f"找不到联系人「{contact}」，请用 list_contacts 查询")
     return {"need_confirm": [{"username": c["username"], "display": c["display"],
                               "kind": c["kind"]} for c in cands[:10]]}
 
 
 @server.tool()
+@_guard
 def build_vector_index(rebuild: bool = False, account: str | None = None) -> dict:
     """[长任务] 构建本地向量语义索引（供 semantic_search 使用）。
 
