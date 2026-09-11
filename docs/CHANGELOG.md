@@ -32,6 +32,8 @@
   sudo 环境自动归还文件属主
 
 ### 已知限制
+- 多次中断的向量构建（每次都从中断点续跑）完成后，`vector_meta.skipped` 只统计最后一段的跳过量
+  （`embedded` 不受影响，始终是实时准确值）；`--rebuild` 一次性完成时两个计数都准确。
 
 - 向量语义检索未启用（`build_vector_index` 为占位，见 ARCHITECTURE.md §6）
 - 群聊发送者显示为 wxid（群昵称映射未实现）
