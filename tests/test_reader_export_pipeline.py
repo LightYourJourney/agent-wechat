@@ -222,6 +222,27 @@ def test_export_full_idempotent(env):
     assert export.run_export(ACCT) == 0                      # 增量无新数据
 
 
+def test_full_export_leaves_other_accounts_watermark_alone(env):
+    """全量导出只重导本账号，不该清掉其它账号的水位线。
+
+    缺陷背景：`DELETE FROM watermark` 没有 account 过滤，对账号 A 做 --full 会连带
+    清掉账号 B 的水位线，使 B 的下一次增量导出白跑一次全量（upsert 幂等，不丢数据，
+    但纯属浪费）。本机有 2 个账号目录，所以这不是纸面问题。
+    """
+    foreign = "wxid_other_account"
+    with store.connect() as con:
+        con.execute("INSERT INTO watermark(account, shard, chat_md5, max_local_id, updated_at)"
+                    " VALUES (?,?,?,?,?)", (foreign, "message_0.db", "deadbeef", 7, 0))
+        con.commit()
+
+    export.run_export(ACCT, full=True)
+
+    with store.connect() as con:
+        wm = dict(con.execute("SELECT account, max_local_id FROM watermark").fetchall())
+    assert wm.get(foreign) == 7, "别的账号的水位线被全量导出清掉了"
+    assert ACCT in wm, "本账号的水位线应被重置后重新推进"
+
+
 def test_search_modes_and_isolation(env):
     export.run_export(ACCT, full=True)
     res = search.search("压缩消息", account=ACCT)            # 4 字 → fts

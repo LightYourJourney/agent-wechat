@@ -21,7 +21,9 @@ def run_export(acct: str, chat_id: str | None = None, full: bool = False,
     total = 0
     with store.connect() as con:
         if full and not chat_id:
-            con.execute("DELETE FROM watermark")
+            # 只重置本账号：run_export 只重导 acct，连带清掉别的账号的水位线会让
+            # 它们白跑一次全量（upsert 幂等，不丢数据，但纯属浪费）
+            con.execute("DELETE FROM watermark WHERE account = ?", (acct,))
             con.commit()
         resume = {} if full else None
         if resume is None:
