@@ -9,6 +9,17 @@ import sys
 from . import account, bootstrap, decrypt, keys, paths
 
 
+def _positive_limit(n: int) -> int:
+    """CLI 的 -n 下界保护：非正值会一路传到 SQL 并产生静默错答。
+
+    reader.recent 的 `LIMIT -1` 在 SQLite 里表示不限量，再被 `pieces[-limit:]`
+    错位切片，于是 `-n -1` **静默丢掉一条**消息、`-n 0` 返回空；search 则是无上限
+    全表扫描。此处只夹下界，CLI 保留无上限（是否与 MCP 侧的 1-500 对齐，属入口
+    策略统一的范畴，另行决定）。
+    """
+    return max(1, n)
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     st = account.status()
     print(f"微信运行: {st.running}  pid: {st.pid}")
@@ -118,7 +129,7 @@ def cmd_recent(args: argparse.Namespace) -> int:
               + json.dumps([{"username": c["username"], "display": c["display"]}
                             for c in cands[:10]], ensure_ascii=False))
         return 1
-    for m in r.recent(chat_id, limit=args.n):
+    for m in r.recent(chat_id, limit=_positive_limit(args.n)):
         who = "我" if m.is_self else (m.sender_name or m.sender_id or "?")
         body = m.content or m.media_hint or ""
         print(f"[{m.ts}] {who}: {body[:200]}")
@@ -159,7 +170,7 @@ def cmd_search(args: argparse.Namespace) -> int:
                   + json.dumps([{"username": c["username"], "display": c["display"]}
                                 for c in cands[:10]], ensure_ascii=False))
             return 1
-    res = search.search(args.query, chat_id=chat_id, limit=args.n, account=acct)
+    res = search.search(args.query, chat_id=chat_id, limit=_positive_limit(args.n), account=acct)
     print(f"mode={res['mode']} total={res['total']}")
     for h in res["hits"]:
         print(f"  [{h['ts']}] {h['chat_id']} {h['sender_name'] or h['sender_id'] or '?'}: "
