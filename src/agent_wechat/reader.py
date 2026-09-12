@@ -8,11 +8,10 @@
 from __future__ import annotations
 
 import contextlib
-import hashlib
 import sqlite3
 from dataclasses import dataclass, asdict
 
-from . import decrypt, keys, paths, store
+from . import decrypt, keys, messages, paths, store
 from .errors import DataNotFound, DependencyMissing
 
 try:
@@ -21,8 +20,8 @@ try:
 except ImportError:  # pragma: no cover
     _ZSTD = None
 
-TYPE_NAMES = {1: "text", 3: "image", 34: "voice", 43: "video", 47: "sticker",
-              48: "location", 51: "status", 10000: "system", 10002: "revoke"}
+# 类型词汇表的 owner 是 messages.py；此处转出以保持既有引用点可用。
+TYPE_NAMES = messages.TYPE_NAMES
 
 
 @dataclass
@@ -61,11 +60,11 @@ def _type_name(t: int) -> str:
 
 
 def _media_hint(t: int, content: str | None) -> str | None:
-    if t == 1 or t in (10000, 10002):
+    if t == messages.TYPE_TEXT or t in (messages.TYPE_SYSTEM, messages.TYPE_REVOKE):
         return None
-    if t == 49 and content and "<title>" in content:
+    if t == messages.TYPE_APPMSG and content and "<title>" in content:
         title = content.split("<title>", 1)[1].split("</title>", 1)[0].strip()
-        return f"[appmsg: {title[:60]}]" if title else "[appmsg]"
+        return messages.appmsg_hint(title)
     return f"[{_type_name(t)}]"
 
 
@@ -133,7 +132,7 @@ class MessageReader:
 
     def md5_map(self) -> dict[str, str]:
         """md5(chat_username) -> chat_username。"""
-        return {hashlib.md5(u.encode()).hexdigest(): u for u in self.username_pool()}
+        return {messages.md5_of(u): u for u in self.username_pool()}
 
     def contacts(self, query: str | None = None, limit: int = 200) -> list[dict]:
         """联系人搜索：备注/昵称/微信号模糊匹配。"""
@@ -188,16 +187,16 @@ class MessageReader:
 
     def _decode_row(self, lid, ltype, sender, ts, mc, ct, md5hex, chat_map, n2i) -> Message:
         """单行解码：压缩、类型掩码、群前缀、媒体提示。所有读取路径共用此函数。"""
-        chat_id = chat_map.get(md5hex, f"md5:{md5hex}")
+        chat_id = chat_map.get(md5hex) or messages.degraded_chat_id(md5hex)
         content = _decode_content(mc, ct)
         t = ltype & 0xffffffff
         sender_u, sender_name = n2i.get(sender), None
-        if chat_id.endswith("@chatroom") and content and t == 1:
+        if chat_id.endswith("@chatroom") and content and t == messages.TYPE_TEXT:
             head, sep, rest = content.partition(":\n")
             if sep and head and "\n" not in head:   # 群消息 "<wxid>:\n正文" 前缀
                 sender_u, sender_name, content = head, head, rest
         hint = _media_hint(t, content)
-        if t == 1:
+        if t == messages.TYPE_TEXT:
             body = content
         elif hint:
             body = hint
@@ -225,7 +224,7 @@ class MessageReader:
 
     def recent(self, chat_id: str, limit: int = 50) -> list[Message]:
         """某会话最近 N 条（时间正序）。分片按时间分区 → 从最新分片起查，够数即停。"""
-        md5hex = hashlib.md5(chat_id.encode()).hexdigest()
+        md5hex = messages.md5_of(chat_id)
         chat_map = {md5hex: chat_id}
         pieces: list[Message] = []
         for shard in reversed(paths.message_shards(self.acct)):
@@ -250,7 +249,7 @@ class MessageReader:
         batch = batch or store.BATCH
         resume = resume or {}
         chat_map = self.md5_map()
-        want_md5 = hashlib.md5(chat_id.encode()).hexdigest() if chat_id else None
+        want_md5 = messages.md5_of(chat_id) if chat_id else None
         for shard in paths.message_shards(self.acct):
             with self._open(f"message/{shard.name}") as con:
                 n2i = self._name2id(con)
@@ -263,18 +262,15 @@ class MessageReader:
                         f"SELECT local_id, local_type, real_sender_id, create_time, "
                         f"message_content, WCDB_CT_message_content FROM '{table}' "
                         f"WHERE local_id > ? ORDER BY local_id", (start,))
-                    rows: list[dict] = []
+                    rows: list[messages.MessageRow] = []
                     for row in cur:
                         m = self._decode_row(*row, md5hex, chat_map, n2i)
-                        rows.append({
-                            "msg_key": f"{self.acct}|{md5hex}|{shard.name}|{m.local_id}",
-                            "account": self.acct, "chat_md5": md5hex,
-                            "chat_id": m.chat_id,
-                            "shard": shard.name, "local_id": m.local_id, "server_id": None,
-                            "ts": m.ts, "msg_type": m.msg_type, "sender_id": m.sender_id,
-                            "sender_name": m.sender_name, "is_self": 1 if m.is_self else 0,
-                            "content": m.content, "media_hint": m.media_hint,
-                        })
+                        rows.append(messages.make_row(
+                            account=self.acct, chat_md5=md5hex, chat_id=m.chat_id,
+                            shard=shard.name, local_id=m.local_id, ts=m.ts,
+                            msg_type=m.msg_type, sender_id=m.sender_id,
+                            sender_name=m.sender_name, is_self=1 if m.is_self else 0,
+                            content=m.content, media_hint=m.media_hint))
                         if len(rows) >= batch:
                             yield rows
                             rows = []

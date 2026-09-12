@@ -5,7 +5,6 @@ pre-v1，存在已知崩溃/内存泄漏 bug），便于回归测试与将来整
 """
 from __future__ import annotations
 
-import hashlib
 import sqlite3
 import threading
 import time
@@ -13,7 +12,7 @@ from typing import Callable, Sequence
 
 import sqlite_vec
 
-from . import paths, store, tasks
+from . import messages, paths, store, tasks
 from .errors import SearchInputError, VectorError
 
 MODEL_NAME = "BAAI/bge-small-zh-v1.5"
@@ -24,7 +23,9 @@ MODEL_CACHE_DIR = paths.HOME_DIR / "models"   # 固定目录：不用 $TMPDIR（
 BATCH = 256                                  # fastembed 实测最优批大小
 COMMIT_ROWS = 5120                           # 每 ~20 批一个事务：频繁 commit 会让插入掉 ~43%
 K_MAX = 4096                                 # sqlite-vec 硬上限
-EMBED_TYPES = (1, 49)                        # 1=文本；49=appmsg（content 形如 "[appmsg: 标题]"）
+# 哪些类型值得嵌入是**本模块的策略**（不是行的事实），故常量留在这里；
+# 类型本身仍从 messages 的词汇表取，不出现裸数字。
+EMBED_TYPES = (messages.TYPE_TEXT, messages.TYPE_APPMSG)   # appmsg 提示形如 "[appmsg: 标题]"
 
 
 def connect() -> sqlite3.Connection:
@@ -46,24 +47,24 @@ def connect() -> sqlite3.Connection:
     return con
 
 
-def should_embed(row: sqlite3.Row | dict) -> bool:
+def should_embed(row: sqlite3.Row | messages.MessageRow) -> bool:
     """文本与带标题的 appmsg 才入向量；纯媒体占位与过短消息跳过（spec §5）。"""
     if row["msg_type"] not in EMBED_TYPES:
         return False
     content = (row["content"] or "").strip()
     if len(content) < 2:
         return False
-    if row["msg_type"] == 49:
-        return content.startswith("[appmsg: ") and content != "[appmsg]"
+    if row["msg_type"] == messages.TYPE_APPMSG:
+        return messages.has_appmsg_title(content)
     return True
 
 
-def display_text(row: sqlite3.Row | dict) -> str:
+def display_text(row: sqlite3.Row | messages.MessageRow) -> str:
     """一行消息的展示文本：正文优先，媒体消息退回 media_hint。"""
     return (row["content"] or row["media_hint"] or "").strip()
 
 
-def _who(row: sqlite3.Row | dict) -> str:
+def _who(row: sqlite3.Row | messages.MessageRow) -> str:
     if row["is_self"]:
         return "我"
     return row["sender_name"] or row["sender_id"] or "?"
@@ -73,7 +74,7 @@ def _date(ts: int) -> str:
     return time.strftime("%Y-%m-%d", time.localtime(ts))
 
 
-def doc_text(row: sqlite3.Row | dict, prev: str | None) -> str:
+def doc_text(row: sqlite3.Row | messages.MessageRow, prev: str | None) -> str:
     """入库文本 = 确定性上下文前缀 + 正文。
 
     前缀解决「好的」「在吗」这类短消息单条 embedding 语义不可靠的问题
@@ -91,15 +92,6 @@ def doc_text(row: sqlite3.Row | dict, prev: str | None) -> str:
 def query_text(q: str) -> str:
     """查询侧加 BGE 官方 s2p 指令（文档侧不加；两侧策略固定，见 spec §5）。"""
     return QUERY_INSTRUCTION + q.strip()
-
-
-def _chat_md5(chat_id: str) -> str:
-    """会话 id → Msg_<md5> 的 md5 部分。
-
-    reader 对无法反查的会话产出 "md5:<hex>" 退化 id，其本身即 md5——
-    该约定以本函数为唯一实现点（评审指出此前在 vector 与 reader 两处各有一份）。
-    """
-    return chat_id[4:] if chat_id.startswith("md5:") else hashlib.md5(chat_id.encode()).hexdigest()
 
 
 def _acct_chat(account: str, chat_md5: str) -> str:
@@ -202,8 +194,10 @@ def _set_watermark(con: sqlite3.Connection, account: str, rowid: int) -> None:
 
 
 _SELECT_ROWS = (
-    "SELECT id, account, chat_md5, chat_id, ts, msg_type, sender_id, sender_name, "
-    "is_self, content, media_hint FROM messages WHERE account = ? AND id > ? ORDER BY id")
+    "SELECT " + messages.column_list(
+        "id", "account", "chat_md5", "chat_id", "ts", "msg_type", "sender_id",
+        "sender_name", "is_self", "content", "media_hint")
+    + " FROM messages WHERE account = ? AND id > ? ORDER BY id")
 
 _INSERT_VEC = ("INSERT INTO vec_messages(msg_rowid, embedding, acct_chat, account, ts, preview) "
                "VALUES (?,?,?,?,?,?)")
@@ -317,8 +311,10 @@ def build_index(account: str | None = None, rebuild: bool = False,
 
 # ---------- KNN 查询 ----------
 
-_SELECT_MSGS = ("SELECT id, chat_id, shard, local_id, ts, msg_type, sender_id, sender_name, "
-                "is_self, content, media_hint FROM messages WHERE id IN ({ph})")
+_SELECT_MSGS = ("SELECT " + messages.column_list(
+    "id", "chat_id", "shard", "local_id", "ts", "msg_type", "sender_id",
+    "sender_name", "is_self", "content", "media_hint")
+    + " FROM messages WHERE id IN ({ph})")
 
 
 def semantic_search(query: str, chat_id: str | None = None, limit: int = 10,
@@ -354,10 +350,10 @@ def semantic_search(query: str, chat_id: str | None = None, limit: int = 10,
                "WHERE embedding MATCH ? AND k = ? AND account = ?")
         args: list = [qvec, k, account]
         if chat_id:
-            # 特判 reader 的 "md5:<hex>" 退化 id（见 _chat_md5），
+            # 特判 reader 的 "md5:<hex>" 退化 id（见 messages.chat_md5），
             # 否则该会话永远过滤不到任何消息（静默返回空）
             sql += " AND acct_chat = ?"
-            args.append(_acct_chat(account, _chat_md5(chat_id)))
+            args.append(_acct_chat(account, messages.chat_md5(chat_id)))
         rows = con.execute(sql, args).fetchall()
         if not rows:
             return {"mode": "semantic", "model": MODEL_ID, "total": 0, "hits": []}

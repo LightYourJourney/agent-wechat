@@ -3,8 +3,13 @@ from __future__ import annotations
 
 import sqlite3
 
-from . import store
+from . import messages, store
 from .errors import SearchInputError
+
+# 命中行的列清单（fts / like 两条路径共用；两处 SQL 曾各抄一份）
+_HIT_COLUMNS = messages.column_list(
+    "id", "chat_id", "shard", "local_id", "ts", "msg_type", "sender_id",
+    "sender_name", "is_self", "content", "media_hint", prefix="m.")
 
 
 def _fts_safe(q: str) -> str:
@@ -37,8 +42,7 @@ def search(query: str, chat_id: str | None = None, limit: int = 20,
 
     mode = "fts"
     try:
-        sql = (f"SELECT m.id, m.chat_id, m.shard, m.local_id, m.ts, m.msg_type, "
-               f"m.sender_id, m.sender_name, m.is_self, m.content, m.media_hint, "
+        sql = (f"SELECT {_HIT_COLUMNS}, "
                f"snippet(messages_fts, 0, '【', '】', '…', 12) AS snip "
                f"FROM messages_fts JOIN messages m ON m.id = messages_fts.rowid "
                f"WHERE messages_fts MATCH ? AND {w} "
@@ -51,8 +55,7 @@ def search(query: str, chat_id: str | None = None, limit: int = 20,
         # trigram 无法匹配 <3 字符 → LIKE 兜底（有 chat 过滤则快，无过滤为全表扫）
         mode = "like"
         like = f"%{query.strip()}%"
-        sql = (f"SELECT m.id, m.chat_id, m.shard, m.local_id, m.ts, m.msg_type, "
-               f"m.sender_id, m.sender_name, m.is_self, m.content, m.media_hint, "
+        sql = (f"SELECT {_HIT_COLUMNS}, "
                f"NULL AS snip FROM messages m WHERE m.content LIKE ? AND {w} "
                f"ORDER BY m.ts DESC LIMIT ?")
         args2 = [like, *args, limit]

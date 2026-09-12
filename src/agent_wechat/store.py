@@ -12,7 +12,7 @@ import pathlib
 import sqlite3
 import time
 
-from . import paths
+from . import messages, paths
 
 DB_PATH = paths.HOME_DIR / "index.db"
 BATCH = 2000
@@ -59,7 +59,7 @@ CREATE TRIGGER IF NOT EXISTS msg_fts_au AFTER UPDATE OF content ON messages BEGI
     INSERT INTO messages_fts(rowid, content, chat_id) VALUES (new.id, new.content, new.chat_id);
 END;
 
--- 预留向量表（sqlite-vec 需运行时加载扩展后建表，见 search.py）
+-- 向量表不在本 SCHEMA：sqlite-vec 需运行时加载扩展后建表，owner 是 vector.py（见 VECTOR_SCHEMA）
 CREATE TABLE IF NOT EXISTS watermark (
     account   TEXT NOT NULL,
     shard     TEXT NOT NULL,
@@ -113,21 +113,21 @@ def connect(db_path: pathlib.Path | None = None) -> sqlite3.Connection:
     return con
 
 
-def upsert_batch(con: sqlite3.Connection, rows: list[dict]) -> None:
-    """批量幂等写入。rows 来自 reader 的解码输出。"""
+# INSERT 的列清单直接取自行契约（+ 本模块拥有的 exported_at），不再手抄一份
+_INSERT_COLUMNS = (*messages.ROW_COLUMNS, "exported_at")
+_INSERT_SQL = (
+    f"INSERT INTO messages ({', '.join(_INSERT_COLUMNS)}) "
+    f"VALUES ({', '.join(':' + c for c in _INSERT_COLUMNS)}) "
+    "ON CONFLICT(msg_key) DO UPDATE SET "
+    "content=excluded.content, msg_type=excluded.msg_type, "
+    "sender_name=excluded.sender_name, exported_at=excluded.exported_at "
+    "WHERE messages.content IS NOT excluded.content")
+
+
+def upsert_batch(con: sqlite3.Connection, rows: list[messages.MessageRow]) -> None:
+    """批量幂等写入。rows 来自 reader 的解码输出（messages.make_row 构造）。"""
     now = int(time.time())
-    con.executemany(
-        """INSERT INTO messages (msg_key, account, chat_md5, chat_id, shard, local_id,
-                                 server_id, ts, msg_type, sender_id, sender_name,
-                                 is_self, content, media_hint, exported_at)
-           VALUES (:msg_key, :account, :chat_md5, :chat_id, :shard, :local_id,
-                   :server_id, :ts, :msg_type, :sender_id, :sender_name,
-                   :is_self, :content, :media_hint, :exported_at)
-           ON CONFLICT(msg_key) DO UPDATE SET
-             content=excluded.content, msg_type=excluded.msg_type,
-             sender_name=excluded.sender_name, exported_at=excluded.exported_at
-           WHERE messages.content IS NOT excluded.content""",
-        [{**r, "exported_at": now} for r in rows])
+    con.executemany(_INSERT_SQL, [{**r, "exported_at": now} for r in rows])
     wm: dict[tuple[str, str, str], int] = {}
     for r in rows:  # 水位线：批内按会话聚合后一条语句推进（单调 max）
         k = (r["account"], r["shard"], r["chat_md5"])

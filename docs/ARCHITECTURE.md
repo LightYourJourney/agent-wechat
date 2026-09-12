@@ -24,7 +24,8 @@ src/agent_wechat/
 ├── keys.py         passphrase 缓存、PBKDF2 派生、page1 HMAC 自验证
 ├── bootstrap.py    lldb 断点捕获 passphrase（唯一 sudo 环节）
 ├── decrypt.py      db+wal+shm 三元组快照 → sqlcipher raw-key 解密导出
-├── reader.py       消息读取：表发现、内容解码、流式产出（唯一认识微信 schema 的模块）
+├── messages.py     messages 行契约：列清单、行构造器、两条哨兵编解码、类型词汇表
+├── reader.py       消息读取：表发现、内容解码、流式产出（唯一认识微信**库**结构的模块）
 ├── export.py       导出管道：流式批处理 + 水位线 + 后台长任务注册表
 ├── store.py        本地检索库：DDL、幂等 upsert、水位线、FTS 触发器
 ├── search.py       检索路由：trigram FTS / LIKE 兜底

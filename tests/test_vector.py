@@ -6,16 +6,7 @@ import pytest
 
 from agent_wechat import paths, store, vector
 
-
-def mk_row(acct, chat, lid, content, *, ts=1700000000, msg_type=1, is_self=0,
-           sender_id="wxid_a", sender_name=None, media_hint=None, shard="message_0.db"):
-    import hashlib
-    md5 = hashlib.md5(chat.encode()).hexdigest()
-    return {"msg_key": f"{acct}|{md5}|{shard}|{lid}", "account": acct, "chat_md5": md5,
-            "chat_id": chat, "shard": shard, "local_id": lid, "server_id": None,
-            "ts": ts, "msg_type": msg_type, "sender_id": sender_id,
-            "sender_name": sender_name, "is_self": is_self, "content": content,
-            "media_hint": media_hint}
+from helpers import mk_row
 
 
 def vec(*xs):

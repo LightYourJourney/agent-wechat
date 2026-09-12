@@ -16,6 +16,8 @@ import zstandard
 
 from agent_wechat import export, keys, paths, reader, search, store
 
+from helpers import mk_row
+
 PW = "0123456789abcdef0123456789abcdef"   # 文本 passphrase；sqlcipher 默认 KDF 与 keys.derive_key 一致
 ACCT = "wxid_t_a1b2"
 SELF = "wxid_t"                            # bare_wxid(ACCT)
@@ -112,13 +114,6 @@ def env(wechat, monkeypatch):
     return wechat
 
 
-def mk_row(acct: str, chat: str, shard: str, lid: int, content: str, ts: int = T0) -> dict:
-    return {"msg_key": f"{acct}|{md5(chat)}|{shard}|{lid}", "account": acct,
-            "chat_md5": md5(chat), "chat_id": chat, "shard": shard, "local_id": lid,
-            "server_id": None, "ts": ts, "msg_type": 1, "sender_id": chat,
-            "sender_name": None, "is_self": 0, "content": content, "media_hint": None}
-
-
 # ---------- store ----------
 
 def test_store_upsert_idempotent_and_watermark(tmp_path, monkeypatch):
@@ -126,18 +121,18 @@ def test_store_upsert_idempotent_and_watermark(tmp_path, monkeypatch):
     # ~/.agent-wechat 做 mkdir 并调用一次 tmutil addexclusion
     monkeypatch.setattr(paths, "HOME_DIR", tmp_path)
     with store.connect(tmp_path / "i.db") as con:
-        batch = [mk_row("a", FRIEND, "message_0.db", 1, "一"),
-                 mk_row("a", FRIEND, "message_0.db", 2, "二")]
+        batch = [mk_row("a", FRIEND, 1, "一", shard="message_0.db"),
+                 mk_row("a", FRIEND, 2, "二", shard="message_0.db")]
         store.upsert_batch(con, batch)
         store.upsert_batch(con, batch)                       # 重复写不产生重复行
         assert con.execute("SELECT count(*) FROM messages").fetchone()[0] == 2
-        store.upsert_batch(con, [mk_row("a", FRIEND, "message_0.db", 2, "二（已编辑）")])
+        store.upsert_batch(con, [mk_row("a", FRIEND, 2, "二（已编辑）", shard="message_0.db")])
         assert con.execute("SELECT count(*) FROM messages").fetchone()[0] == 2
         assert con.execute("SELECT content FROM messages WHERE local_id=2").fetchone()[0] == "二（已编辑）"
         wm = {(s, m): v for s, m, v in con.execute(
             "SELECT shard, chat_md5, max_local_id FROM watermark")}
         assert wm[("message_0.db", md5(FRIEND))] == 2
-        store.upsert_batch(con, [mk_row("a", FRIEND, "message_0.db", 1, "一")])  # 旧行不回退水位线
+        store.upsert_batch(con, [mk_row("a", FRIEND, 1, "一", shard="message_0.db")])  # 旧行不回退水位线
         wm = {(s, m): v for s, m, v in con.execute(
             "SELECT shard, chat_md5, max_local_id FROM watermark")}
         assert wm[("message_0.db", md5(FRIEND))] == 2
@@ -257,7 +252,7 @@ def test_search_modes_and_isolation(env):
     assert search.search("开会", chat_id="888@chatroom", account=ACCT)["total"] == 1
     assert search.search("开会", chat_id=FRIEND, account=ACCT)["total"] == 0
     with store.connect() as con:                             # 多账号隔离
-        store.upsert_batch(con, [mk_row("other", FRIEND, "message_0.db", 99, "别的账号的压缩消息")])
+        store.upsert_batch(con, [mk_row("other", FRIEND, 99, "别的账号的压缩消息", shard="message_0.db")])
     assert search.search("别的账号", account=ACCT)["total"] == 0
     assert search.search("别的账号", account="other")["total"] == 1
 
