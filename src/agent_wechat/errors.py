@@ -81,6 +81,10 @@ class DataNotFound(AgentWeChatError):
     """要读取的库/数据文件不存在。"""
 
 
+class TaskNotFound(AgentWeChatError):
+    """查询的任务 id 不在注册表里（含重启后记录仍在、但 id 写错的情形）。"""
+
+
 def to_payload(exc: AgentWeChatError) -> dict:
     """异常 → MCP 工具错误信封。形状与旧手写的 {"error"[, "hint"]} 逐字节一致。"""
     payload = {"error": redact(str(exc))}

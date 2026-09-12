@@ -1,17 +1,7 @@
-"""导出管道：流式、幂等、断点续传；长任务注册转发到 tasks（MCP 后台执行用）。"""
+"""导出管道：流式、幂等、断点续传。任务登记在 usecases 层，这里只有管道。"""
 from __future__ import annotations
 
-from . import reader, store, tasks
-
-
-def start_task(account: str, chat_id: str | None, full: bool) -> str:
-    """登记导出长任务（后台线程执行）。签名与行为保持不变。"""
-    return tasks.start("export", lambda tid: run_export(account, chat_id=chat_id, full=full),
-                       account=account, chat_id=chat_id)
-
-
-def task_status(task_id: str | None = None) -> dict | list:
-    return tasks.status(task_id)
+from . import reader, store
 
 
 def run_export(acct: str, chat_id: str | None = None, full: bool = False,

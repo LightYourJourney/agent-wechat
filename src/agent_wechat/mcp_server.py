@@ -7,7 +7,7 @@ import json
 
 from mcp.server.mcpserver import MCPServer
 
-from . import errors, export, usecases
+from . import errors, usecases
 
 server = MCPServer(
     name="agent-wechat",
@@ -98,11 +98,10 @@ def export_full_history(contact: str | None = None, full: bool = False,
     立即返回 task_id，用 get_task_status 查询进度；完成后本索引是
     get_recent_messages/search_history 的本地数据源。
     """
-    plan = usecases.export_plan(contact=contact, full=full, account=account)
-    if isinstance(plan, usecases.NeedConfirm):   # 歧义不是「找不到」：列出候选
-        return _need_confirm(plan)
-    return {"task_id": export.start_task(plan.account, plan.chat_id, plan.full),
-            "status": "running"}
+    res = usecases.export_history(contact=contact, full=full, account=account)
+    if isinstance(res, usecases.NeedConfirm):    # 歧义不是「找不到」：列出候选
+        return _need_confirm(res)
+    return res
 
 
 @server.tool()

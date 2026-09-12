@@ -172,7 +172,7 @@ def test_cli_four_commands_render_ambiguity_identically(name, run, stub, capsys,
     _ambiguous(stub)
     monkeypatch.setattr(search, "search", _boom)
     monkeypatch.setattr(vector, "semantic_search", _boom)
-    monkeypatch.setattr(usecases.export, "start_task", _boom)
+    monkeypatch.setattr(usecases.tasks, "start", _boom)   # 任务登记归用例层
     monkeypatch.setattr(usecases.export, "run_export", _boom)
 
     assert run(None) == 1
@@ -228,7 +228,7 @@ def test_export_ambiguity_returns_need_confirm_not_not_found(stub, monkeypatch):
     """回归（C2 前必失败）：`export_full_history` 自己调 resolve_one 并把候选丢进
     `_cands`，于是歧义输入返回「找不到联系人「张三」」——候选丢失，agent 拿到死胡同。"""
     _ambiguous(stub)
-    monkeypatch.setattr(usecases.export, "start_task", _boom)
+    monkeypatch.setattr(usecases.tasks, "start", _boom)
     res = mcp_server.export_full_history(contact="张三")
     assert "error" not in res, res
     assert res == {"need_confirm": EXPECTED}
@@ -275,10 +275,11 @@ def test_build_vector_index_translates_account_to_accounts(monkeypatch):
     """wire 层语义不变（省略 = 索引全部账号）的护栏：翻译只发生在用例层。
 
     core 的 `accounts` 是复数列表（None = 全部、[] = 一个都不索引）；
-    wire 的 `account` 保持单数（None = 全部）。
+    wire 的 `account` 保持单数（None = 全部）。任务登记归用例层所有，接缝也在这里
+    （core 的 vector 模块已无 start_build_task）。
     """
     seen: list[tuple] = []
-    monkeypatch.setattr(vector, "start_build_task",
+    monkeypatch.setattr(usecases, "start_vector_build",
                         lambda accounts, rebuild: seen.append((accounts, rebuild)) or "tid")
 
     assert usecases.build_vector_index(account=None) == {"task_id": "tid", "status": "running"}

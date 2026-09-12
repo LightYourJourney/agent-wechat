@@ -12,7 +12,7 @@ from typing import Callable, Sequence
 
 import sqlite_vec
 
-from . import messages, paths, store, tasks
+from . import messages, paths, store
 from .errors import SearchInputError, VectorError
 
 MODEL_NAME = "BAAI/bge-small-zh-v1.5"
@@ -391,17 +391,3 @@ def semantic_search(query: str, chat_id: str | None = None, limit: int = 10,
                 "total": len(hits[:limit]), "hits": hits[:limit]}
     finally:
         con.close()
-
-
-def start_build_task(accounts: Sequence[str] | None, rebuild: bool) -> str:
-    """登记向量索引长任务（MCP 用）。accounts=None 表示全部账号。"""
-    def _run(tid: str) -> int:
-        res = build_index(accounts=accounts, rebuild=rebuild,
-                          progress=lambda n: tasks.update(tid, rows=n))
-        tasks.update(tid, skipped=res["skipped_this_run"])
-        return res["embedded_this_run"]
-
-    # 任务元数据沿用单数 account 字段（tasks.json 已发布格式）：单账号写该账号、
-    # 全部账号写 None。多账号列表不是 wire 层能产生的形态（usecases 只翻译出这两种）。
-    one = accounts[0] if accounts and len(accounts) == 1 else None
-    return tasks.start("vector", _run, account=one, rebuild=rebuild)

@@ -7,10 +7,12 @@
 import asyncio
 import inspect
 import json
+import time
 
 import pytest
 
-from agent_wechat import account, errors, mcp_server, paths, reader
+from agent_wechat import (account, errors, export, mcp_server, paths, reader, tasks,
+                          usecases)
 
 BOGUS = "wxid_does_not_exist_0000"
 
@@ -118,3 +120,59 @@ def test_build_vector_index_wire_params_unchanged():
     assert list(sig.parameters) == ["rebuild", "account"]
     assert sig.parameters["rebuild"].default is False
     assert sig.parameters["account"].default is None
+
+
+def test_export_full_history_need_confirm_survives_call_tool(monkeypatch):
+    """改走用例层的 export_history 后，歧义信封经 SDK 仍原样到达（不创建任务）。"""
+    class _StubReader:
+        def __init__(self, acct):
+            pass
+
+        def resolve_one(self, contact):
+            return None, [{"username": "wxid_a", "display": "张三", "kind": "direct"},
+                          {"username": "888@chatroom", "display": "张三（群）", "kind": "group"}]
+
+    monkeypatch.setattr(account, "resolve_account", lambda a: "acct")
+    monkeypatch.setattr(reader, "MessageReader", _StubReader)
+    r = asyncio.run(mcp_server.server.call_tool("export_full_history", {"contact": "张三"}))
+    assert r.is_error is False
+    assert json.loads(r.content[0].text) == {"need_confirm": [
+        {"username": "wxid_a", "display": "张三", "kind": "direct"},
+        {"username": "888@chatroom", "display": "张三（群）", "kind": "group"}]}
+
+
+def test_unknown_task_id_envelope_unchanged(monkeypatch, tmp_path):
+    """未知 id 从返回 dict 改成抛 TaskNotFound 后，对外形状仍逐字节相同。"""
+    monkeypatch.setattr(tasks, "TASKS_FILE", tmp_path / "tasks.json")
+    monkeypatch.setattr(tasks, "_loaded_path", None)
+    assert _call(mcp_server.get_task_status, task_id="nope") == {"error": "未知任务 nope"}
+
+
+def test_export_full_history_registers_task_with_same_envelope(monkeypatch):
+    """删掉 export.start_task 转发后，登记参数与返回信封都不变。"""
+    seen = {}
+    monkeypatch.setattr(usecases, "export_plan",
+                        lambda **kw: usecases.ExportPlan("acct", "chat1", True))
+    monkeypatch.setattr(usecases.tasks, "start",
+                        lambda kind, runner, **fields: seen.update(
+                            kind=kind, fields=fields) or "tid123")
+
+    assert _call(mcp_server.export_full_history, contact="张三",
+                 full=True) == {"task_id": "tid123", "status": "running"}
+    assert seen == {"kind": "export", "fields": {"account": "acct", "chat_id": "chat1"}}
+
+
+def test_export_task_is_visible_through_get_task_status(monkeypatch, tmp_path):
+    """用例层登记 → tasks 持久化 → MCP 查询：删掉转发后的全链路仍通。"""
+    monkeypatch.setattr(tasks, "TASKS_FILE", tmp_path / "tasks.json")
+    monkeypatch.setattr(tasks, "_loaded_path", None)
+    monkeypatch.setattr(account, "resolve_account", lambda a: "acct")
+    monkeypatch.setattr(export, "run_export", lambda acct, chat_id=None, full=False: 3)
+
+    res = _call(mcp_server.export_full_history)
+    for _ in range(200):                      # 后台线程，等待完成
+        st = _call(mcp_server.get_task_status, task_id=res["task_id"])
+        if st["status"] != "running":
+            break
+        time.sleep(0.01)
+    assert st["status"] == "done" and st["rows"] == 3 and st["kind"] == "export"

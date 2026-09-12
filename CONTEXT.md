@@ -57,3 +57,10 @@ MCP 与 CLI 两个入口共享的一层：参数归一化、账号/会话解析�
 ## 媒体提示（appmsg 哨兵）
 非文本消息的正文占位；appmsg 带标题时形如 `[appmsg: 标题]`，无标题为 `[appmsg]`。
 出处：`messages.appmsg_hint` / `messages.has_appmsg_title`。
+
+## 任务注册表（tasks）
+长任务的内存记录 + `~/.agent-wechat/tasks.json` 持久化（首次使用时载入，所以重启后
+`get_task_status` 仍答得上来）。`rows` 有**两个写入方**：运行中 `tasks.update(rows=)`
+写进度（本轮已处理行数，单调递增），跑完由 runner 返回值覆盖为终值。载入时把遗留的
+`running` 收割为 `failed`（无 `interrupted` 枚举值）。**任务登记归 usecases**，core 模块
+只提供管道（`export.run_export` / `vector.build_index`）。出处：`tasks.py`、`usecases.py`。

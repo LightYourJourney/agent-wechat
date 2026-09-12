@@ -15,7 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from . import account as acc_mod
-from . import errors, export, keys, reader, search, store, vector
+from . import errors, export, keys, reader, search, store, tasks, vector
 
 # ---------- 参数归一化 ----------
 
@@ -150,6 +150,24 @@ def export_plan(contact: str | None = None, full: bool = False,
     return ExportPlan(account=ctx.account, chat_id=chat_id, full=full)
 
 
+def export_history(contact: str | None = None, full: bool = False,
+                   account: str | None = None) -> dict | NeedConfirm:
+    """登记导出长任务，立即返回 {task_id, status}（MCP 走这条；CLI 同步跑 export_plan）。
+
+    任务登记归本层所有：core 模块只提供管道（export.run_export / vector.build_index），
+    不带任务注册表。
+    """
+    plan = export_plan(contact=contact, full=full, account=account)
+    if isinstance(plan, NeedConfirm):
+        return plan
+    # chat_id 一并记进任务元数据（tasks.json 已发布字段），与旧 export.start_task 一致
+    task_id = tasks.start(
+        "export",
+        lambda _tid: export.run_export(plan.account, chat_id=plan.chat_id, full=plan.full),
+        account=plan.account, chat_id=plan.chat_id)
+    return {"task_id": task_id, "status": "running"}
+
+
 def search_history(query: str, contact: str | None = None, limit: int = 20,
                    account: str | None = None) -> dict | NeedConfirm:
     ctx = ChatContext(account)
@@ -180,6 +198,24 @@ def semantic_search(query: str, contact: str | None = None, limit: int = 10,
     return res
 
 
+def start_vector_build(accounts: list[str] | None, rebuild: bool) -> str:
+    """登记向量索引长任务。accounts=None 表示全部账号（core 复数语义）。
+
+    进度口径：`rows` = 本轮已嵌入行数（vector.build_index 的 progress 回调），
+    结束时补 `skipped`（本轮按规则跳过的行数）并用返回值覆盖 `rows` 为终值。
+    """
+    def _run(tid: str) -> int:
+        res = vector.build_index(accounts=accounts, rebuild=rebuild,
+                                 progress=lambda n: tasks.update(tid, rows=n))
+        tasks.update(tid, skipped=res["skipped_this_run"])
+        return res["embedded_this_run"]
+
+    # 任务元数据沿用单数 account 字段（tasks.json 已发布格式）：单账号写该账号、
+    # 全部账号写 None。多账号列表不是 wire 层能产生的形态（本层只翻译出这两种）。
+    one = accounts[0] if accounts and len(accounts) == 1 else None
+    return tasks.start("vector", _run, account=one, rebuild=rebuild)
+
+
 def build_vector_index(account: str | None = None, rebuild: bool = False) -> dict:
     """注意 account 语义与其它工具相反：省略表示索引**全部**账号（见 TOOLS.md §7）。
 
@@ -187,11 +223,11 @@ def build_vector_index(account: str | None = None, rebuild: bool = False) -> dic
     `accounts`（复数列表，None = 全部，[] = 一个都不索引）。wire 语义一字不动。
     """
     accounts = [account] if account else None
-    return {"task_id": vector.start_build_task(accounts, rebuild), "status": "running"}
+    return {"task_id": start_vector_build(accounts, rebuild), "status": "running"}
 
 
 def task_status(task_id: str | None = None) -> dict | list:
-    return export.task_status(task_id)
+    return tasks.status(task_id)
 
 
 def index_ready() -> bool:
