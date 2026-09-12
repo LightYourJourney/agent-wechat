@@ -165,6 +165,20 @@ def _foreign_model(con: sqlite3.Connection) -> str | None:
     return row[0] if row else None
 
 
+def _ensure_model_ok(con: sqlite3.Connection) -> None:
+    """索引里存在别的模型构建的 meta 行时拒绝继续。
+
+    构建（build_index）与查询（semantic_search）的换模型守卫是**同一条件、同一文案**：
+    判据只有 `_foreign_model` 一份，错误构造也只此一处，避免两处文案漂移。
+    文案含「不一致」与 `rebuild`，且 hint 给出两条修复路径（与 TOOLS.md 的语义检索一节一致）。
+    """
+    foreign = _foreign_model(con)
+    if foreign:
+        raise VectorError(
+            f"索引由 {foreign} 构建，与当前模型 {MODEL_ID} 不一致：请改用 rebuild=True 重建",
+            hint="运行 vector-build --rebuild 或 build_vector_index(rebuild=True)")
+
+
 def _ensure_meta(con: sqlite3.Connection) -> None:
     con.execute("INSERT OR IGNORE INTO vector_meta(model_id, dim, built_at, embedded, skipped) "
                 "VALUES (?,?,?,0,0)", (MODEL_ID, DIM, int(time.time())))
@@ -204,10 +218,12 @@ _INSERT_VEC = ("INSERT INTO vec_messages(msg_rowid, embedding, acct_chat, accoun
 
 
 def _build_account(con: sqlite3.Connection, acct: str, embedder: FastEmbedEmbedder,
-                   progress: Callable[[int], None] | None) -> tuple[int, int]:
+                   progress: Callable[[int], None] | None, *,
+                   batch: int, commit_rows: int) -> tuple[int, int]:
     """单账号增量嵌入。返回 (embedded, skipped)。
 
-    事务边界：每 COMMIT_ROWS 行提交一次（含水位线，二者同事务 → 崩溃后不会重复嵌入）。
+    事务边界：每 commit_rows 行提交一次（含水位线，二者同事务 → 崩溃后不会重复嵌入）。
+    batch 同时是分页步长与单次嵌入的行数上限（默认取模块常量，由 build_index 注入）。
     """
     last_id = start = _watermark(con, acct)
     prev_by_chat: dict[str, str] = {}
@@ -234,7 +250,7 @@ def _build_account(con: sqlite3.Connection, acct: str, embedder: FastEmbedEmbedd
 
     cur = con.execute(_SELECT_ROWS, (acct, start))
     while True:                       # 分页遍历（实测：同连接边读边写边 commit 安全）
-        page = cur.fetchmany(BATCH)
+        page = cur.fetchmany(batch)
         if not page:
             break
         for row in page:
@@ -247,10 +263,10 @@ def _build_account(con: sqlite3.Connection, acct: str, embedder: FastEmbedEmbedd
                 # 只有「有意义的消息」才作为后一条的上文：否则媒体占位（[image] 之类）
                 # 会污染前缀，让所有短消息都带上「上文: [image]…」的噪声
                 prev_by_chat[chat_key] = display_text(row)
-                if len(buf_rows) >= BATCH:
+                if len(buf_rows) >= batch:
                     flush()
-                    since_commit += BATCH
-                    if since_commit >= COMMIT_ROWS:
+                    since_commit += batch
+                    if since_commit >= commit_rows:
                         _set_watermark(con, acct, last_id)
                         con.commit()
                         since_commit = 0
@@ -266,12 +282,19 @@ def _build_account(con: sqlite3.Connection, acct: str, embedder: FastEmbedEmbedd
     return embedded, skipped
 
 
-def build_index(account: str | None = None, rebuild: bool = False,
+def build_index(accounts: Sequence[str] | None = None, rebuild: bool = False,
                 embedder: FastEmbedEmbedder | None = None,
-                progress: Callable[[int], None] | None = None) -> dict:
-    """全量/增量构建向量索引。返回本次运行 {"embedded": n, "skipped": n}。
+                progress: Callable[[int], None] | None = None, *,
+                batch: int = BATCH, commit_rows: int = COMMIT_ROWS) -> dict:
+    """全量/增量构建向量索引。返回**本轮**进度 {"embedded_this_run": n, "skipped_this_run": n}。
 
-    account=None 表示索引库中出现过的全部账号（水位线按账号分别记录）。
+    返回键刻意带 `_this_run` 后缀：`vector_meta.embedded` 是索引内当前总行数（累计），
+    而这里的计数只描述本次调用（跨账号累加）；两者语义不同，键名必须能区分。
+
+    accounts=None 表示索引库中出现过的全部账号（水位线按账号分别记录）；显式传入
+    列表则只索引列表内的账号（[] = 不索引任何账号，而非「全部」）。
+
+    batch / commit_rows 默认取模块常量，仅供测试经接口注入（生产调用不传）。
     """
     embedder = embedder or default_embedder()
     con = connect()
@@ -282,29 +305,27 @@ def build_index(account: str | None = None, rebuild: bool = False,
             con.commit()
         # 换模型必须重建。不重建的两种真实失败形态（实测）：
         #   1) 模型常量变了 → 新模型的水位线从 0 起 → 重嵌 → 撞 vec_messages 主键（裸 OperationalError）
-        #   2) 只改了 meta 行 → 水位线仍在 → 静默返回 {"embedded": 0}，索引停摆
+        #   2) 只改了 meta 行 → 水位线仍在 → 静默返回 {"embedded_this_run": 0}，索引停摆
         # 二者都不是「静默混用向量」，但都必须由用户显式 rebuild 才能继续。
-        foreign = _foreign_model(con)
-        if foreign:
-            raise VectorError(
-                f"索引由 {foreign} 构建，与当前模型 {MODEL_ID} 不一致：请改用 rebuild=True 重建")
+        _ensure_model_ok(con)
         _ensure_meta(con)
-        accounts = ([account] if account else
-                    [r[0] for r in con.execute("SELECT DISTINCT account FROM messages")])
+        targets = (list(accounts) if accounts is not None else
+                   [r[0] for r in con.execute("SELECT DISTINCT account FROM messages")])
         embedded = skipped = 0
-        for acct in accounts:
+        for acct in targets:
             # 进度带偏移：_build_account 的计数是每账号局部的（各自从 0 起），直接
             # 透传会让多账号构建时 rows 在切换账号处从大跳回小。TOOLS.md 把 rows 定
             # 为「本轮已嵌入行数」，所以补上前序账号的累计，保证本轮内单调递增。
             base = embedded
             e, s = _build_account(con, acct, embedder,
-                                  (lambda n: progress(base + n)) if progress else None)
+                                  (lambda n: progress(base + n)) if progress else None,
+                                  batch=batch, commit_rows=commit_rows)
             embedded += e
             skipped += s
         prev_skipped = _meta(con)["skipped"]
         total = con.execute("SELECT count(*) FROM vec_messages").fetchone()[0]
         _write_meta(con, embedded=total, skipped=prev_skipped + skipped)
-        return {"embedded": embedded, "skipped": skipped}
+        return {"embedded_this_run": embedded, "skipped_this_run": skipped}
     finally:
         con.close()
 
@@ -334,12 +355,9 @@ def semantic_search(query: str, chat_id: str | None = None, limit: int = 10,
             raise SearchInputError("limit 必须为正整数", hint="limit 应为 ≥1 的整数")
         # 顺序要紧：先判模型是否匹配，再判是否为空——不匹配的索引一律不得查询。
         # 判据必须模型无关（`_meta()` 按 MODEL_ID 过滤，异模型的行对它不可见，
-        # 用它会让本分支永不可达），且必须看「是否存在任何异模型行」而非「最新一行」。
-        foreign = _foreign_model(con)
-        if foreign:
-            raise VectorError(
-                f"索引由 {foreign} 构建，与当前模型 {MODEL_ID} 不一致",
-                hint="运行 vector-build --rebuild 或 build_vector_index(rebuild=True)")
+        # 用它会让本分支永不可达），且必须看「是否存在任何异模型行」而非「最新一行」；
+        # 该判据与错误文案由 _ensure_model_ok 独占（与 build_index 同源）。
+        _ensure_model_ok(con)
         meta = _meta(con)
         if meta is None or meta["embedded"] == 0:
             raise VectorError("向量索引为空", hint="请先运行 build_vector_index")
@@ -375,12 +393,15 @@ def semantic_search(query: str, chat_id: str | None = None, limit: int = 10,
         con.close()
 
 
-def start_build_task(account: str | None, rebuild: bool) -> str:
-    """登记向量索引长任务（MCP 用）。account=None 表示全部账号。"""
+def start_build_task(accounts: Sequence[str] | None, rebuild: bool) -> str:
+    """登记向量索引长任务（MCP 用）。accounts=None 表示全部账号。"""
     def _run(tid: str) -> int:
-        res = build_index(account=account, rebuild=rebuild,
+        res = build_index(accounts=accounts, rebuild=rebuild,
                           progress=lambda n: tasks.update(tid, rows=n))
-        tasks.update(tid, skipped=res["skipped"])
-        return res["embedded"]
+        tasks.update(tid, skipped=res["skipped_this_run"])
+        return res["embedded_this_run"]
 
-    return tasks.start("vector", _run, account=account, rebuild=rebuild)
+    # 任务元数据沿用单数 account 字段（tasks.json 已发布格式）：单账号写该账号、
+    # 全部账号写 None。多账号列表不是 wire 层能产生的形态（usecases 只翻译出这两种）。
+    one = accounts[0] if accounts and len(accounts) == 1 else None
+    return tasks.start("vector", _run, account=one, rebuild=rebuild)

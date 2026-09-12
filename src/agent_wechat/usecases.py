@@ -181,8 +181,13 @@ def semantic_search(query: str, contact: str | None = None, limit: int = 10,
 
 
 def build_vector_index(account: str | None = None, rebuild: bool = False) -> dict:
-    """注意 account 语义与其它工具相反：省略表示索引**全部**账号（见 TOOLS.md §7）。"""
-    return {"task_id": vector.start_build_task(account, rebuild), "status": "running"}
+    """注意 account 语义与其它工具相反：省略表示索引**全部**账号（见 TOOLS.md §7）。
+
+    翻译边界：wire 层的 `account`（单数，None = 全部）在这里翻成 core 的
+    `accounts`（复数列表，None = 全部，[] = 一个都不索引）。wire 语义一字不动。
+    """
+    accounts = [account] if account else None
+    return {"task_id": vector.start_build_task(accounts, rebuild), "status": "running"}
 
 
 def task_status(task_id: str | None = None) -> dict | list:

@@ -169,8 +169,9 @@ def cmd_vector_build(args: argparse.Namespace) -> int:
     def progress(n: int) -> None:
         print(f"  已嵌入 {n} 行…", flush=True)
 
-    res = vector.build_index(account=args.account, rebuild=args.rebuild, progress=progress)
-    print(f"完成：本轮嵌入 {res['embedded']} 行，跳过 {res['skipped']} 行")
+    res = vector.build_index(accounts=[args.account] if args.account else None,
+                             rebuild=args.rebuild, progress=progress)
+    print(f"完成：本轮嵌入 {res['embedded_this_run']} 行，跳过 {res['skipped_this_run']} 行")
     return 0
 
 

@@ -269,6 +269,26 @@ def test_cli_recent_n_1000_is_capped_at_500(stub, capsys):
     assert stub["limits"] == [500]
 
 
+# ---------- build_vector_index：wire 单数 account → core 复数 accounts ----------
+
+def test_build_vector_index_translates_account_to_accounts(monkeypatch):
+    """wire 层语义不变（省略 = 索引全部账号）的护栏：翻译只发生在用例层。
+
+    core 的 `accounts` 是复数列表（None = 全部、[] = 一个都不索引）；
+    wire 的 `account` 保持单数（None = 全部）。
+    """
+    seen: list[tuple] = []
+    monkeypatch.setattr(vector, "start_build_task",
+                        lambda accounts, rebuild: seen.append((accounts, rebuild)) or "tid")
+
+    assert usecases.build_vector_index(account=None) == {"task_id": "tid", "status": "running"}
+    assert usecases.build_vector_index(account="acct") == {"task_id": "tid", "status": "running"}
+    assert usecases.build_vector_index(account=None, rebuild=True) == {
+        "task_id": "tid", "status": "running"}
+
+    assert seen == [(None, False), (["acct"], False), (None, True)]
+
+
 # ---------- 合成库全链路（真实解密链路，路径全在临时目录） ----------
 
 def test_usecases_three_outcomes_on_synthetic_wechat(env):

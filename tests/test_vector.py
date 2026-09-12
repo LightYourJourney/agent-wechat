@@ -178,7 +178,7 @@ def test_build_index_embeds_text_and_skips_others(env):
     ])
     fake = FakeEmbedder()
     res = vector.build_index(embedder=fake)
-    assert res == {"embedded": 2, "skipped": 2}
+    assert res == {"embedded_this_run": 2, "skipped_this_run": 2}
     meta = env.execute("SELECT embedded, skipped, model_id FROM vector_meta").fetchone()
     assert (meta["embedded"], meta["skipped"], meta["model_id"]) == (2, 2, vector.MODEL_ID)
     # 前缀文本确实进了 embedder（第 2 条带上了第 1 条的「上文」）
@@ -207,20 +207,20 @@ def test_build_index_progress_is_monotonic_across_accounts(env):
     res = vector.build_index(embedder=FakeEmbedder(), progress=seen.append)
 
     assert seen == sorted(seen), f"进度倒退: {seen}"
-    assert seen[-1] == res["embedded"] == 6, f"进度终点不等于总嵌入数: {seen}"
+    assert seen[-1] == res["embedded_this_run"] == 6, f"进度终点不等于总嵌入数: {seen}"
 
 
 def test_build_index_second_run_is_noop(env):
     store.upsert_batch(env, [mk_row("acct", "chatA", 1, "第一条消息")])
-    assert vector.build_index(embedder=FakeEmbedder())["embedded"] == 1
-    assert vector.build_index(embedder=FakeEmbedder())["embedded"] == 0      # 水位线生效
+    assert vector.build_index(embedder=FakeEmbedder())["embedded_this_run"] == 1
+    assert vector.build_index(embedder=FakeEmbedder())["embedded_this_run"] == 0   # 水位线生效
 
 
 def test_build_index_resumes_after_new_rows(env):
     store.upsert_batch(env, [mk_row("acct", "chatA", 1, "第一条消息")])
     vector.build_index(embedder=FakeEmbedder())
     store.upsert_batch(env, [mk_row("acct", "chatA", 2, "第二条消息")])
-    assert vector.build_index(embedder=FakeEmbedder())["embedded"] == 1      # 只补新增
+    assert vector.build_index(embedder=FakeEmbedder())["embedded_this_run"] == 1   # 只补新增
     assert env.execute("SELECT count(*) FROM vec_messages").fetchone()[0] == 2
 
 
@@ -228,17 +228,60 @@ def test_build_index_rebuild_drops_and_reembeds(env):
     store.upsert_batch(env, [mk_row("acct", "chatA", 1, "第一条消息")])
     vector.build_index(embedder=FakeEmbedder())
     res = vector.build_index(rebuild=True, embedder=FakeEmbedder())
-    assert res["embedded"] == 1
+    assert res["embedded_this_run"] == 1
     assert env.execute("SELECT count(*) FROM vec_messages").fetchone()[0] == 1   # 未翻倍
 
 
 def test_build_index_account_scoped(env):
     store.upsert_batch(env, [mk_row("acct1", "chatA", 1, "账号一的消息"),
                              mk_row("acct2", "chatA", 2, "账号二的消息")])
-    assert vector.build_index(account="acct1", embedder=FakeEmbedder())["embedded"] == 1
+    assert vector.build_index(accounts=["acct1"], embedder=FakeEmbedder())["embedded_this_run"] == 1
     wm = {(r["account"], r["last_rowid"]) for r in
           env.execute("SELECT account, last_rowid FROM vector_watermark")}
     assert len(wm) == 1 and wm.pop()[0] == "acct1"
+
+
+def test_build_index_accounts_list_selects_exactly_those_accounts(env):
+    store.upsert_batch(env, [mk_row("acct1", "chatA", 1, "账号一的消息"),
+                             mk_row("acct2", "chatA", 2, "账号二的消息")])
+    res = vector.build_index(accounts=["acct1", "acct2"], embedder=FakeEmbedder())
+    assert res == {"embedded_this_run": 2, "skipped_this_run": 0}
+    got = {r[0] for r in env.execute("SELECT DISTINCT account FROM vec_messages")}
+    assert got == {"acct1", "acct2"}
+
+
+def test_build_index_empty_accounts_indexes_nothing(env):
+    """accounts=[] 是「一个都不索引」，不能退化成「全部账号」——这正是复数参数名的价值。"""
+    store.upsert_batch(env, [mk_row("acct", "chatA", 1, "不该被索引的消息")])
+    res = vector.build_index(accounts=[], embedder=FakeEmbedder())
+    assert res == {"embedded_this_run": 0, "skipped_this_run": 0}
+    assert env.execute("SELECT count(*) FROM vec_messages").fetchone()[0] == 0
+
+
+def test_build_index_return_counts_are_this_run_not_cumulative(env):
+    """返回键是「本轮」计数：第二次运行水位线已到顶 → 本轮 0，而 vector_meta 累计值不变。"""
+    store.upsert_batch(env, [mk_row("acct", "chatA", 1, "第一条消息"),
+                             mk_row("acct", "chatA", 2, "嗯")])     # 1 嵌入 + 1 跳过
+    assert vector.build_index(embedder=FakeEmbedder()) == {
+        "embedded_this_run": 1, "skipped_this_run": 1}
+    meta = env.execute("SELECT embedded, skipped FROM vector_meta").fetchone()
+    assert (meta["embedded"], meta["skipped"]) == (1, 1)
+    assert vector.build_index(embedder=FakeEmbedder()) == {
+        "embedded_this_run": 0, "skipped_this_run": 0}
+    meta2 = env.execute("SELECT embedded, skipped FROM vector_meta").fetchone()
+    assert (meta2["embedded"], meta2["skipped"]) == (1, 1)   # 累计列不受本轮 0 影响
+
+
+def test_build_index_counts_accumulate_across_accounts(env):
+    """跨账号累加：两个账号各自的 embedded/skipped 汇总成本轮总数。"""
+    store.upsert_batch(env, [
+        mk_row("acctA", "chatA", 1, "账号A的消息"),
+        mk_row("acctA", "chatA", 2, "嗯"),                                   # <2 字跳过
+        mk_row("acctB", "chatB", 3, "账号B的消息"),
+        mk_row("acctB", "chatB", 4, "[image]", msg_type=3, media_hint="[image]"),
+    ])
+    assert vector.build_index(embedder=FakeEmbedder()) == {
+        "embedded_this_run": 2, "skipped_this_run": 2}
 
 
 def test_build_index_large_batch_crosses_vec_chunk_boundary(env):
@@ -249,26 +292,69 @@ def test_build_index_large_batch_crosses_vec_chunk_boundary(env):
 
     res = vector.build_index(embedder=FakeEmbedder())
 
-    assert res["embedded"] == n
+    assert res["embedded_this_run"] == n
     assert env.execute("SELECT count(*) FROM vec_messages").fetchone()[0] == n
     max_id = env.execute("SELECT max(id) FROM messages").fetchone()[0]
     wm = env.execute("SELECT last_rowid FROM vector_watermark WHERE account='acct'").fetchone()
     assert wm["last_rowid"] == max_id
 
 
-def test_build_index_mid_run_commit_keeps_rows_and_watermark_in_sync(env, monkeypatch):
-    """中途提交路径：把阈值缩到 2，逼出 COMMIT_ROWS 分支；行数/水位线/返回值三者一致。"""
-    monkeypatch.setattr(vector, "BATCH", 2)
-    monkeypatch.setattr(vector, "COMMIT_ROWS", 2)
+def test_build_index_mid_run_commit_keeps_rows_and_watermark_in_sync(env):
+    """中途提交路径：小 batch/commit_rows 经接口注入（不再 monkeypatch 模块常量），
+    逼出提交分支；行数/水位线/返回值三者一致。"""
     store.upsert_batch(env, [mk_row("acct", "chatA", i, f"第 {i} 条需要嵌入的消息")
                              for i in range(1, 6)])
 
-    res = vector.build_index(account="acct", embedder=FakeEmbedder())
+    res = vector.build_index(accounts=["acct"], embedder=FakeEmbedder(),
+                             batch=2, commit_rows=2)
 
-    assert res == {"embedded": 5, "skipped": 0}
+    assert res == {"embedded_this_run": 5, "skipped_this_run": 0}
     assert env.execute("SELECT count(*) FROM vec_messages").fetchone()[0] == 5
     wm = env.execute("SELECT last_rowid FROM vector_watermark WHERE account='acct'").fetchone()
     assert wm["last_rowid"] == 5                   # 第 2、4 行各提交过一次，末批补齐第 5 行
+
+
+def test_build_index_custom_batch_controls_embed_batch_size(env):
+    """batch 经接口注入后同时决定分页步长与单次嵌入的行数上限（默认 256 时会是单批 5 行）。"""
+    batches: list[int] = []
+
+    class Counting(FakeEmbedder):
+        def embed(self, texts):
+            batches.append(len(texts))
+            return super().embed(texts)
+
+    store.upsert_batch(env, [mk_row("acct", "chatA", i, f"第 {i} 条需要嵌入的消息")
+                             for i in range(1, 6)])
+    res = vector.build_index(accounts=["acct"], embedder=Counting(), batch=2, commit_rows=4)
+
+    assert batches == [2, 2, 1]
+    assert res == {"embedded_this_run": 5, "skipped_this_run": 0}
+
+
+def test_build_index_custom_commit_rows_sets_crash_boundary(env):
+    """commit_rows 经接口注入后决定中途提交点：batch=2、commit_rows=4、第 5 行嵌失败时，
+    已落盘的行与水位线都停在第 4 行（默认 commit_rows=5120 时这里会是 0 行）。"""
+
+    class FailOnThirdBatch(FakeEmbedder):
+        def __init__(self):
+            super().__init__()
+            self.embed_calls = 0
+
+        def embed(self, texts):
+            self.embed_calls += 1
+            if self.embed_calls == 3:
+                raise RuntimeError("boom")
+            return super().embed(texts)
+
+    store.upsert_batch(env, [mk_row("acct", "chatA", i, f"第 {i} 条需要嵌入的消息")
+                             for i in range(1, 6)])
+    with pytest.raises(RuntimeError, match="boom"):
+        vector.build_index(accounts=["acct"], embedder=FailOnThirdBatch(),
+                           batch=2, commit_rows=4)
+
+    assert env.execute("SELECT count(*) FROM vec_messages").fetchone()[0] == 4
+    wm = env.execute("SELECT last_rowid FROM vector_watermark WHERE account='acct'").fetchone()
+    assert wm["last_rowid"] == 4
 
 
 class _FailingOnSecondBatch(FakeEmbedder):
@@ -285,24 +371,23 @@ class _FailingOnSecondBatch(FakeEmbedder):
         return super().embed(texts)
 
 
-def test_build_index_crash_mid_run_leaves_watermark_and_rows_consistent(env, monkeypatch):
+def test_build_index_crash_mid_run_leaves_watermark_and_rows_consistent(env):
     """崩溃后「已提交的向量行」必须等于水位线；续跑只补缺口、绝不重复嵌入。"""
-    monkeypatch.setattr(vector, "BATCH", 2)
-    monkeypatch.setattr(vector, "COMMIT_ROWS", 2)
     total = 5
     store.upsert_batch(env, [mk_row("acct", "chatA", i, f"第 {i} 条需要嵌入的消息")
                              for i in range(1, total + 1)])
 
     with pytest.raises(RuntimeError, match="boom"):
-        vector.build_index(account="acct", embedder=_FailingOnSecondBatch())
+        vector.build_index(accounts=["acct"], embedder=_FailingOnSecondBatch(),
+                           batch=2, commit_rows=2)
 
     committed = env.execute("SELECT count(*) FROM vec_messages").fetchone()[0]
     wm = env.execute("SELECT last_rowid FROM vector_watermark WHERE account='acct'").fetchone()
     assert committed > 0, "第一批（2 行）应已在中段提交点落盘，未提交批在 con.close() 时回滚"
     assert wm is not None and wm["last_rowid"] == committed, "水位线必须与其批次同事务提交"
 
-    res = vector.build_index(account="acct", embedder=FakeEmbedder())
-    assert res["embedded"] == total - committed               # 只补未嵌入的行
+    res = vector.build_index(accounts=["acct"], embedder=FakeEmbedder())
+    assert res["embedded_this_run"] == total - committed      # 只补未嵌入的行
     assert env.execute("SELECT count(*) FROM vec_messages").fetchone()[0] == total
     assert env.execute("SELECT count(DISTINCT msg_rowid) FROM vec_messages").fetchone()[0] == total
     wm2 = env.execute("SELECT last_rowid FROM vector_watermark WHERE account='acct'").fetchone()
@@ -384,7 +469,7 @@ def test_build_index_refuses_model_change_without_rebuild(env):
     env.commit()
     with pytest.raises(vector.VectorError, match="rebuild"):
         vector.build_index(embedder=FakeEmbedder())
-    assert vector.build_index(rebuild=True, embedder=FakeEmbedder())["embedded"] == 1
+    assert vector.build_index(rebuild=True, embedder=FakeEmbedder())["embedded_this_run"] == 1
 
 
 def test_semantic_search_accepts_degraded_md5_chat_id(env):
@@ -413,6 +498,25 @@ def test_build_index_refuses_when_any_meta_row_is_foreign(env):
     env.commit()
     with pytest.raises(vector.VectorError, match="rebuild"):
         vector.build_index(embedder=FakeEmbedder())
+
+
+def test_model_guard_is_shared_by_build_and_search(env):
+    """构建与查询的换模型守卫是同一个 helper：同一条件 → 逐字相同的文案与 hint。"""
+    store.upsert_batch(env, [mk_row("acct", "chatA", 1, "第一条消息")])
+    vector.build_index(embedder=FakeEmbedder())
+    env.execute("UPDATE vector_meta SET model_id='fastembed:other:512'")
+    env.commit()
+
+    errs = []
+    for call in (lambda: vector.build_index(embedder=FakeEmbedder()),
+                 lambda: vector.semantic_search("x", account="acct", embedder=FakeEmbedder())):
+        with pytest.raises(vector.VectorError) as e:
+            call()
+        errs.append(e.value)
+
+    assert str(errs[0]) == str(errs[1])                # 文案同源
+    assert "不一致" in str(errs[0]) and "rebuild" in str(errs[0])
+    assert errs[0].hint == errs[1].hint and "rebuild" in errs[0].hint
 
 
 def test_build_index_refuses_real_model_change(env, monkeypatch):

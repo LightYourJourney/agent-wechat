@@ -5,6 +5,7 @@
 「返回含 error 的 dict 且不抛任何 BaseException」。
 """
 import asyncio
+import inspect
 import json
 
 import pytest
@@ -109,3 +110,11 @@ def test_every_registered_tool_is_guarded():
                  "export_full_history", "get_task_status", "search_history",
                  "semantic_search", "build_vector_index"):
         assert getattr(mcp_server, name).__wrapped__ is not None, f"{name} 缺 @_guard"
+
+
+def test_build_vector_index_wire_params_unchanged():
+    """wire 契约冻结：core 侧把 account 改成复数 accounts 后，工具参数名与默认值一字不动。"""
+    sig = inspect.signature(mcp_server.build_vector_index)
+    assert list(sig.parameters) == ["rebuild", "account"]
+    assert sig.parameters["rebuild"].default is False
+    assert sig.parameters["account"].default is None
