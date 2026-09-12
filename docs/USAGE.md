@@ -40,6 +40,9 @@ agent-wechat recent wxid_abc123def456 -n 30
 # [1789045521] 小李: 好啊，七点老地方？
 ```
 
+> `recent -n` 的范围是 **1-500**（与 MCP 的 `get_recent_messages` 同一口径，超出按
+> 500 处理；非正值按 1 处理）。`-n 1000` 只会返回最多 500 条。
+
 把输出交给任何 LLM 即可生成回复建议；Skill 工作流中这一步由 Agent 自行完成。
 
 ## 2. 场景二：历史检索
@@ -185,6 +188,12 @@ agent-wechat decrypt message/message_0.db --out m0.db   # 导出明文库（调�
 ## 8. 输出约定与错误提示
 
 - 所有失败都会给出中文原因与下一步指引（如密钥缺失时会提示 bootstrap 命令）
+- 名字消歧在 `recent` / `search` / `export` / `semantic` 四个子命令上行为一致：
+  候选列表（JSON，含 `kind`；与 MCP 的 `need_confirm` 同形）打到 **stdout**，
+  一行「无法唯一解析…」打到 **stderr**，退出码 **1**——歧义不会被当成「找不到」，
+  也不会替你猜。用候选里的 `username` 重试即可
+- `contact` 传展示名且未命中任何联系人时，报错并提示用 `contacts`（MCP 侧为
+  `list_contacts`）查询，不会静默扩大到全部会话
 - 非文本消息以 `[image]` / `[appmsg: 标题]` / `[voice]` 等提示代替正文，
   XML 内容不会进入索引
 - 时间一律为 unix 秒；`is_self=1` 表示本人发送

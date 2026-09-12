@@ -29,12 +29,18 @@ src/agent_wechat/
 ├── store.py        本地检索库：DDL、幂等 upsert、水位线、FTS 触发器
 ├── search.py       检索路由：trigram FTS / LIKE 兜底
 ├── vector.py       向量索引与语义检索（唯一接触 fastembed 与 sqlite-vec 的隔离带）
-├── mcp_server.py   MCP 薄适配层（8 工具，无业务逻辑）
-└── cli.py          命令行入口（与 mcp_server 调用同一批核心函数）
+├── usecases.py     用例层：两个入口共享的入口策略（参数归一化、账号/会话解析、结果形状）
+├── mcp_server.py   MCP 薄适配层（8 工具，只做参数编组与渲染）
+└── cli.py          命令行入口（只做参数编组与渲染）
 ```
 
 分层规则：**核心层不 import MCP SDK**；`mcp_server.py` 与 `cli.py` 是同一批核心函数
 的两个入口，保证 Agent 与 CLI 行为一致、测试无需起 MCP。
+
+入口策略只实现一次、放在 `usecases.py`：每个工具一个用例函数，独占 limit 归一化
+（下界一律 1，上界按 TOOLS.md 文档化的区间）、contact → chat_id 解析（歧义返回
+`NeedConfirm` 候选、未命中抛 `ContactNotFound`）与结果形状；入口只负责参数编组与
+渲染（MCP 翻成 `{"error"}/{"need_confirm"}` 信封，CLI 翻成 stdout/stderr + 退出码）。
 
 ## 3. 数据流
 

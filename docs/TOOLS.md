@@ -118,11 +118,14 @@
 
 | 参数 | 类型 | 必填 | 默认 | 说明 |
 |---|---|---|---|---|
-| `contact` | string | 否 | null | 只导出该会话；省略导出全部 |
+| `contact` | string | 否 | null | 只导出该会话（username 或展示名）；省略导出全部。展示名命中多个联系人时返回 `need_confirm`（形状见 §3，含 `kind`），未命中返回 `{"error": "找不到联系人「XXX」，请用 list_contacts 查询"}`——不会静默扩大到全部会话 |
 | `full` | bool | 否 | false | true 时忽略水位线全量重扫（幂等） |
 | `account` | string | 否 | null | 同通用约定 |
 
 **返回**：`{ "task_id": "a1b2c3d4e5f6", "status": "running" }`
+
+`contact` 歧义时返回 `{"need_confirm": [...]}`（不创建任务，也不会猜）；未命中时返回
+`error` 信封。两者都不会误报成「找不到」——候选会一并列出。
 
 随后用 `get_task_status` 轮询（建议间隔 10-30 秒）。中断（Ctrl-C / 进程退出）安全：
 重跑自动从断点继续。

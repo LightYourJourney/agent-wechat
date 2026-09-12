@@ -6,11 +6,10 @@
 """
 import asyncio
 import json
-from types import SimpleNamespace
 
 import pytest
 
-from agent_wechat import errors, mcp_server
+from agent_wechat import account, errors, mcp_server, paths, reader
 
 BOGUS = "wxid_does_not_exist_0000"
 
@@ -18,7 +17,7 @@ BOGUS = "wxid_does_not_exist_0000"
 @pytest.fixture(autouse=True)
 def _no_real_accounts(monkeypatch):
     """不依赖开发机上的真实微信账号目录，保证「不存在的 account」确定不存在。"""
-    monkeypatch.setattr(mcp_server.acc_mod.paths, "account_dirs", lambda: [])
+    monkeypatch.setattr(paths, "account_dirs", lambda: [])
 
 
 def _call(fn, **kwargs):
@@ -63,16 +62,12 @@ def test_errors_reach_the_agent_through_call_tool(name, args):
     assert "账号目录不存在" in payload["error"]
 
 
-def test_resolve_chat_miss_raises_documented_error():
-    """未命中在 core 侧抛 ContactNotFound，文案与 TOOLS.md 逐字节一致。"""
-    r = SimpleNamespace(resolve_one=lambda c: (None, []))
-    with pytest.raises(errors.ContactNotFound) as ei:
-        mcp_server._resolve_chat(r, "张三")
-    assert str(ei.value) == "找不到联系人「张三」，请用 list_contacts 查询"
-
-
 def test_contact_miss_surfaces_as_documented_envelope(monkeypatch):
-    """未命中经 @_guard 翻回信封——对外形状与旧的手写 dict 返回一字不差。"""
+    """未命中经 @_guard 翻回信封——对外形状与旧的手写 dict 返回一字不差。
+
+    消歧/未命中的策略本身在 usecases 层（见 tests/test_usecases.py），这里只钉
+    MCP 出口的信封形状。
+    """
     class _StubReader:
         def __init__(self, acct):
             pass
@@ -80,21 +75,10 @@ def test_contact_miss_surfaces_as_documented_envelope(monkeypatch):
         def resolve_one(self, contact):
             return None, []
 
-    monkeypatch.setattr(mcp_server, "_acct", lambda a: "acct")
-    monkeypatch.setattr(mcp_server.reader, "MessageReader", _StubReader)
+    monkeypatch.setattr(account, "resolve_account", lambda a: "acct")
+    monkeypatch.setattr(reader, "MessageReader", _StubReader)
     res = _call(mcp_server.get_recent_messages, contact="张三")
     assert res == {"error": "找不到联系人「张三」，请用 list_contacts 查询"}
-
-
-def test_resolve_chat_ambiguity_returns_need_confirm():
-    """歧义不是错误：原样返回 need_confirm，键集合与 TOOLS.md 一致。"""
-    cands = [{"username": "wxid_a", "display": "张三", "kind": "direct"},
-             {"username": "123@chatroom", "display": "张三（群）", "kind": "group"}]
-    r = SimpleNamespace(resolve_one=lambda c: (None, cands))
-    res = mcp_server._resolve_chat(r, "张三")
-    assert set(res) == {"need_confirm"}
-    assert res["need_confirm"] == cands
-    assert set(res["need_confirm"][0]) == {"username", "display", "kind"}
 
 
 def test_guard_translates_project_error_with_hint():

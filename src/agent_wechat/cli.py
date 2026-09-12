@@ -9,15 +9,16 @@ import sys
 from . import account, bootstrap, decrypt, errors, keys, paths
 
 
-def _positive_limit(n: int) -> int:
-    """CLI 的 -n 下界保护：非正值会一路传到 SQL 并产生静默错答。
+def _need_confirm(contact: str, nc) -> int:
+    """消歧输出（recent/search/export/semantic 四处一致，策略见 usecases）：
 
-    reader.recent 的 `LIMIT -1` 在 SQLite 里表示不限量，再被 `pieces[-limit:]`
-    错位切片，于是 `-n -1` **静默丢掉一条**消息、`-n 0` 返回空；search 则是无上限
-    全表扫描。此处只夹下界，CLI 保留无上限（是否与 MCP 侧的 1-500 对齐，属入口
-    策略统一的范畴，另行决定）。
+    候选列表（含 kind，与 MCP 的 need_confirm 同形）打到 stdout，一行说明打到
+    stderr，退出码 1。stdout 保持可被脚本直接 json 解析。
     """
-    return max(1, n)
+    print(json.dumps([c.to_dict() for c in nc.candidates], ensure_ascii=False))
+    print(f"无法唯一解析「{contact}」；候选见 stdout 列表，请用 username 重试",
+          file=sys.stderr)
+    return 1
 
 
 def cmd_status(args: argparse.Namespace) -> int:
@@ -113,23 +114,18 @@ def _shorten(v, limit: int = 80):
 
 
 def cmd_contacts(args: argparse.Namespace) -> int:
-    from . import reader
-    r = reader.MessageReader(account.resolve_account(args.account))
-    for c in r.contacts(query=args.query or None):
+    from . import usecases
+    for c in usecases.contacts(query=args.query, account=args.account):
         print(f"{c['username']:<32} {c['kind']:<9} {c['display']}")
     return 0
 
 
 def cmd_recent(args: argparse.Namespace) -> int:
-    from . import reader
-    r = reader.MessageReader(account.resolve_account(args.account))
-    chat_id, cands = r.resolve_one(args.contact)
-    if not chat_id:
-        print(f"无法唯一解析「{args.contact}」；候选: "
-              + json.dumps([{"username": c["username"], "display": c["display"]}
-                            for c in cands[:10]], ensure_ascii=False))
-        return 1
-    for m in r.recent(chat_id, limit=_positive_limit(args.n)):
+    from . import usecases
+    res = usecases.recent_messages(args.contact, limit=args.n, account=args.account)
+    if isinstance(res, usecases.NeedConfirm):
+        return _need_confirm(args.contact, res)
+    for m in res.messages:
         who = "我" if m.is_self else (m.sender_name or m.sender_id or "?")
         body = m.content or m.media_hint or ""
         print(f"[{m.ts}] {who}: {body[:200]}")
@@ -137,40 +133,27 @@ def cmd_recent(args: argparse.Namespace) -> int:
 
 
 def cmd_export(args: argparse.Namespace) -> int:
-    from . import export, store
-    acct = account.resolve_account(args.account)
-    chat_id = None
-    if args.contact:
-        from . import reader
-        r = reader.MessageReader(acct)
-        chat_id, _cands = r.resolve_one(args.contact)
-        if not chat_id:
-            print(f"无法唯一解析「{args.contact}」", file=sys.stderr)
-            return 1
+    from . import export, store, usecases
+    plan = usecases.export_plan(contact=args.contact, full=args.full, account=args.account)
+    if isinstance(plan, usecases.NeedConfirm):
+        return _need_confirm(args.contact, plan)
 
     def progress(n: int) -> None:
         print(f"  已写入 {n} 行…", flush=True)
 
-    n = export.run_export(acct, chat_id=chat_id, full=args.full, progress=progress)
+    n = export.run_export(plan.account, chat_id=plan.chat_id, full=plan.full,
+                          progress=progress)
     with store.connect() as con:
         print(f"完成：本轮 {n} 行；索引总量 {store.counts(con)}")
     return 0
 
 
 def cmd_search(args: argparse.Namespace) -> int:
-    from . import search
-    acct = account.resolve_account(args.account)
-    chat_id = None
-    if args.contact:
-        from . import reader
-        r = reader.MessageReader(acct)
-        chat_id, cands = r.resolve_one(args.contact)
-        if not chat_id:
-            print(f"无法唯一解析「{args.contact}」；候选: "
-                  + json.dumps([{"username": c["username"], "display": c["display"]}
-                                for c in cands[:10]], ensure_ascii=False))
-            return 1
-    res = search.search(args.query, chat_id=chat_id, limit=_positive_limit(args.n), account=acct)
+    from . import usecases
+    res = usecases.search_history(args.query, contact=args.contact, limit=args.n,
+                                  account=args.account)
+    if isinstance(res, usecases.NeedConfirm):
+        return _need_confirm(args.contact, res)
     print(f"mode={res['mode']} total={res['total']}")
     for h in res["hits"]:
         print(f"  [{h['ts']}] {h['chat_id']} {h['sender_name'] or h['sender_id'] or '?'}: "
@@ -192,19 +175,12 @@ def cmd_vector_build(args: argparse.Namespace) -> int:
 
 
 def cmd_semantic(args: argparse.Namespace) -> int:
-    """语义检索。chat_id 原样打印（与 search 子命令一致），展示名富化只属于 MCP 层。"""
-    from . import reader, vector
-    acct = account.resolve_account(args.account)
-    chat_id = None
-    if args.contact:
-        r = reader.MessageReader(acct)
-        chat_id, _cands = r.resolve_one(args.contact)
-        if not chat_id:
-            print(f"无法唯一解析「{args.contact}」", file=sys.stderr)
-            return 1
-    # 与 MCP 层同一上限：-n 超过 50 只会拿到 K_MAX 条候选后被截断，静默少返回
-    limit = max(1, min(args.n, 50))
-    res = vector.semantic_search(args.query, chat_id=chat_id, limit=limit, account=acct)
+    """语义检索。chat_id 原样打印（与 search 子命令一致），展示名只用于 MCP 的返回结构。"""
+    from . import usecases
+    res = usecases.semantic_search(args.query, contact=args.contact, limit=args.n,
+                                   account=args.account)
+    if isinstance(res, usecases.NeedConfirm):
+        return _need_confirm(args.contact, res)
     print(f"mode={res['mode']} total={res['total']}")
     for h in res["hits"]:
         who = "我" if h["is_self"] else h["sender"]
@@ -245,7 +221,7 @@ def main(argv: list[str] | None = None) -> None:
 
     sp = sub.add_parser("recent", help="读取某会话最近 N 条（实时解密）")
     sp.add_argument("contact")
-    sp.add_argument("-n", type=int, default=50)
+    sp.add_argument("-n", type=int, default=50, help="返回条数（1-500，默认 50）")
     sp.add_argument("--account")
     sp.set_defaults(fn=cmd_recent)
 

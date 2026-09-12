@@ -89,6 +89,17 @@
   0 命中且无提示，与「确实没有命中」不可区分（展示名须经 `contact` 解析，未命中 / 重名会报错）
 - 索引由其它模型构建时必须 `--rebuild`，不会混用不同模型的向量
 
+### 入口策略统一（C2）
+
+- 抽出用例层 `usecases.py`：limit 归一化、contact 解析与结果形状只实现一次，
+  `mcp_server.py` / `cli.py` 收缩为参数编组与渲染
+- **行为变更**：`export_full_history`（与 CLI `export --contact`）遇到重名不再误报
+  「找不到联系人」，而是返回含 `kind` 的 `need_confirm` 候选；未命中统一为
+  「找不到联系人「XXX」，请用 list_contacts 查询」
+- **行为变更**：CLI `recent -n` 上界对齐 MCP 的 500（此前 `-n 1000` 会返回 1000 条）
+- CLI `recent` / `search` / `export` / `semantic` 的消歧输出统一：候选（含 `kind`）到
+  stdout、一行说明到 stderr、退出码 1
+
 ### 其他规划
 
 - 蒸馏导出格式（按对话窗口切片的 JSONL）

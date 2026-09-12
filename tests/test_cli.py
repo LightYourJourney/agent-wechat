@@ -3,8 +3,7 @@
 缺陷背景：`-n` 的非正值会一路传到 SQL 而不被拦下——`reader.recent` 的
 `LIMIT -1` 在 SQLite 里表示「不限量」，取回后再被 `pieces[-limit:]` 错位切片，
 于是 `-n -1` **静默丢掉一条**消息、`-n 0` 返回空；`search` 则退化成无上限全表
-扫描。修复是在 CLI 边缘夹下界（`cli._positive_limit`），且**只夹下界**：CLI 保留
-无上限，`-n 1000` 不应被截成 500。
+扫描。归一化现已收进 usecases（见 tests/test_usecases.py），CLI 只负责渲染。
 """
 from types import SimpleNamespace
 
@@ -29,6 +28,9 @@ def captured(monkeypatch):
             seen["recent_limit"] = limit
             return []
 
+        def display_name(self, chat_id):
+            return "张三"
+
     monkeypatch.setattr(reader, "MessageReader", _StubReader)
     monkeypatch.setattr(account, "resolve_account", lambda a: "acct")
     return seen
@@ -40,10 +42,10 @@ def test_recent_clamps_non_positive_limit(captured):
         assert captured["recent_limit"] == 1, f"-n {n} 未被夹到 1"
 
 
-def test_recent_keeps_large_limit_unclamped(captured):
-    """只夹下界：CLI 的上限由用户自负，不向 MCP 的 1-500 看齐。"""
+def test_recent_clamps_large_limit_to_500(captured):
+    """C2 起 CLI 也夹上界：`-n 1000` 与 MCP 的 1-500 对齐（有意的行为变更）。"""
     cli.cmd_recent(SimpleNamespace(account=None, contact="张三", n=1000))
-    assert captured["recent_limit"] == 1000
+    assert captured["recent_limit"] == 500
 
 
 def test_search_clamps_non_positive_limit(monkeypatch):
@@ -85,7 +87,7 @@ def test_main_success_still_exits_0(monkeypatch):
         def __init__(self, acct):
             pass
 
-        def contacts(self, query=None):
+        def contacts(self, query=None, limit=200):
             return []
 
     monkeypatch.setattr(account, "resolve_account", lambda a: "acct")

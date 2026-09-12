@@ -121,7 +121,10 @@ def mk_row(acct: str, chat: str, shard: str, lid: int, content: str, ts: int = T
 
 # ---------- store ----------
 
-def test_store_upsert_idempotent_and_watermark(tmp_path):
+def test_store_upsert_idempotent_and_watermark(tmp_path, monkeypatch):
+    # 必须隔离 HOME_DIR：store.connect → paths.ensure_home_dirs() 会对真实
+    # ~/.agent-wechat 做 mkdir 并调用一次 tmutil addexclusion
+    monkeypatch.setattr(paths, "HOME_DIR", tmp_path)
     with store.connect(tmp_path / "i.db") as con:
         batch = [mk_row("a", FRIEND, "message_0.db", 1, "一"),
                  mk_row("a", FRIEND, "message_0.db", 2, "二")]

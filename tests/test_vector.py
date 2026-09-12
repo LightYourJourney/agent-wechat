@@ -4,7 +4,7 @@ import sqlite3
 
 import pytest
 
-from agent_wechat import store, vector
+from agent_wechat import paths, store, vector
 
 
 def mk_row(acct, chat, lid, content, *, ts=1700000000, msg_type=1, is_self=0,
@@ -32,6 +32,7 @@ def test_store_vector_schema_dim_matches_model_dim():
 
 def test_connect_creates_vector_tables(tmp_path, monkeypatch):
     monkeypatch.setattr(store, "DB_PATH", tmp_path / "index.db")
+    monkeypatch.setattr(paths, "HOME_DIR", tmp_path)   # 否则 store.connect 会对真实目录 mkdir + tmutil
     con = vector.connect()
     try:
         ver = con.execute("SELECT vec_version()").fetchone()[0]
@@ -47,6 +48,7 @@ def test_connect_creates_vector_tables(tmp_path, monkeypatch):
 def test_connect_wraps_extension_load_failure_in_vector_error(tmp_path, monkeypatch):
     """扩展加载失败必须是 VectorError（带可执行的修复指引），且不留半配置连接。"""
     monkeypatch.setattr(store, "DB_PATH", tmp_path / "index.db")
+    monkeypatch.setattr(paths, "HOME_DIR", tmp_path)
     opened = []
     real_connect = store.connect
 
@@ -168,6 +170,7 @@ class FakeEmbedder:
 @pytest.fixture()
 def env(tmp_path, monkeypatch):
     monkeypatch.setattr(store, "DB_PATH", tmp_path / "index.db")
+    monkeypatch.setattr(paths, "HOME_DIR", tmp_path)   # 隔离真实 ~/.agent-wechat
     con = vector.connect()          # 需 sqlite-vec 与 Row：断言直接查 vec_messages、按列名取值
     yield con
     con.close()
@@ -455,6 +458,7 @@ def test_semantic_search_rejects_non_positive_limit(env):
 def test_cmd_vector_build_prints_progress(tmp_path, monkeypatch, capsys):
     from agent_wechat import cli
     monkeypatch.setattr(store, "DB_PATH", tmp_path / "index.db")
+    monkeypatch.setattr(paths, "HOME_DIR", tmp_path)
     con = store.connect()
     store.upsert_batch(con, [mk_row("acct", "chatA", 1, "明天开评审会")])
     con.close()
