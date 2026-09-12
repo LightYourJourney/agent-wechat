@@ -133,11 +133,11 @@ def test_ambiguity_caps_candidates_at_ten(stub):
 
 
 def test_miss_raises_documented_contact_not_found(stub):
-    """未命中在用例层抛项目异常，文案与 TOOLS.md 逐字节一致（含后缀）。"""
+    """未命中在用例层抛项目异常，文案**中立于入口**——后缀由适配层各自追加。"""
     _miss(stub)
     with pytest.raises(errors.ContactNotFound) as ei:
         usecases.ChatContext().resolve("张三")
-    assert str(ei.value) == "找不到联系人「张三」，请用 list_contacts 查询"
+    assert str(ei.value) == "找不到联系人「张三」"
 
 
 # ---------- 两个入口一致（C2 核心断言） ----------
@@ -244,11 +244,15 @@ def test_cli_export_ambiguity_lists_candidates(stub, monkeypatch, capsys):
 
 
 def test_export_miss_is_contact_not_found_with_suffix(stub):
-    """未命中：抛 ContactNotFound（文案带「，请用 list_contacts 查询」后缀）。"""
+    """未命中：core 抛中立的 ContactNotFound，**MCP 出口**才补上工具名后缀。
+
+    对外形状与 TOOLS.md:105/268 文档化的逐字节一致——只是后缀的责任从 core
+    移到了适配层（core 不该知道 `list_contacts` 这个工具名）。
+    """
     _miss(stub)
     with pytest.raises(errors.ContactNotFound) as ei:
         usecases.export_plan(contact="张三")
-    assert str(ei.value) == "找不到联系人「张三」，请用 list_contacts 查询"
+    assert str(ei.value) == "找不到联系人「张三」"
     assert mcp_server.export_full_history(contact="张三") == {
         "error": "找不到联系人「张三」，请用 list_contacts 查询"}
 

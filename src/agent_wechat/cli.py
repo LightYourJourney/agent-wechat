@@ -265,6 +265,11 @@ def main(argv: list[str] | None = None) -> None:
     args = p.parse_args(argv)
     try:
         code = args.fn(args)
+    except errors.ContactNotFound as exc:
+        # 入口专属后缀：CLI 用户该用 `contacts`，而不是 MCP 的工具名 list_contacts
+        # （USAGE.md:195-196 文档化的就是这一条）。
+        print(f"{exc}，请用 contacts 查询", file=sys.stderr)
+        code = 1
     except errors.AgentWeChatError as exc:
         # 项目错误 → 单行中文（含 hint）打到 stderr，退出码 1。argparse 自己的
         # SystemExit(2) 在 parse_args 处先抛出，不经过这里，故参数错仍是 2。

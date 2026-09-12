@@ -181,4 +181,6 @@ def test_failure_error_is_bounded(tmp_path, monkeypatch):
     monkeypatch.setattr(tasks, "TASKS_FILE", tmp_path / "tasks.json")
     st = _fail_with(errors.VectorError("超长" * 1000, hint="修"))
     assert st["status"] == "failed"
-    assert 0 < len(st["error"]) <= 500
+    # 上限是 redact 的 300 字 + 省略号（原先断言 <=500，抓不到 500→300 的收窄）
+    assert st["error"].endswith("…")
+    assert len(st["error"]) <= 301

@@ -97,10 +97,18 @@ class ChatContext:
         if chat_id:
             return chat_id
         if not cands:
-            raise errors.ContactNotFound(
-                f"找不到联系人「{contact}」，请用 list_contacts 查询")
+            # 文案保持中立于入口：CLI 该提示 `contacts`、MCP 该提示 `list_contacts`，
+            # 后缀由各自的适配层追加——本层不产生展示文案。
+            raise errors.ContactNotFound(f"找不到联系人「{contact}」")
         return NeedConfirm([Candidate(c["username"], c["display"], c["kind"])
                             for c in cands[:MAX_CANDIDATES]])
+
+    def resolve_optional(self, contact: str | None) -> str | None | NeedConfirm:
+        """可选 contact：空 → None（不限会话）；否则同 resolve（歧义给候选、未命中抛错）。
+
+        三个「可选 contact」的用例共用，省得同一段判断在每处重写。
+        """
+        return self.resolve(contact) if contact else None
 
 
 # ---------- 工具用例（每个工具一个函数） ----------
@@ -141,12 +149,9 @@ def export_plan(contact: str | None = None, full: bool = False,
                 account: str | None = None) -> ExportPlan | NeedConfirm:
     """导出目标解析：歧义/未命中和其它工具同一策略（不再自成一派）。"""
     ctx = ChatContext(account)
-    chat_id = None
-    if contact:
-        got = ctx.resolve(contact)
-        if isinstance(got, NeedConfirm):
-            return got
-        chat_id = got
+    chat_id = ctx.resolve_optional(contact)
+    if isinstance(chat_id, NeedConfirm):
+        return chat_id
     return ExportPlan(account=ctx.account, chat_id=chat_id, full=full)
 
 
@@ -171,12 +176,9 @@ def export_history(contact: str | None = None, full: bool = False,
 def search_history(query: str, contact: str | None = None, limit: int = 20,
                    account: str | None = None) -> dict | NeedConfirm:
     ctx = ChatContext(account)
-    chat_id = None
-    if contact:
-        got = ctx.resolve(contact)
-        if isinstance(got, NeedConfirm):
-            return got
-        chat_id = got
+    chat_id = ctx.resolve_optional(contact)
+    if isinstance(chat_id, NeedConfirm):
+        return chat_id
     return search.search(query, chat_id=chat_id, limit=clamp_limit(limit),
                          account=ctx.account)
 
@@ -184,12 +186,9 @@ def search_history(query: str, contact: str | None = None, limit: int = 20,
 def semantic_search(query: str, contact: str | None = None, limit: int = 10,
                     account: str | None = None) -> dict | NeedConfirm:
     ctx = ChatContext(account)
-    chat_id = None
-    if contact:
-        got = ctx.resolve(contact)
-        if isinstance(got, NeedConfirm):
-            return got
-        chat_id = got
+    chat_id = ctx.resolve_optional(contact)
+    if isinstance(chat_id, NeedConfirm):
+        return chat_id
     res = vector.semantic_search(query, chat_id=chat_id,
                                  limit=clamp_limit(limit, LIMIT_SEMANTIC),
                                  account=ctx.account)

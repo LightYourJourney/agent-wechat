@@ -120,7 +120,7 @@ def test_store_upsert_idempotent_and_watermark(tmp_path, monkeypatch):
     # 必须隔离 HOME_DIR：store.connect → paths.ensure_home_dirs() 会对真实
     # ~/.agent-wechat 做 mkdir 并调用一次 tmutil addexclusion
     monkeypatch.setattr(paths, "HOME_DIR", tmp_path)
-    with store.connect(tmp_path / "i.db") as con:
+    with store.open(tmp_path / "i.db") as con:
         batch = [mk_row("a", FRIEND, 1, "一", shard="message_0.db"),
                  mk_row("a", FRIEND, 2, "二", shard="message_0.db")]
         store.upsert_batch(con, batch)
@@ -190,7 +190,7 @@ def test_store_connect_rows_are_rows_and_positional_access_still_works(tmp_path,
 def test_load_export_watermarks_shape_multi_shard_multi_chat(tmp_path, monkeypatch):
     """批量读取导出水位线：键为 (shard, chat_md5)，值为 max_local_id，且账号隔离。"""
     monkeypatch.setattr(paths, "HOME_DIR", tmp_path)
-    with store.connect(tmp_path / "i.db") as con:
+    with store.open(tmp_path / "i.db") as con:
         store.upsert_batch(con, [
             mk_row("a", FRIEND, 1, "一", shard="message_0.db"),
             mk_row("a", FRIEND, 2, "二", shard="message_0.db"),
@@ -209,14 +209,14 @@ def test_load_export_watermarks_shape_multi_shard_multi_chat(tmp_path, monkeypat
 def test_load_export_watermarks_empty_account(tmp_path, monkeypatch):
     """没导出过的账号读出来是空 dict（不是 None/异常）。"""
     monkeypatch.setattr(paths, "HOME_DIR", tmp_path)
-    with store.connect(tmp_path / "i.db") as con:
+    with store.open(tmp_path / "i.db") as con:
         assert store.load_export_watermarks(con, "never_seen") == {}
 
 
 def test_clear_export_watermarks_only_clears_named_account(tmp_path, monkeypatch):
     """B2 语义护栏：重置水位线只清指定账号，别的账号必须原样保留。"""
     monkeypatch.setattr(paths, "HOME_DIR", tmp_path)
-    with store.connect(tmp_path / "i.db") as con:
+    with store.open(tmp_path / "i.db") as con:
         store.upsert_batch(con, [mk_row("a", FRIEND, 1, "一", shard="message_0.db"),
                                  mk_row("b", FRIEND, 2, "二", shard="message_0.db")])
         store.clear_export_watermarks(con, "a")
@@ -292,7 +292,7 @@ def test_recent_cross_shard_decode(env):
 
 def test_export_full_idempotent(env):
     assert export.run_export(ACCT, full=True) == 8          # friend 5+2 + group 1
-    with store.connect() as con:
+    with store.open() as con:
         c = store.counts(con)
         assert c["messages"] == 8 and c["chats"] == 2
         wm = store.load_export_watermarks(con, ACCT)
@@ -300,7 +300,7 @@ def test_export_full_idempotent(env):
     assert wm[("message_1.db", md5(FRIEND))] == 2
     assert wm[("message_0.db", md5("888@chatroom"))] == 1
     assert export.run_export(ACCT, full=True) == 8
-    with store.connect() as con:
+    with store.open() as con:
         assert store.counts(con)["messages"] == 8            # 幂等
     assert export.run_export(ACCT) == 0                      # 增量无新数据
 
@@ -313,14 +313,14 @@ def test_full_export_leaves_other_accounts_watermark_alone(env):
     但纯属浪费）。本机有 2 个账号目录，所以这不是纸面问题。
     """
     foreign = "wxid_other_account"
-    with store.connect() as con:
+    with store.open() as con:
         con.execute("INSERT INTO watermark(account, shard, chat_md5, max_local_id, updated_at)"
                     " VALUES (?,?,?,?,?)", (foreign, "message_0.db", "deadbeef", 7, 0))
         con.commit()
 
     export.run_export(ACCT, full=True)
 
-    with store.connect() as con:
+    with store.open() as con:
         foreign_wm = store.load_export_watermarks(con, foreign)
         own_wm = store.load_export_watermarks(con, ACCT)
     assert foreign_wm.get(("message_0.db", "deadbeef")) == 7, "别的账号的水位线被全量导出清掉了"
@@ -337,7 +337,7 @@ def test_search_modes_and_isolation(env):
     assert res2["mode"] == "like" and res2["total"] == 1
     assert search.search("开会", chat_id="888@chatroom", account=ACCT)["total"] == 1
     assert search.search("开会", chat_id=FRIEND, account=ACCT)["total"] == 0
-    with store.connect() as con:                             # 多账号隔离
+    with store.open() as con:                             # 多账号隔离
         store.upsert_batch(con, [mk_row("other", FRIEND, 99, "别的账号的压缩消息", shard="message_0.db")])
     assert search.search("别的账号", account=ACCT)["total"] == 0
     assert search.search("别的账号", account="other")["total"] == 1

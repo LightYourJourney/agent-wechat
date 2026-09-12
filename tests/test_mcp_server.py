@@ -94,8 +94,19 @@ def test_guard_translates_project_error_with_hint():
 def test_guard_translates_project_error_without_hint():
     @mcp_server._guard
     def f():
-        raise errors.ContactNotFound("找不到联系人")
-    assert f() == {"error": "找不到联系人"}
+        raise errors.DataNotFound("/x 不存在")          # 无 hint 的项目错误
+    assert f() == {"error": "/x 不存在"}
+
+
+def test_guard_appends_entry_specific_suffix_for_contact_miss():
+    """未命中的下一步指引是入口专属的：core 只给中立文案，MCP 出口补 list_contacts。
+
+    与 CLI 出口补 `contacts` 成对——同一个 core 异常，两个入口各自的下一步不同。
+    """
+    @mcp_server._guard
+    def f():
+        raise errors.ContactNotFound("找不到联系人「张三」")
+    assert f() == {"error": "找不到联系人「张三」，请用 list_contacts 查询"}
 
 
 def test_guard_wraps_unexpected_exception():

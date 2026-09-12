@@ -30,6 +30,11 @@ def _guard(fn):
     def wrapper(*args, **kwargs):
         try:
             return fn(*args, **kwargs)
+        except errors.ContactNotFound as exc:
+            # 未命中的下一步指引是**入口专属**的：MCP 侧该提示 list_contacts、
+            # CLI 侧该提示 contacts。core 只给中立文案，后缀在各自适配层追加
+            # （TOOLS.md:105/268 文档化的就是这一条，逐字保持）。
+            return {"error": errors.redact(f"{exc}，请用 list_contacts 查询")}
         except errors.AgentWeChatError as exc:
             return errors.to_payload(exc)
         except Exception as exc:      # 第三方裸异常（fastembed/sqlite3…）兜底

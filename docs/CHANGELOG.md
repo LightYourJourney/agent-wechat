@@ -3,6 +3,22 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 风格，
 版本号语义为 0.x 阶段（API 可能变动）。
 
+### 架构深化重构（C1–C8 + 3 个缺陷修复）
+
+内部重构为主。用户可见的变更**只有下列 5 处**：
+
+- CLI `recent -n` 的上界与 MCP 对齐 **1-500**（原为无上限）
+- `export_full_history` 的 `contact` 歧义从「误报成找不到」改为返回 `need_confirm`（候选含 kind）
+- `list_contacts` / `search_history` 的 `limit` 补下界 1（原为原样透传，`-1` 会变成 SQLite 不限量）
+- 错误路径不再杀死 MCP server：`SystemExit` 曾逃出工具处理器（微信未运行时调 5 个工具中的
+  任意一个必现），现统一返回 `{"error"[, "hint"]}` 信封；`docs/TOOLS.md` 那句
+  「工具不抛异常到传输层」由此由假变真
+- **模型不一致**的错误现在带「：请改用 rebuild=True 重建」后缀与 hint——受影响的是
+  MCP 的 `semantic_search` / `build_vector_index` 与 CLI 的 `semantic` / `vector-build`
+  （原 `semantic_search` 的文案止于「不一致」，无后缀、无 hint）
+
+同时修正：`paths.key_info_db` 此前返回 `.dat` 而非 docstring 所述的 `.db`。
+
 ## [0.1.0] - 2026-09-10
 
 首个可用版本。**仅限本机自用，勿公开分发**（见 SECURITY.md §5）。

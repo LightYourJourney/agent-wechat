@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent_wechat import account, bootstrap, cli, keys, reader, search, vector
+from agent_wechat import account, bootstrap, cli, errors, keys, reader, search, usecases, vector
 
 
 @pytest.fixture()
@@ -141,3 +141,23 @@ def test_cmd_bootstrap_output_is_verbatim(monkeypatch, capsys):
         "账号 wxid_testacct01 引导完成。之后所有操作均无需 sudo。\n"
     )
     assert saved == {"bare": "wxid_testacct01", "h": "ab" * 32}
+
+
+def test_contact_miss_suffix_names_the_cli_command(monkeypatch, capsys):
+    """未命中时 CLI 该提示 `contacts`，不是 MCP 的工具名 list_contacts。
+
+    core 只抛中立的 ContactNotFound；下一步指引是入口专属的，由适配层追加
+    （USAGE.md:195-196 文档化的就是这一条）。
+    """
+    monkeypatch.setattr(account, "resolve_account", lambda a: "acct")
+
+    def boom(*a, **k):
+        raise errors.ContactNotFound("找不到联系人「张三」")
+
+    monkeypatch.setattr(usecases, "recent_messages", boom)
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["recent", "张三"])
+    assert ei.value.code == 1
+    err = capsys.readouterr().err
+    assert err.strip() == "找不到联系人「张三」，请用 contacts 查询"
+    assert "list_contacts" not in err          # 不能把 MCP 工具名报给 CLI 用户

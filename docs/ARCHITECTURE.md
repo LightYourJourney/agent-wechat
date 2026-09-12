@@ -24,9 +24,10 @@ src/agent_wechat/
 ├── keys.py         passphrase 缓存、PBKDF2 派生、page1 HMAC 自验证
 ├── bootstrap.py    lldb 断点捕获 passphrase（唯一 sudo 环节）
 ├── decrypt.py      db+wal+shm 三元组快照 → sqlcipher raw-key 解密导出
+├── errors.py       统一错误契约：core 只抛项目异常，适配层翻译成各自介质
 ├── messages.py     messages 行契约：列清单、行构造器、两条哨兵编解码、类型词汇表
 ├── reader.py       消息读取：表发现、内容解码、流式产出（唯一认识微信**库**结构的模块）
-├── export.py       导出管道：流式批处理 + 水位线 + 后台长任务注册表
+├── export.py       导出管道：流式批处理 + 水位线续跑（任务登记归 usecases 层）
 ├── store.py        本地检索库：DDL、幂等 upsert、水位线、FTS 触发器
 ├── search.py       检索路由：trigram FTS / LIKE 兜底
 ├── vector.py       向量索引与语义检索（唯一接触 fastembed 与 sqlite-vec 的隔离带）
@@ -87,7 +88,8 @@ export.run_export
   → 逐分片：快照（db+wal+shm）→ sqlcipher raw-key 解密到 0700 临时目录
   → 逐表（Msg_<md5>）按 local_id > 水位线游标扫描
   → fetchmany(batch) 分批解码 → 批量幂等 upsert + 水位线推进（同一事务）
-  → 临时明文删除；进度写 tasks.json；中断后重跑自动续传
+  → 临时明文删除；进度写 tasks.json（进程重启后从该文件载入，遗留的 running 记为 failed）；
+  中断后重跑自动续传
 ```
 
 ### 3.5 检索（本地索引）
