@@ -14,6 +14,7 @@
 """
 from __future__ import annotations
 
+import dataclasses
 import os
 import platform
 import re
@@ -22,6 +23,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+from typing import Callable
 
 from . import account, keys, paths
 from .errors import CaptureError
@@ -29,6 +31,23 @@ from .errors import CaptureError
 DEFAULT_TIMEOUT = 300
 
 _MIN_HEXDUMP_LINE = re.compile(r"\s*0x[0-9a-f]+:\s+((?:0x[0-9a-f]{2}\s*)+)$")
+
+
+@dataclasses.dataclass(frozen=True)
+class BootstrapProgress:
+    """bootstrap 的进度事件。
+
+    核心层不产生展示文案：kind + 结构化字段交入口层渲染（同序、逐字见
+    `cli.cmd_bootstrap`）。为什么需要回调而不是只返回结果：前两条提示必须发生在
+    lldb 捕获（最长 timeout 秒）**之前**，否则用户看不到「退出登录 → 重新登录」的
+    指引；「同序」也要求 account 行先于 ✅ 行。
+    """
+
+    kind: str                       # "account" | "attach" | "verified"
+    bare: str | None = None         # kind="account"
+    pid: int | None = None          # kind="account"
+    ok_libs: int = 0                # kind="verified"
+    total_libs: int = 0             # kind="verified"
 
 
 def _parse_passphrase(out: str) -> str | None:
@@ -109,15 +128,20 @@ def capture_passphrase_lldb(timeout: int = DEFAULT_TIMEOUT) -> str:
     return ph
 
 
-def bootstrap(timeout: int = DEFAULT_TIMEOUT) -> str:
-    """完整引导：捕获 → 用账号的库做 HMAC 校验 → 通过才落缓存。返回裸 wxid。"""
+def bootstrap(timeout: int = DEFAULT_TIMEOUT,
+              progress: Callable[[BootstrapProgress], None] | None = None) -> str:
+    """完整引导：捕获 → 用账号的库做 HMAC 校验 → 通过才落缓存。返回裸 wxid。
+
+    进度经 progress 回调外发；本层不打印（用户可见输出归入口层）。
+    """
+    emit = progress or (lambda _ev: None)
     st = account.status()
     if not st.logged_in:
         raise CaptureError("无法确定当前登录账号，请先登录微信")
     bare = paths.bare_wxid(st.current)  # type: ignore[arg-type]
 
-    print(f"当前登录账号: {bare} (pid={st.pid})")
-    print("正在 attach lldb… 请在微信内【退出登录 → 重新登录】以触发密钥派生。")
+    emit(BootstrapProgress("account", bare=bare, pid=st.pid))
+    emit(BootstrapProgress("attach"))
     hexstr = capture_passphrase_lldb(timeout)
 
     passphrase = bytes.fromhex(hexstr)
@@ -128,5 +152,5 @@ def bootstrap(timeout: int = DEFAULT_TIMEOUT) -> str:
         raise CaptureError(f"捕获值未通过任何库的 HMAC 校验（{total} 个库），拒绝落缓存。"
                            "可能捕获了错误时刻的派生值，请重试。")
     keys.save_cached_hex(bare, hexstr)
-    print(f"✅ HMAC 校验通过 {len(ok)}/{total} 个库，passphrase 已缓存到 {keys.CACHE_FILE}")
+    emit(BootstrapProgress("verified", ok_libs=len(ok), total_libs=total))
     return bare

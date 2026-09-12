@@ -75,7 +75,7 @@ def key_info_dat(account: str) -> pathlib.Path:
 
 def key_info_db(account: str) -> pathlib.Path:
     """xwechat_files/all_users/login/<裸wxid>/key_info.db（明文 SQLite，56 行包裹 blob）。"""
-    return XWECHAT_FILES / "all_users" / "login" / bare_wxid(account) / "key_info.dat"
+    return XWECHAT_FILES / "all_users" / "login" / bare_wxid(account) / "key_info.db"
 
 
 def all_dbs(account: str) -> list[pathlib.Path]:

@@ -13,6 +13,9 @@ import subprocess
 from . import paths
 from .errors import AccountNotFound
 
+# 模块级可替换点：测试注入桩进程输出的唯一手段（同 keys.CACHE_FILE / paths.XWECHAT_FILES）。
+_run = subprocess.run
+
 
 @dataclasses.dataclass
 class AccountStatus:
@@ -26,22 +29,22 @@ class AccountStatus:
         return self.current is not None
 
 
+def _parse_pids(out: str) -> list[int]:
+    """pgrep 输出 → pid 列表；非数字 token 忽略。"""
+    return [int(x) for x in out.split() if x.strip().isdigit()]
+
+
 def wechat_pid() -> int | None:
     """微信主进程 PID；未运行返回 None。"""
-    r = subprocess.run(["pgrep", "-x", "WeChat"], capture_output=True, text=True)
-    pids = [int(x) for x in r.stdout.split() if x.strip().isdigit()]
+    r = _run(["pgrep", "-x", "WeChat"], capture_output=True, text=True)
+    pids = _parse_pids(r.stdout)
     return pids[0] if pids else None
 
 
-def current_account(pid: int) -> str | None:
-    """lsof 判定当前登录账号。非唯一命中（如启动瞬间）视为不确定，不猜。"""
-    try:
-        r = subprocess.run(["lsof", "-n", "-P", "-p", str(pid)],
-                           capture_output=True, text=True, timeout=15)
-    except subprocess.TimeoutExpired:
-        return None
+def _parse_account_from_lsof(out: str) -> str | None:
+    """lsof 打开文件列表 → 唯一命中的账号目录名（wxid_xxx_hex4）；无/多命中返回 None。"""
     hits: set[str] = set()
-    for line in r.stdout.splitlines():
+    for line in out.splitlines():
         if "xwechat_files/" not in line:
             continue
         tail = line.split("xwechat_files/", 1)[1]
@@ -49,6 +52,16 @@ def current_account(pid: int) -> str | None:
         if paths.ACCOUNT_RE.match(name):
             hits.add(name)
     return next(iter(hits)) if len(hits) == 1 else None
+
+
+def current_account(pid: int) -> str | None:
+    """lsof 判定当前登录账号。非唯一命中（如启动瞬间）视为不确定，不猜。"""
+    try:
+        r = _run(["lsof", "-n", "-P", "-p", str(pid)],
+                 capture_output=True, text=True, timeout=15)
+    except subprocess.TimeoutExpired:
+        return None
+    return _parse_account_from_lsof(r.stdout)
 
 
 def status() -> AccountStatus:

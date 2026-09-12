@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent_wechat import account, cli, reader, search, vector
+from agent_wechat import account, bootstrap, cli, keys, reader, search, vector
 
 
 @pytest.fixture()
@@ -111,3 +111,33 @@ def test_semantic_core_error_reaches_stderr_with_hint(monkeypatch, capsys):
     err = capsys.readouterr().err
     assert "向量索引为空（请先运行 build_vector_index）" in err
     assert "Traceback" not in err
+
+
+# ---------- C8：bootstrap 的 print 迁到 CLI，四处输出逐字（同序/同流向 stdout） ----------
+
+def test_cmd_bootstrap_output_is_verbatim(monkeypatch, capsys):
+    """跑真实 bootstrap 编排（仅桩掉账号/捕获/校验/落盘），断言 CLI 的完整 stdout。"""
+    monkeypatch.setattr(
+        bootstrap.account, "status",
+        lambda: SimpleNamespace(logged_in=True, current="wxid_testacct01_ab12", pid=999))
+    monkeypatch.setattr(bootstrap, "capture_passphrase_lldb", lambda timeout: "ab" * 32)
+    monkeypatch.setattr(
+        bootstrap.keys, "verify_passphrase",
+        lambda acct, pw: [("m/message_0.db", True)] * 3 + [("m/message_1.db", False)] * 2)
+    saved: dict = {}
+    monkeypatch.setattr(bootstrap.keys, "save_cached_hex",
+                        lambda bare, h: saved.update(bare=bare, h=h))
+
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["bootstrap", "--timeout", "7"])
+    assert ei.value.code == 0
+
+    out = capsys.readouterr()
+    assert out.err == ""                      # 全部流向 stdout
+    assert out.out == (
+        "当前登录账号: wxid_testacct01 (pid=999)\n"
+        "正在 attach lldb… 请在微信内【退出登录 → 重新登录】以触发密钥派生。\n"
+        f"✅ HMAC 校验通过 3/5 个库，passphrase 已缓存到 {keys.CACHE_FILE}\n"
+        "账号 wxid_testacct01 引导完成。之后所有操作均无需 sudo。\n"
+    )
+    assert saved == {"bare": "wxid_testacct01", "h": "ab" * 32}

@@ -38,8 +38,19 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def _render_bootstrap(ev: bootstrap.BootstrapProgress) -> None:
+    """bootstrap 进度事件的渲染（核心层只发结构化事件，文案在此）。"""
+    if ev.kind == "account":
+        print(f"当前登录账号: {ev.bare} (pid={ev.pid})")
+    elif ev.kind == "attach":
+        print("正在 attach lldb… 请在微信内【退出登录 → 重新登录】以触发密钥派生。")
+    elif ev.kind == "verified":
+        print(f"✅ HMAC 校验通过 {ev.ok_libs}/{ev.total_libs} 个库，"
+              f"passphrase 已缓存到 {keys.CACHE_FILE}")
+
+
 def cmd_bootstrap(args: argparse.Namespace) -> int:
-    bare = bootstrap.bootstrap(timeout=args.timeout)
+    bare = bootstrap.bootstrap(timeout=args.timeout, progress=_render_bootstrap)
     print(f"账号 {bare} 引导完成。之后所有操作均无需 sudo。")
     return 0
 
