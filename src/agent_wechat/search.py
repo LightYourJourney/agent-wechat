@@ -24,8 +24,6 @@ def search(query: str, chat_id: str | None = None, limit: int = 20,
 
     account 必传：检索严格限定该账号的数据（多账号索引隔离）。
     """
-    con = store.connect()
-    con.row_factory = sqlite3.Row
     if not account:
         raise SearchInputError("search 需要显式 account（多账号索引隔离）")
     where, args = ["m.account = ?"], [account]
@@ -40,38 +38,36 @@ def search(query: str, chat_id: str | None = None, limit: int = 20,
         args.append(before_ts)
     w = " AND ".join(where)
 
-    mode = "fts"
-    try:
-        sql = (f"SELECT {_HIT_COLUMNS}, "
-               f"snippet(messages_fts, 0, '【', '】', '…', 12) AS snip "
-               f"FROM messages_fts JOIN messages m ON m.id = messages_fts.rowid "
-               f"WHERE messages_fts MATCH ? AND {w} "
-               f"ORDER BY m.ts DESC LIMIT ?")
-        rows = con.execute(sql, [_fts_safe(query), *args, limit]).fetchall()
-    except sqlite3.OperationalError:
-        rows = []
+    with store.open() as con:
+        mode = "fts"
+        try:
+            sql = (f"SELECT {_HIT_COLUMNS}, "
+                   f"snippet(messages_fts, 0, '【', '】', '…', 12) AS snip "
+                   f"FROM messages_fts JOIN messages m ON m.id = messages_fts.rowid "
+                   f"WHERE messages_fts MATCH ? AND {w} "
+                   f"ORDER BY m.ts DESC LIMIT ?")
+            rows = con.execute(sql, [_fts_safe(query), *args, limit]).fetchall()
+        except sqlite3.OperationalError:
+            rows = []
 
-    if not rows and len(query.strip()) <= 2:
-        # trigram 无法匹配 <3 字符 → LIKE 兜底（有 chat 过滤则快，无过滤为全表扫）
-        mode = "like"
-        like = f"%{query.strip()}%"
-        sql = (f"SELECT {_HIT_COLUMNS}, "
-               f"NULL AS snip FROM messages m WHERE m.content LIKE ? AND {w} "
-               f"ORDER BY m.ts DESC LIMIT ?")
-        args2 = [like, *args, limit]
-        rows = con.execute(sql, args2).fetchall()
+        if not rows and len(query.strip()) <= 2:
+            # trigram 无法匹配 <3 字符 → LIKE 兜底（有 chat 过滤则快，无过滤为全表扫）
+            mode = "like"
+            like = f"%{query.strip()}%"
+            sql = (f"SELECT {_HIT_COLUMNS}, "
+                   f"NULL AS snip FROM messages m WHERE m.content LIKE ? AND {w} "
+                   f"ORDER BY m.ts DESC LIMIT ?")
+            args2 = [like, *args, limit]
+            rows = con.execute(sql, args2).fetchall()
 
     hits = [dict(r) for r in rows]
-    con.close()
     return {"hits": hits, "mode": mode, "total": len(hits)}
 
 
 def recent_from_store(chat_id: str, limit: int = 50) -> list[dict]:
     """本地库读取近期消息（毫秒级；需先导出）。"""
-    con = store.connect()
-    con.row_factory = sqlite3.Row
-    rows = con.execute(
-        "SELECT * FROM messages WHERE chat_id=? ORDER BY ts DESC, local_id DESC LIMIT ?",
-        (chat_id, limit)).fetchall()
-    con.close()
+    with store.open() as con:
+        rows = con.execute(
+            "SELECT * FROM messages WHERE chat_id=? ORDER BY ts DESC, local_id DESC LIMIT ?",
+            (chat_id, limit)).fetchall()
     return [dict(r) for r in reversed(rows)]  # 时间正序

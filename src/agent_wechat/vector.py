@@ -16,7 +16,7 @@ from . import messages, paths, store
 from .errors import SearchInputError, VectorError
 
 MODEL_NAME = "BAAI/bge-small-zh-v1.5"
-DIM = 512                                   # 必须与 store.VECTOR_SCHEMA 的 float[512] 一致
+DIM = store.VECTOR_DIM                      # 单一真值在 store；本模块只做短别名
 MODEL_ID = f"fastembed:{MODEL_NAME}:{DIM}"
 QUERY_INSTRUCTION = "为这个句子生成表示以用于检索相关文章："   # BGE 官方 s2p 指令，仅查询侧加
 MODEL_CACHE_DIR = paths.HOME_DIR / "models"   # 固定目录：不用 $TMPDIR（重启即清）
@@ -29,9 +29,12 @@ EMBED_TYPES = (messages.TYPE_TEXT, messages.TYPE_APPMSG)   # appmsg 提示形如
 
 
 def connect() -> sqlite3.Connection:
-    """store 连接 + 加载 sqlite-vec 扩展 + 建向量表（扩展不可用则 fail-fast）。"""
+    """store 连接 + 加载 sqlite-vec 扩展 + 建向量表（扩展不可用则 fail-fast）。
+
+    返回裸 Connection，关闭由 build_index / semantic_search 的 try/finally 负责
+    （sqlite-vec 的知识只留在本模块，不委派给 store 的连接 owner）。
+    """
     con = store.connect()
-    con.row_factory = sqlite3.Row
     try:
         con.enable_load_extension(True)
         sqlite_vec.load(con)

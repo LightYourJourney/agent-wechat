@@ -18,7 +18,8 @@ def vec(*xs):
 
 
 def test_store_vector_schema_dim_matches_model_dim():
-    assert f"float[{vector.DIM}]" in store.VECTOR_SCHEMA
+    assert vector.DIM == store.VECTOR_DIM          # 维度真值只在 store，vector 是别名
+    assert f"float[{store.VECTOR_DIM}]" in store.VECTOR_SCHEMA
 
 
 def test_connect_creates_vector_tables(tmp_path, monkeypatch):

@@ -9,7 +9,7 @@ def run_export(acct: str, chat_id: str | None = None, full: bool = False,
     """全量/增量导出。恒定内存：reader 流式产批 → store 批量幂等 upsert。"""
     r = reader.MessageReader(acct)
     total = 0
-    with store.connect() as con:
+    with store.open() as con:
         if full and not chat_id:
             # 只重置本账号：run_export 只重导 acct，连带清掉别的账号的水位线会让
             # 它们白跑一次全量（upsert 幂等，不丢数据，但纯属浪费）

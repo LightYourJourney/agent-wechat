@@ -8,9 +8,11 @@
 """
 from __future__ import annotations
 
+import contextlib
 import pathlib
 import sqlite3
 import time
+from collections.abc import Iterator
 
 from . import messages, paths
 
@@ -72,11 +74,14 @@ CREATE TABLE IF NOT EXISTS watermark (
 
 # ---------- 向量索引（sqlite-vec；由 vector.py 在加载扩展后建表） ----------
 
-VECTOR_SCHEMA = """
+# 向量维度的单一真值：本 DDL 的列宽与 vector.DIM 都从这里取，不再各写一个字面量
+VECTOR_DIM = 512
+
+VECTOR_SCHEMA = f"""
 CREATE VIRTUAL TABLE IF NOT EXISTS vec_messages USING vec0(
     msg_rowid   INTEGER PRIMARY KEY,          -- = messages.id，查回原表取正文
-    embedding   float[512] distance_metric=cosine,
-    acct_chat   TEXT partition key,           -- "{account}|{chat_md5}"，扫描面缩到单会话
+    embedding   float[{VECTOR_DIM}] distance_metric=cosine,
+    acct_chat   TEXT partition key,           -- "{{account}}|{{chat_md5}}"，扫描面缩到单会话
     account     TEXT,                         -- metadata：全局检索的账号隔离
     ts          INTEGER,                      -- metadata：时间过滤
     +preview    TEXT                          -- 辅助列（不参与过滤），调试用
@@ -106,11 +111,35 @@ DROP TABLE IF EXISTS vector_watermark;
 
 
 def connect(db_path: pathlib.Path | None = None) -> sqlite3.Connection:
+    """打开索引库连接（行工厂统一为 sqlite3.Row）。不负责关闭：用 open() 或自行 close()。"""
     paths.ensure_home_dirs()
     con = sqlite3.connect(db_path or DB_PATH)
+    con.row_factory = sqlite3.Row
     con.executescript(SCHEMA)
     con.execute("PRAGMA synchronous=NORMAL")
     return con
+
+
+@contextlib.contextmanager
+def open(db_path: pathlib.Path | None = None) -> Iterator[sqlite3.Connection]:
+    """连接生命周期的 owner：退出时**真正 close**，成功 commit、异常 rollback。
+
+    不要用 `with sqlite3.connect(...)` 代替：那个上下文管理器只管事务，不关连接
+    （关闭时机取决于引用计数归零，是实现细节而非契约）。这里三件事一次说清。
+
+    提交是硬要求：export/usecases 的 upsert 正是靠退出提交落盘（export.run_export
+    只在 full 分支显式 commit），本 context manager 与旧写法的事务语义完全一致。
+    """
+    con = connect(db_path)
+    try:
+        yield con
+    except BaseException:
+        con.rollback()
+        raise
+    else:
+        con.commit()
+    finally:
+        con.close()
 
 
 # INSERT 的列清单直接取自行契约（+ 本模块拥有的 exported_at），不再手抄一份

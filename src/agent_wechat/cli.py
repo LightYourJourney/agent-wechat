@@ -143,7 +143,7 @@ def cmd_export(args: argparse.Namespace) -> int:
 
     n = export.run_export(plan.account, chat_id=plan.chat_id, full=plan.full,
                           progress=progress)
-    with store.connect() as con:
+    with store.open() as con:
         print(f"完成：本轮 {n} 行；索引总量 {store.counts(con)}")
     return 0
 

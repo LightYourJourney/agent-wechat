@@ -138,6 +138,57 @@ def test_store_upsert_idempotent_and_watermark(tmp_path, monkeypatch):
         assert wm[("message_0.db", md5(FRIEND))] == 2
 
 
+def test_store_open_really_closes_on_exit(tmp_path, monkeypatch):
+    """store.open 是连接生命周期的 owner：退出后连接必须真的关闭。
+
+    反证 `with sqlite3.connect(...)` 那种写法只是 commit/rollback、不 close——
+    退出后再执行任何语句必须抛 ProgrammingError。
+    """
+    monkeypatch.setattr(paths, "HOME_DIR", tmp_path)
+    monkeypatch.setattr(store, "DB_PATH", tmp_path / "i.db")
+    with store.open() as con:
+        assert con.execute("SELECT 1").fetchone()[0] == 1
+    with pytest.raises(sqlite3.ProgrammingError):
+        con.execute("SELECT 1")
+
+
+def test_store_open_commits_on_success(tmp_path, monkeypatch):
+    """成功路径退出即提交：写入的行在连接关闭后仍读得到。"""
+    monkeypatch.setattr(paths, "HOME_DIR", tmp_path)
+    monkeypatch.setattr(store, "DB_PATH", tmp_path / "i.db")
+    with store.open() as con:
+        store.upsert_batch(con, [mk_row("a", FRIEND, 1, "落盘", shard="message_0.db")])
+    with store.open() as con:
+        assert con.execute("SELECT count(*) FROM messages").fetchone()[0] == 1
+
+
+def test_store_open_rolls_back_on_error(tmp_path, monkeypatch):
+    """异常路径退出即回滚：未提交的写入不得落盘。"""
+    monkeypatch.setattr(paths, "HOME_DIR", tmp_path)
+    monkeypatch.setattr(store, "DB_PATH", tmp_path / "i.db")
+    with pytest.raises(RuntimeError, match="boom"):
+        with store.open() as con:
+            con.execute("INSERT INTO watermark(account, shard, chat_md5, max_local_id, updated_at)"
+                        " VALUES (?,?,?,?,?)", ("a", "message_0.db", "deadbeef", 1, 0))
+            raise RuntimeError("boom")
+    with store.open() as con:
+        assert con.execute("SELECT count(*) FROM watermark").fetchone()[0] == 0
+
+
+def test_store_connect_rows_are_rows_and_positional_access_still_works(tmp_path, monkeypatch):
+    """connect 默认给 sqlite3.Row：列名与位置取值都要能用（既有消费者按位置取值）。"""
+    monkeypatch.setattr(paths, "HOME_DIR", tmp_path)
+    with store.open(tmp_path / "i.db") as con:
+        assert con.row_factory is sqlite3.Row
+        store.upsert_batch(con, [mk_row("a", FRIEND, 1, "一", shard="message_0.db")])
+        r = con.execute("SELECT account, content FROM messages").fetchone()
+        assert r["account"] == "a" and r["content"] == "一"      # 按列名
+        assert tuple(r) == ("a", "一")                            # 按位置（Row 是 tuple 子类）
+        assert r[0] == "a" and r[1] == "一"
+        assert store.counts(con)["messages"] == 1                 # 既有 r[0] 消费者
+        assert store.get_watermark(con, "a", "message_0.db", md5(FRIEND)) == 1
+
+
 # ---------- reader ----------
 
 def test_contacts_and_resolve(env):
