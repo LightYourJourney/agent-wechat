@@ -242,7 +242,7 @@ class MessageReader:
                  batch: int | None = None):
         """全量流式导出（生成器）。逐分片→逐表→按批 yield。
 
-        resume: {(shard, chat_md5): 已导出的 max(local_id)}（来自 store.watermark；
+        resume: {(shard, chat_md5): 已导出的 max(local_id)}（来自 store.load_export_watermarks；
         local_id 是分片内序号，键必须含 shard）。
         yield 批次为 list[dict]，字段与 store.upsert_batch 对齐。
         """

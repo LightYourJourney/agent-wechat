@@ -150,7 +150,7 @@ def default_embedder() -> FastEmbedEmbedder:
     return _default_embedder
 
 
-# ---------- meta / 水位线 ----------
+# ---------- meta / 向量水位线（vector_watermark） ----------
 
 def _meta(con: sqlite3.Connection) -> sqlite3.Row | None:
     return con.execute("SELECT * FROM vector_meta WHERE model_id = ?", (MODEL_ID,)).fetchone()
@@ -194,13 +194,13 @@ def _write_meta(con: sqlite3.Connection, *, embedded: int, skipped: int) -> None
     con.commit()
 
 
-def _watermark(con: sqlite3.Connection, account: str) -> int:
+def _vector_watermark(con: sqlite3.Connection, account: str) -> int:
     row = con.execute("SELECT last_rowid FROM vector_watermark WHERE model_id=? AND account=?",
                       (MODEL_ID, account)).fetchone()
     return row[0] if row else 0
 
 
-def _set_watermark(con: sqlite3.Connection, account: str, rowid: int) -> None:
+def _set_vector_watermark(con: sqlite3.Connection, account: str, rowid: int) -> None:
     con.execute(
         """INSERT INTO vector_watermark(model_id, account, last_rowid, updated_at)
            VALUES (?,?,?,?)
@@ -228,7 +228,7 @@ def _build_account(con: sqlite3.Connection, acct: str, embedder: FastEmbedEmbedd
     事务边界：每 commit_rows 行提交一次（含水位线，二者同事务 → 崩溃后不会重复嵌入）。
     batch 同时是分页步长与单次嵌入的行数上限（默认取模块常量，由 build_index 注入）。
     """
-    last_id = start = _watermark(con, acct)
+    last_id = start = _vector_watermark(con, acct)
     prev_by_chat: dict[str, str] = {}
     buf_texts: list[str] = []
     buf_rows: list[tuple] = []
@@ -270,7 +270,7 @@ def _build_account(con: sqlite3.Connection, acct: str, embedder: FastEmbedEmbedd
                     flush()
                     since_commit += batch
                     if since_commit >= commit_rows:
-                        _set_watermark(con, acct, last_id)
+                        _set_vector_watermark(con, acct, last_id)
                         con.commit()
                         since_commit = 0
                         if progress:
@@ -278,7 +278,7 @@ def _build_account(con: sqlite3.Connection, acct: str, embedder: FastEmbedEmbedd
             else:
                 skipped += 1
     flush()
-    _set_watermark(con, acct, last_id)
+    _set_vector_watermark(con, acct, last_id)
     con.commit()
     if progress:
         progress(embedded)

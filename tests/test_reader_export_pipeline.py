@@ -129,12 +129,10 @@ def test_store_upsert_idempotent_and_watermark(tmp_path, monkeypatch):
         store.upsert_batch(con, [mk_row("a", FRIEND, 2, "二（已编辑）", shard="message_0.db")])
         assert con.execute("SELECT count(*) FROM messages").fetchone()[0] == 2
         assert con.execute("SELECT content FROM messages WHERE local_id=2").fetchone()[0] == "二（已编辑）"
-        wm = {(s, m): v for s, m, v in con.execute(
-            "SELECT shard, chat_md5, max_local_id FROM watermark")}
+        wm = store.load_export_watermarks(con, "a")
         assert wm[("message_0.db", md5(FRIEND))] == 2
         store.upsert_batch(con, [mk_row("a", FRIEND, 1, "一", shard="message_0.db")])  # 旧行不回退水位线
-        wm = {(s, m): v for s, m, v in con.execute(
-            "SELECT shard, chat_md5, max_local_id FROM watermark")}
+        wm = store.load_export_watermarks(con, "a")
         assert wm[("message_0.db", md5(FRIEND))] == 2
 
 
@@ -187,6 +185,43 @@ def test_store_connect_rows_are_rows_and_positional_access_still_works(tmp_path,
         assert r[0] == "a" and r[1] == "一"
         assert store.counts(con)["messages"] == 1                 # 既有 r[0] 消费者
         assert store.get_watermark(con, "a", "message_0.db", md5(FRIEND)) == 1
+
+
+def test_load_export_watermarks_shape_multi_shard_multi_chat(tmp_path, monkeypatch):
+    """批量读取导出水位线：键为 (shard, chat_md5)，值为 max_local_id，且账号隔离。"""
+    monkeypatch.setattr(paths, "HOME_DIR", tmp_path)
+    with store.connect(tmp_path / "i.db") as con:
+        store.upsert_batch(con, [
+            mk_row("a", FRIEND, 1, "一", shard="message_0.db"),
+            mk_row("a", FRIEND, 2, "二", shard="message_0.db"),
+            mk_row("a", FRIEND, 1, "另分片", shard="message_1.db"),
+            mk_row("a", GROUP, 3, "群", shard="message_0.db"),
+            mk_row("b", FRIEND, 9, "别的账号", shard="message_0.db"),
+        ])
+        assert store.load_export_watermarks(con, "a") == {
+            ("message_0.db", md5(FRIEND)): 2,
+            ("message_1.db", md5(FRIEND)): 1,
+            ("message_0.db", md5(GROUP)): 3,
+        }
+        assert store.load_export_watermarks(con, "b") == {("message_0.db", md5(FRIEND)): 9}
+
+
+def test_load_export_watermarks_empty_account(tmp_path, monkeypatch):
+    """没导出过的账号读出来是空 dict（不是 None/异常）。"""
+    monkeypatch.setattr(paths, "HOME_DIR", tmp_path)
+    with store.connect(tmp_path / "i.db") as con:
+        assert store.load_export_watermarks(con, "never_seen") == {}
+
+
+def test_clear_export_watermarks_only_clears_named_account(tmp_path, monkeypatch):
+    """B2 语义护栏：重置水位线只清指定账号，别的账号必须原样保留。"""
+    monkeypatch.setattr(paths, "HOME_DIR", tmp_path)
+    with store.connect(tmp_path / "i.db") as con:
+        store.upsert_batch(con, [mk_row("a", FRIEND, 1, "一", shard="message_0.db"),
+                                 mk_row("b", FRIEND, 2, "二", shard="message_0.db")])
+        store.clear_export_watermarks(con, "a")
+        assert store.load_export_watermarks(con, "a") == {}
+        assert store.load_export_watermarks(con, "b") == {("message_0.db", md5(FRIEND)): 2}
 
 
 # ---------- reader ----------
@@ -260,8 +295,7 @@ def test_export_full_idempotent(env):
     with store.connect() as con:
         c = store.counts(con)
         assert c["messages"] == 8 and c["chats"] == 2
-        wm = {(s, m): v for s, m, v in con.execute(
-            "SELECT shard, chat_md5, max_local_id FROM watermark WHERE account=?", (ACCT,))}
+        wm = store.load_export_watermarks(con, ACCT)
     assert wm[("message_0.db", md5(FRIEND))] == 5
     assert wm[("message_1.db", md5(FRIEND))] == 2
     assert wm[("message_0.db", md5("888@chatroom"))] == 1
@@ -287,9 +321,10 @@ def test_full_export_leaves_other_accounts_watermark_alone(env):
     export.run_export(ACCT, full=True)
 
     with store.connect() as con:
-        wm = dict(con.execute("SELECT account, max_local_id FROM watermark").fetchall())
-    assert wm.get(foreign) == 7, "别的账号的水位线被全量导出清掉了"
-    assert ACCT in wm, "本账号的水位线应被重置后重新推进"
+        foreign_wm = store.load_export_watermarks(con, foreign)
+        own_wm = store.load_export_watermarks(con, ACCT)
+    assert foreign_wm.get(("message_0.db", "deadbeef")) == 7, "别的账号的水位线被全量导出清掉了"
+    assert own_wm, "本账号的水位线应被重置后重新推进"
 
 
 def test_search_modes_and_isolation(env):

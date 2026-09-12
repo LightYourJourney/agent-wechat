@@ -13,13 +13,11 @@ def run_export(acct: str, chat_id: str | None = None, full: bool = False,
         if full and not chat_id:
             # 只重置本账号：run_export 只重导 acct，连带清掉别的账号的水位线会让
             # 它们白跑一次全量（upsert 幂等，不丢数据，但纯属浪费）
-            con.execute("DELETE FROM watermark WHERE account = ?", (acct,))
+            store.clear_export_watermarks(con, acct)
             con.commit()
         resume = {} if full else None
         if resume is None:
-            # 键含 shard：local_id 是分片内序号，跨分片取 max 会漏导非最新分片的新消息
-            resume = {(shard, md5): mx for shard, md5, mx in con.execute(
-                "SELECT shard, chat_md5, max_local_id FROM watermark WHERE account=?", (acct,))}
+            resume = store.load_export_watermarks(con, acct)
         for batch in r.iter_all(chat_id=chat_id, resume=resume):
             store.upsert_batch(con, batch)
             total += len(batch)

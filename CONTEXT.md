@@ -25,12 +25,18 @@
 缺一不可。出处：`messages.row_key`、[docs/DATA_MODEL.md](docs/DATA_MODEL.md) §4。
 
 ## 水位线（watermark）
-「已处理到哪里」的游标。**本仓库有两个互不相干的：**
-- 导出侧：`watermark` 表，键 `(account, shard, chat_md5)` → `max_local_id`，
-  增量导出按 `local_id > 水位线` 续扫。出处：`store.py` / `export.py`。
-- 向量侧：`vector_watermark` 表，键 `(model_id, account)` → 已嵌入的
-  `max(messages.id)`，增量嵌入按 `id > 水位线` 续跑。出处：`vector.py` /
+「已处理到哪里」的游标。**本仓库有两个互不相干的东西，符号/表名都带限定词区分：**
+- 导出水位线（export）：磁盘表 `watermark`，键 `(account, shard, chat_md5)` →
+  `max_local_id`，增量导出按 `local_id > 水位线` 续扫。读写入口是
+  `store.load_export_watermarks` / `store.clear_export_watermarks`（`export.py`
+  不再手写裸 SQL）。出处：`store.py` / `export.py`。
+- 向量水位线（vector）：磁盘表 `vector_watermark`，键 `(model_id, account)` →
+  已嵌入的 `max(messages.id)`，增量嵌入按 `id > 水位线` 续跑。读写入口是
+  `vector.py` 的 `_vector_watermark` / `_set_vector_watermark`。出处：`vector.py` /
   `store.VECTOR_SCHEMA`。
+
+两张磁盘表的名字是冻结面（`~/.agent-wechat/index.db` 的真实数据），不随符号改名。
+`store.get_watermark` 是导出侧的单键读取器（零生产调用，保留）。
 
 ## 快照三元组
 `db` + `-wal` + `-shm` 三个文件一组的一致快照——WAL 模式下少了 `-wal` 会漏最新消息，

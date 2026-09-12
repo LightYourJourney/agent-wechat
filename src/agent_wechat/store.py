@@ -1,10 +1,11 @@
-"""本地检索库：流式落库、幂等去重、水位线、FTS5。
+"""本地检索库：流式落库、幂等去重、导出水位线、FTS5。
 
 设计约束（全量导出面向超大规模数据）：
 - 写入恒定内存：调用方按批喂 upsert_batch，绝不 fetchall
 - 幂等：主键 (account, chat_md5, shard, local_id) + ON CONFLICT DO UPDATE——
   重复导出不产生重复行，且能吸收撤回/编辑引起的内容变化
-- 增量：watermark 按 (account, shard, chat_md5) 记录已导到的 max(local_id)
+- 增量：导出水位线 watermark 表按 (account, shard, chat_md5) 记录已导到的 max(local_id)
+  读写入口是本模块的 load_export_watermarks / clear_export_watermarks（导出侧不写裸 SQL）
 """
 from __future__ import annotations
 
@@ -176,6 +177,20 @@ def get_watermark(con: sqlite3.Connection, account: str, shard: str, chat_md5: s
     row = con.execute("SELECT max_local_id FROM watermark WHERE account=? AND shard=? AND chat_md5=?",
                       (account, shard, chat_md5)).fetchone()
     return row[0] if row else 0
+
+
+def load_export_watermarks(con: sqlite3.Connection, account: str) -> dict[tuple[str, str], int]:
+    """导出水位线的批量读取：{(shard, chat_md5): max_local_id}，只含指定账号。
+
+    键必须含 shard：local_id 是分片内序号，跨分片取 max 会漏导非最新分片的新消息。
+    """
+    return {(shard, md5): mx for shard, md5, mx in con.execute(
+        "SELECT shard, chat_md5, max_local_id FROM watermark WHERE account=?", (account,))}
+
+
+def clear_export_watermarks(con: sqlite3.Connection, account: str) -> None:
+    """重置指定账号的导出水位线（全量导出用）。只删该 account，别的账号不受影响。"""
+    con.execute("DELETE FROM watermark WHERE account = ?", (account,))
 
 
 def counts(con: sqlite3.Connection) -> dict:
