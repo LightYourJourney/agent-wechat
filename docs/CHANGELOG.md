@@ -131,9 +131,16 @@
 - CLI `recent` / `search` / `export` / `semantic` 的消歧输出统一：候选（含 `kind`）到
   stdout、一行说明到 stderr、退出码 1
 
+### purge 命令
+
+- 新增 `agent-wechat purge`，按范围销毁本地产物：`--keys` / `--index` / `--tmp` / `--all`
+- 默认 dry-run，`--yes` 才执行；删完给出残留核查（计划内是否清空、`$TMPDIR` 遗留、
+  Time Machine 排除状态、本地快照）
+- 有进程持有 `index.db` 或待删路径是符号链接时拒绝执行
+- 只做 CLI，MCP 工具面不变（仍 8 个工具）
+
 ### 其他规划
 
 - 蒸馏导出格式（按对话窗口切片的 JSONL）
 - 群成员昵称解析（chatroom_member）
-- `purge` 一键销毁命令
 - 定时增量同步

@@ -47,6 +47,7 @@
 │  store     本地检索库（SQLite + FTS5 trigram）                │
 │  search    检索路由（trigram / LIKE 兜底）                    │
 │  vector    向量索引与语义检索（本地 fastembed + sqlite-vec）  │
+│  purge     本地数据销毁（清单→计划→执行→核查，CLI 专属）      │
 ├──────────────────────────────────────────────────────────────┤
 │ 数据层                                                        │
 │  微信容器（只读） │ ~/.agent-wechat/（0700：密钥缓存+索引库） │
@@ -118,6 +119,7 @@ agent-wechat/
 │   ├── vector.py          向量索引与语义检索
 │   ├── tasks.py           长任务注册表
 │   ├── usecases.py        用例层（两个入口共享的入口策略）
+│   ├── purge.py           数据销毁（CLI 专属）
 │   ├── mcp_server.py      MCP 工具层
 │   └── cli.py             命令行入口
 ├── tests/                 集成测试（合成加密库，不依赖真机）

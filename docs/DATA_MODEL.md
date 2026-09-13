@@ -136,4 +136,4 @@ for chat, in con.execute("SELECT DISTINCT chat_id FROM messages"):
 ## 7. 备份与销毁
 
 - 备份：拷贝 `index.db`（+`-wal`/`-shm`）即可；`~/.agent-wechat/` 已排除出 Time Machine
-- 销毁：`rm -rf ~/.agent-wechat`（密钥缓存与全部索引一并清除；微信源数据不受影响）
+- 销毁：`agent-wechat purge --all --yes`（密钥缓存与全部索引一并清除；微信源数据不受影响）。默认 dry-run，手工 `rm -rf ~/.agent-wechat` 仍是等价后备

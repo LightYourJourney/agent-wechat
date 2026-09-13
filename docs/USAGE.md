@@ -177,6 +177,18 @@ agent-wechat decrypt message/message_0.db --out m0.db   # 导出明文库（调�
 # ⚠️ --out 产物是持久明文库（~/.agent-wechat/m0.db），用后手动删除
 ```
 
+### purge（销毁本地产物）
+
+```bash
+agent-wechat purge --index            # 预览：将删除哪些路径、体积、重建代价
+agent-wechat purge --index --yes      # 执行
+agent-wechat purge --keys --tmp --yes # 三个具名范围可任意组合
+agent-wechat purge --all --yes        # 整个 ~/.agent-wechat（含 models/、散落文件）
+```
+
+**默认 dry-run**，不加 `--yes` 一个字节都不删。`--all` 与具名范围互斥。
+有进程正在使用 `index.db` 时拒绝执行（否则 unlink 会「成功但空间不释放」）。
+
 ## 7. 账号切换
 
 - 读取/导出/`semantic` **默认操作当前登录账号**；`--account <wxid_xxx_hex4>` 可显式指定

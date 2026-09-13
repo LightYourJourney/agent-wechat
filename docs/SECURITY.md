@@ -54,7 +54,7 @@
 | 备份排除 | 首次使用时代码自动执行 `tmutil addexclusion ~/.agent-wechat`（可用 `tmutil isexcluded` 验证）；失败时请手动执行，防止明文档案绕过 FileVault 进入备份盘 |
 | 临时文件 | 解密明文仅在 `tmp/`（0700）短暂存在，单分片、用后即焚；唯一例外是 `decrypt --out` 显式导出的明文库（见上表） |
 | 传输 | MCP 走 stdio；无网络监听、无云同步路径 |
-| 销毁 | `rm -rf ~/.agent-wechat` 一键清除全部敏感数据（密钥 + 索引） |
+| 销毁 | `agent-wechat purge --all` 一键清除全部敏感数据（密钥 + 索引）；默认 dry-run，加 `--yes` 才执行，删完给出残留核查。手工 `rm -rf ~/.agent-wechat` 仍是等价后备 |
 
 **用户侧建议**：
 
