@@ -42,11 +42,11 @@ def _holders(path: pathlib.Path) -> list[int]:
     于是永远看不到正在跑的长任务——恰好放行它本该拦住的场景。持有句柄检测跨进程，
     且直接对应真正要防的那件事：unlink 一个仍被打开的文件会「成功但空间不释放」。
 
-    已知限制（本轮明确不修，见 spec §9 的 YAGNI）：`lsof <目录>` 列出的是**持有该目录本身**
-    的进程，不是「开着目录里某个文件」的进程——实测同一个进程，`lsof -n -P d/open.db` 找得到，
-    `lsof -n -P d` 却返回 exit 1、无输出。于是 `purge --tmp` 探测不到正在 decrypt 的任务
-    （它持有 `tmp/awdec-*/plain.db`），照样会删掉那个目录。要覆盖得换 `lsof +D`：它逐个文件
-    递归，在 --all 那种整树规模上代价不可接受。
+    已知限制（本轮明确不修）：`lsof <目录>` 列出的是**持有该目录本身**的进程，不是「开着
+    目录里某个文件」的进程——实测同一个进程，`lsof -n -P d/open.db` 找得到，`lsof -n -P d`
+    却返回 exit 1、无输出。于是 `purge --tmp` 探测不到正在 decrypt 的任务（它持有
+    `tmp/awdec-*/plain.db`），照样会删掉那个目录。要覆盖得换 `lsof +D`：它逐个文件递归，
+    在 --all 那种整树规模上代价不可接受。
     """
     if not path.exists():
         return []
@@ -113,8 +113,13 @@ class PurgePlan:
 def _item(a: Artifact) -> PlanItem:
     try:
         st = a.path.lstat()            # lstat 而非 stat：符号链接本身也要能看出来
-    except OSError:
-        return PlanItem(a, False, 0, False)
+    except (FileNotFoundError, NotADirectoryError):
+        return PlanItem(a, False, 0, False)      # 真的不存在
+    except OSError as exc:
+        # 权限之类的失败不等于「不存在」——把它当不存在会让 dry-run 对着活文件印「（不存在）」，
+        # 而这个命令的全部价值就在于让用户在动手前看清将发生什么。
+        raise errors.PurgeRefused(f"无法读取待删路径：{a.path}",
+                                  hint=f"{exc}；请先修正权限再重试") from exc
     return PlanItem(a, True, st.st_size, a.path.is_symlink())
 
 
@@ -125,6 +130,11 @@ def _check_home_is_sane(home: pathlib.Path) -> None:
     `os.environ.get(...)` 返回 `""` 而不是默认值，`Path("")` 就是 `.`——于是
     `purge --all --yes` 会递归删掉**当前工作目录**（实测确认，且输出最后一行还打着 ✅）。
     该变量是文档化的一等开关（含 MCP 的 env），所以「shell 里没设上」是现实输入。
+
+    已知边界：后两条判据里的「用户主目录」取自**本进程**的 `pathlib.Path.home()`（即 `$HOME`），
+    所以换过 `HOME` 的 shell 里这套判据是**跟着变的**——例如 `sudo`（本项目为 bootstrap 文档化
+    了 sudo）下 `HOME=/var/root`，此时 `/Users/<你>` 能过闸。要关上它得先定义「提权场景下用户
+    主目录算谁的」（真实家目录、`$SUDO_USER` 的家目录、还是两者都比对），那是产品决定，不在本轮。
     """
     resolved = home.resolve()
     if not home.is_absolute():
@@ -215,8 +225,9 @@ def _escapes_home(link: pathlib.Path, home: pathlib.Path) -> bool:
 
     判据跟着删除原语走，不是「见到链接就拒」：
       · **文件型**具名范围走 unlink → 只删链接，**目标必留存** → 无条件拒绝（见 execute 的 links）；
-      · **目录型**具名范围（`tmp/`）与 `--all` 走 rmtree → 目标也在树内时会一并删除，不存在
-        false-clean，故这两条走本函数判定。
+      · **目录型**具名范围（`tmp/`）的 item 路径与子树、以及 `--all` 的**整树扫描**走 rmtree →
+        目标也在树内时会一并删除，不存在 false-clean，故这几条走本函数判定。
+        （`--all` 的 **item 路径**不在此列：文件型的 item 在 execute 里被无条件拒绝，够不到本函数。）
     只有目标逃出树外时才真的对应 spec §5.1 第 2 步那句「其实还在外置盘上」。
 
     为什么不能一律拒绝：vector.py 用 huggingface_hub 下载模型，其 blob/snapshot 布局会在
@@ -336,7 +347,7 @@ def execute(plan: PurgePlan) -> PurgeReport:
     if links:
         raise errors.PurgeRefused(
             "待删路径是符号链接，拒绝删除：" + "、".join(str(p) for p in links),
-            hint="unlink 只删链接不删目标，会造成「已清干净」的假象；请手工处理")
+            hint="删链接不会删目标，会造成「已清干净」的假象；请手工处理")
 
     held = {i.artifact.path: pids
             for i in plan.items if i.exists and (pids := _holders(i.artifact.path))}

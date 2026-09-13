@@ -321,8 +321,13 @@ def test_purge_all_refuses_on_empty_home_env(tmp_path, monkeypatch, capsys):
     实测确认过：目录连内容全没，而最后一行还打着 ✅。这是一道数据丢失闸门。
 
     注意这条**不走 `_isolate`**：`_isolate` 会把 HOME_DIR patch 成绝对路径，正好把这个缺陷
-    掩掉。也因此它必须由 plan() 的第一道闸门拦下——任何一次 execute 都已经太晚了。"""
+    掩掉。也因此它必须由 plan() 的第一道闸门拦下——任何一次 execute 都已经太晚了。
+
+    `chdir(tmp_path)` 是**爆炸半径控制**，不是隔离洁癖：闸门一旦回归，这条测试做的第一件事就是
+    rmtree 当前工作目录，而 pytest 的 CWD 就是仓库本身。绑到 tmp_path 后，回归只毁一个临时目录，
+    测试仍然照常红（断言「相对路径」在 stderr 里）。"""
     from agent_wechat import paths as _paths
+    monkeypatch.chdir(tmp_path)          # CWD 就是缺陷要删的东西，先挪到临时目录
     monkeypatch.setenv("AGENT_WECHAT_HOME", "")
     monkeypatch.setattr(_paths, "HOME_DIR", pathlib.Path(""))
     with pytest.raises(SystemExit) as ei:
@@ -364,6 +369,27 @@ def test_purge_index_refuses_when_artifact_parent_unreadable(tmp_path, monkeypat
     assert "Traceback" not in err
     assert len(err.strip().splitlines()) == 1, f"应当是单行中文，实际：{err!r}"
     assert (sub / "index.db").exists()
+
+
+def test_purge_dry_run_refuses_when_artifact_parent_unreadable(tmp_path, monkeypatch, capsys):
+    """dry-run 也必须退 1，而不是对着**活文件**印「（不存在）」——这个命令的全部价值就在于让
+    用户在动手前看清将发生什么。根因是 _item() 把 lstat 的 OSError 一律当成「不存在」，
+    这条走的是 plan 阶段（没有 --yes）。"""
+    from agent_wechat import store as _store
+    home = _isolate(tmp_path, monkeypatch)
+    sub = home / "sub"; sub.mkdir()
+    (sub / "index.db").write_bytes(b"x" * 10)
+    monkeypatch.setattr(_store, "DB_PATH", sub / "index.db")
+    os.chmod(sub, 0o000)
+    try:
+        with pytest.raises(SystemExit) as ei:
+            cli.main(["purge", "--index"])              # dry-run：没有 --yes
+    finally:
+        os.chmod(sub, 0o700)
+    assert ei.value.code == 1
+    out, err = capsys.readouterr()
+    assert "无法读取待删路径" in err and "Traceback" not in err
+    assert "将删除" not in out, f"拒绝时不得印出计划表：{out!r}"
 
 
 def test_purge_all_yes_reports_home_removed(tmp_path, monkeypatch, capsys):

@@ -438,6 +438,22 @@ def test_plan_refuses_when_home_unreadable(tmp_path):
     assert "不可读" in str(ei.value)
 
 
+def test_plan_refuses_when_home_parent_unsearchable(tmp_path, monkeypatch):
+    """闸门里那个 `except OSError: unreadable = True` 分支（为堵裸 OSError 而加）此前无测试。
+    HOME_DIR 的**父目录**不可搜索时，`home.exists()` 抛 EACCES 而不是返回 False（3.12 的
+    _IGNORED_ERRNOS 不含 EACCES，实测确认）——「在不在」都判不出来，与「不可读」同归一类。"""
+    parent = tmp_path / "sealed"; parent.mkdir()
+    home = parent / "home"; home.mkdir()
+    monkeypatch.setattr(paths, "HOME_DIR", home)
+    os.chmod(parent, 0o000)
+    try:
+        with pytest.raises(errors.PurgeRefused) as ei:
+            purge.plan(frozenset({"index"}))
+    finally:
+        os.chmod(parent, 0o700)          # 不还原的话 pytest 自己清不掉这棵树
+    assert "不可读" in str(ei.value)
+
+
 def test_execute_refuses_when_artifact_parent_becomes_unreadable(tmp_path, monkeypatch):
     """产物父目录不可搜索时（lstat 需要父目录的 +x），符号链接检查此前抛**裸 OSError**：
     违反「core 层一律抛 AgentWeChatError 子类」，在 CLI 那边就是一个 traceback。
