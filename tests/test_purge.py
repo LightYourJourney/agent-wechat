@@ -268,6 +268,26 @@ def test_execute_all_allows_intra_tree_symlink(tmp_path, monkeypatch):
     assert not home.exists()                    # 整棵树连同 blob 一起没了
 
 
+def test_execute_all_tolerates_symlinked_home_ancestor(tmp_path, monkeypatch):
+    """home 的**祖先**是符号链接时（macOS 上 /tmp → /private/tmp，$TMPDIR 与 mktemp -d
+    给出的路径同理），link.resolve() 给的是真路径而 paths.HOME_DIR 未解析——两边形态不同
+    会让树内链接被误判为逃逸、整片拒绝。home 自身不是链接，故 is_symlink() 那道闸门不触发，
+    只有 home 也解析过才判得对。"""
+    real_parent = tmp_path / "real"; real_parent.mkdir()
+    link_parent = tmp_path / "link"; link_parent.symlink_to(real_parent)
+    home = link_parent / "home"                 # home 自身不是链接，祖先是
+    base = home / "models"
+    blob = base / "blobs" / "abc"
+    blob.parent.mkdir(parents=True)
+    blob.write_bytes(b"weights")
+    (base / "snapshots").mkdir()
+    (base / "snapshots" / "m.onnx").symlink_to(blob)
+    monkeypatch.setattr(paths, "HOME_DIR", home)
+    r = purge.execute(purge.plan(frozenset(), all_=True))
+    assert r.failed == ()
+    assert not (real_parent / "home").exists()  # 整棵树被删掉
+
+
 def test_execute_all_refuses_nested_symlink(tmp_path, monkeypatch):
     """符号链接不只在 HOME_DIR 顶层：树内任意深度都会被 rmtree 当普通条目 unlink，
     目标明文留存。spec §5.1 第 2 步要求对**每个待删路径**做 lstat，故必须走整棵树。"""

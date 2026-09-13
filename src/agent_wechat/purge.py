@@ -154,12 +154,25 @@ def _escapes_home(link: pathlib.Path, home: pathlib.Path) -> bool:
     全部树内、树外 0 个）。一律拒绝会让 `purge --all` 在标准安装上永远跑不起来，
     而它什么都没保护到——spec §9 又否掉了 --force，用户只能回去手敲 rm -rf。
     """
+    home = home.resolve(strict=False)   # 两边都要解析过才能比。macOS 上 /tmp → /private/tmp、
+                                        # $TMPDIR 与 mktemp -d 给出的路径常带符号链接祖先；
+                                        # 只解析 link 不解析 home，会把树内目标一律判成「树外」
+                                        # 而整片拒绝——即整树扫描那条回归的残留形态。
     try:
         target = link.resolve(strict=False)
+    except (OSError, RuntimeError):
+        # 解析不出来就**判为逃逸并拒绝**：判不出来就无法保证目标会随树一起消失，对这种命令
+        # 宁可拒绝。RuntimeError 是 3.12 对符号链接环抛的（3.13 才改成 OSError）；环本身不会
+        # 留下东西，但它是病态配置，拒绝比放行更容易解释。不接住的话它会以裸异常穿透
+        # execute()，违反「core 层只抛 AgentWeChatError 子类」。
+        return True
+    try:
+        if not target.exists():
+            return False      # 断链：目标本就不存在，删掉链接不留任何东西
     except OSError:
-        return False
-    if not target.exists():
-        return False          # 断链：目标本就不存在，删掉链接不留任何东西
+        # EACCES 等（pathlib 的 _IGNORED_ERRNOS 不含 EACCES）：目标可能真存在只是读不到。
+        # 同上，判为逃逸。
+        return True
     try:
         target.relative_to(home)
     except ValueError:
