@@ -250,6 +250,21 @@ def test_execute_all_refuses_symlink_inside_home(tmp_path, monkeypatch):
     assert (real / "secret.db").exists()                # 目标明文完好
 
 
+def test_execute_all_refuses_nested_symlink(tmp_path, monkeypatch):
+    """符号链接不只在 HOME_DIR 顶层：树内任意深度都会被 rmtree 当普通条目 unlink，
+    目标明文留存。spec §5.1 第 2 步要求对**每个待删路径**做 lstat，故必须走整棵树。"""
+    real = tmp_path / "elsewhere"; real.mkdir()
+    (real / "secret.db").write_bytes(b"plaintext" * 100)
+    home = tmp_path / "home"; (home / "models").mkdir(parents=True)
+    (home / "models" / "link.db").symlink_to(real / "secret.db")
+    monkeypatch.setattr(paths, "HOME_DIR", home)
+    with pytest.raises(errors.PurgeRefused) as ei:
+        purge.execute(purge.plan(frozenset(), all_=True))
+    assert "符号链接" in str(ei.value)
+    assert home.exists()                                # 一个字节都没删
+    assert (real / "secret.db").exists()                # 目标明文完好
+
+
 def test_execute_all_refuses_symlinked_home(tmp_path, monkeypatch):
     """HOME_DIR 本身是符号链接时 --all 必须拒绝（spec §5.1 第 2 步）。
     实测 3.12.13：rmtree(link) 不传 handler 抛 OSError；传了 onexc 则一条

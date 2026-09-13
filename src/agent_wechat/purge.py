@@ -141,6 +141,19 @@ def _remove(item: PlanItem) -> bool:
     return True
 
 
+def _tree_entries(root: pathlib.Path) -> list[pathlib.Path]:
+    """整树的每个条目。指向目录的符号链接也要收——os.walk 把它们放进 dirnames
+    且不跟随（followlinks 默认 False），只遍历 filenames 会漏掉它们。
+
+    与 _tree_size 同样吞掉遍历中的 OSError：算不准的项跳过，不因一个不可读的子目录中断。
+    """
+    out: list[pathlib.Path] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        for name in (*dirnames, *filenames):
+            out.append(pathlib.Path(dirpath) / name)
+    return out
+
+
 def _tree_size(root: pathlib.Path) -> int:
     """整树的字节数（只读元数据）。供 --all 用：那条路径绕过 items 循环，没有现成体积可加。
 
@@ -180,9 +193,12 @@ def execute(plan: PurgePlan) -> PurgeReport:
     # 其实还在外置盘上——正是 spec §5.1 第 2 步要防的 false-clean。
     links = [i.artifact.path for i in plan.items if i.artifact.path.is_symlink()]
     if plan.all_:
-        # loose 同样是「待删路径」：--all 的整树 rmtree 只会 unlink 树内的符号链接本身，
-        # 目标明文留存（上面第三种情形）。漏掉这一句就是漏掉 --all 上的 false-clean。
-        links += [p for p in plan.loose if p.is_symlink()]
+        # spec §5.1 第 2 步要求对**每个待删路径**做 lstat。--all 的待删路径是**整棵树**
+        # ——plan.loose 只有顶层，那是 §3 对「计划表逐条展示」的要求，与删除范围是两回事。
+        # 树内任意深度的符号链接都会被 rmtree 当作普通条目 unlink、目标明文留存，而删除后
+        # 核查会报「计划内路径已清空」——正是该步点名的「以为明文没了，其实还在外置盘上」。
+        # 所以这里走一遍整棵树，而不是只看 plan.loose。
+        links += [p for p in _tree_entries(paths.HOME_DIR) if p.is_symlink()]
         if paths.HOME_DIR.is_symlink():
             links.append(paths.HOME_DIR)
     if links:
