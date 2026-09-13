@@ -234,6 +234,22 @@ def test_holders_parses_lsof_output(tmp_path, monkeypatch):
     assert seen["argv"][:3] == ["lsof", "-n", "-P"]
 
 
+def test_execute_all_refuses_symlink_inside_home(tmp_path, monkeypatch):
+    """--all 的整树 rmtree 会把树内的符号链接当作普通条目 unlink，**目标明文原封不动
+    留在盘上**；核查却报「计划内路径已清空」——用户的 5 GB 明文还在外置盘上。
+    实测于 Python 3.12.13：rmtree(含 symlink 的目录, onexc=...) 删掉树、保住目标。"""
+    real = tmp_path / "elsewhere"; real.mkdir()
+    (real / "secret.db").write_bytes(b"plaintext" * 100)
+    home = tmp_path / "home"; home.mkdir(parents=True)
+    (home / "leaked.db").symlink_to(real / "secret.db")     # HOME_DIR 顶层的符号链接
+    monkeypatch.setattr(paths, "HOME_DIR", home)
+    with pytest.raises(errors.PurgeRefused) as ei:
+        purge.execute(purge.plan(frozenset(), all_=True))
+    assert "符号链接" in str(ei.value)
+    assert home.exists()                                # 一个字节都没删
+    assert (real / "secret.db").exists()                # 目标明文完好
+
+
 def test_execute_all_refuses_symlinked_home(tmp_path, monkeypatch):
     """HOME_DIR 本身是符号链接时 --all 必须拒绝（spec §5.1 第 2 步）。
     rmtree 对 symlink 直接抛 OSError 且不走 onexc，会穿透 CLI 漏斗变成 traceback。"""

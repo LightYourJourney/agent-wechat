@@ -164,15 +164,27 @@ def execute(plan: PurgePlan) -> PurgeReport:
     if held:
         detail = "；".join(f"{p.name} 被 pid {','.join(map(str, v))} 持有"
                           for p, v in held.items())
-        raise errors.PurgeRefused(f"有进程正在使用检索库，拒绝删除：{detail}",
+        # 措辞覆盖全部具名范围：held 可能是 passphrase.json 或解密 tmp，不只是 index
+        raise errors.PurgeRefused(f"有进程正在使用待删产物，拒绝删除：{detail}",
                                   hint="等该进程结束（如向量构建任务）后重试")
 
-    links = [i.artifact.path for i in plan.items if i.is_symlink]
-    if plan.all_ and paths.HOME_DIR.is_symlink():
-        # spec §5.1 第 2 步：HOME_DIR 本身是符号链接时 --all 同样拒绝。
-        # 不只是少一层保护：shutil.rmtree 对 symlink 会**直接抛 OSError**（不走 onexc），
-        # 穿透 CLI 漏斗变成 traceback，违反「core 只抛 AgentWeChatError 子类」。
-        links.append(paths.HOME_DIR)
+    # 符号链接检查在 **execute 时刻**重算，不用 plan 时刻的 i.is_symlink：CLI 是
+    # 「先 plan（dry-run）→ 用户确认 → 再 execute」，这个窗口内路径被换成链接就漏掉了。
+    #
+    # 为什么必须拒绝（实测于 Python 3.12.13 / macOS，三种情形）：
+    #   rmtree(link, onexc=h)  → **不抛**，handler 收到 OSError('Cannot call rmtree on a
+    #                            symbolic link')，链接与目标都完好；
+    #   rmtree(link) 不传 handler → 抛 OSError；
+    #   rmtree(整树) 树内含 symlink → **树被删掉，而链接的目标明文原封不动留在盘上**。
+    # 第三种才是真正的危险：删除后核查会报「计划内路径已清空」，用户以为明文没了，
+    # 其实还在外置盘上——正是 spec §5.1 第 2 步要防的 false-clean。
+    links = [i.artifact.path for i in plan.items if i.artifact.path.is_symlink()]
+    if plan.all_:
+        # loose 同样是「待删路径」：--all 的整树 rmtree 只会 unlink 树内的符号链接本身，
+        # 目标明文留存（上面第三种情形）。漏掉这一句就是漏掉 --all 上的 false-clean。
+        links += [p for p in plan.loose if p.is_symlink()]
+        if paths.HOME_DIR.is_symlink():
+            links.append(paths.HOME_DIR)
     if links:
         raise errors.PurgeRefused(
             "待删路径是符号链接，拒绝删除：" + "、".join(str(p) for p in links),
