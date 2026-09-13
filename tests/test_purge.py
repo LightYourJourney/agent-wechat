@@ -365,16 +365,29 @@ def test_verify_reports_surviving_loose_entry(tmp_path, monkeypatch):
     assert rep.kept == ()          # 两者都在计划内，不得落进「按范围保留」桶
 
 
+def test_verify_reports_dangling_symlink_as_present(tmp_path):
+    """断链的链接文件仍在盘上。exists() 跟随符号链接会判它「已删除」，而链接明明还在——
+    在这门专门用来抓假象的字段里制造假象，故用 lexists。"""
+    home = tmp_path / "home"; home.mkdir(parents=True)
+    (home / "passphrase.json").symlink_to(home / "gone.json")   # 目标不存在
+    rep = purge.verify(purge.plan(frozenset({"keys"})))
+    assert [p.name for p in rep.not_removed] == ["passphrase.json"]
+
+
 def test_verify_reports_still_held_index(tmp_path, monkeypatch):
     """held 是 spec §5.2 的第三项，但 fixture 的 _run 桩让 _holders 恒返回 []，
-    于是它在全部 verify 测试里都是空字典——把 i.exists 的判据反写、或把 p.name 键错，
-    26 个测试会全绿。故此处直接覆盖 _holders。"""
+    于是它在全部 verify 测试里都是空字典——把 i.exists 的判据反写、或把键名写错，
+    测试会全绿。故此处直接覆盖 _holders。"""
     home = tmp_path / "home"; home.mkdir(parents=True)
     (home / "index.db").write_bytes(b"x" * 100)
+    (home / "index.db-wal").write_bytes(b"w" * 10)      # 存在，但无人持有
     monkeypatch.setattr(purge, "_holders",
                         lambda p: [4242] if p.name == "index.db" else [])
     rep = purge.verify(purge.plan(frozenset({"index"})))
     assert rep.held.get("index.db") == [4242]
+    # 钉住 pids 的真值过滤：去掉 `and (pids := ...)` 的话本测试原本仍会通过，
+    # 但渲染时会多出一行「⚠️ index.db-wal 仍被 pid  持有」（pid 为空）——一条对用户说的假话。
+    assert "index.db-wal" not in rep.held
 
 
 def test_verify_finds_tmp_lldb_leftovers(tmp_path, monkeypatch):
