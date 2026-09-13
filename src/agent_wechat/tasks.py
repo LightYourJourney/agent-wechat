@@ -25,7 +25,6 @@ from . import errors, paths
 # 孤儿任务的失败文案：上次进程退出时还在 running，说明它已经死了。不得新增
 # `interrupted` 状态值——TOOLS.md §5 已把枚举发布为 running/done/failed 三值。
 ORPHAN_ERROR = "进程中断，任务未完成"
-_MAX_ERROR = 500
 
 TASKS_FILE = paths.HOME_DIR / "tasks.json"
 _tasks: dict[str, dict] = {}
@@ -81,14 +80,17 @@ def start(kind: str, runner: Callable[[str], int | None], **fields) -> str:
 
 
 def _error_text(exc: BaseException) -> str:
-    """失败文案：项目异常带上 hint（与 CLI 同一条修复路径），脱敏后截断。
+    """失败文案：项目异常带上 hint（与 CLI 同一条修复路径），脱敏。
 
     `str(exc)` 拿不到 `AgentWeChatError.hint`——同一个模型不一致错误，CLI 用户经
     `errors.to_text` 看得到修复路径，MCP 用户看不到，就是这里丢的。非项目异常也过
     `errors.redact`：这条 error 是作为**成功结果**返回给 agent 的，不经过 `_guard`。
+
+    长度上限由 `errors.redact` 自己的 300 字负责（此处曾有一道 `[:_MAX_ERROR]`
+    切片，但它在 redact 之后执行、恒定不生效，已删除）。
     """
     text = errors.to_text(exc) if isinstance(exc, errors.AgentWeChatError) else str(exc)
-    return errors.redact(text)[:_MAX_ERROR]
+    return errors.redact(text)
 
 
 def _run(task_id: str, runner: Callable[[str], int | None]) -> None:

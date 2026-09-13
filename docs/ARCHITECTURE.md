@@ -104,7 +104,7 @@ search.search(query)
 ### 3.6 语义检索（本地嵌入，手动触发）
 
 ```
-vector.build_index(account, rebuild)        # 长任务，读的是已导出的本地 messages 表
+vector.build_index(accounts, rebuild)       # 长任务，读的是已导出的本地 messages 表
   → 按账号水位线（vector_watermark.last_rowid）续扫 messages
   → 逐条构造嵌入文本：`[日期 发送者] 上文: <上一条入索引消息的前 30 字>… | 正文`（确定性前缀）
   → fastembed（ONNX，CPU）批量嵌入 → vec0 虚表 vec_messages（cosine，512 维）

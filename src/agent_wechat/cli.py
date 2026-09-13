@@ -5,11 +5,17 @@ import argparse
 import json
 import sqlite3
 import sys
+from typing import TYPE_CHECKING
 
 from . import account, bootstrap, decrypt, errors, keys, paths
 
+if TYPE_CHECKING:
+    # 仅类型检查期：usecases 会连带拉起 vector→fastembed，不能进 CLI 的启动路径
+    # （本文件其余地方也一律在函数内惰性 import usecases）。
+    from . import usecases
 
-def _need_confirm(contact: str, nc) -> int:
+
+def _need_confirm(contact: str, nc: usecases.NeedConfirm) -> int:
     """消歧输出（recent/search/export/semantic 四处一致，策略见 usecases）：
 
     候选列表（含 kind，与 MCP 的 need_confirm 同形）打到 stdout，一行说明打到
@@ -175,12 +181,12 @@ def cmd_search(args: argparse.Namespace) -> int:
 def cmd_vector_build(args: argparse.Namespace) -> int:
     """构建向量索引。故意不解析当前账号：省略 --account 表示「全部账号」，
     与其它子命令（省略即当前登录账号）语义相反，别照抄 resolve_account。"""
-    from . import vector
+    from . import usecases, vector
 
     def progress(n: int) -> None:
         print(f"  已嵌入 {n} 行…", flush=True)
 
-    res = vector.build_index(accounts=[args.account] if args.account else None,
+    res = vector.build_index(accounts=usecases.to_accounts(args.account),
                              rebuild=args.rebuild, progress=progress)
     print(f"完成：本轮嵌入 {res['embedded_this_run']} 行，跳过 {res['skipped_this_run']} 行")
     return 0

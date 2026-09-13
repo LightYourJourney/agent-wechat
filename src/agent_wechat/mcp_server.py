@@ -4,6 +4,8 @@ from __future__ import annotations
 import asyncio
 import functools
 import json
+from collections.abc import Callable
+from typing import Any
 
 from mcp.server.mcpserver import MCPServer
 
@@ -18,7 +20,7 @@ server = MCPServer(
 )
 
 
-def _guard(fn):
+def _guard(fn: Callable[..., Any]) -> Callable[..., Any]:
     """把 core 抛出的项目异常翻成 {"error"[, "hint"]} 信封。
 
     必须包住每个工具：MCP SDK 的兜底是 `except Exception`，SystemExit（不是
@@ -27,7 +29,7 @@ def _guard(fn):
     对外信封与旧的手写 dict 返回逐字节一致（errors.to_payload）。
     """
     @functools.wraps(fn)
-    def wrapper(*args, **kwargs):
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
         try:
             return fn(*args, **kwargs)
         except errors.ContactNotFound as exc:

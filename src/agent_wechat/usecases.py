@@ -34,6 +34,16 @@ def clamp_limit(n: int, bounds: tuple[int, int | None] = LIMIT_UNBOUNDED) -> int
     return max(lo, n) if hi is None else max(lo, min(n, hi))
 
 
+def to_accounts(account: str | None) -> list[str] | None:
+    """wire 层的单数 `account` → core 层的复数 `accounts`（None = 全部，[] = 一个都不索引）。
+
+    两个入口的执行模型不同（CLI 的 `vector-build` 同步跑、MCP 的 `build_vector_index`
+    登记长任务），但「一个字符串还是一个列表」的翻译必须是同一份——否则又是一处两写，
+    正是 C2/C4 要消的那类重复。
+    """
+    return [account] if account else None
+
+
 # ---------- 结果类型 ----------
 
 MAX_CANDIDATES = 10          # 候选一律截前 10：避免刷屏，两个入口同一口径
@@ -211,18 +221,18 @@ def start_vector_build(accounts: list[str] | None, rebuild: bool) -> str:
 
     # 任务元数据沿用单数 account 字段（tasks.json 已发布格式）：单账号写该账号、
     # 全部账号写 None。多账号列表不是 wire 层能产生的形态（本层只翻译出这两种）。
-    one = accounts[0] if accounts and len(accounts) == 1 else None
-    return tasks.start("vector", _run, account=one, rebuild=rebuild)
+    single_account = accounts[0] if accounts and len(accounts) == 1 else None
+    return tasks.start("vector", _run, account=single_account, rebuild=rebuild)
 
 
 def build_vector_index(account: str | None = None, rebuild: bool = False) -> dict:
     """注意 account 语义与其它工具相反：省略表示索引**全部**账号（见 TOOLS.md §7）。
 
-    翻译边界：wire 层的 `account`（单数，None = 全部）在这里翻成 core 的
+    翻译边界：wire 层的 `account`（单数，None = 全部）经 `to_accounts` 翻成 core 的
     `accounts`（复数列表，None = 全部，[] = 一个都不索引）。wire 语义一字不动。
     """
-    accounts = [account] if account else None
-    return {"task_id": start_vector_build(accounts, rebuild), "status": "running"}
+    return {"task_id": start_vector_build(to_accounts(account), rebuild),
+            "status": "running"}
 
 
 def task_status(task_id: str | None = None) -> dict | list:

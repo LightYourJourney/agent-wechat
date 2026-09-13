@@ -47,7 +47,9 @@ uv run pytest tests/ -q          # 运行测试
   只保留手工整理的纯结构文档
 - **账号标识一律用占位符**：真实 wxid（本机账号目录名、联系人 username）不得入库，
   文档与测试统一用 `wxid_testacct01` / `wxid_abc123def456` 这类合成值；
-  测试夹具与本机绝对路径同理（用 `/Users/you`，不要写真实用户名）
+  示例与测试夹具里的本机绝对路径同理，用 `/Users/you`，不要写真实用户名。
+  例外只有两处：`.mcp.json` 与 `.codex/config.toml`——它们是**功能性本机配置**，
+  写的就是运行这台机器所需的真实路径，且 JSON/TOML 不展开 `~`；README 目录树已注明
 - 不加公开 remote、不 push（见 SECURITY.md §5）
 
 ## 5. 版本与文档同步

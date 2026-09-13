@@ -5,7 +5,7 @@
 
 ### 架构深化重构（C1–C8 + 3 个缺陷修复）
 
-内部重构为主。用户可见的变更**只有下列 7 处**：
+内部重构为主。用户可见的变更**只有下列 10 处**：
 
 - CLI `recent -n` 的上界与 MCP 对齐 **1-500**（原为无上限）
 - `export_full_history` 的 `contact` 歧义从「误报成找不到」改为返回 `need_confirm`（候选含 kind）
@@ -19,6 +19,13 @@
 - **全量导出**（`--full`）此前会清掉**其它账号**的导出水位线，令它们下次白跑一次全量；
   现只清目标账号
 - 多账号 `vector-build` 的进度（`rows`）会随账号切换**倒退**；现为全局累计
+- MCP `list_contacts` 的返回类型注解由 `list[dict]` 放宽为 `list[dict] | dict`——错误信封
+  必须能过 SDK 的返回标注校验（原先只声明数组一种形状，出错即退化成 `UnexpectedToolError`，
+  core 写好的中文修复指引到不了 agent）
+- CLI 的错误路径统一：`decrypt` / `inspect` / 密钥缺失等此前把 Python traceback 直接抛给
+  用户，现为单行中文 stderr + 退出码 1（上面第 4 条只覆盖了 MCP server 一侧）
+- 长任务失败文案的长度上限落定为 **300 字**（`errors.redact` 的上限）；此前 `tasks` 侧另有
+  一道 500 字切片，因排在 redact 之后执行而恒定不生效，已删除
 
 同时修正：`paths.key_info_db` 此前返回 `.dat` 而非 docstring 所述的 `.db`。
 
