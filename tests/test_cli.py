@@ -170,14 +170,16 @@ def test_purge_without_scope_exits_2(capsys):
     with pytest.raises(SystemExit) as ei:
         cli.main(["purge"])
     assert ei.value.code == 2
+    assert "范围" in capsys.readouterr().err
 
 
-def test_purge_all_with_named_scope_exits_2():
+def test_purge_all_with_named_scope_exits_2(capsys):
     """--all 与具名范围互斥。**用手写校验 + parser.error()**，不用 argparse 互斥组：
     互斥组不支持嵌套，把四个 flag 放一组会连 --index --tmp 一起禁掉（spec §3）。"""
     with pytest.raises(SystemExit) as ei:
         cli.main(["purge", "--all", "--keys"])
     assert ei.value.code == 2
+    assert "不能与" in capsys.readouterr().err
 
 
 def _isolate(tmp_path, monkeypatch):
@@ -236,8 +238,10 @@ def test_purge_refused_renders_single_line_not_traceback(tmp_path, monkeypatch, 
 def test_render_residue_shows_held_with_pids(capsys):
     """held 的**渲染层**钉子。T6 的复审指出：execute 在有进程持有时会拒绝执行，
     所以走 cli.main 不可能构造出「verify 时有进程持有」的状态——这条只能直接单测渲染函数。
-    渲染里 `','.join(map(str, pids))` 对空列表会打印出「仍被 pid  持有」（pid 为空），
-    而那正是一条对用户说的假话。"""
+
+    空 pid 列表的**过滤在 verify 侧**（purge.py 的 `and (pids := _holders(...))`），
+    渲染层并不设防：它只是照 `','.join(map(str, pids))` 直印。本测试钉的是**格式串**，
+    即那些 pid 确实会被印出来，而不是断言渲染函数自带空列表守卫。"""
     from agent_wechat import cli as _cli, purge as _purge
     rep = _purge.ResidueReport(not_removed=(), kept=(), held={"index.db": [4242]},
                                tmp_leaks=(), tm_excluded="否", snapshots="无输出")
@@ -252,7 +256,7 @@ def test_purge_yes_executes_and_reports(tmp_path, monkeypatch, capsys):
     用户可见出口**——而 T7 的四个测试此前全是 dry-run 或以退出码 2 结束，这条路径零覆盖，
     只有 T9 的手工验收护着，手工验收不防回归。"""
     home = _isolate(tmp_path, monkeypatch)
-    (home / "passphrase.json").write_bytes(b"x" * (2 * 1024**2))   # 2 MiB，便于断言体积
+    (home / "passphrase.json").write_bytes(b"x" * 2_000_000)   # 2.0 MB，便于断言体积
     (home / "index.db").write_bytes(b"y" * 3000)
     with pytest.raises(SystemExit) as ei:
         cli.main(["purge", "--keys", "--yes"])
@@ -261,7 +265,38 @@ def test_purge_yes_executes_and_reports(tmp_path, monkeypatch, capsys):
     assert (home / "index.db").exists()          # 范围外的一个字节没删
     out = capsys.readouterr().out
     assert "已删除 1 项" in out
-    assert "2.0 MiB" in out, f"freed 必须反映真实字节数，而实际输出是：{out!r}"
+    assert "2.0 MB" in out, f"freed 必须反映真实字节数，而实际输出是：{out!r}"
+
+
+def test_purge_all_dry_run_renders_loose_rows(tmp_path, monkeypatch, capsys):
+    """--all 的 `plan.loose` 渲染分支此前**从未被执行过**：测试全用具名范围，
+    报告的冒烟也用 `--index`。那儿一个格式串写坏会静默发布，而它正是
+    spec §3「枚举 HOME_DIR 顶层条目逐条列出」那条要求的落点。"""
+    home = _isolate(tmp_path, monkeypatch)
+    (home / "leaked.db").write_bytes(b"stray")      # 不属于任何具名范围
+    (home / "models").mkdir()
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["purge", "--all"])
+    assert ei.value.code == 0
+    out = capsys.readouterr().out
+    assert "leaked.db" in out and "models" in out
+    assert "不属于任何具名范围" in out
+    assert (home / "leaked.db").exists()            # dry-run，一个字节没删
+
+
+def test_render_plan_uses_decimal_units(tmp_path, monkeypatch, capsys):
+    """体积单位必须是十进制且标签与数字相符。此前 ≥1 GiB 分支除以 1024**3 却标 GB
+    （印 4.94 GB，与 help 的 5.3 GB 打架），小文件走 MiB 分支把 182 B 印成 0.0 MiB
+    （读起来像空文件）——同一个文件在一次会话里出现三个数字。"""
+    home = _isolate(tmp_path, monkeypatch)
+    (home / "index.db").write_bytes(b"x" * 2_000_000)      # 2.0 MB
+    (home / "passphrase.json").write_bytes(b"y" * 182)     # 182 B
+    with pytest.raises(SystemExit):
+        cli.main(["purge", "--index", "--keys"])
+    out = capsys.readouterr().out
+    assert "2.0 MB" in out, f"十进制 MB 未出现：{out!r}"
+    assert "182 B" in out, f"小文件必须印字节数而不是 0.0 MiB：{out!r}"
+    assert "MiB" not in out and "4.94 GB" not in out
 
 
 def test_purge_dry_run_prints_plan_and_deletes_nothing(tmp_path, monkeypatch, capsys):

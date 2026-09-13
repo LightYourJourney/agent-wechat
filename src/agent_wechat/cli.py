@@ -13,6 +13,9 @@ if TYPE_CHECKING:
     # 仅类型检查期：usecases 会连带拉起 vector→fastembed，不能进 CLI 的启动路径
     # （本文件其余地方也一律在函数内惰性 import usecases）。
     from . import usecases
+    # purge 同理（它的 import 链带起 vector→sqlite_vec）：此处只为 _render_* 的签名取类型，
+    # 真身仍在 cmd_purge 里惰性 import，冷启动不为它买单。
+    from . import purge
 
 
 def _need_confirm(contact: str, nc: usecases.NeedConfirm) -> int:
@@ -207,6 +210,22 @@ def cmd_semantic(args: argparse.Namespace) -> int:
     return 0
 
 
+def _human_size(n: int) -> str:
+    """十进制单位。spec §3 的表样就是十进制的：5.30 GB / 12 MB / 182 B。
+
+    **不要用 1024 基底却标 GB**——那会印出 `4.94 GB`，与同屏 help 里的 5.3 GB 打架；
+    而 `if i.size` 那种写法会让 182 B 走 MiB 分支印成 `0.0 MiB`，读起来像空文件。
+    同一个文件在一次会话里出现三个不同数字，对一个靠数字帮用户判断该不该删的命令是实打实的伤害。
+    """
+    if n >= 1000**3:
+        return f"{n / 1000**3:.2f} GB"
+    if n >= 1000**2:
+        return f"{n / 1000**2:.1f} MB"
+    if n >= 1000:
+        return f"{n / 1000:.0f} KB"
+    return f"{n} B"
+
+
 def cmd_purge(args: argparse.Namespace) -> int:
     """销毁本地产物。**默认 dry-run**：不带 --yes 只打印计划，一个字节不删。
 
@@ -220,23 +239,21 @@ def cmd_purge(args: argparse.Namespace) -> int:
     plan = purge.plan(scopes, all_=args.all)
 
     if not args.yes:
-        _render_plan(plan, scopes, args.all)
+        _render_plan(plan)
         return 0
 
     report = purge.execute(plan)
-    freed = f"{report.freed / 1024**2:.1f} MiB" if report.freed else "0 B"
-    print(f"已删除 {len(report.removed)} 项，释放 {freed}。")
+    print(f"已删除 {len(report.removed)} 项，释放 {_human_size(report.freed)}。")
     for p, err in report.failed:
         print(f"  ⚠️ 未能删除 {p}：{err}", file=sys.stderr)
     _render_residue(purge.verify(plan))
     return 1 if report.failed else 0
 
 
-def _render_plan(plan, scopes, all_: bool) -> None:
+def _render_plan(plan: purge.PurgePlan) -> None:
     print("将删除：")
     for i in plan.items:
-        size = f"{i.size / 1024**3:.2f} GB" if i.size >= 1024**3 else \
-               (f"{i.size / 1024**2:.1f} MiB" if i.size else "—")
+        size = _human_size(i.size) if i.exists else "—"
         mark = "" if i.exists else "（不存在）"
         print(f"  {i.artifact.scope:<7} {i.artifact.path}  {size:>10}  "
               f"{'敏感' if i.artifact.sensitive else '否':<4} {i.artifact.rebuild}{mark}")
@@ -245,7 +262,7 @@ def _render_plan(plan, scopes, all_: bool) -> None:
     print("\n未删除任何文件。加 --yes 执行。")
 
 
-def _render_residue(rep) -> None:
+def _render_residue(rep: purge.ResidueReport) -> None:
     print("\n残留核查：")
     for p in rep.not_removed:
         print(f"  ❌ 计划内仍未删除：{p}")
