@@ -46,6 +46,9 @@ def test_plan_touches_nothing(tmp_path):
     (home / "index.db").write_bytes(b"x" * 1000)
     before = sorted((p.name, p.stat().st_size, p.stat().st_mtime) for p in home.iterdir())
     purge.plan(frozenset({"index"}))
+    # --all 是 plan() 唯一越过 lstat 的分支（要 iterdir 枚举顶层），必须一并验证：
+    # 只测 all_=False 的话，往 --all 分支里加一次写入，本文件四个测试全都看不见。
+    purge.plan(frozenset(), all_=True)
     after = sorted((p.name, p.stat().st_size, p.stat().st_mtime) for p in home.iterdir())
     assert before == after
 
@@ -72,8 +75,61 @@ def test_plan_all_enumerates_home_including_strays(tmp_path):
     这样才列得出 models/、tasks.json 与散落文件（spec §3）。"""
     home = tmp_path / "home"
     home.mkdir(parents=True)
+    (home / "index.db").write_bytes(b"x" * 1000)        # 已知产物：必须被排除在 loose 之外
     (home / "leaked.db").write_bytes(b"stray")          # 模拟 decrypt --out 的散落明文
     (home / "models").mkdir()
     p = purge.plan(frozenset(), all_=True)
     assert p.all_ is True
     assert {x.name for x in p.loose} >= {"leaked.db", "models"}
+    # 反断言：`if p not in known` 这条排除若被删掉，这个测试原本仍会通过，但已知产物
+    # 会在 items 与 loose 里各出现一次，体积被重复计入 T4 的 freed（用户看到的「释放 N B」）。
+    assert "index.db" not in {x.name for x in p.loose}
+
+
+def test_execute_keys_does_not_touch_index(tmp_path):
+    """反向断言：防范围泄漏。比「删了该删的」更重要（spec §7）。"""
+    home = tmp_path / "home"; home.mkdir(parents=True)
+    (home / "passphrase.json").write_text("{}")
+    (home / "index.db").write_bytes(b"x" * 500)
+    purge.execute(purge.plan(frozenset({"keys"})))
+    assert not (home / "passphrase.json").exists()
+    assert (home / "index.db").exists()
+
+
+def test_execute_is_idempotent(tmp_path):
+    home = tmp_path / "home"; home.mkdir(parents=True)
+    r1 = purge.execute(purge.plan(frozenset({"keys"})))
+    r2 = purge.execute(purge.plan(frozenset({"keys"})))
+    assert r1.removed == ()
+    assert r2.removed == ()          # 两次都成功，第二次什么都没删
+
+
+def test_execute_all_removes_tree_and_does_not_recreate(tmp_path):
+    """--all 删整树，且**不重建** HOME_DIR（spec §5.1 第 6 步）。"""
+    home = tmp_path / "home"; home.mkdir(parents=True)
+    (home / "index.db").write_bytes(b"x" * 100)
+    (home / "leaked.db").write_bytes(b"stray")     # 不属于任何具名范围
+    (home / "models").mkdir()
+    r = purge.execute(purge.plan(frozenset(), all_=True))
+    assert not home.exists()
+    assert r.home_removed is True
+
+
+def test_execute_all_on_missing_home_is_idempotent(tmp_path):
+    """HOME_DIR 不存在时 --all 仍成功（AC4）。rmtree 对缺失路径会抛 FileNotFoundError，
+    spec §5.1 第 5 步要求把它纳入幂等规则。"""
+    r = purge.execute(purge.plan(frozenset(), all_=True))
+    assert r.home_removed is False
+    assert r.failed == ()
+
+
+def test_execute_all_reports_what_it_removed(tmp_path):
+    """--all 走整树 rmtree，绕过了 items 循环。若不在此补齐 removed/freed，
+    CLI 会在删光整棵 HOME_DIR 之后打印「已删除 0 项，释放 0 B」——与 spec §3/§6
+    要求的「删了什么 + 释放多少」直接冲突。"""
+    home = tmp_path / "home"; home.mkdir(parents=True)
+    (home / "index.db").write_bytes(b"x" * 4096)
+    (home / "leaked.db").write_bytes(b"y" * 100)     # 散落文件也计入体积
+    r = purge.execute(purge.plan(frozenset(), all_=True))
+    assert r.freed == 4196
+    assert {p.name for p in r.removed} >= {"index.db", "leaked.db"}
