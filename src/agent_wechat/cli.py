@@ -253,7 +253,11 @@ def cmd_purge(args: argparse.Namespace) -> int:
 def _render_plan(plan: purge.PurgePlan) -> None:
     print("将删除：")
     for i in plan.items:
-        size = _human_size(i.size) if i.exists else "—"
+        # 目录的 i.size 是 inode 自身大小（几十到几百字节），**不是整树体积**——
+        # 而 execute 的汇总行用的是 _tree_size 量出的整树体积。同一个 tmp/ 会在计划表里
+        # 显示 96 B、在汇总行显示几百 MB，差好几个数量级。spec §3 的表样对那一行标的正是
+        # 「—」，故目录一律不显体积。（T4 修过 freed 上的同一个错误，这是它在渲染器里的残留。）
+        size = _human_size(i.size) if (i.exists and i.artifact.kind != "dir") else "—"
         mark = "" if i.exists else "（不存在）"
         print(f"  {i.artifact.scope:<7} {i.artifact.path}  {size:>10}  "
               f"{'敏感' if i.artifact.sensitive else '否':<4} {i.artifact.rebuild}{mark}")

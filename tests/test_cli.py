@@ -268,6 +268,20 @@ def test_purge_yes_executes_and_reports(tmp_path, monkeypatch, capsys):
     assert "2.0 MB" in out, f"freed 必须反映真实字节数，而实际输出是：{out!r}"
 
 
+def test_render_plan_shows_no_size_for_directory(tmp_path, monkeypatch, capsys):
+    """目录行不得显示体积。`PlanItem.size` 对目录是 `lstat().st_size`（inode 自身大小，
+    几十到几百字节），而 execute 的汇总行用 `_tree_size` 量整树——同一个 tmp/ 会在计划表里
+    显示 96 B、在汇总行显示几百 MB，差好几个数量级。spec §3 的表样对那一行标的正是「—」。"""
+    home = _isolate(tmp_path, monkeypatch)
+    (home / "tmp").mkdir()
+    (home / "tmp" / "plaintext.db").write_bytes(b"x" * 500_000)   # 目录里确实有半 MB 明文
+    with pytest.raises(SystemExit):
+        cli.main(["purge", "--tmp"])
+    out = capsys.readouterr().out
+    assert "500 KB" not in out and "500000 B" not in out, f"目录行不该显示体积：{out!r}"
+    assert "—" in out, f"目录行应显示「—」：{out!r}"
+
+
 def test_purge_all_dry_run_renders_loose_rows(tmp_path, monkeypatch, capsys):
     """--all 的 `plan.loose` 渲染分支此前**从未被执行过**：测试全用具名范围，
     报告的冒烟也用 `--index`。那儿一个格式串写坏会静默发布，而它正是
