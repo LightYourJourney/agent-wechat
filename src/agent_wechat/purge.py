@@ -141,6 +141,32 @@ def _remove(item: PlanItem) -> bool:
     return True
 
 
+def _escapes_home(link: pathlib.Path, home: pathlib.Path) -> bool:
+    """该符号链接的目标是否在 home 之外**且确实存在**——即删掉之后会真留下东西。
+
+    判据跟着删除原语走，不是「见到链接就拒」：
+      · 具名范围走 unlink → 只删链接，**目标必留存** → 无条件拒绝（见 execute 里的 links）；
+      · --all 树内走 rmtree → 目标也在树内时会一并删除，不存在 false-clean。
+    只有目标逃出树外时才真的对应 spec §5.1 第 2 步那句「其实还在外置盘上」。
+
+    为什么不能一律拒绝：vector.py 用 huggingface_hub 下载模型，其 blob/snapshot 布局会在
+    models/ 下建若干指向**树内** blobs/ 的符号链接（实测本机 ~/.agent-wechat 有 5 个，
+    全部树内、树外 0 个）。一律拒绝会让 `purge --all` 在标准安装上永远跑不起来，
+    而它什么都没保护到——spec §9 又否掉了 --force，用户只能回去手敲 rm -rf。
+    """
+    try:
+        target = link.resolve(strict=False)
+    except OSError:
+        return False
+    if not target.exists():
+        return False          # 断链：目标本就不存在，删掉链接不留任何东西
+    try:
+        target.relative_to(home)
+    except ValueError:
+        return True           # 目标在 home 之外
+    return False
+
+
 def _tree_entries(root: pathlib.Path) -> list[pathlib.Path]:
     """整树的每个条目。指向目录的符号链接也要收——os.walk 把它们放进 dirnames
     且不跟随（followlinks 默认 False），只遍历 filenames 会漏掉它们。
@@ -197,10 +223,13 @@ def execute(plan: PurgePlan) -> PurgeReport:
         # ——plan.loose 只有顶层，那是 §3 对「计划表逐条展示」的要求，与删除范围是两回事。
         # 树内任意深度的符号链接都会被 rmtree 当作普通条目 unlink、目标明文留存，而删除后
         # 核查会报「计划内路径已清空」——正是该步点名的「以为明文没了，其实还在外置盘上」。
-        # 所以这里走一遍整棵树，而不是只看 plan.loose。
-        links += [p for p in _tree_entries(paths.HOME_DIR) if p.is_symlink()]
+        # 所以这里走一遍整棵树，而不是只看 plan.loose——但只拒绝**目标逃出树外**的链接
+        # （树内目标会被 rmtree 一并删掉，不存在 false-clean；一律拒绝会让标准安装永远跑不起来）。
+        links += [p for p in _tree_entries(paths.HOME_DIR)
+                  if p.is_symlink() and _escapes_home(p, paths.HOME_DIR)]
         if paths.HOME_DIR.is_symlink():
             links.append(paths.HOME_DIR)
+    links = list(dict.fromkeys(links))     # 同一路径可能既在 items 又在树扫描里，去重
     if links:
         raise errors.PurgeRefused(
             "待删路径是符号链接，拒绝删除：" + "、".join(str(p) for p in links),

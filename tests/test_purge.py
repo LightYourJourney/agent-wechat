@@ -250,6 +250,24 @@ def test_execute_all_refuses_symlink_inside_home(tmp_path, monkeypatch):
     assert (real / "secret.db").exists()                # 目标明文完好
 
 
+def test_execute_all_allows_intra_tree_symlink(tmp_path, monkeypatch):
+    """HuggingFace 的 blob/snapshot 布局会在 models/ 下建指向**树内** blobs/ 的符号链接
+    （本仓库 vector.py 用 huggingface_hub 下载模型就会产生，实测本机有 5 个）。
+    目标在树内 → 整树 rmtree 会连它一起删，不存在 false-clean；一律拒绝会让
+    `purge --all` 在标准安装上永远跑不起来，而 spec §9 又否掉了 --force。"""
+    home = tmp_path / "home"
+    blob = home / "models" / "blobs" / "abc123"
+    blob.parent.mkdir(parents=True)
+    blob.write_bytes(b"weights")
+    snap = home / "models" / "snapshots" / "rev1"
+    snap.mkdir(parents=True)
+    (snap / "model.onnx").symlink_to(blob)      # 树内链接：不得拒绝
+    monkeypatch.setattr(paths, "HOME_DIR", home)
+    r = purge.execute(purge.plan(frozenset(), all_=True))
+    assert r.failed == ()
+    assert not home.exists()                    # 整棵树连同 blob 一起没了
+
+
 def test_execute_all_refuses_nested_symlink(tmp_path, monkeypatch):
     """符号链接不只在 HOME_DIR 顶层：树内任意深度都会被 rmtree 当普通条目 unlink，
     目标明文留存。spec §5.1 第 2 步要求对**每个待删路径**做 lstat，故必须走整棵树。"""
