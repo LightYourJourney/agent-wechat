@@ -55,8 +55,9 @@ lldb attach 需要 `task_for_pid` 权限；Hardened Runtime 会阻止它，所�
 不会修改微信状态。快照读取期间微信正常可用；最坏情况是导出瞬间占用几秒磁盘带宽。
 
 **Q12：如何彻底删除本工具产生的所有数据？**
-`agent-wechat purge --all --yes`。它包含密钥缓存、索引库与临时文件；不加 `--yes` 只预览。
-核查报告会告诉你还有什么没清干净（如 `$TMPDIR` 下 bootstrap 崩溃残留的 `awcap_*` 脚本）。
+`agent-wechat purge --all --yes`（`~/.agent-wechat` 目录包含密钥缓存、索引库与临时文件）；
+不加 `--yes` 只预览。核查报告会告诉你还有什么没清干净——如 `$TMPDIR` 下 bootstrap 崩溃残留的
+`awcap_*` 脚本，**这些只报告、不代删，需手工处理**。
 该目录已排除出 Time Machine 备份。
 
 **Q13：为什么有的会话显示为 `md5:xxxx…` 而不是名字？**
