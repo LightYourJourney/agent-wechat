@@ -6,7 +6,7 @@
 """
 import pytest
 
-from agent_wechat import decrypt, keys, paths, purge, store, tasks, vector
+from agent_wechat import decrypt, errors, keys, paths, purge, store, tasks, vector
 
 # 导入时取值：此刻 autouse fixture 尚未 patch，paths.HOME_DIR 就是真实路径。
 # 不重述 paths 的解析逻辑（它读 AGENT_WECHAT_HOME）——那正是 purge.py 明令禁止的第二份来源。
@@ -22,6 +22,11 @@ def _never_touch_real_home(monkeypatch, tmp_path):
     monkeypatch.setattr(store, "DB_PATH", home / "index.db")
     monkeypatch.setattr(tasks, "TASKS_FILE", home / "tasks.json")
     monkeypatch.setattr(vector, "MODEL_CACHE_DIR", home / "models")
+    # spec §7：lsof 注入桩。必须打在 **_run** 这一层，不能把 _holders 整个换掉——
+    # 本文件里的 test_holders_parses_lsof_output 要调的正是真 _holders，autouse fixture
+    # 先执行会把它替换成桩，那个测试就永远拿不到真函数。
+    monkeypatch.setattr(purge, "_run",
+                        lambda *a, **kw: type("R", (), {"stdout": ""})())
     arts = purge.artifacts()
     assert len(arts) == 5, \
         f"红线：清单条目数由 5 变为 {len(arts)}，必有产物未被保护，须先核对再改这个数"
@@ -187,3 +192,56 @@ def test_execute_all_reports_what_it_removed(tmp_path):
     r = purge.execute(purge.plan(frozenset(), all_=True))
     assert r.freed == 4196
     assert {p.name for p in r.removed} >= {"index.db", "leaked.db"}
+
+
+def test_execute_refuses_when_index_is_held(tmp_path, monkeypatch):
+    """有进程持有 index.db 时拒绝执行。**不要用 tasks 注册表判断**：tasks._ensure_loaded()
+    载入时就把 running 收割成 failed（tasks.py:62-64，test_tasks.py:115-129 固化），
+    独立进程永远看不到 running——那条路是死的（spec §5.1 第 1 步）。"""
+    home = tmp_path / "home"; home.mkdir(parents=True)
+    (home / "index.db").write_bytes(b"x" * 100)
+    monkeypatch.setattr(purge, "_holders", lambda p: [4242] if p.name == "index.db" else [])
+    with pytest.raises(errors.PurgeRefused) as ei:
+        purge.execute(purge.plan(frozenset({"index"})))
+    assert "4242" in str(ei.value)
+    assert (home / "index.db").exists()          # 一个字节都没删
+
+
+def test_execute_refuses_symlink_and_leaves_target(tmp_path):
+    """符号链接必须拒绝：unlink 只删链接不删目标，而「列目录看到空了」的核查会给出
+    false-clean——用户以为明文没了，其实还在（spec §5.1 第 2 步、AC7）。"""
+    home = tmp_path / "home"; home.mkdir(parents=True)
+    real = tmp_path / "elsewhere.db"
+    real.write_bytes(b"plaintext" * 100)
+    (home / "index.db").symlink_to(real)
+    with pytest.raises(errors.PurgeRefused) as ei:
+        purge.execute(purge.plan(frozenset({"index"})))
+    assert "符号链接" in str(ei.value)
+    assert real.exists()                          # 目标必须完好无损
+
+
+def test_holders_parses_lsof_output(tmp_path, monkeypatch):
+    """lsof -n -P 不可省（否则 DNS 解析卡 30 秒，见 account.py:60 的既有教训）。"""
+    seen = {}
+
+    def fake_run(argv, **kw):
+        seen["argv"] = argv
+        return type("R", (), {"stdout": "COMMAND  PID USER\nWeChat 1234 leo\n"})
+
+    monkeypatch.setattr(purge, "_run", fake_run)
+    p = tmp_path / "index.db"; p.write_bytes(b"x")
+    assert purge._holders(p) == [1234]
+    assert seen["argv"][:3] == ["lsof", "-n", "-P"]
+
+
+def test_execute_all_refuses_symlinked_home(tmp_path, monkeypatch):
+    """HOME_DIR 本身是符号链接时 --all 必须拒绝（spec §5.1 第 2 步）。
+    rmtree 对 symlink 直接抛 OSError 且不走 onexc，会穿透 CLI 漏斗变成 traceback。"""
+    real = tmp_path / "real-home"; real.mkdir()
+    (real / "index.db").write_bytes(b"x" * 100)
+    link = tmp_path / "home-link"; link.symlink_to(real)
+    monkeypatch.setattr(paths, "HOME_DIR", link)
+    with pytest.raises(errors.PurgeRefused) as ei:
+        purge.execute(purge.plan(frozenset(), all_=True))
+    assert "符号链接" in str(ei.value)
+    assert (real / "index.db").exists()          # 目标必须完好无损

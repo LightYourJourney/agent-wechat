@@ -33,6 +33,29 @@ class Artifact:
     rebuild: str        # 重建代价，写进计划表
 
 
+def _holders(path: pathlib.Path) -> list[int]:
+    """持有该文件的进程 pid 列表。
+
+    为什么是这个机制而不是查 tasks 注册表：purge 是独立进程，而 tasks._ensure_loaded()
+    是唯一读路径、载入时就把磁盘上的 running 一律改判为 failed（tasks.py:62-64），
+    于是永远看不到正在跑的长任务——恰好放行它本该拦住的场景。持有句柄检测跨进程，
+    且直接对应真正要防的那件事：unlink 一个仍被打开的文件会「成功但空间不释放」。
+    """
+    if not path.exists():
+        return []
+    try:
+        r = _run(["lsof", "-n", "-P", str(path)],
+                 capture_output=True, text=True, timeout=15)
+    except Exception:
+        return []          # lsof 缺失/超时：不因探测失败而阻断销毁
+    pids = []
+    for line in (r.stdout or "").splitlines()[1:]:
+        parts = line.split()
+        if len(parts) >= 2 and parts[1].isdigit():
+            pids.append(int(parts[1]))
+    return sorted(set(pids))
+
+
 def artifacts() -> tuple[Artifact, ...]:
     """三个具名范围的清单。**调用时求值**——测试靠 monkeypatch 重定向路径。"""
     out = [
@@ -136,6 +159,25 @@ def _tree_size(root: pathlib.Path) -> int:
 
 def execute(plan: PurgePlan) -> PurgeReport:
     """执行删除。**部分失败不中止**：敏感度高的产物应当继续被清除（spec §5.1 第 4 步）。"""
+    held = {i.artifact.path: pids
+            for i in plan.items if i.exists and (pids := _holders(i.artifact.path))}
+    if held:
+        detail = "；".join(f"{p.name} 被 pid {','.join(map(str, v))} 持有"
+                          for p, v in held.items())
+        raise errors.PurgeRefused(f"有进程正在使用检索库，拒绝删除：{detail}",
+                                  hint="等该进程结束（如向量构建任务）后重试")
+
+    links = [i.artifact.path for i in plan.items if i.is_symlink]
+    if plan.all_ and paths.HOME_DIR.is_symlink():
+        # spec §5.1 第 2 步：HOME_DIR 本身是符号链接时 --all 同样拒绝。
+        # 不只是少一层保护：shutil.rmtree 对 symlink 会**直接抛 OSError**（不走 onexc），
+        # 穿透 CLI 漏斗变成 traceback，违反「core 只抛 AgentWeChatError 子类」。
+        links.append(paths.HOME_DIR)
+    if links:
+        raise errors.PurgeRefused(
+            "待删路径是符号链接，拒绝删除：" + "、".join(str(p) for p in links),
+            hint="unlink 只删链接不删目标，会造成「已清干净」的假象；请手工处理")
+
     removed: list[pathlib.Path] = []
     failed: list[tuple[pathlib.Path, str]] = []
     freed = 0
