@@ -252,7 +252,8 @@ def test_execute_all_refuses_symlink_inside_home(tmp_path, monkeypatch):
 
 def test_execute_all_refuses_symlinked_home(tmp_path, monkeypatch):
     """HOME_DIR 本身是符号链接时 --all 必须拒绝（spec §5.1 第 2 步）。
-    rmtree 对 symlink 直接抛 OSError 且不走 onexc，会穿透 CLI 漏斗变成 traceback。"""
+    实测 3.12.13：rmtree(link) 不传 handler 抛 OSError；传了 onexc 则一条
+    'Cannot call rmtree on a symbolic link' 进 handler，链接与目标都完好。"""
     real = tmp_path / "real-home"; real.mkdir()
     (real / "index.db").write_bytes(b"x" * 100)
     link = tmp_path / "home-link"; link.symlink_to(real)
