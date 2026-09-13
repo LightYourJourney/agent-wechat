@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+import glob
 import os
 import pathlib
 import shutil
@@ -142,7 +143,11 @@ def _remove(item: PlanItem) -> bool:
 
 
 def _escapes_home(link: pathlib.Path, home: pathlib.Path) -> bool:
-    """该符号链接的目标是否在 home 之外**且确实存在**——即删掉之后会真留下东西。
+    """该符号链接**是否会在删树之后留下东西**，或**判不出来**——后者也返回 True。
+
+    判据不是「目标在 home 之外」，而是「树删完之后它还会不会在」：目标在树内 → 会被一并
+    删掉 → False；目标在树外且存在 → 留存 → True；解析不出来（符号链接环、EACCES 等）
+    → 无法保证 → True（保守，与「判不出来就别删」一致）。
 
     判据跟着删除原语走，不是「见到链接就拒」：
       · 具名范围走 unlink → 只删链接，**目标必留存** → 无条件拒绝（见 execute 里的 links）；
@@ -290,3 +295,47 @@ def execute(plan: PurgePlan) -> PurgeReport:
             removed = [p for p in shown if not p.exists()]
             home_removed = not paths.HOME_DIR.exists()
     return PurgeReport(tuple(removed), tuple(failed), freed, home_removed)
+
+
+@dataclass(frozen=True)
+class ResidueReport:
+    not_removed: tuple[pathlib.Path, ...]   # 计划内、但仍存在的 → 真残留
+    kept: tuple[pathlib.Path, ...]          # HOME_DIR 里计划外的 → 按范围保留 / 散落
+    held: dict[str, list[int]]              # 仍持有 index 的进程
+    tmp_leaks: tuple[str, ...]              # $TMPDIR 下的 awcap_*
+    tm_excluded: str
+    snapshots: str
+
+
+def _tmutil(args: list[str]) -> str:
+    """外部命令探测：带 timeout、异常降级为「无法判定」，绝不因探测失败而中断核查。"""
+    try:
+        r = _run(["tmutil", *args], capture_output=True, text=True, timeout=10)
+    except Exception:
+        return "无法判定（tmutil 不可用或超时）"
+    return (r.stdout or "").strip() or "无输出"
+
+
+def verify(plan: PurgePlan) -> ResidueReport:
+    """删后核查。**必须接收 plan**：判据是「计划内的是否都没了、计划外的是什么」，
+    不是「HOME_DIR 是否为空」——后者会把按范围故意保留的产物误报为残留。"""
+    not_removed = tuple(i.artifact.path for i in plan.items if i.artifact.path.exists())
+
+    planned = {i.artifact.path for i in plan.items} | set(plan.loose)
+    try:
+        top = sorted(paths.HOME_DIR.iterdir())
+    except OSError:
+        top = []
+    kept = tuple(p for p in top if p not in planned)
+
+    held = {p.name: pids
+            for i in plan.items if i.exists and (pids := _holders(i.artifact.path))}
+
+    tmpdir = os.environ.get("TMPDIR", "/tmp")
+    tmp_leaks = tuple(sorted(glob.glob(os.path.join(tmpdir, "awcap_*"))))
+
+    return ResidueReport(
+        not_removed=not_removed, kept=kept, held=held, tmp_leaks=tmp_leaks,
+        tm_excluded=_tmutil(["isexcluded", str(paths.HOME_DIR)]),
+        snapshots=_tmutil(["listlocalsnapshots", "/"]),
+    )

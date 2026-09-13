@@ -268,6 +268,20 @@ def test_execute_all_allows_intra_tree_symlink(tmp_path, monkeypatch):
     assert not home.exists()                    # 整棵树连同 blob 一起没了
 
 
+def test_execute_all_refuses_symlink_loop(tmp_path, monkeypatch):
+    """符号链接环：3.12 的 Path.resolve 抛 RuntimeError（3.13 才改成 OSError）。
+    接不住的话它会以裸异常穿透 execute()，违反「core 层只抛 AgentWeChatError 子类」。
+    环本身不留东西，但属病态配置，拒绝比放行更容易解释——且与「判不出来就别删」一致。"""
+    home = tmp_path / "home"; home.mkdir(parents=True)
+    a, b = home / "a", home / "b"
+    a.symlink_to(b); b.symlink_to(a)          # a ↔ b
+    monkeypatch.setattr(paths, "HOME_DIR", home)
+    with pytest.raises(errors.PurgeRefused) as ei:
+        purge.execute(purge.plan(frozenset(), all_=True))
+    assert "符号链接" in str(ei.value)
+    assert home.exists()                      # 一个字节都没删
+
+
 def test_execute_all_tolerates_symlinked_home_ancestor(tmp_path, monkeypatch):
     """home 的**祖先**是符号链接时（macOS 上 /tmp → /private/tmp，$TMPDIR 与 mktemp -d
     给出的路径同理），link.resolve() 给的是真路径而 paths.HOME_DIR 未解析——两边形态不同
@@ -315,3 +329,43 @@ def test_execute_all_refuses_symlinked_home(tmp_path, monkeypatch):
         purge.execute(purge.plan(frozenset(), all_=True))
     assert "符号链接" in str(ei.value)
     assert (real / "index.db").exists()          # 目标必须完好无损
+
+
+def test_verify_does_not_call_kept_artifacts_residue(tmp_path):
+    """**22 条评审里最严重的一条**：选择性 purge 后 index.db 是按范围故意保留的，
+    拿「HOME_DIR 空不空」当判据会把它误报为残留，与 AC2 直接打架（spec §5.2）。"""
+    home = tmp_path / "home"; home.mkdir(parents=True)
+    (home / "passphrase.json").write_text("{}")
+    (home / "index.db").write_bytes(b"x" * 100)
+    plan = purge.plan(frozenset({"keys"}))
+    purge.execute(plan)
+    rep = purge.verify(plan)
+    assert rep.not_removed == ()                       # 计划内的都删掉了
+    assert any(p.name == "index.db" for p in rep.kept)  # 保留项归入 kept，不是残留
+
+
+def test_verify_reports_unremoved_planned_paths(tmp_path):
+    home = tmp_path / "home"; home.mkdir(parents=True)
+    (home / "passphrase.json").write_text("{}")
+    plan = purge.plan(frozenset({"keys"}))
+    rep = purge.verify(plan)                            # 没执行就核查
+    assert [p.name for p in rep.not_removed] == ["passphrase.json"]
+
+
+def test_verify_finds_tmp_lldb_leftovers(tmp_path, monkeypatch):
+    """bootstrap.py:85 的 mkstemp 未传 dir=，落 $TMPDIR；进程被 kill 时残留。
+    spec §2 那张表的第四行——核查必须实际检查它。"""
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+    (tmp_path / "awcap_abc123.lldb").write_text("script")
+    rep = purge.verify(purge.plan(frozenset({"keys"})))
+    assert any("awcap_" in x for x in rep.tmp_leaks)
+
+
+def test_verify_degrades_when_tmutil_missing(tmp_path, monkeypatch):
+    """tmutil 缺失/超时时该项报「无法判定」，不能让整个核查崩掉（spec §5.2）。"""
+    def boom(*a, **k):
+        raise FileNotFoundError("tmutil")
+
+    monkeypatch.setattr(purge, "_run", boom)
+    rep = purge.verify(purge.plan(frozenset({"keys"})))
+    assert "无法判定" in rep.tm_excluded
