@@ -319,16 +319,23 @@ def _tmutil(args: list[str]) -> str:
 def verify(plan: PurgePlan) -> ResidueReport:
     """删后核查。**必须接收 plan**：判据是「计划内的是否都没了、计划外的是什么」，
     不是「HOME_DIR 是否为空」——后者会把按范围故意保留的产物误报为残留。"""
-    not_removed = tuple(i.artifact.path for i in plan.items if i.artifact.path.exists())
+    # 计划内 = 具名产物 ∪（--all 时的）loose 顶层条目。**两者都在删除范围内，故都要查存活**：
+    # 只查 items 而把 loose 仅用于从 kept 里排除的话，一个在部分失败中活下来的 loose 条目
+    # （models/、tasks.json、散落明文）**两个桶都不进**，报告会说「计划内路径已清空」——
+    # 正是本字段存在的意义所在的那种假象（spec §5.2 第 1 项）。
+    planned = [i.artifact.path for i in plan.items] + list(plan.loose)
+    # lexists 而非 exists：exists 跟随符号链接，断链会被判成「已删除」而链接文件明明还在——
+    # 在这门专门用来抓假象的字段里制造假象。
+    not_removed = tuple(p for p in planned if os.path.lexists(p))
 
-    planned = {i.artifact.path for i in plan.items} | set(plan.loose)
+    planned_set = set(planned)
     try:
         top = sorted(paths.HOME_DIR.iterdir())
     except OSError:
         top = []
-    kept = tuple(p for p in top if p not in planned)
+    kept = tuple(p for p in top if p not in planned_set)
 
-    held = {p.name: pids
+    held = {i.artifact.path.name: pids
             for i in plan.items if i.exists and (pids := _holders(i.artifact.path))}
 
     tmpdir = os.environ.get("TMPDIR", "/tmp")

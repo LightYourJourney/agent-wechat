@@ -352,6 +352,31 @@ def test_verify_reports_unremoved_planned_paths(tmp_path):
     assert [p.name for p in rep.not_removed] == ["passphrase.json"]
 
 
+def test_verify_reports_surviving_loose_entry(tmp_path, monkeypatch):
+    """--all 部分失败时活下来的 loose 顶层条目必须报为残留。它既不在 items 里、又被从
+    kept 里排除，此前**两个桶都不进**，报告会说「计划内路径已清空」——
+    正是 not_removed 这个字段存在的意义所在的那种假象（spec §5.2 第 1 项）。"""
+    home = tmp_path / "home"; home.mkdir(parents=True)
+    (home / "index.db").write_bytes(b"x" * 100)         # 具名产物
+    (home / "leaked.db").write_bytes(b"stray")          # loose：不属于任何具名范围
+    rep = purge.verify(purge.plan(frozenset(), all_=True))   # 什么都不删 = 全都没删掉
+    names = {p.name for p in rep.not_removed}
+    assert {"index.db", "leaked.db"} <= names, f"loose 存活项漏报，实际只报了 {names}"
+    assert rep.kept == ()          # 两者都在计划内，不得落进「按范围保留」桶
+
+
+def test_verify_reports_still_held_index(tmp_path, monkeypatch):
+    """held 是 spec §5.2 的第三项，但 fixture 的 _run 桩让 _holders 恒返回 []，
+    于是它在全部 verify 测试里都是空字典——把 i.exists 的判据反写、或把 p.name 键错，
+    26 个测试会全绿。故此处直接覆盖 _holders。"""
+    home = tmp_path / "home"; home.mkdir(parents=True)
+    (home / "index.db").write_bytes(b"x" * 100)
+    monkeypatch.setattr(purge, "_holders",
+                        lambda p: [4242] if p.name == "index.db" else [])
+    rep = purge.verify(purge.plan(frozenset({"index"})))
+    assert rep.held.get("index.db") == [4242]
+
+
 def test_verify_finds_tmp_lldb_leftovers(tmp_path, monkeypatch):
     """bootstrap.py:85 的 mkstemp 未传 dir=，落 $TMPDIR；进程被 kill 时残留。
     spec §2 那张表的第四行——核查必须实际检查它。"""
