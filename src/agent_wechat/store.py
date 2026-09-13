@@ -18,6 +18,18 @@ from collections.abc import Iterator
 from . import messages, paths
 
 DB_PATH = paths.HOME_DIR / "index.db"
+
+
+def db_paths() -> tuple[pathlib.Path, ...]:
+    """index 库的文件族：基库 + WAL + SHM。
+
+    为什么需要它：本模块的 DDL 设了 `PRAGMA journal_mode=WAL`，所以基库被删除时，
+    若进程仍在运行或曾异常崩溃，`-wal` 会独立存在且**含明文页**——只删基库会留残留。
+    「index 由哪些文件构成」是只有本模块有资格定义的知识，让调用方自己拼串就是复制一份。
+    """
+    return (DB_PATH, pathlib.Path(f"{DB_PATH}-wal"), pathlib.Path(f"{DB_PATH}-shm"))
+
+
 BATCH = 2000
 
 SCHEMA = """

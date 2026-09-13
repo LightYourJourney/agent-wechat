@@ -21,9 +21,14 @@ from . import keys, paths
 from .errors import DecryptError
 
 
+def tmp_dir() -> pathlib.Path:
+    """解密临时目录（0700）。调用方负责确保存在（见 ensure_home_dirs）。"""
+    return paths.HOME_DIR / "tmp"
+
+
 def ensure_home_dirs() -> None:
     paths.ensure_home_dirs()
-    (paths.HOME_DIR / "tmp").mkdir(mode=0o700, parents=True, exist_ok=True)
+    tmp_dir().mkdir(mode=0o700, parents=True, exist_ok=True)
 
 
 def snapshot(db: pathlib.Path, td: pathlib.Path) -> pathlib.Path:
@@ -40,7 +45,7 @@ def snapshot(db: pathlib.Path, td: pathlib.Path) -> pathlib.Path:
 def decrypted(db: pathlib.Path, passphrase: bytes, tmpdir: pathlib.Path | None = None):
     """上下文管理器：yield 解密后的明文库路径，退出时自动清理临时文件。"""
     ensure_home_dirs()
-    td = pathlib.Path(tempfile.mkdtemp(prefix="awdec-", dir=tmpdir or (paths.HOME_DIR / "tmp")))
+    td = pathlib.Path(tempfile.mkdtemp(prefix="awdec-", dir=tmpdir or tmp_dir()))
     try:
         snap = snapshot(db, td)
         page1 = snap.read_bytes()[:keys.PAGE_SZ]
