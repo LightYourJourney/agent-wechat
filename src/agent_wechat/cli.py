@@ -244,6 +244,11 @@ def cmd_purge(args: argparse.Namespace) -> int:
 
     report = purge.execute(plan)
     print(f"已删除 {len(report.removed)} 项，释放 {_human_size(report.freed)}。")
+    if report.home_removed:
+        # 这行是「目录本身也没了」的唯一出口：removed 数的是 HOME_DIR 的顶层条目，目录自身
+        # 不在其中，空目录的 --all 会印「已删除 0 项，释放 0 B」；残留核查那边也只按路径判
+        # 存活（`✅ 计划内路径已清空` 对「目录还在」与「目录没了」是同一句话）。
+        print(f"数据目录本身已一并删除：{paths.HOME_DIR.resolve()}")
     for p, err in report.failed:
         print(f"  ⚠️ 未能删除 {p}：{err}", file=sys.stderr)
     _render_residue(purge.verify(plan))
@@ -251,7 +256,11 @@ def cmd_purge(args: argparse.Namespace) -> int:
 
 
 def _render_plan(plan: purge.PurgePlan) -> None:
+    from . import purge      # 与 cmd_purge 同一惰性策略：purge 的 import 链带起 vector→sqlite_vec
     print("将删除：")
+    # 绝对目标必须先印：下面每行的路径都可能与用户以为的那个目录无关（AGENT_WECHAT_HOME
+    # 被设成空值时全都相对当前工作目录），而「将删除：」这四个字是这张表唯一的上下文。
+    print(f"目标目录：{paths.HOME_DIR.resolve()}")
     for i in plan.items:
         # 目录的 i.size 是 inode 自身大小（几十到几百字节），**不是整树体积**——
         # 而 execute 的汇总行用的是 _tree_size 量出的整树体积。同一个 tmp/ 会在计划表里
@@ -262,7 +271,12 @@ def _render_plan(plan: purge.PurgePlan) -> None:
         print(f"  {i.artifact.scope:<7} {i.artifact.path}  {size:>10}  "
               f"{'敏感' if i.artifact.sensitive else '否':<4} {i.artifact.rebuild}{mark}")
     for p in plan.loose:
-        print(f"  {'all':<7} {p}  （不属于任何具名范围）")
+        # spec §3：每行点名它属于哪个已知产物，或标「散落文件」。models/ 与 tasks.json 是
+        # vector/tasks 的已知产物，只是没有对应的 CLI 开关——一律印「不属于任何具名范围」
+        # 字面没错，读起来却是「没人认识的文件」。
+        known = purge.known_artifact_label(p)
+        mark = f"已知产物：{known}" if known else "不属于任何具名范围"
+        print(f"  {'all':<7} {p}  （{mark}）")
     print("\n未删除任何文件。加 --yes 执行。")
 
 

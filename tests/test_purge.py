@@ -4,6 +4,9 @@
 并断言 artifacts() 解析出的路径确实不在真实数据目录下。写成 autouse 而不是单个测试函数
 是有意的——单独跑本文件里任何一个测试时，保护都必须生效（spec §7）。
 """
+import os
+import pathlib
+
 import pytest
 
 from agent_wechat import decrypt, errors, keys, paths, purge, store, tasks, vector
@@ -407,3 +410,128 @@ def test_verify_degrades_when_tmutil_missing(tmp_path, monkeypatch):
     monkeypatch.setattr(purge, "_run", boom)
     rep = purge.verify(purge.plan(frozenset({"keys"})))
     assert "无法判定" in rep.tm_excluded
+
+
+def test_execute_refuses_when_home_is_root(tmp_path, monkeypatch):
+    """闸门在 execute 里也要有一道，且是第一句：CLI 是「先 plan → 再 execute」，plan 到
+    execute 之间 paths.HOME_DIR 可能已被改指（或首次 plan 走的不是这条路径），到那时就只剩
+    「已经开始删」了。测试文件里那道 autouse 红线保护不了这条——它保护的是测试自己。"""
+    monkeypatch.setattr(paths, "HOME_DIR", pathlib.Path("/"))
+    p = purge.PurgePlan(scopes=frozenset({"keys"}), all_=False, items=(), loose=())
+    with pytest.raises(errors.PurgeRefused) as ei:
+        purge.execute(p)
+    assert "文件系统根" in str(ei.value)
+
+
+def test_plan_refuses_when_home_unreadable(tmp_path):
+    """spec §6 那一行：「plan 阶段权限不足（目录不可读）→ PurgeRefused（**不是**「删除失败」，
+    发生在任何 unlink 之前）」。此前这种情况被 _item() 吞成「不存在」——dry-run 对一堆活着的
+    文件打「（不存在）」，--yes 则在 is_symlink() 上抛裸 PermissionError。"""
+    home = tmp_path / "home"; home.mkdir(parents=True)
+    (home / "index.db").write_bytes(b"x" * 10)
+    os.chmod(home, 0o000)
+    try:
+        with pytest.raises(errors.PurgeRefused) as ei:
+            purge.plan(frozenset({"index"}))
+    finally:
+        os.chmod(home, 0o700)          # 不还原的话 pytest 自己清不掉这棵树
+    assert "不可读" in str(ei.value)
+
+
+def test_execute_refuses_when_artifact_parent_becomes_unreadable(tmp_path, monkeypatch):
+    """产物父目录不可搜索时（lstat 需要父目录的 +x），符号链接检查此前抛**裸 OSError**：
+    违反「core 层一律抛 AgentWeChatError 子类」，在 CLI 那边就是一个 traceback。
+    计划先生成再改坏权限，正是 plan→execute 之间那个窗口的形态。"""
+    home = tmp_path / "home"; home.mkdir(parents=True)
+    sub = home / "sub"; sub.mkdir()
+    (sub / "index.db").write_bytes(b"x" * 10)
+    monkeypatch.setattr(store, "DB_PATH", sub / "index.db")
+    p = purge.plan(frozenset({"index"}))
+    os.chmod(sub, 0o000)
+    try:
+        with pytest.raises(errors.PurgeRefused) as ei:
+            purge.execute(p)
+    finally:
+        os.chmod(sub, 0o700)
+    assert "权限" in str(ei.value.hint or "") or "符号链接" in str(ei.value)
+    assert (sub / "index.db").exists()
+
+
+def test_execute_refuses_symlink_before_reporting_holders(tmp_path, monkeypatch):
+    """检查顺序：links 必须排在 held **之前**。`_holders` 走 `lsof <path>`，而 lsof 会
+    **解析符号链接**——产物是链接时，占用检查报出的是一堆持有**目标**的不相关进程
+    （实测：拿 /etc/hosts 当目标，lsof 列出 7 个持有者）。退出码与安全性都对，但用户照着
+    那条理由去杀进程也删不掉这个链接——真正的原因是它是链接。"""
+    home = tmp_path / "home"; home.mkdir(parents=True)
+    real = tmp_path / "elsewhere.db"; real.write_bytes(b"plaintext" * 10)
+    (home / "index.db").symlink_to(real)
+    monkeypatch.setattr(purge, "_holders", lambda p: [4242])   # 模拟 lsof 解析到目标的持有者
+    with pytest.raises(errors.PurgeRefused) as ei:
+        purge.execute(purge.plan(frozenset({"index"})))
+    assert "符号链接" in str(ei.value)
+    assert "4242" not in str(ei.value), "理由必须是「它是链接」，不是「被 pid 4242 持有」"
+    assert real.exists()
+
+
+def test_execute_tmp_refuses_out_of_tree_symlink_in_tree(tmp_path):
+    """具名范围里 kind="dir" 的只有 tmp/，它走的是 rmtree——与 --all 同一原语，故同样要扫
+    它整棵树。实测：`tmp/evil.db -> /outside/secret.db`（700 KB）+ `purge --tmp --yes`
+    退 0、「已删除 1 项」，树外明文原封不动，而核查里一个字都没提它——正是 spec §5.1 第 2 步
+    要防的那种假清空。"""
+    outside = tmp_path / "outside"; outside.mkdir()
+    (outside / "secret.db").write_bytes(b"p" * 700_000)
+    home = tmp_path / "home"; (home / "tmp").mkdir(parents=True)
+    (home / "tmp" / "evil.db").symlink_to(outside / "secret.db")
+    with pytest.raises(errors.PurgeRefused) as ei:
+        purge.execute(purge.plan(frozenset({"tmp"})))
+    assert "符号链接" in str(ei.value)
+    assert (home / "tmp" / "evil.db").is_symlink()      # 拒绝在任何删除之前
+    assert (outside / "secret.db").exists()
+
+
+def test_execute_tmp_allows_intra_tree_symlink(tmp_path):
+    """目标在树内的链接不拒绝：rmtree 会把目标一并删掉，不存在假清空。一律拒绝会让
+    blob/snapshot 式布局（huggingface_hub 下载模型就会产生，本仓库 vector.py 用它）
+    永远删不掉，而 spec §9 又否掉了 --force。"""
+    home = tmp_path / "home"; (home / "tmp").mkdir(parents=True)
+    (home / "tmp" / "real.db").write_bytes(b"plaintext" * 10)
+    (home / "tmp" / "alias.db").symlink_to(home / "tmp" / "real.db")
+    r = purge.execute(purge.plan(frozenset({"tmp"})))
+    assert r.failed == ()
+    assert not (home / "tmp").exists()
+
+
+def test_execute_all_allows_intra_tree_symlink_at_artifact_path(tmp_path):
+    """M1 的连带修复：`--all` 下 `tmp/`（具名产物、kind=dir）**本身**是指向树内的链接时，
+    此前会被 items 那条（文件型才该有的无条件拒绝）拦下，理由还写着「unlink 只删链接」——
+    而 --all 根本不走 unlink，它 rmtree 整棵树，树内目标会一并删掉。判据该是 _escapes_home。"""
+    home = tmp_path / "home"; home.mkdir(parents=True)
+    real_tmp = home / "real-tmp"; real_tmp.mkdir()
+    (real_tmp / "plain.db").write_bytes(b"plaintext" * 10)
+    (home / "tmp").symlink_to(real_tmp)
+    r = purge.execute(purge.plan(frozenset(), all_=True))
+    assert r.failed == ()
+    assert not home.exists()
+    assert not real_tmp.exists()          # 树内目标随整树一并删除
+
+
+def test_execute_all_partial_failure_reports_survivor(tmp_path):
+    """`--all` 的部分失败分支（rmtree 中途某项删不掉）此前只被手工验收过，没有任何测试钉住。
+    四条裁定一起钉：失败被记录、freed 扣掉没删掉的那部分、removed 不含仍活着的项、
+    残留核查点名它。"""
+    home = tmp_path / "home"; home.mkdir(parents=True)
+    (home / "index.db").write_bytes(b"x" * 100)
+    stuck = home / "stuck"; stuck.mkdir()
+    (stuck / "plain.db").write_bytes(b"y" * 500)
+    os.chmod(stuck, 0o500)                    # 可读可进入、不可写：rmtree 删不掉里面的文件
+    try:
+        p = purge.plan(frozenset(), all_=True)
+        r = purge.execute(p)
+        rep = purge.verify(p)
+    finally:
+        os.chmod(stuck, 0o700)                # 不还原的话 pytest 自己清不掉这棵树
+    assert any(x.name == "stuck" for x, _ in r.failed), f"失败未被记录：{r.failed}"
+    assert not any(x.name == "stuck" for x in r.removed)
+    assert r.freed == 100, f"freed 必须扣掉活下来的 500 B，实际 {r.freed}"
+    assert r.home_removed is False
+    assert any(x.name == "stuck" for x in rep.not_removed), "残留核查必须点名它"

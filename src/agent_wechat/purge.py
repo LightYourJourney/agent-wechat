@@ -41,6 +41,12 @@ def _holders(path: pathlib.Path) -> list[int]:
     是唯一读路径、载入时就把磁盘上的 running 一律改判为 failed（tasks.py:62-64），
     于是永远看不到正在跑的长任务——恰好放行它本该拦住的场景。持有句柄检测跨进程，
     且直接对应真正要防的那件事：unlink 一个仍被打开的文件会「成功但空间不释放」。
+
+    已知限制（本轮明确不修，见 spec §9 的 YAGNI）：`lsof <目录>` 列出的是**持有该目录本身**
+    的进程，不是「开着目录里某个文件」的进程——实测同一个进程，`lsof -n -P d/open.db` 找得到，
+    `lsof -n -P d` 却返回 exit 1、无输出。于是 `purge --tmp` 探测不到正在 decrypt 的任务
+    （它持有 `tmp/awdec-*/plain.db`），照样会删掉那个目录。要覆盖得换 `lsof +D`：它逐个文件
+    递归，在 --all 那种整树规模上代价不可接受。
     """
     if not path.exists():
         return []
@@ -70,6 +76,24 @@ def artifacts() -> tuple[Artifact, ...]:
     return tuple(out)
 
 
+def known_artifact_label(path: pathlib.Path) -> str | None:
+    """该顶层路径是**已知产物**（有拥有者模块）但不属于任何具名范围时，返回它的展示名。
+
+    与 artifacts() 的区别是有没有 CLI 开关：keys / index / tmp 三个能被 `--keys` / `--index`
+    / `--tmp` 单独选中；models/ 与 tasks.json 有拥有者（vector.MODEL_CACHE_DIR /
+    tasks.TASKS_FILE）却没有开关，只出现在 `--all` 的 loose 行里。spec §3 要求每行点名它
+    属于哪个已知产物、或标「散落文件」——把 models/ 一律印成「不属于任何具名范围」字面没错，
+    但它读起来是「没人认识的野文件」，而它恰恰是向量模型的落点（删了要重新下载）。
+
+    **调用时求值**：测试靠 monkeypatch 重定向这两个常量。
+    """
+    for p, label in ((vector.MODEL_CACHE_DIR, "向量模型缓存"),
+                     (tasks.TASKS_FILE, "长任务注册表")):
+        if path == p:
+            return label
+    return None
+
+
 @dataclass(frozen=True)
 class PlanItem:
     artifact: Artifact
@@ -94,6 +118,30 @@ def _item(a: Artifact) -> PlanItem:
     return PlanItem(a, True, st.st_size, a.path.is_symlink())
 
 
+def _check_home_is_sane(home: pathlib.Path) -> None:
+    """拒绝看起来不像数据目录的 HOME_DIR。**这是一道数据丢失闸门，不是洁癖。**
+
+    `paths.HOME_DIR` 来自 `$AGENT_WECHAT_HOME`，而**设了但为空**的环境变量会让
+    `os.environ.get(...)` 返回 `""` 而不是默认值，`Path("")` 就是 `.`——于是
+    `purge --all --yes` 会递归删掉**当前工作目录**（实测确认，且输出最后一行还打着 ✅）。
+    该变量是文档化的一等开关（含 MCP 的 env），所以「shell 里没设上」是现实输入。
+    """
+    resolved = home.resolve()
+    if not home.is_absolute():
+        raise errors.PurgeRefused(
+            f"拒绝在相对路径上执行销毁：{home!r}",
+            hint="AGENT_WECHAT_HOME 是否被设成了空值？空值会被解析成当前目录")
+    if resolved == pathlib.Path("/"):
+        raise errors.PurgeRefused(f"拒绝销毁文件系统根：{resolved}",
+                                  hint="AGENT_WECHAT_HOME 指向了不该被销毁的目录")
+    if resolved == pathlib.Path.home():
+        raise errors.PurgeRefused(f"拒绝销毁用户主目录：{resolved}",
+                                  hint="AGENT_WECHAT_HOME 指向了不该被销毁的目录")
+    if pathlib.Path.home().is_relative_to(resolved):
+        raise errors.PurgeRefused(f"拒绝销毁用户主目录的祖先：{resolved}",
+                                  hint="AGENT_WECHAT_HOME 指向了不该被销毁的目录")
+
+
 def plan(scopes: frozenset[str], all_: bool = False,
          home: pathlib.Path | None = None) -> PurgePlan:
     """生成删除计划。**纯只读**：不创建、不删除、不写任何东西。
@@ -102,6 +150,22 @@ def plan(scopes: frozenset[str], all_: bool = False,
     artifacts() 只认识三个具名范围，列不出 models/ 与散落文件。
     """
     home = home or paths.HOME_DIR
+    # 闸门在 plan 里而不是只在 execute 里：dry-run 的那张表就是用户据以说 --yes 的东西，
+    # 计划表照常渲染完再由 execute 拒绝，等于默许了一张「将删除当前目录」的表。
+    _check_home_is_sane(home)
+    # spec §6 那一行：plan 阶段权限不足（目录不可读）→ PurgeRefused，**不是**「删除失败」，
+    # 发生在任何 unlink 之前。此前这种情况会被 _item() 吞成「不存在」，于是 dry-run 对一堆
+    # 活着的文件打「（不存在）」，而 --yes 会在 is_symlink() 上抛裸 PermissionError。
+    # 用 os.access 取值而不是 try-stat：它对「不存在」返回 False（幂等路径要靠 exists 区分），
+    # 而 exists() 在**父目录不可搜索**时会抛 EACCES 而非返回 False（3.12 的 _IGNORED_ERRNOS
+    # 不含 EACCES），那种输入与「不可读」同归一类：判不出来就不删。
+    try:
+        unreadable = home.exists() and not os.access(home, os.R_OK | os.X_OK)
+    except OSError:
+        unreadable = True
+    if unreadable:
+        raise errors.PurgeRefused(f"目录不可读，拒绝生成销毁计划：{home}",
+                                  hint="请先修正权限（需要读 + 进入权限），再重试")
     # --all 时 items 仍全部列出：计划表要显示 index/keys 的重建代价（spec §3 的 --all 表样）
     items = tuple(_item(a) for a in artifacts() if all_ or a.scope in scopes)
     loose: tuple[pathlib.Path, ...] = ()
@@ -150,8 +214,9 @@ def _escapes_home(link: pathlib.Path, home: pathlib.Path) -> bool:
     → 无法保证 → True（保守，与「判不出来就别删」一致）。
 
     判据跟着删除原语走，不是「见到链接就拒」：
-      · 具名范围走 unlink → 只删链接，**目标必留存** → 无条件拒绝（见 execute 里的 links）；
-      · --all 树内走 rmtree → 目标也在树内时会一并删除，不存在 false-clean。
+      · **文件型**具名范围走 unlink → 只删链接，**目标必留存** → 无条件拒绝（见 execute 的 links）；
+      · **目录型**具名范围（`tmp/`）与 `--all` 走 rmtree → 目标也在树内时会一并删除，不存在
+        false-clean，故这两条走本函数判定。
     只有目标逃出树外时才真的对应 spec §5.1 第 2 步那句「其实还在外置盘上」。
 
     为什么不能一律拒绝：vector.py 用 huggingface_hub 下载模型，其 blob/snapshot 布局会在
@@ -216,14 +281,10 @@ def _tree_size(root: pathlib.Path) -> int:
 
 def execute(plan: PurgePlan) -> PurgeReport:
     """执行删除。**部分失败不中止**：敏感度高的产物应当继续被清除（spec §5.1 第 4 步）。"""
-    held = {i.artifact.path: pids
-            for i in plan.items if i.exists and (pids := _holders(i.artifact.path))}
-    if held:
-        detail = "；".join(f"{p.name} 被 pid {','.join(map(str, v))} 持有"
-                          for p, v in held.items())
-        # 措辞覆盖全部具名范围：held 可能是 passphrase.json 或解密 tmp，不只是 index
-        raise errors.PurgeRefused(f"有进程正在使用待删产物，拒绝删除：{detail}",
-                                  hint="等该进程结束（如向量构建任务）后重试")
+    # 与 plan() 同一道闸门，且必须是第一条语句：CLI 是「先 plan → 再 execute」，plan 到
+    # execute 之间 paths.HOME_DIR 可能被改指（或首次 plan 走的不是这条路径），到这里就
+    # 只剩「已经开始删」了。
+    _check_home_is_sane(paths.HOME_DIR)
 
     # 符号链接检查在 **execute 时刻**重算，不用 plan 时刻的 i.is_symlink：CLI 是
     # 「先 plan（dry-run）→ 用户确认 → 再 execute」，这个窗口内路径被换成链接就漏掉了。
@@ -235,23 +296,56 @@ def execute(plan: PurgePlan) -> PurgeReport:
     #   rmtree(整树) 树内含 symlink → **树被删掉，而链接的目标明文原封不动留在盘上**。
     # 第三种才是真正的危险：删除后核查会报「计划内路径已清空」，用户以为明文没了，
     # 其实还在外置盘上——正是 spec §5.1 第 2 步要防的 false-clean。
-    links = [i.artifact.path for i in plan.items if i.artifact.path.is_symlink()]
-    if plan.all_:
-        # spec §5.1 第 2 步要求对**每个待删路径**做 lstat。--all 的待删路径是**整棵树**
-        # ——plan.loose 只有顶层，那是 §3 对「计划表逐条展示」的要求，与删除范围是两回事。
-        # 树内任意深度的符号链接都会被 rmtree 当作普通条目 unlink、目标明文留存，而删除后
-        # 核查会报「计划内路径已清空」——正是该步点名的「以为明文没了，其实还在外置盘上」。
-        # 所以这里走一遍整棵树，而不是只看 plan.loose——但只拒绝**目标逃出树外**的链接
-        # （树内目标会被 rmtree 一并删掉，不存在 false-clean；一律拒绝会让标准安装永远跑不起来）。
-        links += [p for p in _tree_entries(paths.HOME_DIR)
-                  if p.is_symlink() and _escapes_home(p, paths.HOME_DIR)]
-        if paths.HOME_DIR.is_symlink():
-            links.append(paths.HOME_DIR)
+    #
+    # 顺序：这一段在**占用检查之前**。两者都会拒绝，但这里的理由更具体、也更便宜；而且
+    # 占用检查走 `lsof <path>`，**lsof 会解析符号链接**——产物是链接时它会报出一堆持有
+    # **目标**的不相关进程（实测：拿 /etc/hosts 做目标，lsof 列出 7 个持有者），用户照着
+    # 那条理由去杀进程也删不掉这个链接，真正的原因只是它是链接。
+    try:
+        links = [i.artifact.path for i in plan.items
+                 if i.artifact.path.is_symlink()
+                 and (i.artifact.kind == "file" or _escapes_home(i.artifact.path, paths.HOME_DIR))]
+        # kind="dir" 的**具名**产物（tmp/）与 --all 走同一个原语 rmtree，故同样要扫它整棵树：
+        # 树内链接会被 rmtree 当作普通条目 unlink、目标明文留存，而核查会报「已清空」——
+        # 实测 `tmp/evil.db -> /outside/secret.db` + `purge --tmp --yes` 退 0、「已删除 1 项」，
+        # 树外那 700 KB 一个字都没提。判据仍是 _escapes_home 而不是「见到链接就拒」：树内目标
+        # 会被 rmtree 一并删掉，一律拒绝会让 blob/snapshot 式布局永远删不掉。
+        for i in plan.items:
+            if i.artifact.kind == "dir" and not i.artifact.path.is_symlink():
+                links += [p for p in _tree_entries(i.artifact.path)
+                          if p.is_symlink() and _escapes_home(p, paths.HOME_DIR)]
+        if plan.all_:
+            # spec §5.1 第 2 步要求对**每个待删路径**做 lstat。--all 的待删路径是**整棵树**
+            # ——plan.loose 只有顶层，那是 §3 对「计划表逐条展示」的要求，与删除范围是两回事。
+            # 树内任意深度的符号链接都会被 rmtree 当作普通条目 unlink、目标明文留存，而删除后
+            # 核查会报「计划内路径已清空」——正是该步点名的「以为明文没了，其实还在外置盘上」。
+            # 所以这里走一遍整棵树，而不是只看 plan.loose——但只拒绝**目标逃出树外**的链接
+            # （树内目标会被 rmtree 一并删掉，不存在 false-clean；一律拒绝会让标准安装永远跑不起来）。
+            links += [p for p in _tree_entries(paths.HOME_DIR)
+                      if p.is_symlink() and _escapes_home(p, paths.HOME_DIR)]
+            if paths.HOME_DIR.is_symlink():
+                links.append(paths.HOME_DIR)
+    except OSError as exc:
+        # 这条 lstat 需要父目录的 +x。权限不足时它不是「没找到路径」而是**判不出来**，
+        # 此前会以裸 PermissionError 穿透 execute（CLI 那边就是一个 traceback）。core 层
+        # 一律抛项目异常，且判不出来就该拒绝——所以归到符号链接这道闸门的拒绝里。
+        raise errors.PurgeRefused(
+            f"无法判定待删路径是否为符号链接，拒绝删除：{exc}",
+            hint="请先修正权限（父目录需要读 + 进入权限），再重试") from exc
     links = list(dict.fromkeys(links))     # 同一路径可能既在 items 又在树扫描里，去重
     if links:
         raise errors.PurgeRefused(
             "待删路径是符号链接，拒绝删除：" + "、".join(str(p) for p in links),
             hint="unlink 只删链接不删目标，会造成「已清干净」的假象；请手工处理")
+
+    held = {i.artifact.path: pids
+            for i in plan.items if i.exists and (pids := _holders(i.artifact.path))}
+    if held:
+        detail = "；".join(f"{p.name} 被 pid {','.join(map(str, v))} 持有"
+                          for p, v in held.items())
+        # 措辞覆盖全部具名范围：held 可能是 passphrase.json 或解密 tmp，不只是 index
+        raise errors.PurgeRefused(f"有进程正在使用待删产物，拒绝删除：{detail}",
+                                  hint="等该进程结束（如向量构建任务）后重试")
 
     removed: list[pathlib.Path] = []
     failed: list[tuple[pathlib.Path, str]] = []

@@ -5,6 +5,8 @@
 于是 `-n -1` **静默丢掉一条**消息、`-n 0` 返回空；`search` 则退化成无上限全表
 扫描。归一化现已收进 usecases（见 tests/test_usecases.py），CLI 只负责渲染。
 """
+import os
+import pathlib
 from types import SimpleNamespace
 
 import pytest
@@ -311,6 +313,92 @@ def test_render_plan_uses_decimal_units(tmp_path, monkeypatch, capsys):
     assert "2.0 MB" in out, f"十进制 MB 未出现：{out!r}"
     assert "182 B" in out, f"小文件必须印字节数而不是 0.0 MiB：{out!r}"
     assert "MiB" not in out and "4.94 GB" not in out
+
+
+def test_purge_all_refuses_on_empty_home_env(tmp_path, monkeypatch, capsys):
+    """`AGENT_WECHAT_HOME=`（设了但为空）会让 os.environ.get 返回 ""，
+    而 Path("") 是 `.`——`purge --all --yes` 因此会递归删掉当前工作目录。
+    实测确认过：目录连内容全没，而最后一行还打着 ✅。这是一道数据丢失闸门。
+
+    注意这条**不走 `_isolate`**：`_isolate` 会把 HOME_DIR patch 成绝对路径，正好把这个缺陷
+    掩掉。也因此它必须由 plan() 的第一道闸门拦下——任何一次 execute 都已经太晚了。"""
+    from agent_wechat import paths as _paths
+    monkeypatch.setenv("AGENT_WECHAT_HOME", "")
+    monkeypatch.setattr(_paths, "HOME_DIR", pathlib.Path(""))
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["purge", "--all", "--yes"])
+    assert ei.value.code == 1
+    err = capsys.readouterr().err
+    assert "相对路径" in err and "Traceback" not in err
+
+
+def test_purge_dry_run_prints_absolute_target(tmp_path, monkeypatch, capsys):
+    """计划表必须印出绝对目标目录。此前只印相对路径（`keys passphrase.json`、`all sub`），
+    用户按下 --yes 时看不出这些相对路径指的是当前工作目录。"""
+    home = _isolate(tmp_path, monkeypatch)
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["purge", "--all"])
+    assert ei.value.code == 0
+    out = capsys.readouterr().out
+    assert f"目标目录：{home.resolve()}" in out, f"计划表未印绝对目标：{out!r}"
+
+
+def test_purge_index_refuses_when_artifact_parent_unreadable(tmp_path, monkeypatch, capsys):
+    """产物父目录不可搜索时，CLI 必须是「一行中文 + 退出码 1」，不是 traceback。
+    实测（修复前）：`purge --index --yes` 从 purge.py 的 is_symlink() 抛裸 PermissionError
+    穿透到用户面前。这里把 index.db 挪进一个 mode 000 的子目录——HOME_DIR 本身仍可读，
+    所以 plan 那道「目录不可读」的闸门不触发，走的正是这条历史 traceback 路径。"""
+    from agent_wechat import store as _store
+    home = _isolate(tmp_path, monkeypatch)
+    sub = home / "sub"; sub.mkdir()
+    (sub / "index.db").write_bytes(b"x" * 10)
+    monkeypatch.setattr(_store, "DB_PATH", sub / "index.db")
+    os.chmod(sub, 0o000)
+    try:
+        with pytest.raises(SystemExit) as ei:
+            cli.main(["purge", "--index", "--yes"])
+    finally:
+        os.chmod(sub, 0o700)
+    assert ei.value.code == 1
+    err = capsys.readouterr().err
+    assert "Traceback" not in err
+    assert len(err.strip().splitlines()) == 1, f"应当是单行中文，实际：{err!r}"
+    assert (sub / "index.db").exists()
+
+
+def test_purge_all_yes_reports_home_removed(tmp_path, monkeypatch, capsys):
+    """`--all` 成功时 removed 数的是 HOME_DIR 的顶层条目，目录自身不在其中——空目录的 --all
+    会印「已删除 0 项，释放 0 B」，用户从输出里看不出「目录本身也没了」。"""
+    home = _isolate(tmp_path, monkeypatch)
+    (home / "index.db").write_bytes(b"x" * 10)
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["purge", "--all", "--yes"])
+    assert ei.value.code == 0
+    out = capsys.readouterr().out
+    assert not home.exists()
+    assert "数据目录本身" in out, f"未报告目录自身也被删：{out!r}"
+
+
+def test_purge_all_loose_rows_name_known_artifacts(tmp_path, monkeypatch, capsys):
+    """`--all` 的 loose 行此前一律印「不属于任何具名范围」——对 models/ 与 tasks.json 是误导：
+    它们是 vector.MODEL_CACHE_DIR 与 tasks.TASKS_FILE，有拥有者，只是没有对应的 CLI 开关。
+    spec §3 要求每行点名它属于哪个已知产物，或标「散落文件」。"""
+    from agent_wechat import tasks as _tasks, vector as _vector
+    home = _isolate(tmp_path, monkeypatch)
+    monkeypatch.setattr(_vector, "MODEL_CACHE_DIR", home / "models")
+    monkeypatch.setattr(_tasks, "TASKS_FILE", home / "tasks.json")
+    (home / "models").mkdir()
+    (home / "tasks.json").write_text("{}")
+    (home / "leaked.db").write_bytes(b"stray")
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["purge", "--all"])
+    assert ei.value.code == 0
+    out = capsys.readouterr().out
+    lines = {name: next(l for l in out.splitlines() if name in l)
+             for name in ("models", "tasks.json", "leaked.db")}
+    assert "已知产物" in lines["models"] and "向量模型缓存" in lines["models"]
+    assert "已知产物" in lines["tasks.json"] and "长任务注册表" in lines["tasks.json"]
+    assert "不属于任何具名范围" in lines["leaked.db"]
 
 
 def test_purge_dry_run_prints_plan_and_deletes_nothing(tmp_path, monkeypatch, capsys):
