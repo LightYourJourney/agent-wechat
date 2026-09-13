@@ -25,6 +25,17 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/agent_wechat"]
 
+# 默认（不给 include/exclude）hatchling 按 VCS 跟踪面把整棵工作树打进 sdist——
+# 实测 55 个条目，含 docs/(13) tests/(14) skills/ spike/ .mcp.json .codex/。本项目
+# 「个人自用、不得公开分发」（docs/SECURITY.md §5），故只保留装包与运行必需的最小面。
+# README.md 必须在列：构建 wheel 时构建后端要读它生成 PKG-INFO。
+[tool.hatch.build.targets.sdist]
+include = [
+    "src/agent_wechat",
+    "pyproject.toml",
+    "README.md",
+]
+
 [dependency-groups]
 dev = [
     "pytest>=9.1.1",

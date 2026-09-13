@@ -22,6 +22,11 @@
 
 同时修正：`paths.key_info_db` 此前返回 `.dat` 而非 docstring 所述的 `.db`。
 
+打包面：`pyproject.toml` 未限定 sdist 收录范围，hatchling 默认按 VCS 跟踪面整棵工作树打包
+——`uv build --sdist` 实测产出 55 个条目，含 `docs/`(13)、`tests/`(14)、`skills/`、`spike/`、
+`.mcp.json`、`.codex/config.toml`。现用 `[tool.hatch.build.targets.sdist] include` 收窄到
+`src/agent_wechat` + `pyproject.toml` + `README.md`（21 条），并已验证可从该 sdist 反向构建 wheel。
+
 ## [0.1.0] - 2026-09-10
 
 首个可用版本。**仅限本机自用，勿公开分发**（见 SECURITY.md §5）。
