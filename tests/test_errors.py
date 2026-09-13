@@ -107,3 +107,12 @@ def test_generic_payload_redacted_but_keeps_diagnosis():
     payload = errors.generic_payload(sqlite3.OperationalError(f"boom {key}"))
     assert key not in payload["error"]
     assert "OperationalError" in payload["error"] and "boom" in payload["error"]
+
+
+def test_purge_refused_is_a_project_error_with_hint():
+    """purge 的拒绝要走项目错误契约，否则 PermissionError/OSError 会穿透 CLI 漏斗
+    变成 traceback——正是 C1 要消灭的东西（spec §4）。"""
+    exc = errors.PurgeRefused("有进程正在使用检索库", hint="等该进程结束后重试")
+    assert isinstance(exc, errors.AgentWeChatError)
+    assert not isinstance(exc, SystemExit)          # 绝不能是会杀死 server 的 SystemExit
+    assert errors.to_text(exc) == "有进程正在使用检索库（等该进程结束后重试）"

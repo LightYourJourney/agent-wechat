@@ -4,13 +4,13 @@
 并断言 artifacts() 解析出的路径确实不在真实数据目录下。写成 autouse 而不是单个测试函数
 是有意的——单独跑本文件里任何一个测试时，保护都必须生效（spec §7）。
 """
-import pathlib
-
 import pytest
 
 from agent_wechat import decrypt, keys, paths, purge, store, tasks, vector
 
-REAL_HOME = pathlib.Path.home() / ".agent-wechat"
+# 导入时取值：此刻 autouse fixture 尚未 patch，paths.HOME_DIR 就是真实路径。
+# 不重述 paths 的解析逻辑（它读 AGENT_WECHAT_HOME）——那正是 purge.py 明令禁止的第二份来源。
+REAL_HOME = paths.HOME_DIR
 
 
 @pytest.fixture(autouse=True)
@@ -22,7 +22,10 @@ def _never_touch_real_home(monkeypatch, tmp_path):
     monkeypatch.setattr(store, "DB_PATH", home / "index.db")
     monkeypatch.setattr(tasks, "TASKS_FILE", home / "tasks.json")
     monkeypatch.setattr(vector, "MODEL_CACHE_DIR", home / "models")
-    for a in purge.artifacts():
+    arts = purge.artifacts()
+    assert len(arts) == 5, \
+        f"红线：清单条目数由 5 变为 {len(arts)}，必有产物未被保护，须先核对再改这个数"
+    for a in arts:
         assert a.path != REAL_HOME and REAL_HOME not in a.path.parents, \
             f"红线：{a.path} 指向真实数据目录"
 

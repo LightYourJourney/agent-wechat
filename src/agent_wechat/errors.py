@@ -85,6 +85,14 @@ class TaskNotFound(AgentWeChatError):
     """查询的任务 id 不在注册表里（含重启后记录仍在、但 id 写错的情形）。"""
 
 
+class PurgeRefused(AgentWeChatError):
+    """purge 的拒绝或失败。hint 承载具体原因（被占用 / 符号链接 / 权限）。
+
+    OS 层异常（PermissionError / OSError / shutil.Error）由 purge.py 捕获后重抛为本类：
+    本模块的契约是 core 只抛项目异常，适配层才做翻译。
+    """
+
+
 def to_payload(exc: AgentWeChatError) -> dict:
     """异常 → MCP 工具错误信封。形状与旧手写的 {"error"[, "hint"]} 逐字节一致。"""
     payload = {"error": redact(str(exc))}
