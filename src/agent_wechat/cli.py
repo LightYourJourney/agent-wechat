@@ -207,6 +207,61 @@ def cmd_semantic(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_purge(args: argparse.Namespace) -> int:
+    """销毁本地产物。**默认 dry-run**：不带 --yes 只打印计划，一个字节不删。
+
+    --all 的语义是「整个 HOME_DIR」（超集），不是三个具名范围的并集——这样才扫得掉
+    `decrypt --out` 落在 HOME_DIR 下的散落明文（SECURITY.md:13 标为极高敏感）。
+    """
+    from . import purge
+
+    scopes = frozenset(s for s, on in
+                       (("keys", args.keys), ("index", args.index), ("tmp", args.tmp)) if on)
+    plan = purge.plan(scopes, all_=args.all)
+
+    if not args.yes:
+        _render_plan(plan, scopes, args.all)
+        return 0
+
+    report = purge.execute(plan)
+    freed = f"{report.freed / 1024**2:.1f} MiB" if report.freed else "0 B"
+    print(f"已删除 {len(report.removed)} 项，释放 {freed}。")
+    for p, err in report.failed:
+        print(f"  ⚠️ 未能删除 {p}：{err}", file=sys.stderr)
+    _render_residue(purge.verify(plan))
+    return 1 if report.failed else 0
+
+
+def _render_plan(plan, scopes, all_: bool) -> None:
+    print("将删除：")
+    for i in plan.items:
+        size = f"{i.size / 1024**3:.2f} GB" if i.size >= 1024**3 else \
+               (f"{i.size / 1024**2:.1f} MiB" if i.size else "—")
+        mark = "" if i.exists else "（不存在）"
+        print(f"  {i.artifact.scope:<7} {i.artifact.path}  {size:>10}  "
+              f"{'敏感' if i.artifact.sensitive else '否':<4} {i.artifact.rebuild}{mark}")
+    for p in plan.loose:
+        print(f"  {'all':<7} {p}  （不属于任何具名范围）")
+    print("\n未删除任何文件。加 --yes 执行。")
+
+
+def _render_residue(rep) -> None:
+    print("\n残留核查：")
+    for p in rep.not_removed:
+        print(f"  ❌ 计划内仍未删除：{p}")
+    for p in rep.kept:
+        print(f"  · 按范围保留 / 散落：{p}")
+    for name, pids in rep.held.items():
+        print(f"  ⚠️ {name} 仍被 pid {','.join(map(str, pids))} 持有"
+              f"（空间要等该进程退出才释放）")
+    for x in rep.tmp_leaks:
+        print(f"  ⚠️ $TMPDIR 遗留：{x}")
+    print(f"  Time Machine 排除：{rep.tm_excluded}")
+    print(f"  本地快照：{rep.snapshots}")
+    if not (rep.not_removed or rep.kept or rep.held or rep.tmp_leaks):
+        print("  ✅ 计划内路径已清空，未发现残留")
+
+
 def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(prog="agent-wechat",
                                 description="macOS 微信聊天记录读取 + MCP Server（仅限本人已登录账号）")
@@ -268,7 +323,22 @@ def main(argv: list[str] | None = None) -> None:
     sp.add_argument("--account")
     sp.set_defaults(fn=cmd_semantic)
 
+    sp = sub.add_parser("purge", help="销毁本地产物（默认 dry-run，加 --yes 才真删）")
+    sp.add_argument("--keys", action="store_true", help="密钥缓存 passphrase.json")
+    sp.add_argument("--index", action="store_true", help="本地检索库 index.db（含向量，5.3 GB）")
+    sp.add_argument("--tmp", action="store_true", help="解密临时目录")
+    sp.add_argument("--all", action="store_true",
+                    help="整个 ~/.agent-wechat（含 models/ 与散落文件），与具名范围互斥")
+    sp.add_argument("--yes", action="store_true", help="真正执行删除")
+    sp.set_defaults(fn=cmd_purge)
+
     args = p.parse_args(argv)
+    if args.cmd == "purge":
+        named = args.keys or args.index or args.tmp
+        if args.all and named:
+            p.error("--all 不能与 --keys/--index/--tmp 同时使用")
+        if not args.all and not named:
+            p.error("必须指定至少一个范围：--keys / --index / --tmp / --all")
     try:
         code = args.fn(args)
     except errors.ContactNotFound as exc:

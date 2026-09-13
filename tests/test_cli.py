@@ -161,3 +161,115 @@ def test_contact_miss_suffix_names_the_cli_command(monkeypatch, capsys):
     err = capsys.readouterr().err
     assert err.strip() == "找不到联系人「张三」，请用 contacts 查询"
     assert "list_contacts" not in err          # 不能把 MCP 工具名报给 CLI 用户
+
+
+# ---------- purge：手写互斥（spec §3）与 dry-run 渲染（spec §6） ----------
+
+def test_purge_without_scope_exits_2(capsys):
+    """用法错误 = 2（仓库既有约定：argparse 的参数错是 2、应用层是 1，见 cli.py:281）。"""
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["purge"])
+    assert ei.value.code == 2
+
+
+def test_purge_all_with_named_scope_exits_2():
+    """--all 与具名范围互斥。**用手写校验 + parser.error()**，不用 argparse 互斥组：
+    互斥组不支持嵌套，把四个 flag 放一组会连 --index --tmp 一起禁掉（spec §3）。"""
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["purge", "--all", "--keys"])
+    assert ei.value.code == 2
+
+
+def _isolate(tmp_path, monkeypatch):
+    """把 purge 会碰的路径全部指向 tmp_path，并把外部命令注入桩。patch 的是**模块属性**——
+    purge.py 用 `from . import keys` 取常量，所以 patch keys.CACHE_FILE 才生效
+    （`from .keys import CACHE_FILE` 那种写法 patch 不掉，会删到真实数据，spec §4）。"""
+    from agent_wechat import keys, paths, purge, store
+    home = tmp_path / "home"; home.mkdir(parents=True)
+    monkeypatch.setattr(paths, "HOME_DIR", home)
+    monkeypatch.setattr(keys, "CACHE_FILE", home / "passphrase.json")
+    monkeypatch.setattr(store, "DB_PATH", home / "index.db")
+    # lsof（_holders）与 tmutil（_tmutil）都经 _run：桩打在最低层，一处覆盖两个外部命令。
+    # 不加这个，任何走进 execute/verify 的 CLI 测试都会去跑**真实的** lsof 与 tmutil。
+    monkeypatch.setattr(purge, "_run", lambda *a, **kw: type("R", (), {"stdout": ""})())
+    # $TMPDIR 同样要隔离：verify 会 glob 它找 awcap_* 残留，否则读的是本机真实临时目录
+    monkeypatch.setenv("TMPDIR", str(tmp_path / "tmpdir"))
+    return home
+
+
+def test_purge_named_scopes_can_combine(tmp_path, monkeypatch):
+    """三个具名范围可任意组合——这正是 argparse 互斥组做不到的那一半（spec §3）。"""
+    home = _isolate(tmp_path, monkeypatch)
+    (home / "index.db").write_bytes(b"x" * 10)
+    # main() 结尾是 raise SystemExit(code)，**从不返回**（cli.py:284）。既有测试一律
+    # 写成 pytest.raises(SystemExit) 再断 ei.value.code（tests/test_cli.py:70-71 等）。
+    # 写成 `assert cli.main(...) == 0` 的话 SystemExit(0) 会逃出测试体，测试以未捕获
+    # 异常失败而非断言失败，实现者会误判成「实现没跑通」。
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["purge", "--index", "--tmp"])             # dry-run，退出 0
+    assert ei.value.code == 0
+    assert (home / "index.db").exists()                     # 一个字节没删
+
+
+def test_purge_refused_renders_single_line_not_traceback(tmp_path, monkeypatch, capsys):
+    """有进程持有产物时，CLI 必须打一行中文（含 hint）到 stderr 并退 1，
+    而不是让 PurgeRefused 穿透成 traceback——这正是 C1 契约要消灭的东西，spec §6 有明文行。
+
+    **这条路径此前零覆盖**，而且藏法和 T6 那个 NameError 一模一样：_isolate 的 _run 桩
+    令 _holders 恒返回 []，于是占用拒绝这个分支一次都不会进——被桩挡住的不可达代码，
+    看起来像被测过。"""
+    from agent_wechat import purge as _purge
+    home = _isolate(tmp_path, monkeypatch)
+    (home / "passphrase.json").write_bytes(b"x")
+    monkeypatch.setattr(_purge, "_holders",
+                        lambda p: [4242] if p.name == "passphrase.json" else [])
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["purge", "--keys", "--yes"])
+    assert ei.value.code == 1
+    err = capsys.readouterr().err
+    assert "4242" in err, f"拒绝理由必须带 pid，实际：{err!r}"
+    assert "（" in err, f"to_text 应渲染成 message（hint），实际：{err!r}"
+    assert "Traceback" not in err
+    assert (home / "passphrase.json").exists()          # 拒绝时一个字节都没删
+
+
+def test_render_residue_shows_held_with_pids(capsys):
+    """held 的**渲染层**钉子。T6 的复审指出：execute 在有进程持有时会拒绝执行，
+    所以走 cli.main 不可能构造出「verify 时有进程持有」的状态——这条只能直接单测渲染函数。
+    渲染里 `','.join(map(str, pids))` 对空列表会打印出「仍被 pid  持有」（pid 为空），
+    而那正是一条对用户说的假话。"""
+    from agent_wechat import cli as _cli, purge as _purge
+    rep = _purge.ResidueReport(not_removed=(), kept=(), held={"index.db": [4242]},
+                               tmp_leaks=(), tm_excluded="否", snapshots="无输出")
+    _cli._render_residue(rep)
+    out = capsys.readouterr().out
+    assert "index.db" in out and "4242" in out
+    assert "pid  持有" not in out           # 空 pid 的假警告形态
+
+
+def test_purge_yes_executes_and_reports(tmp_path, monkeypatch, capsys):
+    """--yes 是唯一真正删东西的路径，其汇总行「已删除 N 项，释放 X」是两条裁定的**唯一
+    用户可见出口**——而 T7 的四个测试此前全是 dry-run 或以退出码 2 结束，这条路径零覆盖，
+    只有 T9 的手工验收护着，手工验收不防回归。"""
+    home = _isolate(tmp_path, monkeypatch)
+    (home / "passphrase.json").write_bytes(b"x" * (2 * 1024**2))   # 2 MiB，便于断言体积
+    (home / "index.db").write_bytes(b"y" * 3000)
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["purge", "--keys", "--yes"])
+    assert ei.value.code == 0
+    assert not (home / "passphrase.json").exists()
+    assert (home / "index.db").exists()          # 范围外的一个字节没删
+    out = capsys.readouterr().out
+    assert "已删除 1 项" in out
+    assert "2.0 MiB" in out, f"freed 必须反映真实字节数，而实际输出是：{out!r}"
+
+
+def test_purge_dry_run_prints_plan_and_deletes_nothing(tmp_path, monkeypatch, capsys):
+    home = _isolate(tmp_path, monkeypatch)
+    (home / "index.db").write_bytes(b"x" * 2048)
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["purge", "--index"])
+    assert ei.value.code == 0
+    out = capsys.readouterr().out
+    assert "将删除" in out and "未删除任何文件" in out
+    assert (home / "index.db").exists()
