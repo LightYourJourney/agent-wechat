@@ -100,20 +100,28 @@ uv run agent-wechat semantic "上次说的那个爬山的安排"
 ```
 agent-wechat/
 ├── README.md              ← 本文件
+├── CONTEXT.md             领域词表（代码与文档共用的术语）
 ├── .mcp.json              Claude Code 项目级 MCP 配置
+├── .codex/config.toml     Codex 项目级 MCP 配置（与 .mcp.json 同构的 TOML 版）
 ├── src/agent_wechat/      核心包（模块职责见 ARCHITECTURE.md）
+│   ├── paths.py           路径常量与账号目录解析
 │   ├── account.py         登录态检测与账号识别
 │   ├── keys.py            密钥派生/校验/缓存
 │   ├── bootstrap.py       lldb 捕获（sudo）
 │   ├── decrypt.py         快照与解密
+│   ├── errors.py          统一错误契约
+│   ├── messages.py        messages 行契约
 │   ├── reader.py          消息读取与解码
-│   ├── export.py          导出管道与长任务
+│   ├── export.py          导出管道与水位线续跑
 │   ├── store.py           本地检索库
 │   ├── search.py          检索路由
 │   ├── vector.py          向量索引与语义检索
+│   ├── tasks.py           长任务注册表
+│   ├── usecases.py        用例层（两个入口共享的入口策略）
 │   ├── mcp_server.py      MCP 工具层
 │   └── cli.py             命令行入口
 ├── tests/                 集成测试（合成加密库，不依赖真机）
+├── skills/                随仓库分发的 Claude Code Skill（wechat-reply）
 ├── spike/                 密钥可行性探索脚本（一次性，留档）
 └── docs/
     ├── INSTALL.md         安装与配置
@@ -141,6 +149,7 @@ agent-wechat/
 | [SECURITY.md](docs/SECURITY.md) | 隐私、密钥安全、法律风险 |
 | [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | 常见故障与修复 |
 | [FAQ.md](docs/FAQ.md) | 用户常见疑问 |
+| [CONTEXT.md](CONTEXT.md) | 领域词表（账号/会话/分片/水位线/用例…） |
 | [CHANGELOG.md](docs/CHANGELOG.md) / [CONTRIBUTING.md](docs/CONTRIBUTING.md) | 版本与贡献 |
 
 ## 许可证与免责声明

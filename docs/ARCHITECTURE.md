@@ -31,6 +31,7 @@ src/agent_wechat/
 ├── store.py        本地检索库：DDL、幂等 upsert、水位线、FTS 触发器
 ├── search.py       检索路由：trigram FTS / LIKE 兜底
 ├── vector.py       向量索引与语义检索（唯一接触 fastembed 与 sqlite-vec 的隔离带）
+├── tasks.py        长任务注册表：后台线程 + 进度落盘 + 中断回收（不认识任何具体任务）
 ├── usecases.py     用例层：两个入口共享的入口策略（参数归一化、账号/会话解析、结果形状）
 ├── mcp_server.py   MCP 薄适配层（8 工具，只做参数编组与渲染）
 └── cli.py          命令行入口（只做参数编组与渲染）

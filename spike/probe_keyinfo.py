@@ -28,6 +28,8 @@ import pathlib
 
 HOME = pathlib.Path.home()
 DOC = HOME / "Library/Containers/com.tencent.xinWeChat/Data/Documents"
+# 账号目录是占位符：跑之前换成 `agent-wechat status` 列出的你自己的账号目录名。
+# 仓库内一律不放真实 wxid（见 CONTRIBUTING.md §4 的敏感数据自查）。
 KDB = DOC / "xwechat_files/all_users/login/wxid_testacct01/key_info.db"
 MAIN = DOC / "xwechat_files/wxid_testacct01_ab12/db_storage"
 

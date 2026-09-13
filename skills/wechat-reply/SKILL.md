@@ -14,7 +14,7 @@ description: 基于本机微信聊天记录为指定联系人生成回复建议�
 2. `get_recent_messages(<username>, limit=50)` → 拿近期上下文（时间正序）。
 3. 若近期信息不足或需要背景，`search_history(<关键词>, contact=<username>)` 补充历史。
    （search_history 查询本地索引；若提示索引为空，先让用户运行
-   `uv run --directory /Users/you/agent-wechat agent-wechat export`）
+   `uv run --directory ~/agent-wechat agent-wechat export`）
 4. 综合分析后生成 **2-3 条风格不同的候选回复**，每条附一句适用场景说明：
    - 贴合对方的语气与关系远近（看对方怎么写的）
    - 回应对方最后一条消息的实际内容，不要答非所问

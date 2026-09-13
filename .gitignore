@@ -2,6 +2,32 @@
 __pycache__/
 *.pyc
 .pytest_cache/
-plain*.db
+
+# 本机工具状态：只在本机有意义，换机器会重新生成；不靠开发者个人全局 ignore
+.claude/
+.superpowers/
+
+# 构建产物（hatchling 后端，uv build 会产出）
+dist/
+build/
+*.egg-info/
+
+# macOS / 编辑器
+.DS_Store
+.idea/
+.vscode/
+
+# 冲突与备份残留
+*.orig
+*.rej
+*~
+*.bak
+*.log
+
+# 本地检索库（解密后的明文聊天索引）。默认落在 ~/.agent-wechat（仓库外，见
+# paths.HOME_DIR），仅当 AGENT_WECHAT_HOME 被指到仓库内才会出现在这里。
+# 三类后缀一律宽匹配：只挡基库会让 <db>-wal 被忽略而基库被提交，两边不一致。
+*.db
 *.db-wal
 *.db-shm
+*.db-journal

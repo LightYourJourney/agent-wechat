@@ -5,7 +5,7 @@
 
 ### 架构深化重构（C1–C8 + 3 个缺陷修复）
 
-内部重构为主。用户可见的变更**只有下列 5 处**：
+内部重构为主。用户可见的变更**只有下列 7 处**：
 
 - CLI `recent -n` 的上界与 MCP 对齐 **1-500**（原为无上限）
 - `export_full_history` 的 `contact` 歧义从「误报成找不到」改为返回 `need_confirm`（候选含 kind）
@@ -16,6 +16,9 @@
 - **模型不一致**的错误现在带「：请改用 rebuild=True 重建」后缀与 hint——受影响的是
   MCP 的 `semantic_search` / `build_vector_index` 与 CLI 的 `semantic` / `vector-build`
   （原 `semantic_search` 的文案止于「不一致」，无后缀、无 hint）
+- **全量导出**（`--full`）此前会清掉**其它账号**的导出水位线，令它们下次白跑一次全量；
+  现只清目标账号
+- 多账号 `vector-build` 的进度（`rows`）会随账号切换**倒退**；现为全局累计
 
 同时修正：`paths.key_info_db` 此前返回 `.dat` 而非 docstring 所述的 `.db`。
 

@@ -17,7 +17,7 @@ ACC = "wxid_testacct01_ab12"
 
 def _lsof(path: str) -> str:
     """一行形如真实 lsof 输出的记录；NAME 列是打开文件的绝对路径。"""
-    return f"WeChat  1234 leo  12r  REG  1,2  0  12345  {path}"
+    return f"WeChat  1234 user  12r  REG  1,2  0  12345  {path}"
 
 
 def _stdout(text: str) -> SimpleNamespace:
