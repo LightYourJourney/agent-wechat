@@ -103,11 +103,19 @@ class PurgeReport:
     home_removed: bool
 
 
-def _remove(item: PlanItem) -> None:
+def _remove(item: PlanItem) -> bool:
+    """删除单个产物，返回是否真的删掉了东西。kind 决定 unlink 还是 rmtree——调用方不猜。
+
+    入口重查存在性：CLI 是「先 plan（默认 dry-run）→ 用户确认 → 再 execute」，
+    两步之间产物可能已被删掉，spec §5.1 第 5 步要求这算**成功**而不是失败。
+    """
+    if not item.artifact.path.exists():
+        return False
     if item.artifact.kind == "file":
         item.artifact.path.unlink(missing_ok=True)
     else:
         shutil.rmtree(item.artifact.path)
+    return True
 
 
 def _tree_size(root: pathlib.Path) -> int:
@@ -139,9 +147,15 @@ def execute(plan: PurgePlan) -> PurgeReport:
             if not item.exists:
                 continue
             try:
-                _remove(item)
+                # 目录的 lstat().st_size 是 inode 自身大小（几十到几百字节），不是整树体积。
+                # 直接拿它相加会让 `purge --tmp`——解密明文的临时目录——无论删掉多少都报
+                # 「释放 ~96 B」。与 --all 那条已修的同型：对销毁操作报一个假数字，且这处
+                # 更隐蔽（看起来合理的 96 B，而非显眼的 0 B）。故目录先量整树，且必须在删之前量。
+                size = _tree_size(item.artifact.path) if item.artifact.kind == "dir" else item.size
+                if not _remove(item):
+                    continue          # 计划生成后已被删掉：spec §5.1 第 5 步算成功，不计数
                 removed.append(item.artifact.path)
-                freed += item.size
+                freed += size
             except OSError as exc:
                 failed.append((item.artifact.path, str(exc)))
 
@@ -157,6 +171,9 @@ def execute(plan: PurgePlan) -> PurgeReport:
             # 用 onexc 不用 onerror——后者在 3.12 已弃用，本仓库 requires-python >=3.12。
             shutil.rmtree(paths.HOME_DIR,
                           onexc=lambda fn, p, exc: failed.append((pathlib.Path(p), str(exc))))
+            if paths.HOME_DIR.exists():
+                # 部分失败：把没删掉的那部分从 freed 里扣回去，否则报出的体积大于实际释放的
+                freed -= _tree_size(paths.HOME_DIR)
             # 删完再回看谁真的没了：部分失败时不会把仍存在的条目虚报为已删
             removed = [p for p in shown if not p.exists()]
             home_removed = not paths.HOME_DIR.exists()

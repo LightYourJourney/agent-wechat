@@ -82,7 +82,9 @@ def test_plan_all_enumerates_home_including_strays(tmp_path):
     assert p.all_ is True
     assert {x.name for x in p.loose} >= {"leaked.db", "models"}
     # 反断言：`if p not in known` 这条排除若被删掉，这个测试原本仍会通过，但已知产物
-    # 会在 items 与 loose 里各出现一次，体积被重复计入 T4 的 freed（用户看到的「释放 N B」）。
+    # 会在 items 与 loose 里各出现一次——计划表会把同一个路径渲染两遍。
+    # （注意别把它说成「体积重复计入 freed」：--all 的 freed 是 _tree_size 走盘量出来的，
+    #   不是 items+loose 求和，所以重复项不会让 freed 翻倍。）
     assert "index.db" not in {x.name for x in p.loose}
 
 
@@ -98,10 +100,62 @@ def test_execute_keys_does_not_touch_index(tmp_path):
 
 def test_execute_is_idempotent(tmp_path):
     home = tmp_path / "home"; home.mkdir(parents=True)
+    # 必须先放一个真产物：home 空着的话两次都会走「跳过不存在项」的短路，
+    # execute() 就算一个字节都不删，这个测试照样通过——它测的就不是幂等了。
+    (home / "passphrase.json").write_text("{}")
     r1 = purge.execute(purge.plan(frozenset({"keys"})))
     r2 = purge.execute(purge.plan(frozenset({"keys"})))
-    assert r1.removed == ()
-    assert r2.removed == ()          # 两次都成功，第二次什么都没删
+    assert r1.removed == (home / "passphrase.json",)   # 第一次真删了
+    assert r2.removed == ()                            # 第二次什么都没删
+    assert r2.freed == 0
+
+
+def test_execute_continues_after_one_failure(tmp_path, monkeypatch):
+    """部分失败不中止：某个路径删不掉，不应放弃其余（spec §5.1 第 4 步）。
+    这正是提交信息里写的行为——把 except 分支里的 append 删掉，本测试即失败。"""
+    home = tmp_path / "home"; home.mkdir(parents=True)
+    (home / "index.db").write_bytes(b"x" * 10)
+    (home / "index.db-wal").write_bytes(b"y" * 20)
+    real_remove = purge._remove
+
+    def flaky(item):
+        if item.artifact.path.name == "index.db":
+            raise PermissionError("模拟：该文件删不掉")
+        return real_remove(item)
+
+    monkeypatch.setattr(purge, "_remove", flaky)
+    r = purge.execute(purge.plan(frozenset({"index"})))
+    assert [p.name for p, _ in r.failed] == ["index.db"]
+    assert not (home / "index.db-wal").exists()        # 后面那一项仍然被删了
+
+
+def test_execute_tolerates_stale_plan(tmp_path):
+    """CLI 是「先 dry-run 出计划 → 用户确认 → 再 execute」，两步之间产物可能已被删掉。
+    spec §5.1 第 5 步要求这算成功，不是失败。"""
+    home = tmp_path / "home"; home.mkdir(parents=True)
+    (home / "passphrase.json").write_text("{}")
+    p = purge.plan(frozenset({"keys"}))
+    (home / "passphrase.json").unlink()                # 计划之后、执行之前没了
+    r = purge.execute(p)
+    assert r.failed == ()
+    assert r.removed == ()
+
+
+def test_execute_dir_reports_tree_size_not_inode_size(tmp_path):
+    """`purge --tmp` 删的是解密明文临时目录。目录的 lstat().st_size 只是 inode 自身
+    大小（几十到几百字节），若直接相加，无论删掉多少明文都报「释放 ~96 B」。"""
+    home = tmp_path / "home"; home.mkdir(parents=True)
+    tmpdir = home / "tmp"
+    tmpdir.mkdir()
+    (tmpdir / "a.db").write_bytes(b"a" * 3000)         # 模拟散落的解密明文
+    (tmpdir / "b.db").write_bytes(b"b" * 1000)
+    p = purge.plan(frozenset({"tmp"}))
+    item = p.items[0]
+    assert item.artifact.kind == "dir"
+    assert item.size < 2000, "前提：目录的 st_size 是 inode 大小，远小于整树体积"
+    r = purge.execute(p)
+    assert r.freed == 4000
+    assert not tmpdir.exists()
 
 
 def test_execute_all_removes_tree_and_does_not_recreate(tmp_path):
