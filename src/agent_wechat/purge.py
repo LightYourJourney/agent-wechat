@@ -43,3 +43,48 @@ def artifacts() -> tuple[Artifact, ...]:
                      "重建 ≈2.5–3 小时（68 万向量）")
             for p in store.db_paths()]
     return tuple(out)
+
+
+@dataclass(frozen=True)
+class PlanItem:
+    artifact: Artifact
+    exists: bool
+    size: int          # 字节；不存在时为 0
+    is_symlink: bool
+
+
+@dataclass(frozen=True)
+class PurgePlan:
+    scopes: frozenset[str]
+    all_: bool
+    items: tuple[PlanItem, ...]        # 具名产物（--all 时亦为「已知产物」部分）
+    loose: tuple[pathlib.Path, ...]    # 仅 --all：HOME_DIR 顶层不属于任何具名产物的条目
+
+
+def _item(a: Artifact) -> PlanItem:
+    try:
+        st = a.path.lstat()            # lstat 而非 stat：符号链接本身也要能看出来
+    except OSError:
+        return PlanItem(a, False, 0, False)
+    return PlanItem(a, True, st.st_size, a.path.is_symlink())
+
+
+def plan(scopes: frozenset[str], all_: bool = False,
+         home: pathlib.Path | None = None) -> PurgePlan:
+    """生成删除计划。**纯只读**：不创建、不删除、不写任何东西。
+
+    `--all` 的 loose 是「枚举 HOME_DIR 顶层减去已知产物」，不是 artifacts() 的产物——
+    artifacts() 只认识三个具名范围，列不出 models/ 与散落文件。
+    """
+    home = home or paths.HOME_DIR
+    # --all 时 items 仍全部列出：计划表要显示 index/keys 的重建代价（spec §3 的 --all 表样）
+    items = tuple(_item(a) for a in artifacts() if all_ or a.scope in scopes)
+    loose: tuple[pathlib.Path, ...] = ()
+    if all_:
+        known = {a.path for a in artifacts()}
+        try:
+            top = sorted(home.iterdir())
+        except OSError:
+            top = []
+        loose = tuple(p for p in top if p not in known)
+    return PurgePlan(scopes=scopes, all_=all_, items=items, loose=loose)

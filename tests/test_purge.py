@@ -37,3 +37,43 @@ def test_db_paths_is_the_wal_trio(monkeypatch, tmp_path):
     assert got == (tmp_path / "index.db",
                    tmp_path / "index.db-wal",
                    tmp_path / "index.db-shm")
+
+
+def test_plan_touches_nothing(tmp_path):
+    """dry-run 的本质是「没动手」，不是「返回值对」（spec §7）。"""
+    home = tmp_path / "home"
+    home.mkdir(parents=True)
+    (home / "index.db").write_bytes(b"x" * 1000)
+    before = sorted((p.name, p.stat().st_size, p.stat().st_mtime) for p in home.iterdir())
+    purge.plan(frozenset({"index"}))
+    after = sorted((p.name, p.stat().st_size, p.stat().st_mtime) for p in home.iterdir())
+    assert before == after
+
+
+def test_plan_marks_missing_artifacts(tmp_path):
+    """产物不存在时标 exists=False，而不是报错（幂等的前半，spec §5.1 第 5 步）。"""
+    p = purge.plan(frozenset({"keys"}))
+    keys_items = [i for i in p.items if i.artifact.scope == "keys"]
+    assert len(keys_items) == 1
+    assert keys_items[0].exists is False
+    assert keys_items[0].size == 0
+
+
+def test_plan_index_has_three_items(tmp_path):
+    """index 必须是三个独立 Artifact（基库/-wal/-shm），各自一行、各自 stat（spec §4）。"""
+    p = purge.plan(frozenset({"index"}))
+    assert [i.artifact.path.name for i in p.items] == \
+        ["index.db", "index.db-wal", "index.db-shm"]
+    assert all(i.artifact.kind == "file" for i in p.items)
+
+
+def test_plan_all_enumerates_home_including_strays(tmp_path):
+    """--all 的计划**不由 artifacts() 生成**，而是枚举 HOME_DIR 顶层，
+    这样才列得出 models/、tasks.json 与散落文件（spec §3）。"""
+    home = tmp_path / "home"
+    home.mkdir(parents=True)
+    (home / "leaked.db").write_bytes(b"stray")          # 模拟 decrypt --out 的散落明文
+    (home / "models").mkdir()
+    p = purge.plan(frozenset(), all_=True)
+    assert p.all_ is True
+    assert {x.name for x in p.loose} >= {"leaked.db", "models"}
