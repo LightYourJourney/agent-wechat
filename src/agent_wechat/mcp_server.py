@@ -5,11 +5,15 @@ import asyncio
 import functools
 import json
 from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from mcp.server.mcpserver import MCPServer
 
 from . import errors, usecases
+
+if TYPE_CHECKING:
+    # 仅类型检查期：reader 已由 usecases 间接载入，这里只为让注解可解析
+    from . import reader
 
 server = MCPServer(
     name="agent-wechat",
@@ -44,7 +48,7 @@ def _guard(fn: Callable[..., Any]) -> Callable[..., Any]:
     return wrapper
 
 
-def _msg_dict(m) -> dict:
+def _msg_dict(m: reader.Message) -> dict:
     return {"time": m.ts, "sender": m.sender_name or m.sender_id or "?",
             "is_self": m.is_self, "type": m.type_name,
             "content": m.content or m.media_hint or ""}
