@@ -229,15 +229,20 @@ class MessageReader:
                      if c["username"] == chat_id), chat_id)
 
     def roster(self) -> list[roster.RosterRow]:
-        """本账号的显示名名册：全部群成员 + 全部联系人（私聊行用）。
+        """本账号的显示名名册。**逐源降级**（spec §6）：`chat_room` 与 `contact` 在物理上
+        无关，少一个仍有另一个——整体降级会把「还能给你群昵称」白白丢掉。
 
+        漂移记进 `self._drift`（不抛），由调用方（usecases）决定怎么呈现。
         两次查询在同一次 contact.db 解密里完成，由 `_open` 管理生命周期。
         名册的**规则**不在这里——`roster.build_rows` 是全项目唯一那份。
         """
         groups: dict[str, list[tuple[str, str | None]]] = {}
         contacts: dict[str, tuple[str, str]] = {}
-        try:
-            with self._open("contact/contact.db") as con:
+        with self._open("contact/contact.db") as con:
+            # 源一：群成员与群昵称（`name2id` 被下一条 SQL 的 JOIN 用到，属同一个源）
+            try:
+                self._check("roster", "contact/contact.db", con, only="chat_room")
+                self._check("roster", "contact/contact.db", con, only="name2id")
                 # chat_room.id → name2id.rowid → 群 username（实测 3/3 相等，spec §2.1）
                 for username, blob in con.execute(
                         "SELECT n.username, cr.ext_buffer FROM chat_room cr "
@@ -246,6 +251,11 @@ class MessageReader:
                     if chat_id:
                         groups[chat_id] = roster.parse_members(
                             blob if isinstance(blob, bytes) else None)
+            except errors.SchemaDrift:
+                pass                      # 群昵称不可用；私聊行仍可产出
+            # 源二：全部联系人（私聊行 + 群成员的名字来源）
+            try:
+                self._check("roster", "contact/contact.db", con, only="contact")
                 # **不带 limit**：`_contacts_all_cached()` 走的是 contacts(limit=5000)，
                 # 而真实 contact 表有 12,782 行——拿它当名册会静默漏掉一半人（spec §2.6）。
                 for u, remark, nick in con.execute(
@@ -254,13 +264,8 @@ class MessageReader:
                     key = _s(u)
                     if key:
                         contacts[key] = (_s(remark), _s(nick))
-        except sqlite3.Error as exc:
-            # 表/列不存在是现实输入（ARCHITECTURE §7：微信升级可能改变库结构）。
-            # 不翻成项目异常的话，它会穿透 _refresh_roster 的 except AgentWeChatError，
-            # 把**索引检索**一起打挂——而那和 contact.db 坏没坏是两件事。
-            raise DataNotFound(
-                f"读取联系人库失败：{exc}",
-                hint="微信升级可能改变了库结构；本机检索不受影响，只是显示名暂不可用") from exc
+            except errors.SchemaDrift:
+                pass                      # 备注/昵称不可用；群昵称仍可产出
         return roster.build_rows(groups, contacts)
 
     def _roster_map(self) -> dict[tuple[str, str], str]:

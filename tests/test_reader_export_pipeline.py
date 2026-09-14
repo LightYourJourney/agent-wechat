@@ -515,16 +515,22 @@ def test_search_still_works_when_roster_refresh_fails(env, monkeypatch):
     assert "hits" in res, f"刷新失败不该阻断检索：{res}"
 
 
-def test_search_still_works_when_roster_hits_sqlite_error(env, tmp_path, monkeypatch):
-    """`_refresh_roster` 只吞 `AgentWeChatError`。contact.db 的结构漂移（ARCHITECTURE §7：
-    微信升级可能改变库结构）若在 reader 层不翻成项目异常，就会穿透 `_refresh_roster`
-    把**索引检索**一起打挂——而索引库是好的，那是两条独立的能力。终审实测复现过：
-    没有 `name2id` 表的 contact.db 让 `reader.roster()` 抛
-    `sqlite3.OperationalError: no such table: name2id`。
+def test_search_still_works_when_roster_degrades_on_drift(env, tmp_path, monkeypatch):
+    """`_refresh_roster` 只吞 `AgentWeChatError`，所以 reader 层给它的必须是认得的形状。
+    contact.db 的结构漂移（ARCHITECTURE §7：微信升级可能改变库结构）若以裸
+    `sqlite3.OperationalError` 的形态穿过去，就会把**索引检索**一起打挂——而索引库是好的，
+    那是两条独立的能力。
+
+    T4 之前这里钉的是「reader 把 sqlite 错误翻成 `DataNotFound`」，构造就是下面这棵树
+    （没有 `name2id` 表 ⇒ 裸 `no such table: name2id`）。T4 之后**结构漂移不再抛**：
+    `name2id` 是声明过的源，缺了就逐源降级（并记进 `_drift`，由 T5 呈现给用户）。
+    所以这条测试钉的是新形状：漂移的名册不抛、其余源照常产出、检索完全不受影响。
+    「文件不存在」那一支仍由 `test_search_still_works_when_roster_refresh_fails` 钉着
+    （`_open` 抛 `DataNotFound`）。
 
     **必须驱动真的 `roster()`**（自造一棵带漂移的树，同
     `test_roster_does_not_use_the_search_limit` 的隔离法）：把 `roster` monkeypatch 成
-    「抛 sqlite3 错误」的桩，等于绕开被修的那一层——那样这条测试在修与不修时**都是红的**，
+    「抛 sqlite3 错误」的桩，等于绕开被考的那一层——那样这条测试在修与不修时**都是红的**，
     因为它考的是「`_refresh_roster` 要不要吞任意裸异常」，而不是本模块的契约。
     """
     root = tmp_path / "driftwx"
@@ -538,9 +544,10 @@ def test_search_still_works_when_roster_hits_sqlite_error(env, tmp_path, monkeyp
                     "nick_name TEXT, delete_flag INTEGER)", [(FRIEND, None, "张三", None, 0)]),
     })                                                # **唯独没有 name2id 表**
 
-    with pytest.raises(errors.DataNotFound) as ei:    # reader 层负责翻成项目异常
-        reader.MessageReader(ACCT).roster()
-    assert "name2id" in str(ei.value), "原始 sqlite 错误该留在消息里，便于定位"
+    r = reader.MessageReader(ACCT)
+    rows = r.roster()                                 # 漂移 → 逐源降级，不该抛
+    assert (FRIEND, FRIEND, "张三") in rows, "contact 源是好的，私聊行照常产出"
+    assert {d.table for d in r._drift if d.capability == "roster"} == {"name2id"}
 
     res = usecases.search_history("开会", contact=GROUP, account=ACCT)
     assert res["hits"], f"contact.db 结构漂移不该打挂索引检索：{res}"
@@ -727,3 +734,47 @@ def test_inspect_still_works_in_a_drifted_tree(env, tmp_path, monkeypatch):
         # 登录账号，测试就寄生在本机微信状态上（密码缓存由 env fixture 落好）。
         cli.main(["inspect", "contact/contact.db", "--account", ACCT])
     assert ei.value.code == 0, "漂移环境下 inspect 仍该成功"
+
+
+def test_roster_survives_missing_chat_room(env, tmp_path, monkeypatch):
+    """`chat_room` 没了 → 没有群昵称，但私聊行（备注/昵称）照常产出。"""
+    root = tmp_path / "wx"
+    drift_tree(root, ACCT, drop_table="chat_room")
+    monkeypatch.setattr(paths, "XWECHAT_FILES", root)
+    rows = reader.MessageReader(ACCT).roster()          # 不该抛
+    private = [r for r in rows if r[0] == r[1]]
+    assert private and private[0][2] == "张三"
+
+
+def test_roster_survives_missing_contact(env, tmp_path, monkeypatch):
+    """`contact` 没了 → 没有备注/昵称，但群成员行仍以群昵称（无群名片者回落 username）产出。
+
+    **必须造一个真有成员的 `chat_room`**：`drift_tree` 的 chat_room 是空表，用它的话
+    `contact` 一走名册就必然是空的——私聊行**只**来自 `contact` 表（`build_rows` 的第二个
+    循环），contact 没了就没有「谁是我的私聊」这份名单，那一条断言只能是空转。
+    """
+    root = tmp_path / "wx"
+    enc_db(root / ACCT / "db_storage" / "contact" / "contact.db", {
+        "name2id": ("CREATE TABLE name2id (username TEXT)", [(GROUP,)]),
+        "chat_room": ("CREATE TABLE chat_room (id INTEGER PRIMARY KEY, username TEXT, "
+                      "owner TEXT, ext_buffer BLOB)",
+                      [(1, GROUP, None, ext_buffer(member(FRIEND, "群里的张三"),
+                                                   member("wxid_friend02")))]),
+    })                                          # **唯独没有 contact 表**
+    monkeypatch.setattr(paths, "XWECHAT_FILES", root)
+    rows = reader.MessageReader(ACCT).roster()          # 不该抛
+    got = {(c, k): d for c, k, d in rows}
+    assert got[(GROUP, FRIEND)] == "群里的张三", "群昵称不依赖 contact"
+    assert got[(GROUP, "wxid_friend02")] == "wxid_friend02", "无群名片回落 username"
+
+
+def test_roster_records_both_drifts_when_both_sources_are_gone(env, tmp_path, monkeypatch):
+    """两个源都没了 → 名册为空（T5 的空名册守卫会让它不写库），且两条漂移都被记下。"""
+    root = tmp_path / "wx"
+    enc_db(root / ACCT / "db_storage" / "contact" / "contact.db", {
+        "name2id": ("CREATE TABLE name2id (username TEXT)", []),
+    })
+    monkeypatch.setattr(paths, "XWECHAT_FILES", root)
+    r = reader.MessageReader(ACCT)
+    assert r.roster() == []
+    assert {d.table for d in r._drift if d.capability == "roster"} == {"chat_room", "contact"}
