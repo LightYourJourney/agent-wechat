@@ -92,12 +92,15 @@ def get_recent_messages(contact: str, limit: int = 50,
     contact 可以是 username（wxid / xxx@chatroom）或展示名（备注/昵称）。
     若按名字解析出多个联系人，返回 {"need_confirm": [...]} 让用户消歧，不要猜。
     每条消息含 time(unix秒)/sender/is_self/type/content。
+    微信库结构变更导致能力降级时，另带 degraded: [{capability, effect}]（未降级时为空）。
     """
     res = usecases.recent_messages(contact, limit=limit, account=account)
     if isinstance(res, usecases.NeedConfirm):
         return _need_confirm(res)
     return {"chat_id": res.chat_id, "display": res.display,
-            "messages": [_msg_dict(m) for m in res.messages]}
+            "messages": [_msg_dict(m) for m in res.messages],
+            "degraded": [{"capability": d.capability, "effect": d.effect}
+                         for d in res.degraded]}
 
 
 @server.tool()
@@ -132,6 +135,8 @@ def search_history(query: str, contact: str | None = None, limit: int = 20,
     需先运行 export_full_history。contact 可选限定会话（username 或展示名；
     展示名命中多个联系人时返回 need_confirm，不命中返回 error，不会静默扩大范围）。
     返回 hits: [{chat_id, ts, sender_id, sender_name, is_self, content, media_hint, snip}]。
+    微信库结构变更导致显示名等能力降级时，另带 degraded: [{capability, effect}]——
+    降级会让 sender_name 回落成 wxid，别把它当成真实姓名。
     """
     res = usecases.search_history(query, contact=contact, limit=limit, account=account)
     if isinstance(res, usecases.NeedConfirm):
@@ -152,6 +157,7 @@ def semantic_search(query: str, contact: str | None = None, limit: int = 10,
     模糊意图（「上次说的那个爬山的安排」）用本工具。contact 可选限定会话，
     展示名歧义时返回 need_confirm。返回 hits: [{chat_id, display, ts, sender,
     is_self, content, media_hint, distance}]，distance 越小越相近（cosine 距离）。
+    微信库结构变更导致显示名等能力降级时，另带 degraded: [{capability, effect}]。
     """
     res = usecases.semantic_search(query, contact=contact, limit=limit, account=account)
     return _need_confirm(res) if isinstance(res, usecases.NeedConfirm) else res

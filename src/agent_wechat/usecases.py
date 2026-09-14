@@ -122,6 +122,19 @@ class ChatContext:
         """
         return self.resolve(contact) if contact else None
 
+    def degradations(self) -> list[dict]:
+        """本次调用见过的降级，信封形状（search/semantic 的出口，Ruling 13）。
+
+        **只报已经构造出来的 reader 上的漂移**：没构造过 reader 说明这次调用没碰微信的库
+        （检索走的是本地索引），也就没有「静默变少」可言。反过来，为了报降级去构造一个
+        reader 是有代价的——它会读 passphrase 缓存，缓存没了就抛（`purge --keys` 之后
+        检索仍然可用），把一条本来能用的检索打翻。
+        """
+        if self._reader is None:
+            return []
+        return [{"capability": d.capability, "effect": d.effect}
+                for d in collect_degradations(self._reader)]
+
 
 # 能力 → 降级后用户**少了什么**（人话）。用户不需要知道表名（spec §7）：
 # `SchemaDrift` 只说「哪里漂了」，策略层才知道「那意味着什么」。
@@ -259,17 +272,22 @@ def export_history(contact: str | None = None, full: bool = False,
 
 def search_history(query: str, contact: str | None = None, limit: int = 20,
                    account: str | None = None) -> dict | NeedConfirm:
+    """hits 的 `sender_name` 来自名册（`search.py:13`），而 `_refresh_roster` 吞掉漂移——
+    所以降级说明必须随结果带出去（Ruling 13），否则显示名**静默**回落成 wxid。"""
     ctx = ChatContext(account)
     chat_id = ctx.resolve_optional(contact)
     if isinstance(chat_id, NeedConfirm):
         return chat_id
     _refresh_roster(ctx)
-    return search.search(query, chat_id=chat_id, limit=clamp_limit(limit),
-                         account=ctx.account)
+    res = search.search(query, chat_id=chat_id, limit=clamp_limit(limit),
+                        account=ctx.account)
+    res["degraded"] = ctx.degradations()
+    return res
 
 
 def semantic_search(query: str, contact: str | None = None, limit: int = 10,
                     account: str | None = None) -> dict | NeedConfirm:
+    """同 search_history：hits 的 `display` 也由名册富化（Ruling 13）。"""
     ctx = ChatContext(account)
     chat_id = ctx.resolve_optional(contact)
     if isinstance(chat_id, NeedConfirm):
@@ -280,6 +298,7 @@ def semantic_search(query: str, contact: str | None = None, limit: int = 10,
                                  account=ctx.account)
     for h in res.get("hits", []):
         h["display"] = ctx.reader.display_name(h["chat_id"])   # 缓存命中，只解密一次
+    res["degraded"] = ctx.degradations()
     return res
 
 

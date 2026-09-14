@@ -901,6 +901,15 @@ def test_degradation_effect_is_human_readable_not_the_table_name():
     assert "显示名" in usecases.DEGRADE_EFFECT["roster"]
 
 
+def test_degrade_effect_covers_every_capability():
+    """策略表的完整性钉子：`collect_degradations` 走的是
+    `DEGRADE_EFFECT.get(capability, "部分功能降级")`——一个键拼错**不会红任何东西**，
+    只会让用户把一句没有信息量的话当成全部真相。能力清单的唯一来源是
+    `schema.CAPABILITIES` 的键，两边必须一一对上。"""
+    from agent_wechat import schema                     # 函数内 import，不动文件头
+    assert set(schema.CAPABILITIES) <= set(usecases.DEGRADE_EFFECT)
+
+
 def test_recent_messages_carries_degradations(env, tmp_path, monkeypatch):
     """降级说明要挂进**返回结构**，而不是靠全局状态。"""
     root = tmp_path / "wx"

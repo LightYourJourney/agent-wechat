@@ -12,6 +12,9 @@ from types import SimpleNamespace
 import pytest
 
 from agent_wechat import account, bootstrap, cli, errors, keys, reader, search, usecases, vector
+# 合成微信目录（真实 sqlcipher 解密链路；路径全部指向 tmp_path，绝不碰真实数据）。
+# 跨模块复用夹具与 test_usecases 同法：`env` 依赖它**自己模块**里的 module 级 `wechat`。
+from test_reader_export_pipeline import ACCT, FRIEND, drift_tree, env, wechat  # noqa: F401
 
 
 @pytest.fixture()
@@ -75,7 +78,8 @@ def test_search_renders_self_as_me(monkeypatch, capsys):
         "mode": "fts", "total": 1,
         "hits": [{"ts": 1700000000, "chat_id": "wxid_friend01",
                   "sender_id": "wxid_t", "sender_name": None, "is_self": 1,
-                  "content": "今晚一起吃饭吗"}]})
+                  "content": "今晚一起吃饭吗"}],
+        "degraded": []})
     cli.cmd_search(SimpleNamespace(account=None, contact=None, query="吃饭", n=10))
     assert capsys.readouterr().out == (
         "mode=fts total=1\n  [1700000000] wxid_friend01 我: 今晚一起吃饭吗\n")
@@ -545,3 +549,63 @@ def test_purge_dry_run_prints_plan_and_deletes_nothing(tmp_path, monkeypatch, ca
     out = capsys.readouterr().out
     assert "将删除" in out and "未删除任何文件" in out
     assert (home / "index.db").exists()
+
+
+# ---------- T6：降级说明的出口（spec §7） ----------
+
+def test_recent_renders_degradation_to_stderr_not_stdout(env, monkeypatch, capsys):
+    """降级是**成功但有保留**——它不该污染 stdout（那是给人看的表，也是管道里
+    机器可读的部分），所以走 stderr（spec §7）。"""
+    from agent_wechat import usecases
+    monkeypatch.setattr(usecases, "collect_degradations",
+                        lambda r: (usecases.Degradation(
+                            "roster", "contact/contact.db", "chat_room", (),
+                            "显示名暂不可用"),))
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["recent", FRIEND, "-n", "3", "--account", ACCT])
+    assert ei.value.code == 0
+    out, err = capsys.readouterr()
+    assert "显示名暂不可用" in err
+    assert "显示名暂不可用" not in out
+
+
+def test_search_renders_roster_degradation_to_stderr_not_stdout(env, tmp_path,
+                                                                monkeypatch, capsys):
+    """Ruling 13：search 的 hits 靠名册取 `sender_name`（`search.py:13`），而
+    `_refresh_roster` 吞掉漂移——显示名**静默**回落成 wxid，用户无从知道。所以这条路
+    也要与 recent 同一个出口：stderr 一行说明，stdout 不含它。走真实链路（漂移的
+    contact.db：`chat_room` 没了、检索本身照常）。"""
+    from agent_wechat import paths
+    root = tmp_path / "wx"
+    drift_tree(root, ACCT, drop_table="chat_room")
+    monkeypatch.setattr(paths, "XWECHAT_FILES", root)
+    assert cli.cmd_search(SimpleNamespace(account=ACCT, contact=None,
+                                          query="会议记录", n=5)) == 0
+    out, err = capsys.readouterr()
+    assert out == "mode=fts total=0\n"          # 空索引：stdout 只有表头这一行
+    assert "显示名" in err
+
+
+def test_semantic_renders_degradation_to_stderr_not_stdout(monkeypatch, capsys, tmp_path):
+    """semantic 的 hits 同样靠名册（`display` 由 `display_name` 富化，Ruling 13）。
+    这条走**用例层**：漂移挂在 reader 上（T4 记的形状），`usecases.semantic_search`
+    翻成信封的 degraded，CLI 把它印到 stderr——接线与渲染一起钉住。"""
+    from agent_wechat import store
+
+    class _DriftedReader:
+        def __init__(self, acct):
+            self._drift = [errors.SchemaDrift("roster", "contact/contact.db", "chat_room")]
+
+        def roster(self):
+            return []                    # 名册不可用 → 空 → 不写库（T5 的守卫）
+
+    monkeypatch.setattr(account, "resolve_account", lambda a: "acct")
+    monkeypatch.setattr(store, "DB_PATH", tmp_path / "index.db")   # _refresh_roster 会开库
+    monkeypatch.setattr(reader, "MessageReader", _DriftedReader)
+    monkeypatch.setattr(vector, "semantic_search", lambda *a, **k: {
+        "mode": "semantic", "total": 0, "hits": []})
+    assert cli.cmd_semantic(SimpleNamespace(account=None, contact=None,
+                                            query="爬山", n=5)) == 0
+    out, err = capsys.readouterr()
+    assert out == "mode=semantic total=0\n"
+    assert "显示名" in err             # 策略表的文案（不是表名），与 recent 同一出口

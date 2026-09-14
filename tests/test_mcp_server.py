@@ -14,6 +14,8 @@ import pytest
 
 from agent_wechat import (account, errors, export, mcp_server, paths, reader, tasks,
                           usecases)
+# 合成微信目录（真实 sqlcipher 解密链路；路径全部指向 tmp_path，绝不碰真实数据）
+from test_reader_export_pipeline import ACCT, drift_tree, env, wechat  # noqa: F401
 
 BOGUS = "wxid_does_not_exist_0000"
 
@@ -202,3 +204,37 @@ def test_msg_dict_falls_back_to_sender_id():
     m = SimpleNamespace(ts=1, sender_name=None, sender_id="wxid_x", is_self=False,
                         type_name="文本", content="在", media_hint=None)
     assert mcp_server._msg_dict(m)["sender"] == "wxid_x"
+
+
+# ---------- T6：降级的信封出口（spec §7） ----------
+
+def test_get_recent_messages_envelope_carries_degraded_key(monkeypatch):
+    """MCP 的信封加一个顶层键——加键向后兼容（不认识的 agent 会忽略它），
+    但要同步 TOOLS.md（T7）。"""
+    from agent_wechat import usecases
+    monkeypatch.setattr(usecases, "collect_degradations",
+                        lambda r: (usecases.Degradation(
+                            "roster", "contact/contact.db", "chat_room", (),
+                            "显示名暂不可用"),))
+    monkeypatch.setattr(usecases, "recent_messages",
+                        lambda *a, **k: usecases.RecentMessages(
+                            chat_id="x", display="d", messages=[],
+                            degraded=usecases.collect_degradations(None)))
+    res = mcp_server.get_recent_messages.__wrapped__(contact="x")
+    assert res["degraded"] and res["degraded"][0]["effect"] == "显示名暂不可用"
+
+
+def test_search_history_envelope_carries_degraded_key(env, tmp_path, monkeypatch):
+    """Ruling 13：`_refresh_roster` 吞掉漂移，于是 search 的 `sender_name` **静默**回落成
+    wxid——信封必须把这条降级带出去（与 get_recent_messages 同一个键、同一个形状），
+    否则「显示名变少了」对 agent 不可见。走真实链路（漂移的 contact.db）。"""
+    root = tmp_path / "wx"
+    drift_tree(root, ACCT, drop_table="chat_room")
+    monkeypatch.setattr(paths, "XWECHAT_FILES", root)
+    # 本模块的 autouse 夹具把 account_dirs 钉成空（「不存在的账号确定不存在」），
+    # 这条要解析合成账号，故覆盖回真实扫描（后打的 patch 生效在前，teardown 逆序）。
+    monkeypatch.setattr(paths, "account_dirs", lambda: [ACCT])
+    res = mcp_server.search_history(query="会议记录", account=ACCT)
+    assert "degraded" in res, res
+    assert [d["capability"] for d in res["degraded"]] == ["roster"]
+    assert "显示名" in res["degraded"][0]["effect"]

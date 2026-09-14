@@ -149,6 +149,7 @@ def cmd_recent(args: argparse.Namespace) -> int:
         who = "我" if m.is_self else (m.sender_name or m.sender_id or "?")
         body = m.content or m.media_hint or ""
         print(f"[{m.ts}] {who}: {body[:200]}")
+    _render_degradations(res.degraded)
     return 0
 
 
@@ -178,6 +179,7 @@ def cmd_search(args: argparse.Namespace) -> int:
     for h in res["hits"]:
         who = "我" if h["is_self"] else (h["sender_name"] or h["sender_id"] or "?")
         print(f"  [{h['ts']}] {h['chat_id']} {who}: {(h['content'] or '')[:120]}")
+    _render_degradations(res["degraded"])
     return 0
 
 
@@ -207,6 +209,7 @@ def cmd_semantic(args: argparse.Namespace) -> int:
         who = "我" if h["is_self"] else h["sender"]
         print(f"  [{h['ts']}] {h['chat_id']} {who}: {(h['content'] or '')[:120]}"
               f"  distance={h['distance']:.4f}")
+    _render_degradations(res["degraded"])
     return 0
 
 
@@ -305,6 +308,20 @@ def _render_residue(rep: purge.ResidueReport) -> None:
     print(f"  本地快照：{rep.snapshots}")
     if not (rep.not_removed or rep.kept or rep.held or rep.tmp_leaks):
         print("  ✅ 计划内路径已清空，未发现残留")
+
+
+def _render_degradations(degraded) -> None:
+    """降级说明走 stderr：成功但有保留，不该污染 stdout（spec §7）。
+
+    两种形状都要收：`recent` 给 `usecases.Degradation`（dataclass，带 db/table，故能印出
+    那句诊断），search/semantic 给随信封走的 dict（`{"capability", "effect"}`，与 MCP 同一
+    形状——它刻意不带表名，用户不需要知道）。
+    """
+    for d in degraded:
+        if isinstance(d, dict):
+            print(f"⚠️  {d['effect']}", file=sys.stderr)
+        else:
+            print(f"⚠️  {d.effect}（{d.db} 的 {d.table} 结构不符）", file=sys.stderr)
 
 
 def main(argv: list[str] | None = None) -> None:
