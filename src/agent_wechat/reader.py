@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import sqlite3
 from dataclasses import dataclass, asdict
 
@@ -87,6 +88,7 @@ class MessageReader:
         self.passphrase = keys.get_passphrase(acct)
         self.self_wxid = paths.bare_wxid(acct)
         self._contacts_all: list[dict] | None = None   # 实例级缓存，见 _contacts_all_cached
+        self._roster_map_cache: dict[tuple[str, str], str] | None = None
 
     def _contacts_all_cached(self) -> list[dict]:
         """全量联系人。同一 reader 生命周期内只解密一次 contact.db
@@ -199,6 +201,28 @@ class MessageReader:
                     contacts[key] = (_s(remark), _s(nick))
         return roster.build_rows(groups, contacts)
 
+    def _roster_map(self) -> dict[tuple[str, str], str]:
+        """`{(chat_id, member_key): display_name}`，**实例级缓存**——与
+        `_contacts_all_cached` 同一模式：一次工具调用里 resolve + recent 会先后用到它。
+        """
+        if self._roster_map_cache is None:
+            self._roster_map_cache = {(c, k): d for c, k, d in self.roster()}
+        return self._roster_map_cache
+
+    def _apply_roster(self, chat_id: str, msgs: list[Message]) -> list[Message]:
+        """把发送者换成名册里的显示名。
+
+        **只给 `recent` 用**。不要挂到 `_decode_row` 或 `iter_all` 上：那条路径的产物
+        要写进索引库，而索引库侧是由查询时的 join 统一覆盖的——在这里换名会让新导出
+        存名字、存量存 wxid，两边分道扬镳（spec §6、§7）。
+        """
+        mapping = self._roster_map()
+        out: list[Message] = []
+        for m in msgs:
+            name = mapping.get((chat_id, m.sender_id or ""))
+            out.append(dataclasses.replace(m, sender_name=name) if name else m)
+        return out
+
     # ---------- 消息 ----------
 
     def _name2id(self, con: sqlite3.Connection) -> dict[int, str]:
@@ -263,7 +287,7 @@ class MessageReader:
             if len(pieces) >= limit:
                 break
         pieces.sort(key=lambda m: m.ts)
-        return pieces[-limit:]
+        return self._apply_roster(chat_id, pieces)[-limit:]
 
     def iter_all(self, chat_id: str | None = None, resume: dict[str, int] | None = None,
                  batch: int | None = None):

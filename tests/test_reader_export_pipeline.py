@@ -290,7 +290,7 @@ def test_recent_cross_shard_decode(env):
     assert app.content == "[appmsg: 分享标题]" and app.media_hint == app.content
     g = r.recent("888@chatroom", limit=10)
     assert len(g) == 1
-    assert g[0].sender_id == FRIEND and g[0].sender_name == FRIEND  # 群前缀解析
+    assert g[0].sender_id == FRIEND and g[0].sender_name == "群里的张三"  # 群前缀解析 + 名册换名
     assert g[0].content == "开会啦"
 
 
@@ -423,3 +423,35 @@ def test_roster_does_not_use_the_search_limit(env, tmp_path, monkeypatch):
     rows = reader.MessageReader(ACCT).roster()
     private = [x for x in rows if x[0] == x[1]]
     assert len(private) == n, f"联系人被截断了：拿到 {len(private)}，应为 {n}"
+
+
+def test_recent_uses_display_names(env):
+    """实时路径（recent）用内存名册换名——它不走索引库，join 覆盖不到（spec §2.4）。"""
+    r = reader.MessageReader(ACCT)
+    msgs = r.recent(GROUP, limit=10)
+    group_msgs = [m for m in msgs if m.sender_id == FRIEND]
+    assert group_msgs, "前提：fixture 的群里有 FRIEND 发的消息"
+    assert group_msgs[0].sender_name == "群里的张三"
+
+
+def test_recent_private_messages_use_display_names(env):
+    """私聊也要覆盖：名册里有 (chat_id=对方, member_key=对方) 那一行。"""
+    r = reader.MessageReader(ACCT)
+    msgs = r.recent(FRIEND, limit=10)
+    from_friend = [m for m in msgs if not m.is_self]
+    assert from_friend, "前提：fixture 里有对方发的消息"
+    assert from_friend[0].sender_name == "张三"
+
+
+def test_iter_all_still_emits_raw_usernames(env):
+    """**这是「新旧混杂」的守卫。** `iter_all` 是 export 的数据源，它必须继续产出
+    wxid——查询时由 join 统一覆盖，存量与新数据才走同一条路。没有这条，
+    一次「顺手重构」把 `_apply_roster` 挪进 `_decode_row`，全量测试仍然全绿，
+    而索引库从此一半名字一半 wxid。
+    """
+    r = reader.MessageReader(ACCT)
+    raw = [row for batch in r.iter_all(GROUP) for row in batch]
+    group_rows = [x for x in raw if x.get("sender_id") == FRIEND]
+    assert group_rows, "前提：iter_all 里有 FRIEND 的消息"
+    assert group_rows[0]["sender_name"] == FRIEND, \
+        f"iter_all 不该换名（换名会让新导出与存量分道扬镳）：{group_rows[0]}"
