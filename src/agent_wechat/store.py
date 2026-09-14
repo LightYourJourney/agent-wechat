@@ -83,6 +83,18 @@ CREATE TABLE IF NOT EXISTS watermark (
     updated_at INTEGER NOT NULL,
     PRIMARY KEY (account, shard, chat_md5)
 );
+
+CREATE TABLE IF NOT EXISTS display_names (
+    account      TEXT NOT NULL,
+    chat_id      TEXT NOT NULL,
+    member_key   TEXT NOT NULL,     -- 消息里出现的那个形态（username）
+    display_name TEXT NOT NULL,
+    PRIMARY KEY (account, chat_id, member_key)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS roster_meta (
+    account      TEXT PRIMARY KEY,
+    refreshed_at INTEGER NOT NULL
+) WITHOUT ROWID;
 """
 
 # ---------- 向量索引（sqlite-vec；由 vector.py 在加载扩展后建表） ----------
@@ -210,3 +222,43 @@ def counts(con: sqlite3.Connection) -> dict:
     chats = con.execute("SELECT count(DISTINCT chat_id) FROM messages").fetchone()[0]
     last = con.execute("SELECT max(ts) FROM messages").fetchone()[0]
     return {"messages": n, "chats": chats, "last_ts": last}
+
+
+# ---------- 显示名名册 ----------
+
+# join 片段与表达式**必须成对使用**：_SENDER_EXPR 引用别名 dn，单独用是一个静默的
+# no such column: dn.display_name。别名用 dn 而不是 d，是为了让
+# test_join_drives_from_messages_not_the_roster 的 EXPLAIN 断言不会误判。
+_SENDER_JOIN = ("LEFT JOIN display_names dn ON dn.account = m.account "
+                "AND dn.chat_id = m.chat_id AND dn.member_key = m.sender_id")
+_SENDER_EXPR = "COALESCE(dn.display_name, m.sender_name, m.sender_id)"
+
+
+def roster_is_stale(con: sqlite3.Connection, account: str, ttl: int) -> bool:
+    """该账号的名册是否该刷新：没记录过，或记录早于 `now - ttl`。
+
+    查的是 roster_meta（一行），不是 display_names——后者在一次 DELETE + INSERT
+    的中间态里会短暂为空，拿它判会得到假过期。
+    """
+    row = con.execute("SELECT refreshed_at FROM roster_meta WHERE account=?",
+                      (account,)).fetchone()
+    return row is None or (int(time.time()) - row[0]) >= ttl
+
+
+def replace_roster(con: sqlite3.Connection, account: str,
+                   rows: list[tuple[str, str, str]]) -> None:
+    """整体替换该账号的名册，并更新 refreshed_at。
+
+    **一个事务内 DELETE + INSERT**：中途失败若留下半份名册，那半份之外的人会突然
+    显示成 wxid——比不刷新更糟（一半有名一半没名，用户无从判断哪个可信）。
+    本函数不 commit：由调用方（`store.open()` 或 usecases）决定事务边界。
+    """
+    con.execute("DELETE FROM display_names WHERE account=?", (account,))
+    con.executemany(
+        "INSERT OR REPLACE INTO display_names (account, chat_id, member_key, display_name) "
+        "VALUES (?,?,?,?)",
+        [(account, chat_id, key, display) for chat_id, key, display in rows])
+    con.execute(
+        "INSERT INTO roster_meta (account, refreshed_at) VALUES (?,?) "
+        "ON CONFLICT(account) DO UPDATE SET refreshed_at=excluded.refreshed_at",
+        (account, int(time.time())))
