@@ -123,6 +123,48 @@ def _item(a: Artifact) -> PlanItem:
     return PlanItem(a, True, st.st_size, a.path.is_symlink())
 
 
+def _home_of_uid(uid: int) -> pathlib.Path | None:
+    """passwd 里该 uid 的家目录；查不到（容器里的临时 uid、非 POSIX）返回 None。"""
+    try:
+        import pwd
+    except ImportError:
+        return None
+    try:
+        return pathlib.Path(pwd.getpwuid(uid).pw_dir)
+    except KeyError:
+        return None
+
+
+def _user_homes() -> tuple[pathlib.Path, ...]:
+    """「这个人的主目录」的全部候选，**每个都已 resolve**。
+
+    为什么要一组而不是一个：判据来自 `pathlib.Path.home()`（即 `$HOME`），于是换过 `HOME`
+    的 shell 里这套判据跟着变——本项目为 bootstrap 文档化了 `sudo`，而 `sudo` 下
+    `HOME=/var/root`，此时 `/Users/<你>` 能过闸，「少打 /.agent-wechat」的手滑拦不住。
+    `SUDO_UID` 是 sudo 给出的**发起者** uid，拿它查 passwd 才还原得出那个人。
+
+    为什么要 resolve：调用方拿 `home.resolve()` 的**产物**来比，而 `Path.home()` 是未解析的。
+    macOS 上 `/tmp → /private/tmp` 恒成立，只解析一边会让两条判据**永远为假**——
+    `_escapes_home` 里同一个错误已经修过（那里注释明写「两边都要解析过才能比」）。
+    """
+    raw = {pathlib.Path.home()}
+    uids = [os.getuid()]
+    sudo_uid = os.environ.get("SUDO_UID", "")
+    if sudo_uid.isdigit():
+        uids.append(int(sudo_uid))
+    for uid in uids:
+        h = _home_of_uid(uid)
+        if h is not None:
+            raw.add(h)
+    out = []
+    for h in raw:
+        try:
+            out.append(h.resolve(strict=False))
+        except (OSError, RuntimeError):
+            continue        # 单个候选解析不出来就跳过它，不让一个坏候选拖垮整道闸门
+    return tuple(out)
+
+
 def _check_home_is_sane(home: pathlib.Path) -> None:
     """拒绝看起来不像数据目录的 HOME_DIR。**这是一道数据丢失闸门，不是洁癖。**
 
@@ -131,25 +173,35 @@ def _check_home_is_sane(home: pathlib.Path) -> None:
     `purge --all --yes` 会递归删掉**当前工作目录**（实测确认，且输出最后一行还打着 ✅）。
     该变量是文档化的一等开关（含 MCP 的 env），所以「shell 里没设上」是现实输入。
 
-    已知边界：后两条判据里的「用户主目录」取自**本进程**的 `pathlib.Path.home()`（即 `$HOME`），
-    所以换过 `HOME` 的 shell 里这套判据是**跟着变的**——例如 `sudo`（本项目为 bootstrap 文档化
-    了 sudo）下 `HOME=/var/root`，此时 `/Users/<你>` 能过闸。要关上它得先定义「提权场景下用户
-    主目录算谁的」（真实家目录、`$SUDO_USER` 的家目录、还是两者都比对），那是产品决定，不在本轮。
+    「用户主目录」跑的是 `_user_homes()` 的**全部候选**（`$HOME` ∪ 本进程 uid 的家 ∪
+    `$SUDO_UID` 的家），而不是单个 `Path.home()`：提权下 `$HOME` 变成 `/var/root`，
+    只比一个的话 `/Users/<你>` 就过闸了。
     """
-    resolved = home.resolve()
     if not home.is_absolute():
+        # 先判这个再 resolve：`Path("")` 是相对路径，但它 resolve 之后就是 CWD 了，
+        # 先 resolve 会让消息退化成「拒绝销毁用户主目录」——指不到真正的原因。
         raise errors.PurgeRefused(
             f"拒绝在相对路径上执行销毁：{home!r}",
             hint="AGENT_WECHAT_HOME 是否被设成了空值？空值会被解析成当前目录")
+    try:
+        resolved = home.resolve(strict=False)
+    except (OSError, RuntimeError) as exc:
+        # 符号链接环：3.12 的 Path.resolve 抛 RuntimeError（3.13 才改成 OSError）。
+        # 不接住的话它会以裸异常穿透 CLI，**dry-run 也会崩**——而这个命令的全部价值就在于
+        # 让用户在动手前看清将发生什么。判不出来就不删。
+        raise errors.PurgeRefused(
+            f"无法解析待销毁目录，拒绝执行销毁：{home}",
+            hint=f"{exc}；请检查该路径是否为符号链接环") from exc
     if resolved == pathlib.Path("/"):
         raise errors.PurgeRefused(f"拒绝销毁文件系统根：{resolved}",
                                   hint="AGENT_WECHAT_HOME 指向了不该被销毁的目录")
-    if resolved == pathlib.Path.home():
-        raise errors.PurgeRefused(f"拒绝销毁用户主目录：{resolved}",
-                                  hint="AGENT_WECHAT_HOME 指向了不该被销毁的目录")
-    if pathlib.Path.home().is_relative_to(resolved):
-        raise errors.PurgeRefused(f"拒绝销毁用户主目录的祖先：{resolved}",
-                                  hint="AGENT_WECHAT_HOME 指向了不该被销毁的目录")
+    for h in _user_homes():
+        if resolved == h:
+            raise errors.PurgeRefused(f"拒绝销毁用户主目录：{resolved}",
+                                      hint="AGENT_WECHAT_HOME 指向了不该被销毁的目录")
+        if h.is_relative_to(resolved):
+            raise errors.PurgeRefused(f"拒绝销毁用户主目录的祖先：{resolved}",
+                                      hint="AGENT_WECHAT_HOME 指向了不该被销毁的目录")
 
 
 def plan(scopes: frozenset[str], all_: bool = False,

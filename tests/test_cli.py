@@ -337,6 +337,25 @@ def test_purge_all_refuses_on_empty_home_env(tmp_path, monkeypatch, capsys):
     assert "相对路径" in err and "Traceback" not in err
 
 
+def test_purge_dry_run_refuses_symlink_loop_without_traceback(tmp_path, monkeypatch, capsys):
+    """指向符号链接环的 AGENT_WECHAT_HOME 让裸 RuntimeError 穿透 CLI——而这条是 **dry-run**：
+    用户只是想看看会删什么，拿到的是一整个 traceback。核心修复在 purge._check_home_is_sane，
+    这里钉的是用户可见的那个结果：退 1、理由可读、不出现 traceback。
+
+    不走 `_isolate`：它会把 HOME_DIR patch 成绝对路径，正好把这个输入掩掉。
+    闸门在 plan() 第一句，所以任何真实产物都不会被 lstat 到。"""
+    from agent_wechat import paths as _paths
+    a = tmp_path / "a"; b = tmp_path / "b"
+    a.symlink_to(b); b.symlink_to(a)
+    monkeypatch.setattr(_paths, "HOME_DIR", a)
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["purge", "--index"])          # dry-run：没有 --yes
+    assert ei.value.code == 1
+    err = capsys.readouterr().err
+    assert "Traceback" not in err, f"不得以裸异常穿透：{err!r}"
+    assert "无法解析" in err
+
+
 def test_purge_dry_run_prints_absolute_target(tmp_path, monkeypatch, capsys):
     """计划表必须印出绝对目标目录。此前只印相对路径（`keys passphrase.json`、`all sub`），
     用户按下 --yes 时看不出这些相对路径指的是当前工作目录。"""

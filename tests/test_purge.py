@@ -454,6 +454,52 @@ def test_plan_refuses_when_home_parent_unsearchable(tmp_path, monkeypatch):
     assert "不可读" in str(ei.value)
 
 
+def test_plan_refuses_home_with_symlinked_ancestor(tmp_path, monkeypatch):
+    """闸门的两条主目录判据只 resolve 了左边（`resolved == Path.home()`）。$HOME 路径链上
+    有符号链接时（macOS 上 /tmp → /private/tmp 恒成立），未经 resolve 的 Path.home() 与
+    已 resolve 的 resolved **永远不相等**——于是「数据目录 = $HOME 本身」这种少打
+    /.agent-wechat 的手滑被放行，`purge --all --yes` 会删掉整个家目录。
+    实测（修前）：`HOME=/tmp/leohome AGENT_WECHAT_HOME=/tmp/leohome` 闸门放行、照常印计划表。
+    同一个错误在 _escapes_home 里已修（那里注释明写「两边都要解析过才能比」）。"""
+    real = tmp_path / "realhome"; real.mkdir()
+    link = tmp_path / "linkhome"; link.symlink_to(real, target_is_directory=True)
+    monkeypatch.setenv("HOME", str(link))
+    monkeypatch.setattr(paths, "HOME_DIR", link)
+    with pytest.raises(errors.PurgeRefused) as ei:
+        purge.plan(frozenset({"keys"}))
+    assert "用户主目录" in str(ei.value)
+
+
+def test_plan_refuses_symlink_loop_home(tmp_path, monkeypatch):
+    """指向符号链接环的 AGENT_WECHAT_HOME 让 **dry-run 也崩**：3.12 的 Path.resolve 对环抛
+    RuntimeError（3.13 才改成 OSError），而 `resolved = home.resolve()` 不在 try 内——
+    用户只是想看看会删什么，拿到的是一整个 traceback。实测（修前）：
+    `RuntimeError: Symlink loop from '/private/tmp/purgeloop/a'`。
+    这也是「core 层一律抛 AgentWeChatError 子类」那条约定的违反。"""
+    a = tmp_path / "a"; b = tmp_path / "b"
+    a.symlink_to(b); b.symlink_to(a)
+    monkeypatch.setattr(paths, "HOME_DIR", a)
+    with pytest.raises(errors.PurgeRefused) as ei:
+        purge.plan(frozenset({"keys"}))
+    assert "无法解析" in str(ei.value)
+
+
+def test_plan_refuses_sudo_users_home(tmp_path, monkeypatch):
+    """sudo 下 HOME=/var/root，只比 Path.home() 的话 /Users/<你> 能过闸——而本项目为 bootstrap
+    文档化了 sudo，「少打 /.agent-wechat」正是这道闸门要接住的手滑。SUDO_UID 是 sudo 给出的
+    **发起者** uid，拿它查 passwd 才还原得出那个人。
+
+    这里走**真实** passwd 查询而不是打桩：要钉的正是「查询这一步真的会被走到」。
+    闸门在 plan() 第一句，所以即使它失效也不会碰真实数据（autouse 红线还兜着）。"""
+    real_home = pathlib.Path.home()        # 必须在改 $HOME 之前取；REAL_HOME 是数据目录不是家目录
+    monkeypatch.setenv("HOME", str(tmp_path / "rootlike"))   # 模拟 sudo 下的 $HOME
+    monkeypatch.setenv("SUDO_UID", str(os.getuid()))
+    monkeypatch.setattr(paths, "HOME_DIR", real_home)        # 发起者（本进程用户）的家目录
+    with pytest.raises(errors.PurgeRefused) as ei:
+        purge.plan(frozenset({"keys"}))
+    assert "用户主目录" in str(ei.value)
+
+
 def test_execute_refuses_when_artifact_parent_becomes_unreadable(tmp_path, monkeypatch):
     """产物父目录不可搜索时（lstat 需要父目录的 +x），符号链接检查此前抛**裸 OSError**：
     违反「core 层一律抛 AgentWeChatError 子类」，在 CLI 那边就是一个 traceback。
