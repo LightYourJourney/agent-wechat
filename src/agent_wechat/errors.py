@@ -91,6 +91,31 @@ class HomeUnavailable(AgentWeChatError):
     """
 
 
+class SchemaDrift(AgentWeChatError):
+    """微信库的结构与声明不符：表没了，或列被改名/删除。
+
+    与 DataNotFound 的边界：那个是**文件**不存在（库没导、没解密），这个是**文件在、
+    结构不对**——微信升级触发后者，环境问题触发前者。两者的降级策略也不同。
+
+    三个字段都是降级路径的输入：`capability` 让调用方查「能力 → 降级策略」表；
+    `missing_columns` 决定错误消息的写法（空 = 表不存在，非空 = 列缺了）。
+    """
+
+    def __init__(self, capability: str, db: str, table: str,
+                 missing_columns: tuple[str, ...] = ()):
+        self.capability = capability
+        self.db = db
+        self.table = table
+        self.missing_columns = missing_columns
+        if missing_columns:
+            detail = f"缺少列 {', '.join(missing_columns)}"
+        else:
+            detail = "表不存在"
+        super().__init__(
+            f"微信库结构与预期不符（{capability}）：{db} 的 {table} {detail}",
+            hint="微信升级可能改变了库结构；可用 `agent-wechat inspect` 对比结构")
+
+
 class TaskNotFound(AgentWeChatError):
     """查询的任务 id 不在注册表里（含重启后记录仍在、但 id 写错的情形）。"""
 
