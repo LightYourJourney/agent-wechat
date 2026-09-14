@@ -22,6 +22,7 @@ def captured(monkeypatch):
     class _StubReader:
         def __init__(self, acct):
             self.acct = acct
+            self._drift = []         # 真实 MessageReader 的状态：collect_degradations 会读
 
         def resolve_one(self, contact):
             return ("wxid_target", [])

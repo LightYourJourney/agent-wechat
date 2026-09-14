@@ -29,6 +29,7 @@ def stub(monkeypatch, tmp_path):
     class _StubReader:
         def __init__(self, acct):
             seen["readers"] = seen.get("readers", []) + [acct]
+            self._drift = []         # 真实 MessageReader 的状态：collect_degradations 会读
 
         def resolve_one(self, contact):
             seen.setdefault("contacts", []).append(contact)

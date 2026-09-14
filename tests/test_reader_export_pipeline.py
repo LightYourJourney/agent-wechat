@@ -553,6 +553,41 @@ def test_search_still_works_when_roster_degrades_on_drift(env, tmp_path, monkeyp
     assert res["hits"], f"contact.db 结构漂移不该打挂索引检索：{res}"
 
 
+def test_search_survives_a_bare_sqlite_error_from_the_roster(env, tmp_path, monkeypatch):
+    """**探测覆盖不到**的失败也要被「尽力而为」接住（spec §5 最后三行）。
+
+    `name2id` 变成 `WITHOUT ROWID`：声明只保 `username` 这一列，探测于是放行——`rowid` 是
+    隐式列，`PRAGMA table_info` 根本不列它，声明覆盖不到它。下面那条
+    `JOIN name2id n ON n.rowid = cr.id` 照样崩，抛的是裸 `OperationalError`。
+
+    `roster()` 不接它（spec §5：自家 bug 与库损坏都不该被吞成「名册为空」），所以接网点
+    必须在 `_refresh_roster`——那里才是「刷新失败不该让检索一起挂」这句承诺的兑现处。
+    没有这条，把 except 收回 `AgentWeChatError` 也不会有测试红，而索引库明明好好的。
+
+    构造必须驱动真的 `roster()`（理由同上面的漂移那条）：猴补一个「抛 sqlite 错误」的桩
+    等于绕开被考的那一层，测试在修与不修时都是红的。第一段断言 `roster()` 本身照旧抛，
+    钉住「安全网不在 reader 里」——它一旦被挪进去，这条会红。
+    """
+    root = tmp_path / "norowidwx"
+    shutil.copytree(env.wx, root)
+    monkeypatch.setattr(paths, "XWECHAT_FILES", root)
+    export.run_export(ACCT, full=True)                # 先建好索引库（此时 contact.db 还好）
+    enc_db(root / ACCT / "db_storage" / "contact" / "contact.db", {
+        "name2id": ("CREATE TABLE name2id (id INTEGER PRIMARY KEY, username TEXT) WITHOUT ROWID",
+                    [(1, FRIEND)]),
+        "contact": ("CREATE TABLE contact (username TEXT, alias TEXT, remark TEXT, "
+                    "nick_name TEXT, delete_flag INTEGER)", [(FRIEND, None, "张三", None, 0)]),
+        "chat_room": ("CREATE TABLE chat_room (id INTEGER PRIMARY KEY, username TEXT, "
+                      "owner TEXT, ext_buffer BLOB)", [(1, GROUP, None, None)]),
+    })
+
+    with pytest.raises(sqlite3.OperationalError):
+        reader.MessageReader(ACCT).roster()           # 探测放行、SQL 崩——网不能在这儿
+
+    res = usecases.search_history("开会", contact=GROUP, account=ACCT)
+    assert res["hits"], f"名册刷新撞上裸 sqlite 错误不该打挂索引检索：{res}"
+
+
 def test_refresh_does_not_write_when_roster_is_empty(env, monkeypatch):
     """**空名册不得写库**。`replace_roster([])` 会清空该账号名册**并盖上 refreshed_at**——
     roster_is_stale 从此返回 False，整个 TTL 内不再重试：一次意外的空名册（contact.db
@@ -828,3 +863,52 @@ def test_drift_recorded_once_per_capability_and_table(env, tmp_path, monkeypatch
     r = reader.MessageReader(ACCT)
     r.username_pool()                                   # 降级：跳过读不到的源
     assert [(d.capability, d.table) for d in r._drift] == [("username_pool", "Name2Id")]
+
+
+# ---------- usecases：降级编排 ----------
+
+def test_degradations_are_collected_and_deduped(env, tmp_path, monkeypatch):
+    """同一 `(capability, table)` 在一次调用里出现多次（iter_all 每个分片探一次），
+    去重后只挂一条——否则一次导出会给用户几十条重复提示（spec §7）。"""
+    root = tmp_path / "wx"
+    drift_tree(root, ACCT, drop_table="chat_room")
+    monkeypatch.setattr(paths, "XWECHAT_FILES", root)
+    r = reader.MessageReader(ACCT)
+    r.roster()
+    r.roster()                                   # 第二次：缓存命中，但 _drift 不再追加
+    ds = usecases.collect_degradations(r)
+    assert len(ds) == 1 and ds[0].capability == "roster"
+    assert "显示名" in ds[0].effect
+
+
+def test_collect_degradations_dedupes_on_its_own(env):
+    """`collect_degradations` **自己**那层去重的钉子。上面那条考不到它：
+    `_record_drift`（T4）已经按同一把键去过重，`roster(); roster()` 根本不会产出重复，
+    把这里的 `seen` 换成裸 append 也不会有测试红。`_drift` 的类型是 list，去重不是它的
+    保证——直接喂一个带重复的 `_drift`，把契约钉在函数上。
+    """
+    r = reader.MessageReader(ACCT)
+    dup = errors.SchemaDrift("roster", "contact/contact.db", "chat_room")
+    r._drift.extend([dup, dup,
+                     errors.SchemaDrift("username_pool", "message/message_0.db", "Name2Id")])
+    assert [(d.capability, d.table) for d in usecases.collect_degradations(r)] == [
+        ("roster", "chat_room"), ("username_pool", "Name2Id")]
+
+
+def test_degradation_effect_is_human_readable_not_the_table_name():
+    """用户不需要知道 chat_room 表没了——他需要知道「显示名暂不可用」（spec §7）。"""
+    assert "chat_room" not in usecases.DEGRADE_EFFECT["roster"]
+    assert "显示名" in usecases.DEGRADE_EFFECT["roster"]
+
+
+def test_recent_messages_carries_degradations(env, tmp_path, monkeypatch):
+    """降级说明要挂进**返回结构**，而不是靠全局状态。"""
+    root = tmp_path / "wx"
+    drift_tree(root, ACCT, drop_table="chat_room")     # 显示名降级，但消息可读
+    monkeypatch.setattr(paths, "XWECHAT_FILES", root)
+    monkeypatch.setattr(keys, "CACHE_FILE", root / "passphrase.json")
+    keys.save_cached_hex(SELF, PW.encode().hex())
+    res = usecases.recent_messages(FRIEND, limit=5, account=ACCT)
+    assert isinstance(res.degraded, tuple)
+    assert [d.table for d in res.degraded] == ["chat_room"], \
+        "降级必须真的挂上去：默认 `()` 也是 tuple，光 isinstance 是空转"

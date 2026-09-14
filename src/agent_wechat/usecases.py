@@ -12,6 +12,7 @@
 """
 from __future__ import annotations
 
+import sqlite3
 from dataclasses import dataclass
 
 from . import account as acc_mod
@@ -73,6 +74,7 @@ class RecentMessages:
     chat_id: str
     display: str
     messages: list[reader.Message]
+    degraded: tuple[Degradation, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -121,6 +123,44 @@ class ChatContext:
         return self.resolve(contact) if contact else None
 
 
+# 能力 → 降级后用户**少了什么**（人话）。用户不需要知道表名（spec §7）：
+# `SchemaDrift` 只说「哪里漂了」，策略层才知道「那意味着什么」。
+DEGRADE_EFFECT: dict[str, str] = {
+    "username_pool": "部分会话的显示名无法反查（其余功能不受影响）",
+    "roster": "显示名暂不可用，发送者会回落到原始帐号标识",
+    "contacts": "联系人查询不可用",
+    "messages": "消息读取不可用",
+}
+
+
+@dataclass(frozen=True)
+class Degradation:
+    """一次降级：哪里漂了 + 那意味着什么。"""
+    capability: str
+    db: str
+    table: str
+    missing_columns: tuple[str, ...]
+    effect: str
+
+
+def collect_degradations(rdr: reader.MessageReader) -> tuple[Degradation, ...]:
+    """从 reader 实例收集降级，按 `(capability, table)` 去重（spec §7）。
+
+    `reader._record_drift`（T4）已经用同一把键去过重，所以在**今天的** reader 上这里
+    是兜底：`_drift` 的类型是 list，「进来就是去重的」不是它对外保证的东西——将来多一个
+    来源（或某条直接 append 的路径）带进重复，用户就会看到几十行一模一样的提示。
+    """
+    seen: dict[tuple[str, str], Degradation] = {}
+    for d in rdr._drift:
+        key = (d.capability, d.table)
+        if key not in seen:
+            seen[key] = Degradation(
+                capability=d.capability, db=d.db, table=d.table,
+                missing_columns=d.missing_columns,
+                effect=DEGRADE_EFFECT.get(d.capability, "部分功能降级"))
+    return tuple(seen.values())
+
+
 # 名册刷新间隔。刷新 = 解密一次 contact.db（秒级），且落在查询路径上会阻塞用户：
 # 太短则频繁解密，太长则改完备注要等。900 秒是 spec §7 定的取舍。
 ROSTER_TTL = 900
@@ -130,7 +170,13 @@ def _refresh_roster(ctx: ChatContext) -> None:
     """名册过期就重读一次 contact.db。**尽力而为，绝不抛。**
 
     `contact.db` 读不到（没 bootstrap、权限坏了）不该让检索也查不了——那是两条独立的
-    能力（spec §7）。这里吞掉 `AgentWeChatError`：名册旧总比查不了好。
+    能力（spec §7）。这里吞掉 `AgentWeChatError` 与裸 `sqlite3.Error`：名册旧总比查不了好。
+
+    为什么连裸 sqlite 错误一起吞：`roster()` 自己没有宽 except（spec §5：自家 bug 与库损坏
+    都不该被吞成「名册为空」），于是**探测覆盖不到**的失败会原样穿到这里——`name2id` 变成
+    `WITHOUT ROWID` 时 `JOIN ... ON n.rowid` 抛 `OperationalError`（`rowid` 是隐式列，
+    `PRAGMA table_info` 不列它，声明覆盖不到），半拷贝的 WAL 抛 `DatabaseError`。安全网该
+    落在「尽力而为」这句承诺所在的那一层。
     """
     try:
         with store.open() as con:
@@ -144,7 +190,7 @@ def _refresh_roster(ctx: ChatContext) -> None:
             # 由 Ruling 13 接受——正确性无损，性能损失只在罕见账号上。
             if rows:
                 store.replace_roster(con, ctx.account, rows)
-    except errors.AgentWeChatError:
+    except (errors.AgentWeChatError, sqlite3.Error):
         pass
 
 
@@ -179,7 +225,8 @@ def recent_messages(contact: str, limit: int = 50,
         return chat_id
     msgs = ctx.reader.recent(chat_id, limit=clamp_limit(limit, LIMIT_RECENT))
     return RecentMessages(chat_id=chat_id, display=ctx.reader.display_name(chat_id),
-                          messages=msgs)
+                          messages=msgs,
+                          degraded=collect_degradations(ctx.reader))
 
 
 def export_plan(contact: str | None = None, full: bool = False,
