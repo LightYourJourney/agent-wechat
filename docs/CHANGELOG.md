@@ -156,6 +156,20 @@
   由查询时 join 统一覆盖——新数据与存量因此不会分道扬镳
 - MCP 的发送者渲染补上 `is_self` 判断，与 CLI 对齐
 
+### 微信库结构漂移的处理
+
+- 新增 `schema.py`：声明四个能力（`contacts` / `roster` / `messages` / `username_pool`）
+  各自必需的表与列；`MessageReader` 打开库后用 `PRAGMA table_info` 探测（单表 0.017 ms，
+  实例级缓存）
+- 漂移时按能力处理：`contacts` / `messages` / `export` **报错**（唯一来源，降级会产生
+  「没有这个人/没有消息」的假象）；`username_pool` 跳过读不到的源；`roster` **逐源降级**
+  （群昵称与备注昵称物理无关，少一个仍有另一个）
+- 降级时结果里带说明：CLI 走 stderr（不污染 stdout），MCP 信封加 `degraded` 键
+- **不掩盖自家的 SQL bug**：探测只保声明过的列，SQL 引用了未声明的列时照旧崩
+- `docs/schema-4.1.13.md` 补齐了 `contact.db` 的表结构（此前只有描述性列举）
+- 已知限制：名册刷新若恰好撞上漂移，那份不完整的名册会被连同新的时间戳一起写进索引库，
+  此后 900 秒内 `search` 不再报降级（详见 USAGE.md §2）
+
 ### 其他规划
 
 - 蒸馏导出格式（按对话窗口切片的 JSONL）

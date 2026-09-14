@@ -66,9 +66,37 @@ CREATE TABLE SessionDeleteTable(username TEXT PRIMARY KEY, delete_time INTEGER);
 
 ## contact.db
 
-关键表：`contact`（12,754 行，含 username/nick_name/remark 等）、`name2id`（12,902 行）、
-`chat_room`、`chatroom_member`（18,651 行，群成员）、`biz_info`（公众号）。
+关键表：`contact`（12,786 行，含 username/nick_name/remark 等）、`name2id`（12,934 行）、
+`chat_room`（224 行）、`chatroom_member`（18,664 行，群成员）、`biz_info`（公众号）。
 注意 `biz_profile.offset` 等列存在**非 UTF-8 字节**，读 TEXT 时须用 `text_factory=bytes`。
+
+**表结构（2026-09-14 复测，微信 4.1.13.63）**。只读探测（`sqlite_master` +
+`PRAGMA table_info`），库文件字节数与 mtime 前后不变。共 18 张表（含 SQLite 内建的
+`sqlite_sequence`；`agent-wechat inspect` 会跳过 `sqlite_` 前缀，因此它列 17 张）：`biz_info`、
+`biz_profile`、`biz_session_feeds`、`chat_room`、`chat_room_info_detail`、`chatroom_member`、
+`contact`、`contact_label`、`encrypt_name2id`、`name2id`、`openim_acct_type`、
+`openim_appid`、`openim_wording`、`oplog`、`sqlite_sequence`、`stranger`、
+`stranger_ticket_info`、`ticket_info`。
+
+```sql
+-- contact：22 列，此处只列本项目读的 5 列；完整列见 agent-wechat inspect contact/contact.db
+CREATE TABLE contact(id INTEGER PRIMARY KEY, username TEXT, ..., alias TEXT, ...,
+  delete_flag INTEGER, ..., remark TEXT, ..., nick_name TEXT, ...);
+
+-- name2id：会话 username ↔ rowid（chat_room.id → name2id.rowid，实测 224/224 命中）
+CREATE TABLE name2id(username TEXT PRIMARY KEY);
+
+-- chat_room：群昵称的载体（ext_buffer 是 protobuf，字段 f2，可选，见 roster.py）
+CREATE TABLE chat_room(id INTEGER PRIMARY KEY, username TEXT, owner TEXT, ext_buffer BLOB);
+
+CREATE TABLE chatroom_member(room_id INTEGER, member_id INTEGER,
+  CONSTRAINT room_member UNIQUE(room_id, member_id));
+```
+
+- 显示名名册（`roster`）读的是 `chat_room.ext_buffer` + `contact.remark` / `nick_name`；
+  `chatroom_member` 这张表的成员关系本项目**不读**（群成员名单在 `ext_buffer` 的 protobuf 里）。
+- `schema.py` 在 `contact.db` 上的声明：`contact` 的 `username` / `alias` / `remark` /
+  `nick_name` / `delete_flag`，`chat_room` 的 `id` / `ext_buffer`，`name2id` 的 `username`。
 
 ## 对去重键的直接影响
 

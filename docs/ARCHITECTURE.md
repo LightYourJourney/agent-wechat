@@ -27,7 +27,8 @@ src/agent_wechat/
 ├── errors.py       统一错误契约：core 只抛项目异常，适配层翻译成各自介质
 ├── messages.py     messages 行契约：列清单、行构造器、两条哨兵编解码、类型词汇表
 ├── roster.py       显示名规则：ext_buffer 的 protobuf 解析 + 群昵称/备注/昵称优先级（纯逻辑，不碰 IO）
-├── reader.py       消息读取：表发现、内容解码、流式产出（唯一认识微信**库**结构的模块）
+├── schema.py       微信库结构声明：能力 × 必需表/列 + 探测（纯数据，不碰 IO）
+├── reader.py       消息读取：表发现、内容解码、流式产出（唯一直接读微信**库**的模块；结构声明在 schema.py）
 ├── export.py       导出管道：流式批处理 + 水位线续跑（任务登记归 usecases 层）
 ├── store.py        本地检索库：DDL、幂等 upsert、水位线、FTS 触发器
 ├── search.py       检索路由：trigram FTS / LIKE 兜底
@@ -159,7 +160,8 @@ vector.semantic_search(query, chat_id, limit, account)
 
 ## 7. 已知边界
 
-- 微信升级可能改变库结构/加密参数 → `inspect` 对比 [schema-4.1.13.md](schema-4.1.13.md)
+- 微信升级可能改变库结构/加密参数 → 运行时按 `schema.py` 的声明清单探测（读 `PRAGMA
+  table_info`，实例级缓存），受影响的能力降级并在结果里说明；`inspect` 仍是人工对照工具
 - 读取期间微信重度使用时快照可能偶发不一致 → 快照失败自动重试逻辑为规划的加固点
   （当前实现直接报错，重跑即可）
 - `key_info.db` 明文库的存在说明微信本地留存了被包裹的密钥材料；若未来微信改为
