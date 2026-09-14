@@ -33,12 +33,13 @@ class Requirement:
 CAPABILITIES: dict[str, tuple[Requirement, ...]] = {
     "contacts": (
         Requirement("contact/contact.db", "contact",
-                    ("username", "alias", "remark", "nick_name")),
+                    ("username", "alias", "remark", "nick_name", "delete_flag")),
     ),
     "roster": (
-        Requirement("contact/contact.db", "chat_room", ("id", "username", "ext_buffer")),
+        Requirement("contact/contact.db", "chat_room", ("id", "ext_buffer")),
         Requirement("contact/contact.db", "name2id", ("username",)),
-        Requirement("contact/contact.db", "contact", ("username", "remark", "nick_name")),
+        Requirement("contact/contact.db", "contact",
+                    ("username", "remark", "nick_name", "delete_flag")),
     ),
     "messages": (
         Requirement("message/*.db", "Name2Id", ("user_name",)),
