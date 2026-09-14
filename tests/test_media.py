@@ -1,6 +1,9 @@
 """media 核心的单元测试。全部夹具测试内构造（已知 key 加密假明文），无真实用户数据。"""
+import datetime
 import hashlib
+import os
 import pathlib
+import stat
 
 import pytest
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
@@ -130,33 +133,36 @@ def test_month_of_uses_local_timezone(monkeypatch):
 def test_resolve_image_month_and_suffix_priority(tmp_path, monkeypatch):
     root, account = make_tree(tmp_path, monkeypatch)
     cm = "a" * 32
-    img = paths.XWECHAT_FILES / account / "msg/attach" / cm / "2026-09" / "Img"
+    ts = int(datetime.datetime(2026, 9, 15, 12, 0).timestamp())   # 月由 ts 现算（Ruling 13.1）
+    img = paths.XWECHAT_FILES / account / "msg/attach" / cm / media.month_of(ts) / "Img"
     img.mkdir(parents=True)
     (img / "beef_hd.dat").write_bytes(b"x")     # _hd 优先于 _h 与裸名
     (img / "beef_h.dat").write_bytes(b"x")
     (img / "beef.dat").write_bytes(b"x")
-    ts = 1789000000                              # 2026-09 内的某刻
     got = media.resolve_image(account, cm, ts, "beef")
     assert got is not None and got.name == "beef_hd.dat"
 
 
 def test_resolve_image_adjacent_month_fallback(tmp_path, monkeypatch):
+    """目录落在**上一个月**：月份由 ts 用 datetime 推算，不手写常量对（会随 ts 漂移）。"""
     root, account = make_tree(tmp_path, monkeypatch)
     cm = "a" * 32
-    img = paths.XWECHAT_FILES / account / "msg/attach" / cm / "2026-08" / "Img"
+    ts = int(datetime.datetime(2026, 9, 15, 12, 0).timestamp())
+    prev = (datetime.datetime.fromtimestamp(ts).replace(day=1)
+            - datetime.timedelta(days=1)).strftime("%Y-%m")
+    img = paths.XWECHAT_FILES / account / "msg/attach" / cm / prev / "Img"
     img.mkdir(parents=True)
     (img / "cafe.dat").write_bytes(b"x")
-    ts = 1789000000                              # 2026-09——目录在相邻的 2026-08，靠 -1 月回退命中
     assert media.resolve_image(account, cm, ts, "cafe") is not None
 
 
 def test_resolve_video_mp4_then_thumb(tmp_path, monkeypatch):
     root, account = make_tree(tmp_path, monkeypatch)
-    vdir = paths.XWECHAT_FILES / account / "msg/video" / "2026-09"
+    ts = int(datetime.datetime(2026, 9, 15, 12, 0).timestamp())
+    vdir = paths.XWECHAT_FILES / account / "msg/video" / media.month_of(ts)
     vdir.mkdir(parents=True)
     (vdir / "abcd.mp4").write_bytes(b"x")
     (vdir / "ef01_thumb.jpg").write_bytes(b"x")
-    ts = 1789000000
     assert media.resolve_video(account, ts, "abcd") == (vdir / "abcd.mp4", False)
     assert media.resolve_video(account, ts, "ef01") == (vdir / "ef01_thumb.jpg", True)
     assert media.resolve_video(account, ts, "nope") is None
@@ -182,10 +188,12 @@ def test_export_media_images_and_videos(tmp_path, monkeypatch):
         (sdir / f"sam{i}.dat").write_bytes(
             build_v2_dat(jpeg_like(64), b"\x33" * 8 + b"\xff\xd9", aes, FAKE_XOR))
     (img / "beef.dat").write_bytes(build_v2_dat(jpeg_like(1024), b"\x11" * 50 + b"\xff\xd9", aes, FAKE_XOR))
-    # wxgf 是**解密后**的容器（"无 ffmpeg 时存原容器"）：dat 本身按 V0 全文件 XOR 存
-    # （spec §2.1）——直接写明文容器的话解密出来是乱码，导出会记 failed 而不是 .wxgf。
+    # wxgf 是**解密后**的容器（"无 ffmpeg 时存原容器"）：夹具按磁盘真实形态包成 V2 容器
+    # （Ruling 13.2；spec §2.1：本机 200 样本全为 V2，V0 是 3.x 遗留形态；§2.3：其中 23 个
+    # wxgf 解密成功）。
+    # 不是 V0——老注释把「V0 全文件 XOR」当成磁盘形态，与 §2.1/§2.3 矛盾。
     wxgf = b"wxgf" + b"\x00\x00\x00\x01" + b"\x00" * 16
-    (img / "c0de.dat").write_bytes(bytes(b ^ FAKE_XOR for b in wxgf))
+    (img / "c0de.dat").write_bytes(build_v2_dat(wxgf, b"\x22" * 20, aes, FAKE_XOR))
     (paths.XWECHAT_FILES / account / "msg/video/2026-09").mkdir(parents=True, exist_ok=True)
     vdir = paths.XWECHAT_FILES / account / "msg/video/2026-09"
     (vdir / "abcd.mp4").write_bytes(b"m" * 32)
@@ -332,7 +340,10 @@ def test_export_media_image_read_error_counts_failed(tmp_path, monkeypatch):
     (img / "beef.dat").write_bytes(
         build_v2_dat(jpeg_like(1024), b"\x11" * 50 + b"\xff\xd9", aes, FAKE_XOR))
     bad = img / "dead.dat"
-    bad.write_bytes(b"x")
+    # 载荷用**正确密钥**的真 V2 容器（Ruling 13.3）：能读出来就会被正常导出。于是 failed==1
+    # 只能来自那次读失败——若 monkeypatch 未生效会变成 ok==2，断言自足。（用错钥构造的话，
+    # monkeypatch 失效时照样计 failed，断言的失败原因就分不出来了。）
+    bad.write_bytes(build_v2_dat(jpeg_like(1024), b"\x33" * 50 + b"\xff\xd9", aes, FAKE_XOR))
     real_read = pathlib.Path.read_bytes
 
     def fake(self):
@@ -367,3 +378,91 @@ def test_export_media_video_read_error_counts_missing(tmp_path, monkeypatch):
     rep = media.export_media(account, ["c@chatroom"], kinds=["video"],
                              months=["2026-09"], out_dir=root / "home" / "media")
     assert rep.video.ok == 1 and rep.video.thumb == 1 and rep.video.missing == 2
+
+
+# ---------- Ruling 11：0700 覆盖输出树全链路 ----------
+
+def _mode(p) -> int:
+    return stat.S_IMODE(os.stat(p).st_mode)
+
+
+def _video_fixture(account, ts: int) -> str:
+    """在 ts 所属月放一个 mp4，返回该月（月份由 ts 现算，不手写常量）。"""
+    mon = media.month_of(ts)
+    vdir = paths.XWECHAT_FILES / account / "msg/video" / mon
+    vdir.mkdir(parents=True)
+    (vdir / "abcd.mp4").write_bytes(b"m" * 8)
+    return mon
+
+
+def test_export_media_tree_is_0700_all_the_way(tmp_path, monkeypatch):
+    """Ruling 11：默认 out_root 下，输出树**每一级**都是 0700，落盘文件 0600。
+
+    只断言 out_root 会给出假保证：`mkdir(mode=0o700, parents=True)` 只给最后一级套 mode，
+    中间两级（{chat_md5}/{kind}）按 umask 落 0755，文件按 umask 落 0644。
+    """
+    root, account = make_tree(tmp_path, monkeypatch)
+    mon = _video_fixture(account, int(datetime.datetime(2026, 9, 15, 12, 0).timestamp()))
+    media.export_media(account, ["c@chatroom"], kinds=["video"], months=[mon])   # 默认 out_root
+    out = paths.HOME_DIR / "media"
+    cm = hashlib.md5("c@chatroom".encode()).hexdigest()
+    for p in (out, out / cm, out / cm / "video", out / cm / "video" / mon):
+        assert _mode(p) == 0o700, p
+    assert _mode(out / cm / "video" / mon / "abcd.mp4") == 0o600
+
+
+def test_export_media_tightens_existing_out_root(tmp_path, monkeypatch):
+    """Ruling 11：`--out` 指向**已存在**目录（spec §6 允许）时同样收紧到 0700。
+
+    审阅者点名的暴露场景：`mkdir(exist_ok=True)` 对已存在目录不动权限——改前整棵树没有
+    任何一级是 0700，明文视频世界可读。
+    """
+    root, account = make_tree(tmp_path, monkeypatch)
+    out = root / "preexisting"
+    out.mkdir()
+    os.chmod(out, 0o755)                        # 用户既有目录：默认权限
+    (out / "keep.txt").write_text("x")
+    mon = _video_fixture(account, int(datetime.datetime(2026, 9, 15, 12, 0).timestamp()))
+    media.export_media(account, ["c@chatroom"], kinds=["video"], months=[mon], out_dir=out)
+    cm = hashlib.md5("c@chatroom".encode()).hexdigest()
+    for p in (out, out / cm, out / cm / "video", out / cm / "video" / mon):
+        assert _mode(p) == 0o700, p
+    assert _mode(out / cm / "video" / mon / "abcd.mp4") == 0o600
+    assert (out / "keep.txt").read_text() == "x"    # 只收紧权限，不动既有文件
+
+
+# ---------- Ruling 12：目录枚举的 OSError 也要归口 ----------
+
+def test_export_media_unreadable_dir_is_skipped(tmp_path, monkeypatch):
+    """Ruling 12：目录枚举抛 OSError（权限/竞态删目录）不逃出 core 层——该目录跳过，
+    其余照常，且**不**误记 degraded（与 Ruling 6 对 kvcomm 同一规矩）。
+
+    四处枚举（`base.iterdir` / `img_dir.glob` / `vbase.iterdir` / `month_dir.glob`）都走
+    同一个 `_safe_iter`，故这里聚焦打到最外层那处：会话的图片目录整个读不了。
+    """
+    root, account = make_tree(tmp_path, monkeypatch)
+    code = "999999"
+    (paths.CONTAINER / "app_data/net/kvcomm/key_999999_1_2_3_4_5_input.statistic").write_bytes(b"")
+    cm = hashlib.md5("chatA@chatroom".encode()).hexdigest()
+    aes = hashlib.md5((code + paths.bare_wxid(account)).encode()).hexdigest()[:16].encode()
+    sdir = paths.XWECHAT_FILES / account / "msg/attach" / cm / "2026-03" / "Img"
+    sdir.mkdir(parents=True)
+    samples = [sdir / f"sam{i}.dat" for i in range(4)]
+    for p in samples:
+        p.write_bytes(build_v2_dat(jpeg_like(64), b"\x33" * 8 + b"\xff\xd9", aes, FAKE_XOR))
+    monkeypatch.setattr(media, "_attach_dats", lambda acct: iter(samples))
+    mon = _video_fixture(account, int(datetime.datetime(2026, 9, 15, 12, 0).timestamp()))
+    blocked = paths.XWECHAT_FILES / account / "msg/attach" / cm
+    real_iterdir = pathlib.Path.iterdir
+
+    def fake(self):
+        if self == blocked:
+            raise PermissionError(13, "Operation not permitted", str(self))
+        return real_iterdir(self)
+
+    monkeypatch.setattr(pathlib.Path, "iterdir", fake)
+    rep = media.export_media(account, ["chatA@chatroom"], kinds=["image", "video"],
+                             months=[mon], out_dir=root / "home" / "media")
+    assert rep.image.ok == 0 and rep.image.failed == 0    # 该会话没东西可导 ≠ 导出失败
+    assert rep.video.ok == 1                              # 视频照常导出
+    assert rep.degraded == []                             # 一个目录读不了不是能力级降级

@@ -288,14 +288,50 @@ def _wxgf_to_jpeg(data: bytes, dest: pathlib.Path) -> bool:
     if r is None or r.returncode != 0 or not dest.exists() or dest.stat().st_size == 0:
         dest.unlink(missing_ok=True)       # ffmpeg 万一建了半成品：清掉，不留坏文件
         return False
+    dest.chmod(0o600)                      # ffmpeg 落盘的权限跟 umask，这里收口（同 _save）
     return True
+
+
+def _ensure_tree(root: pathlib.Path, *parts: str) -> pathlib.Path:
+    """逐级建目录并**逐级 chmod 0700**，返回最终路径（Ruling 11）。
+
+    `mkdir(parents=True, mode=…)` 只给最后一级套 mode，中间级按 umask 落成 0755；而
+    `exist_ok=True` 对**已存在**的目录完全不动权限。本函数的调用点要的是「这条输出路径
+    每一级都只有我能进」，所以只能逐级 mkdir + chmod（chmod 才是对已存在目录生效的那一下）。
+
+    **root 本身（out_root）也在收紧范围内**，即使它已存在（`--out` 指向既有目录是 spec §6
+    允许的用法）：它是本次导出的输出根，明文照片/视频全在里面，spec 要求 0700——这不是
+    误伤用户目录，是导出数据的安全边界。只 chmod 权限，不动既有的任何文件。
+    """
+    p = root
+    p.mkdir(mode=0o700, parents=True, exist_ok=True)
+    p.chmod(0o700)
+    for part in parts:
+        p = p / part
+        p.mkdir(mode=0o700, exist_ok=True)
+        p.chmod(0o700)
+    return p
+
+
+def _safe_iter(d: pathlib.Path, pattern: str | None = None) -> list[pathlib.Path]:
+    """枚举目录（或按 pattern glob）并**立即物化**；读不了返回 []（Ruling 12）。
+
+    两个要点：`glob` 是惰性生成器——OSError 在**迭代时**才抛，所以「创建 + 物化」必须都在
+    try 里，否则异常会从 for 循环裸奔出 core 层（与 Ruling 6 对 kvcomm 同一规矩）；一个目录
+    读不了只意味着**这一个**目录没东西可导，不是整次导出失败，也不该加 degraded。
+    """
+    try:
+        found = d.glob(pattern) if pattern else d.iterdir()
+        return sorted(found)
+    except OSError:
+        return []
 
 
 def _dest(out_root: pathlib.Path, cm: str, kind: str, mon: str,
           stem: str, ext: str) -> pathlib.Path:
-    """导出终路径（父目录 0700）。与 _save 共用：wxgf 转码要先拿路径才能直写。"""
-    d = out_root / cm / kind / mon
-    d.mkdir(mode=0o700, parents=True, exist_ok=True)
+    """导出终路径（`out_root/cm/kind/mon` 逐级 0700，含已存在的 out_root）。
+    与 _save 共用：wxgf 转码要先拿路径才能直写。"""
+    d = _ensure_tree(out_root, cm, kind, mon)
     return d / f"{stem}.{ext}"
 
 
@@ -303,6 +339,7 @@ def _save(out_root: pathlib.Path, cm: str, kind: str, mon: str,
           stem: str, ext: str, data: bytes) -> pathlib.Path:
     p = _dest(out_root, cm, kind, mon, stem, ext)
     p.write_bytes(data)
+    p.chmod(0o600)                             # 导出的是明文媒体：除了属主谁也读不到
     return p
 
 
@@ -312,8 +349,7 @@ def export_media(account: str, chat_ids: list[str], *, kinds: list[str],
     """按会话导出媒体。图片解密（MediaKeyError → 能力级降级不抛）；语音见 Task 3；视频明文复制
     （账号级枚举：只有恰好一个会话时可归属，多会话跳过并记 degraded）。"""
     report = MediaReport()
-    out_root = pathlib.Path(out_dir) if out_dir else paths.HOME_DIR / "media"
-    out_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    out_root = _ensure_tree(pathlib.Path(out_dir) if out_dir else paths.HOME_DIR / "media")
     want = set(months) if months else None
     produced = 0
 
@@ -332,7 +368,9 @@ def export_media(account: str, chat_ids: list[str], *, kinds: list[str],
                 base = paths.XWECHAT_FILES / account / "msg/attach" / cm
                 if not base.is_dir():
                     continue
-                for month_dir in sorted(p for p in base.iterdir() if p.is_dir()):
+                for month_dir in _safe_iter(base):
+                    if not month_dir.is_dir():
+                        continue
                     if full():
                         break
                     mon = month_dir.name
@@ -342,7 +380,7 @@ def export_media(account: str, chat_ids: list[str], *, kinds: list[str],
                     if not img_dir.is_dir():
                         continue
                     wxgf_warned = False
-                    for dat in sorted(img_dir.glob("*.dat")):
+                    for dat in _safe_iter(img_dir, "*.dat"):
                         if full():
                             report.truncated = True
                             break
@@ -384,12 +422,14 @@ def export_media(account: str, chat_ids: list[str], *, kinds: list[str],
             if full():
                 report.truncated = True
             elif vbase.is_dir():
-                for month_dir in sorted(p for p in vbase.iterdir() if p.is_dir()):
+                for month_dir in _safe_iter(vbase):
+                    if not month_dir.is_dir():
+                        continue
                     mon = month_dir.name
                     if want is not None and mon not in want:
                         continue
                     mp4_stems = set()
-                    for f in sorted(month_dir.glob("*.mp4")):
+                    for f in _safe_iter(month_dir, "*.mp4"):
                         if full():
                             report.truncated = True
                             break
@@ -404,7 +444,7 @@ def export_media(account: str, chat_ids: list[str], *, kinds: list[str],
                         produced += 1
                         if progress:
                             progress(produced)
-                    for f in sorted(month_dir.glob("*_thumb.jpg")):
+                    for f in _safe_iter(month_dir, "*_thumb.jpg"):
                         if full():
                             report.truncated = True
                             break
