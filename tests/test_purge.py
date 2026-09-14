@@ -64,7 +64,7 @@ def test_plan_touches_nothing(tmp_path):
     assert before == after
 
 
-def test_plan_marks_missing_artifacts(tmp_path):
+def test_plan_marks_missing_artifacts():
     """产物不存在时标 exists=False，而不是报错（幂等的前半，spec §5.1 第 5 步）。"""
     p = purge.plan(frozenset({"keys"}))
     keys_items = [i for i in p.items if i.artifact.scope == "keys"]
@@ -73,7 +73,7 @@ def test_plan_marks_missing_artifacts(tmp_path):
     assert keys_items[0].size == 0
 
 
-def test_plan_index_has_three_items(tmp_path):
+def test_plan_index_has_three_items():
     """index 必须是三个独立 Artifact（基库/-wal/-shm），各自一行、各自 stat（spec §4）。"""
     p = purge.plan(frozenset({"index"}))
     assert [i.artifact.path.name for i in p.items] == \
@@ -180,7 +180,7 @@ def test_execute_all_removes_tree_and_does_not_recreate(tmp_path):
     assert r.home_removed is True
 
 
-def test_execute_all_on_missing_home_is_idempotent(tmp_path):
+def test_execute_all_on_missing_home_is_idempotent():
     """HOME_DIR 不存在时 --all 仍成功（AC4）。rmtree 对缺失路径会抛 FileNotFoundError，
     spec §5.1 第 5 步要求把它纳入幂等规则。"""
     r = purge.execute(purge.plan(frozenset(), all_=True))
@@ -358,7 +358,7 @@ def test_verify_reports_unremoved_planned_paths(tmp_path):
     assert [p.name for p in rep.not_removed] == ["passphrase.json"]
 
 
-def test_verify_reports_surviving_loose_entry(tmp_path, monkeypatch):
+def test_verify_reports_surviving_loose_entry(tmp_path):
     """--all 部分失败时活下来的 loose 顶层条目必须报为残留。它既不在 items 里、又被从
     kept 里排除，此前**两个桶都不进**，报告会说「计划内路径已清空」——
     正是 not_removed 这个字段存在的意义所在的那种假象（spec §5.2 第 1 项）。"""
@@ -391,8 +391,10 @@ def test_verify_reports_still_held_index(tmp_path, monkeypatch):
                         lambda p: [4242] if p.name == "index.db" else [])
     rep = purge.verify(purge.plan(frozenset({"index"})))
     assert rep.held.get("index.db") == [4242]
-    # 钉住 pids 的真值过滤：去掉 `and (pids := ...)` 的话本测试原本仍会通过，
-    # 但渲染时会多出一行「⚠️ index.db-wal 仍被 pid  持有」（pid 为空）——一条对用户说的假话。
+    # 钉住 pids 的真值过滤：写成 `if i.exists` 再取值的话，index.db-wal 会以**空 pid 列表**
+    # 进 held，渲染时多出一行「⚠️ index.db-wal 仍被 pid  持有」——一条对用户说的假话。
+    #（原注释写的是「去掉 `and (pids := ...)` 测试仍会通过」——实测证伪：只去掉真值判断，
+    #  下面的断言会红；walrus 一并去掉则 pids 未定义，那是 NameError，也不是绿。）
     assert "index.db-wal" not in rep.held
 
 
@@ -405,7 +407,7 @@ def test_verify_finds_tmp_lldb_leftovers(tmp_path, monkeypatch):
     assert any("awcap_" in x for x in rep.tmp_leaks)
 
 
-def test_verify_degrades_when_tmutil_missing(tmp_path, monkeypatch):
+def test_verify_degrades_when_tmutil_missing(monkeypatch):
     """tmutil 缺失/超时时该项报「无法判定」，不能让整个核查崩掉（spec §5.2）。"""
     def boom(*a, **k):
         raise FileNotFoundError("tmutil")
@@ -415,7 +417,7 @@ def test_verify_degrades_when_tmutil_missing(tmp_path, monkeypatch):
     assert "无法判定" in rep.tm_excluded
 
 
-def test_tmutil_maps_nonzero_exit_to_undecidable(tmp_path, monkeypatch):
+def test_tmutil_maps_nonzero_exit_to_undecidable(monkeypatch):
     """非零退出且只写了 stderr 时，此前被印成「无输出」——用户读到的意思是「就是没输出」，
     而不是「判不出来」，而这两件事对一门专门用来抓假象的核查字段含义正相反。
     实测：正常用法恒 rc=0（`[Included]`/`[Excluded]` 都走 stdout，排没排除都是 0），
@@ -428,7 +430,7 @@ def test_tmutil_maps_nonzero_exit_to_undecidable(tmp_path, monkeypatch):
     assert "无法判定" in rep.tm_excluded and "64" in rep.tm_excluded
 
 
-def test_execute_refuses_when_home_is_root(tmp_path, monkeypatch):
+def test_execute_refuses_when_home_is_root(monkeypatch):
     """闸门在 execute 里也要有一道，且是第一句：CLI 是「先 plan → 再 execute」，plan 到
     execute 之间 paths.HOME_DIR 可能已被改指（或首次 plan 走的不是这条路径），到那时就只剩
     「已经开始删」了。测试文件里那道 autouse 红线保护不了这条——它保护的是测试自己。"""

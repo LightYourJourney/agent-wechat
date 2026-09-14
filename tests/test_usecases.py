@@ -193,7 +193,7 @@ def test_mcp_tools_return_need_confirm_envelope(name, kwargs, stub):
     assert res == {"need_confirm": EXPECTED}
 
 
-def test_mcp_and_cli_report_miss_identically(stub, monkeypatch):
+def test_mcp_and_cli_report_miss_identically(stub):
     """未命中：MCP 信封的 error 文案 = CLI stderr 的单行文案（同一条异常）。"""
     _miss(stub)
     res = mcp_server.get_recent_messages(contact="张三")
