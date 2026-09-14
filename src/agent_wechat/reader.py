@@ -182,23 +182,31 @@ class MessageReader:
         """
         groups: dict[str, list[tuple[str, str | None]]] = {}
         contacts: dict[str, tuple[str, str]] = {}
-        with self._open("contact/contact.db") as con:
-            # chat_room.id → name2id.rowid → 群 username（实测 3/3 相等，spec §2.1）
-            for username, blob in con.execute(
-                    "SELECT n.username, cr.ext_buffer FROM chat_room cr "
-                    "JOIN name2id n ON n.rowid = cr.id"):
-                chat_id = _s(username)
-                if chat_id:
-                    groups[chat_id] = roster.parse_members(
-                        blob if isinstance(blob, bytes) else None)
-            # **不带 limit**：`_contacts_all_cached()` 走的是 contacts(limit=5000)，
-            # 而真实 contact 表有 12,782 行——拿它当名册会静默漏掉一半人（spec §2.6）。
-            for u, remark, nick in con.execute(
-                    "SELECT username, remark, nick_name FROM contact "
-                    "WHERE COALESCE(delete_flag,0)=0"):
-                key = _s(u)
-                if key:
-                    contacts[key] = (_s(remark), _s(nick))
+        try:
+            with self._open("contact/contact.db") as con:
+                # chat_room.id → name2id.rowid → 群 username（实测 3/3 相等，spec §2.1）
+                for username, blob in con.execute(
+                        "SELECT n.username, cr.ext_buffer FROM chat_room cr "
+                        "JOIN name2id n ON n.rowid = cr.id"):
+                    chat_id = _s(username)
+                    if chat_id:
+                        groups[chat_id] = roster.parse_members(
+                            blob if isinstance(blob, bytes) else None)
+                # **不带 limit**：`_contacts_all_cached()` 走的是 contacts(limit=5000)，
+                # 而真实 contact 表有 12,782 行——拿它当名册会静默漏掉一半人（spec §2.6）。
+                for u, remark, nick in con.execute(
+                        "SELECT username, remark, nick_name FROM contact "
+                        "WHERE COALESCE(delete_flag,0)=0"):
+                    key = _s(u)
+                    if key:
+                        contacts[key] = (_s(remark), _s(nick))
+        except sqlite3.Error as exc:
+            # 表/列不存在是现实输入（ARCHITECTURE §7：微信升级可能改变库结构）。
+            # 不翻成项目异常的话，它会穿透 _refresh_roster 的 except AgentWeChatError，
+            # 把**索引检索**一起打挂——而那和 contact.db 坏没坏是两件事。
+            raise DataNotFound(
+                f"读取联系人库失败：{exc}",
+                hint="微信升级可能改变了库结构；本机检索不受影响，只是显示名暂不可用") from exc
         return roster.build_rows(groups, contacts)
 
     def _roster_map(self) -> dict[tuple[str, str], str]:

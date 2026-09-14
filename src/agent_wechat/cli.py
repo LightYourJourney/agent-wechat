@@ -176,8 +176,8 @@ def cmd_search(args: argparse.Namespace) -> int:
         return _need_confirm(args.contact, res)
     print(f"mode={res['mode']} total={res['total']}")
     for h in res["hits"]:
-        print(f"  [{h['ts']}] {h['chat_id']} {h['sender_name'] or h['sender_id'] or '?'}: "
-              f"{(h['content'] or '')[:120]}")
+        who = "我" if h["is_self"] else (h["sender_name"] or h["sender_id"] or "?")
+        print(f"  [{h['ts']}] {h['chat_id']} {who}: {(h['content'] or '')[:120]}")
     return 0
 
 

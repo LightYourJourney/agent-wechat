@@ -64,6 +64,22 @@ def test_search_clamps_non_positive_limit(monkeypatch):
         assert seen["limit"] == 1, f"-n {n} 未被夹到 1"
 
 
+def test_search_renders_self_as_me(monkeypatch, capsys):
+    """自己发的消息一律印「我」，CLI search 也不例外。
+
+    终审端到端实测的缺口：cmd_recent / cmd_semantic / mcp_server 三处都有
+    `is_self` 分支，唯独 search 的 hit 渲染漏了——自己发的私聊消息印成自己的 wxid。
+    """
+    monkeypatch.setattr(usecases, "search_history", lambda *a, **k: {
+        "mode": "fts", "total": 1,
+        "hits": [{"ts": 1700000000, "chat_id": "wxid_friend01",
+                  "sender_id": "wxid_t", "sender_name": None, "is_self": 1,
+                  "content": "今晚一起吃饭吗"}]})
+    cli.cmd_search(SimpleNamespace(account=None, contact=None, query="吃饭", n=10))
+    assert capsys.readouterr().out == (
+        "mode=fts total=1\n  [1700000000] wxid_friend01 我: 今晚一起吃饭吗\n")
+
+
 # ---------- C1：统一错误契约（core 抛项目异常，CLI 翻转成 stderr + 退出码 1） ----------
 
 def test_main_prints_project_error_to_stderr_and_exits_1(monkeypatch, capsys):

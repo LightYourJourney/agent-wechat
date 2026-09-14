@@ -6,6 +6,7 @@ reader/export/search 走真实全链路（真实 PBKDF2 派生 + 真实解密）
 """
 import hashlib
 import pathlib
+import shutil
 import sqlite3
 import subprocess
 import uuid
@@ -486,6 +487,37 @@ def test_search_still_works_when_roster_refresh_fails(env, monkeypatch):
     monkeypatch.setattr(reader.MessageReader, "roster", boom)
     res = usecases.search_history("开会", contact=GROUP, account=ACCT)
     assert "hits" in res, f"刷新失败不该阻断检索：{res}"
+
+
+def test_search_still_works_when_roster_hits_sqlite_error(env, tmp_path, monkeypatch):
+    """`_refresh_roster` 只吞 `AgentWeChatError`。contact.db 的结构漂移（ARCHITECTURE §7：
+    微信升级可能改变库结构）若在 reader 层不翻成项目异常，就会穿透 `_refresh_roster`
+    把**索引检索**一起打挂——而索引库是好的，那是两条独立的能力。终审实测复现过：
+    没有 `name2id` 表的 contact.db 让 `reader.roster()` 抛
+    `sqlite3.OperationalError: no such table: name2id`。
+
+    **必须驱动真的 `roster()`**（自造一棵带漂移的树，同
+    `test_roster_does_not_use_the_search_limit` 的隔离法）：把 `roster` monkeypatch 成
+    「抛 sqlite3 错误」的桩，等于绕开被修的那一层——那样这条测试在修与不修时**都是红的**，
+    因为它考的是「`_refresh_roster` 要不要吞任意裸异常」，而不是本模块的契约。
+    """
+    root = tmp_path / "driftwx"
+    shutil.copytree(env.wx, root)
+    monkeypatch.setattr(paths, "XWECHAT_FILES", root)
+    export.run_export(ACCT, full=True)                # 先建好索引库（此时 contact.db 还好）
+    enc_db(root / ACCT / "db_storage" / "contact" / "contact.db", {
+        "chat_room": ("CREATE TABLE chat_room (id INTEGER PRIMARY KEY, username TEXT, "
+                      "owner TEXT, ext_buffer BLOB)", [(1, GROUP, None, None)]),
+        "contact": ("CREATE TABLE contact (username TEXT, alias TEXT, remark TEXT, "
+                    "nick_name TEXT, delete_flag INTEGER)", [(FRIEND, None, "张三", None, 0)]),
+    })                                                # **唯独没有 name2id 表**
+
+    with pytest.raises(errors.DataNotFound) as ei:    # reader 层负责翻成项目异常
+        reader.MessageReader(ACCT).roster()
+    assert "name2id" in str(ei.value), "原始 sqlite 错误该留在消息里，便于定位"
+
+    res = usecases.search_history("开会", contact=GROUP, account=ACCT)
+    assert res["hits"], f"contact.db 结构漂移不该打挂索引检索：{res}"
 
 
 def test_refresh_does_not_write_when_roster_is_empty(env, monkeypatch):
