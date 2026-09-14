@@ -49,7 +49,8 @@ def _guard(fn: Callable[..., Any]) -> Callable[..., Any]:
 
 
 def _msg_dict(m: reader.Message) -> dict:
-    return {"time": m.ts, "sender": m.sender_name or m.sender_id or "?",
+    return {"time": m.ts,
+            "sender": "我" if m.is_self else (m.sender_name or m.sender_id or "?"),
             "is_self": m.is_self, "type": m.type_name,
             "content": m.content or m.media_hint or ""}
 

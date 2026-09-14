@@ -8,6 +8,7 @@ import asyncio
 import inspect
 import json
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -187,3 +188,17 @@ def test_export_task_is_visible_through_get_task_status(monkeypatch, tmp_path):
             break
         time.sleep(0.01)
     assert st["status"] == "done" and st["rows"] == 3 and st["kind"] == "export"
+
+
+def test_msg_dict_marks_self_as_me():
+    """`cli.py:149` 有 is_self 判断而 MCP 没有——自己发的**私聊**消息（sender_id 是自己
+    ≠ chat_id，名册 join 不上）因此在 MCP 里显示成一串 wxid。"""
+    m = SimpleNamespace(ts=1, sender_name=None, sender_id="wxid_me", is_self=True,
+                        type_name="文本", content="在", media_hint=None)
+    assert mcp_server._msg_dict(m)["sender"] == "我"
+
+
+def test_msg_dict_falls_back_to_sender_id():
+    m = SimpleNamespace(ts=1, sender_name=None, sender_id="wxid_x", is_self=False,
+                        type_name="文本", content="在", media_hint=None)
+    assert mcp_server._msg_dict(m)["sender"] == "wxid_x"
