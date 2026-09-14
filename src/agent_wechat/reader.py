@@ -83,7 +83,7 @@ def is_chat_id(s: str) -> bool:
 def _db_matches(pattern: str, rel: str) -> bool:
     """`"message/*.db"` 匹配 `"message/message_0.db"`；其余是精确匹配。"""
     if pattern.endswith("/*.db"):
-        return rel.startswith(pattern[:-5]) and rel.endswith(".db")
+        return rel.startswith(pattern[:-4]) and rel.endswith(".db")   # 留下 "message/"
     return pattern == rel
 
 
@@ -120,7 +120,7 @@ class MessageReader:
                 con.close()
 
     def _check(self, capability: str, rel: str, con: sqlite3.Connection, *,
-               table: str | None = None) -> None:
+               table: str | None = None, only: str | None = None) -> None:
         """校验该能力在**这个库**上的声明，缺了抛 `SchemaDrift`。
 
         缓存键含表名：`Msg_*` 的真名是 md5，同一个 capability 在不同分片上对应不同的表。
@@ -128,13 +128,19 @@ class MessageReader:
         通配声明（`Msg_*`）的抽样规则：调用方先把该库里真实存在的匹配表名传进来
         （`table=`）；一条也没有时调用方**不该调这个方法**——那是「没有消息」而不是
         「结构漂移」（spec §4 的陷阱）。
+
+        `only=` 只校验**这一张表**的声明：`roster` 要逐源降级（T4），没有它一次调用
+        会走完该能力的全部声明、第一条漂移就抛，后面的源永远记不上（`chat_room` 与
+        `contact` 物理无关，少一个仍有另一个）。
         """
-        key = (rel, capability, table or "")
+        key = (rel, capability, only or table or "")
         if key in self._probed:
             return
         for req in schema.CAPABILITIES[capability]:
             if not _db_matches(req.db, rel):
                 continue                       # 这条声明属于另一个库
+            if only is not None and req.table != only:
+                continue                       # 只校验这一张表的声明（roster 逐源降级）
             # `table=` 只对**通配**声明有意义（`Msg_*` 的真名运行时才知道）；
             # 精确表名的声明用它自己的表名——否则探 chat_room 时会拿这个名字
             # 去探 name2id 的声明，得到的是无关的结论。
@@ -142,7 +148,9 @@ class MessageReader:
             result = schema.probe(con, req, effective)
             if not result.ok:
                 self._probed.add(key)          # 漂移也缓存：同一个库里不必反复探
-                drift = errors.SchemaDrift(capability, rel, table or req.table,
+                # 报 `effective` 而不是 `table or req.table`：`Name2Id` 缺了的时候
+                # 后者会点名 `Msg_<md5>`——一张**存在**的表，用户会查错方向。
+                drift = errors.SchemaDrift(capability, rel, effective,
                                            result.missing_columns)
                 self._drift.append(drift)
                 raise drift

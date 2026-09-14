@@ -573,6 +573,17 @@ def test_refresh_does_not_write_when_roster_is_empty(env, monkeypatch):
 # passphrase 缓存（`MessageReader.__init__` 就要用，缺了连构造都过不去）。
 # env 先指到合成目录，测试体再指到漂移树，后者生效。
 
+def test_db_matches_wildcard_needs_a_real_path_segment():
+    """`message/*.db` 只该匹配 `message/` 下的库。切片写成 `[:-5]` 留下的是 `"message"`
+    （没有斜杠），于是 `message_fts/message_fts.db` 也会命中——今天所有 `rel` 都是
+    `message/<shard>` 或精确路径所以无害，但注释里的算术与代码对不上，早晚要坑人。"""
+    assert reader._db_matches("message/*.db", "message/message_0.db")
+    assert not reader._db_matches("message/*.db", "message_fts/message_fts.db")
+    assert not reader._db_matches("message/*.db", "message")
+    assert reader._db_matches("contact/contact.db", "contact/contact.db")
+    assert not reader._db_matches("contact/contact.db", "session/session.db")
+
+
 def test_contacts_raises_schema_drift_when_table_missing(env, tmp_path, monkeypatch):
     """`contacts` 是唯一来源，漂移时**不降级**——返回空会让用户以为「没有这个人」。"""
     root = tmp_path / "wx"
@@ -632,14 +643,55 @@ def test_export_raises_schema_drift_when_message_columns_change(env, tmp_path, m
 
 
 def test_username_pool_degrades_when_one_source_drifts(env, tmp_path, monkeypatch):
-    """四个源汇集，少一个仍有三个（spec §6）——**不抛**，跳过它继续。"""
+    """四个源汇集，少一个仍有三个（spec §6）——**不抛**，跳过它继续。
+
+    断言必须钉的是「其余源**照常贡献**」而不只是「不抛」：把 pool 换成
+    `{self_wxid, "filehelper"}` 的空转实现也该红。所以这里让 session 源是**活的**，
+    只把 name2id 拿掉——它是唯一能证明「跳过坏的、留下好的」的构造。"""
     root = tmp_path / "wx"
-    drift_tree(root, ACCT, drop_table="name2id")        # contact 源没了
+    drift_tree(root, ACCT, drop_table="name2id")        # contact 源（name2id）没了
+    enc_db(root / ACCT / "db_storage" / "session" / "session.db", {
+        "SessionTable": ("CREATE TABLE SessionTable (username TEXT)", [(FRIEND,)]),
+    })                                                 # session 源是好的
     monkeypatch.setattr(paths, "XWECHAT_FILES", root)
     r = reader.MessageReader(ACCT)
     pool = r.username_pool()                            # 不该抛
-    assert FRIEND not in pool                           # 别的源也没造，但至少不炸
+    assert FRIEND in pool                               # 漂移的源被跳过，其余照常贡献
     assert any(d.capability == "username_pool" for d in r._drift)
+
+
+def test_drift_names_the_table_that_actually_drifted(env, tmp_path, monkeypatch):
+    """漂移点名的必须是**真的缺了的那张表**：`messages` 能力下 `Name2Id` 缺了，若报成
+    `Msg_<md5>`（一张存在的表），用户会去查错方向，T5 按 `(capability, table)` 去重也会错位。"""
+    root = tmp_path / "wx"
+    enc_db(root / ACCT / "db_storage" / "message" / "message_0.db", {
+        # **唯独没有 Name2Id 表**
+        f"Msg_{md5(FRIEND)}": (
+            f"CREATE TABLE Msg_{md5(FRIEND)} (local_id INTEGER, local_type INTEGER, "
+            "real_sender_id INTEGER, create_time INTEGER, message_content BLOB, "
+            "WCDB_CT_message_content INTEGER)", [(1, 1, 1, T0, "hi", 0)]),
+    })
+    monkeypatch.setattr(paths, "XWECHAT_FILES", root)
+    with pytest.raises(errors.SchemaDrift) as ei:
+        reader.MessageReader(ACCT).recent(FRIEND, limit=5)
+    assert ei.value.table == "Name2Id", "该点名缺了的 Name2Id，而不是那张存在的 Msg_ 表"
+    assert ei.value.missing_columns == ()               # 空 = 表不存在
+
+
+def test_check_only_validates_the_named_table(env, tmp_path, monkeypatch):
+    """`only=` 只校验这一张表的声明（T4 的逐源降级靠它）：没有它，一次 `_check` 会走完
+    `roster` 的全部三条声明，第一条漂移就抛——后面的源永远记不上 `_drift`。"""
+    root = tmp_path / "wx"
+    drift_tree(root, ACCT, drop_table="chat_room")       # 群昵称源没了，contact 还在
+    monkeypatch.setattr(paths, "XWECHAT_FILES", root)
+    r = reader.MessageReader(ACCT)
+    with r._open("contact/contact.db") as con:
+        r._check("roster", "contact/contact.db", con, only="contact")   # 不该抛
+    assert r._drift == []
+    with r._open("contact/contact.db") as con:
+        with pytest.raises(errors.SchemaDrift) as ei:
+            r._check("roster", "contact/contact.db", con)      # 不带 only：chat_room 缺
+    assert ei.value.table == "chat_room"
 
 
 def test_a_bare_sql_column_typo_still_crashes(env, tmp_path, monkeypatch):
