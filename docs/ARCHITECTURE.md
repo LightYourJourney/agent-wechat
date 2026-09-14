@@ -26,6 +26,7 @@ src/agent_wechat/
 ├── decrypt.py      db+wal+shm 三元组快照 → sqlcipher raw-key 解密导出
 ├── errors.py       统一错误契约：core 只抛项目异常，适配层翻译成各自介质
 ├── messages.py     messages 行契约：列清单、行构造器、两条哨兵编解码、类型词汇表
+├── roster.py       显示名规则：ext_buffer 的 protobuf 解析 + 群昵称/备注/昵称优先级（纯逻辑，不碰 IO）
 ├── reader.py       消息读取：表发现、内容解码、流式产出（唯一认识微信**库**结构的模块）
 ├── export.py       导出管道：流式批处理 + 水位线续跑（任务登记归 usecases 层）
 ├── store.py        本地检索库：DDL、幂等 upsert、水位线、FTS 触发器

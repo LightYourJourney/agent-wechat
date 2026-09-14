@@ -88,7 +88,7 @@
   "chat_id": "wxid_abc123def456",
   "display": "小李（产品）",
   "messages": [
-    { "time": 1789045400, "sender": "wxid_testacct01", "is_self": true,
+    { "time": 1789045400, "sender": "我", "is_self": true,
       "type": "text", "content": "今晚一起吃饭吗" },
     { "time": 1789045521, "sender": "wxid_abc123def456", "is_self": false,
       "type": "text", "content": "好啊，七点老地方？" },
@@ -176,7 +176,7 @@
     { "id": 735662, "chat_id": "wxid_abc123def456",
       "shard": "message_4.db", "local_id": 22415, "ts": 1789045400,
       "msg_type": 1, "sender_id": "wxid_testacct01",
-      "sender_name": null, "is_self": 1,
+      "sender_name": "wxid_testacct01", "is_self": 1,
       "content": "周末爬山的那天记得带水", "media_hint": null,
       "snip": "…【周末爬山】那天记得带水…" }
   ]
