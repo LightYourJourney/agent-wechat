@@ -262,7 +262,7 @@ def test_purge_yes_executes_and_reports(tmp_path, monkeypatch, capsys):
     用户可见出口**——而 T7 的四个测试此前全是 dry-run 或以退出码 2 结束，这条路径零覆盖，
     只有 T9 的手工验收护着，手工验收不防回归。"""
     home = _isolate(tmp_path, monkeypatch)
-    (home / "passphrase.json").write_bytes(b"x" * 2_000_000)   # 2.0 MB，便于断言体积
+    (home / "passphrase.json").write_bytes(b"x" * 2_000_000)   # 2 MB，便于断言体积
     (home / "index.db").write_bytes(b"y" * 3000)
     with pytest.raises(SystemExit) as ei:
         cli.main(["purge", "--keys", "--yes"])
@@ -271,7 +271,7 @@ def test_purge_yes_executes_and_reports(tmp_path, monkeypatch, capsys):
     assert (home / "index.db").exists()          # 范围外的一个字节没删
     out = capsys.readouterr().out
     assert "已删除 1 项" in out
-    assert "2.0 MB" in out, f"freed 必须反映真实字节数，而实际输出是：{out!r}"
+    assert "2 MB" in out, f"freed 必须反映真实字节数，而实际输出是：{out!r}"
 
 
 def test_render_plan_shows_no_size_for_directory(tmp_path, monkeypatch, capsys):
@@ -324,13 +324,44 @@ def test_render_plan_uses_decimal_units(tmp_path, monkeypatch, capsys):
     （印 4.94 GB，与 help 的 5.3 GB 打架），小文件走 MiB 分支把 182 B 印成 0.0 MiB
     （读起来像空文件）——同一个文件在一次会话里出现三个数字。"""
     home = _isolate(tmp_path, monkeypatch)
-    (home / "index.db").write_bytes(b"x" * 2_000_000)      # 2.0 MB
+    (home / "index.db").write_bytes(b"x" * 2_000_000)      # 2 MB
     (home / "passphrase.json").write_bytes(b"y" * 182)     # 182 B
     with pytest.raises(SystemExit):
         cli.main(["purge", "--index", "--keys"])
     out = capsys.readouterr().out
-    assert "2.0 MB" in out, f"十进制 MB 未出现：{out!r}"
+    assert "2 MB" in out, f"十进制 MB 未出现：{out!r}"
     assert "182 B" in out, f"小文件必须印字节数而不是 0.0 MiB：{out!r}"
+
+
+def test_human_size_never_rounds_into_the_next_unit():
+    """999,500–999,999 此前印成「1000 KB」、999,999,999 印成「1000.0 MB」——用户按单位读
+    会以为「1000.0 MB」比「1.00 GB」还大（真实值差 1 字节）。舍入把数字推进下一档时，
+    单位必须跟着走。
+
+    同时钉住 spec §3 计划表的五个样例：GB 保两位小数、整数不印「.0」——`5.30 GB` 与
+    `12 MB` 只在「整数省略小数」这一条规则下同时成立（spec 自己的格式并不自洽，
+    这是唯一解）。"""
+    assert cli._human_size(999_499) == "999 KB"
+    assert cli._human_size(999_500) == "1.0 MB"
+    assert cli._human_size(999_999) == "1.0 MB"
+    assert cli._human_size(999_949_999) == "999.9 MB"
+    assert cli._human_size(999_999_999) == "1.00 GB"
+    assert cli._human_size(5_300_000_000) == "5.30 GB"
+    assert cli._human_size(12_000_000) == "12 MB"
+    assert cli._human_size(182) == "182 B"
+    assert cli._human_size(95_000_000) == "95 MB"
+    assert cli._human_size(2) == "2 B"
+
+
+def test_purge_index_help_has_no_hardcoded_size(capsys):
+    """help 里硬编码的「5.3 GB」与渲染器是两个独立数字来源，会随索引增长漂移（今天一致
+    纯属巧合）。argparse 的 help 是构建时字符串，动态取值要在 --help 时读盘——不合适。
+    这个数字的正确位置是 dry-run 表，那里它取自真实产物。"""
+    with pytest.raises(SystemExit):
+        cli.main(["purge", "--help"])
+    out = capsys.readouterr().out
+    assert "5.3 GB" not in out, f"help 不该带会漂移的硬编码体积：{out!r}"
+    assert "--index" in out, "反面：别把整行 help 删掉来过关"
     assert "MiB" not in out and "4.94 GB" not in out
 
 

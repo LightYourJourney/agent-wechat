@@ -216,14 +216,23 @@ def _human_size(n: int) -> str:
     **不要用 1024 基底却标 GB**——那会印出 `4.94 GB`，与同屏 help 里的 5.3 GB 打架；
     而 `if i.size` 那种写法会让 182 B 走 MiB 分支印成 `0.0 MiB`，读起来像空文件。
     同一个文件在一次会话里出现三个不同数字，对一个靠数字帮用户判断该不该删的命令是实打实的伤害。
+
+    下面两条规则都是为了「单位与数字相符」：
+    · **舍入推进下一档时升档**——999,999 字节按 KB 档格式化是「1000 KB」，用户按单位读会
+      以为它比 1 MB 小；999,999,999 印「1000.0 MB」，而真实值差 1 字节就到 1 GB。
+    · **整数不印「.0」**——spec §3 的样例是 `12 MB` / `95 MB` / `182 B`，而 `5.30 GB`
+      保留两位小数（它不整）。这是唯一能同时命中那五个样例的规则。
     """
-    if n >= 1000**3:
-        return f"{n / 1000**3:.2f} GB"
-    if n >= 1000**2:
-        return f"{n / 1000**2:.1f} MB"
-    if n >= 1000:
-        return f"{n / 1000:.0f} KB"
-    return f"{n} B"
+    if n < 1000:
+        return f"{n} B"
+    for div, unit, prec in ((1000, "KB", 0), (1000**2, "MB", 1),
+                            (1000**3, "GB", 2), (1000**4, "TB", 2)):
+        if n < div * 1000 and round(n / div, prec) < 1000:
+            scaled = n / div
+            if scaled == int(scaled):
+                return f"{int(scaled)} {unit}"
+            return f"{scaled:.{prec}f} {unit}"
+    return f"{n / 1000**4:.2f} TB"      # ≥999.995 TB：再往上的单位没有实际用途
 
 
 def cmd_purge(args: argparse.Namespace) -> int:
@@ -361,7 +370,7 @@ def main(argv: list[str] | None = None) -> None:
 
     sp = sub.add_parser("purge", help="销毁本地产物（默认 dry-run，加 --yes 才真删）")
     sp.add_argument("--keys", action="store_true", help="密钥缓存 passphrase.json")
-    sp.add_argument("--index", action="store_true", help="本地检索库 index.db（含向量，5.3 GB）")
+    sp.add_argument("--index", action="store_true", help="本地检索库 index.db（含向量索引）")
     sp.add_argument("--tmp", action="store_true", help="解密临时目录")
     sp.add_argument("--all", action="store_true",
                     help="整个 ~/.agent-wechat（含 models/ 与散落文件），与具名范围互斥")
