@@ -7,8 +7,6 @@
 import pathlib
 import sqlite3
 
-import pytest
-
 from agent_wechat import errors, schema
 
 

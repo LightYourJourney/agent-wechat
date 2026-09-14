@@ -162,10 +162,17 @@ def cmd_export(args: argparse.Namespace) -> int:
     def progress(n: int) -> None:
         print(f"  已写入 {n} 行…", flush=True)
 
+    degraded: list = []
+
+    def note_reader(r) -> None:
+        """导出只返回行数，而漂移记在它用的那份 reader 上（spec §6 的 `username_pool`）。"""
+        degraded.extend(usecases.collect_degradations(r))
+
     n = export.run_export(plan.account, chat_id=plan.chat_id, full=plan.full,
-                          progress=progress)
+                          progress=progress, on_reader=note_reader)
     with store.open() as con:
         print(f"完成：本轮 {n} 行；索引总量 {store.counts(con)}")
+    _render_degradations(degraded)      # 降级走 stderr：成功但有保留（spec §7）
     return 0
 
 

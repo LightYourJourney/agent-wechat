@@ -14,7 +14,8 @@ import pytest
 from agent_wechat import account, bootstrap, cli, errors, keys, reader, search, usecases, vector
 # 合成微信目录（真实 sqlcipher 解密链路；路径全部指向 tmp_path，绝不碰真实数据）。
 # 跨模块复用夹具与 test_usecases 同法：`env` 依赖它**自己模块**里的 module 级 `wechat`。
-from test_reader_export_pipeline import ACCT, FRIEND, drift_tree, env, wechat  # noqa: F401
+from test_reader_export_pipeline import (ACCT, FRIEND, T0, build_shard, drift_tree,  # noqa: F401
+                                         enc_db, env, wechat)
 
 
 @pytest.fixture()
@@ -108,7 +109,7 @@ def test_main_keeps_argparse_exit_code_2():
 def test_main_success_still_exits_0(monkeypatch):
     class _StubReader:
         def __init__(self, acct):
-            pass
+            self._drift = []         # 真实 MessageReader 的状态：collect_degradations 会读
 
         def contacts(self, query=None, limit=200):
             return []
@@ -590,7 +591,7 @@ def test_semantic_renders_degradation_to_stderr_not_stdout(monkeypatch, capsys, 
     """semantic 的 hits 同样靠名册（`display` 由 `display_name` 富化，Ruling 13）。
     这条走**用例层**：漂移挂在 reader 上（T4 记的形状），`usecases.semantic_search`
     翻成信封的 degraded，CLI 把它印到 stderr——接线与渲染一起钉住。"""
-    from agent_wechat import store
+    from agent_wechat import paths, store
 
     class _DriftedReader:
         def __init__(self, acct):
@@ -601,6 +602,9 @@ def test_semantic_renders_degradation_to_stderr_not_stdout(monkeypatch, capsys, 
 
     monkeypatch.setattr(account, "resolve_account", lambda a: "acct")
     monkeypatch.setattr(store, "DB_PATH", tmp_path / "index.db")   # _refresh_roster 会开库
+    # HOME_DIR 也要隔离：store.connect → paths.ensure_home_dirs() 否则会对真实
+    # ~/.agent-wechat 做 mkdir 并跑一次 tmutil addexclusion
+    monkeypatch.setattr(paths, "HOME_DIR", tmp_path)
     monkeypatch.setattr(reader, "MessageReader", _DriftedReader)
     monkeypatch.setattr(vector, "semantic_search", lambda *a, **k: {
         "mode": "semantic", "total": 0, "hits": []})
@@ -609,3 +613,27 @@ def test_semantic_renders_degradation_to_stderr_not_stdout(monkeypatch, capsys, 
     out, err = capsys.readouterr()
     assert out == "mode=semantic total=0\n"
     assert "显示名" in err             # 策略表的文案（不是表名），与 recent 同一出口
+
+
+def test_export_renders_username_pool_degradation_to_stderr(env, tmp_path, monkeypatch, capsys):
+    """`username_pool` 是**唯一按设计降级**的能力（spec §6），而 export 是它唯一的
+    消费者——导出只返回行数，漂移以前被丢掉：索引里静默躺着 `md5:<hex>` 会话，之后按
+    群名 search 返回 0 且**无任何提示**。更糟的是它把一个原本响亮的失败（裸
+    OperationalError → 导出失败）变成了「成功」。降级说明走 stderr、不进 stdout——那是
+    给人看的表，也是管道里机器可读的部分（spec §7）。"""
+    from agent_wechat import paths
+    root = tmp_path / "wx"
+    ds = root / ACCT / "db_storage"
+    # session 源漂移：SessionTable 少了 username 列（微信改列比删表常见）。
+    # 导出本身照常跑——消息在分片里，与 session 无关。
+    enc_db(ds / "session" / "session.db", {
+        "SessionTable": ("CREATE TABLE SessionTable (user_name TEXT)", [(FRIEND,)])})
+    build_shard(root, ACCT, "message_0.db", {FRIEND: [(1, 1, 1, T0, "你好", 0)]}, [FRIEND])
+    monkeypatch.setattr(paths, "XWECHAT_FILES", root)
+
+    assert cli.cmd_export(SimpleNamespace(account=ACCT, contact=None, full=False)) == 0
+    out, err = capsys.readouterr()
+    assert out == ("  已写入 1 行…\n"
+                   f"完成：本轮 1 行；索引总量 {{'messages': 1, 'chats': 1, 'last_ts': {T0}}}\n")
+    assert "部分会话的显示名无法反查" in err      # 策略表的文案，用户不需要知道表名
+    assert "SessionTable" in err                 # Degradation 形状带得出诊断

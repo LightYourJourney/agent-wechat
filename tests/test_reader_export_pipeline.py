@@ -15,7 +15,7 @@ from types import SimpleNamespace
 import pytest
 import zstandard
 
-from agent_wechat import errors, export, keys, paths, reader, search, store, usecases
+from agent_wechat import errors, export, keys, paths, reader, search, store, usecases, vector
 
 from helpers import ext_buffer, member, mk_row
 
@@ -921,3 +921,40 @@ def test_recent_messages_carries_degradations(env, tmp_path, monkeypatch):
     assert isinstance(res.degraded, tuple)
     assert [d.table for d in res.degraded] == ["chat_room"], \
         "降级必须真的挂上去：默认 `()` 也是 tuple，光 isinstance 是空转"
+
+
+def test_recent_survives_contact_table_drift(env, tmp_path, monkeypatch):
+    """`contact` 表漂移时 `recent` 仍要返回消息：显示名是**富化**而非唯一来源（spec §6
+    的判据）——消息在 message 分片里，与 `contact` 无关；而 `_apply_roster` 已经为**同一个
+    漂移**把发送者降级成 wxid 了。富化这里跟着抛，等于同一件事在一处降级、在另一处把整个
+    命令杀掉。
+
+    注意 contact 必须是 **chat_id**：按名字解析本来就该抛（spec §6：没有 chat_id 就没有
+    会话可查），那不是这条要钉的东西。
+    """
+    root = tmp_path / "wx"
+    drift_tree(root, ACCT, drop_table="contact")
+    build_shard(root, ACCT, "message_0.db", {FRIEND: [(1, 1, 1, T0, "你好", 0)]}, [FRIEND])
+    monkeypatch.setattr(paths, "XWECHAT_FILES", root)
+
+    res = usecases.recent_messages(FRIEND, limit=5, account=ACCT)
+    assert [m.content for m in res.messages] == ["你好"]        # 消息照常可读
+    assert res.display == FRIEND                                # 富化回落 chat_id
+    assert "contacts" in [d.capability for d in res.degraded]   # 漂移照常报出去
+
+
+def test_semantic_search_survives_contact_table_drift(env, tmp_path, monkeypatch):
+    """同上，semantic 一侧：hits 的 `display` 只是富化——索引库完好、命中照常返回。
+    富化跟着 `contact` 漂移一起抛，等于把「显示名暂时拿不到」升级成「什么都搜不到」。"""
+    root = tmp_path / "wx"
+    drift_tree(root, ACCT, drop_table="contact")
+    monkeypatch.setattr(paths, "XWECHAT_FILES", root)
+    # 不打嵌入（要模型）：这条钉的是富化与降级，不是检索本身
+    monkeypatch.setattr(vector, "semantic_search", lambda *a, **k: {
+        "mode": "semantic", "total": 1,
+        "hits": [{"chat_id": FRIEND, "ts": T0, "sender": "wxid_a", "is_self": 0,
+                  "content": "你好", "distance": 0.1}]})
+
+    res = usecases.semantic_search("你好", account=ACCT)
+    assert res["total"] == 1 and res["hits"][0]["display"] == FRIEND
+    assert "contacts" in [d["capability"] for d in res["degraded"]]

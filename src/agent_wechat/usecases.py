@@ -207,6 +207,22 @@ def _refresh_roster(ctx: ChatContext) -> None:
         pass
 
 
+def _display_or_id(ctx: ChatContext, chat_id: str) -> str:
+    """显示名富化：`contact` 表漂移时回落 `chat_id`——那正是查不到名字时的无信息版本。
+
+    显示名是**富化**而非唯一来源（spec §6 的判据）：消息在 message 分片里、hits 在索引库里，
+    都不受 `contact` 漂移影响。而 `_apply_roster` 已经为**同一个漂移**把发送者降级成 wxid
+    了——富化这里跟着抛，等于同一件事在一处降级、在另一处把整个命令杀掉。
+
+    漂移本身记在 `reader._drift` 上，随既有的 `degraded` 通道出去（调用方**先**富化再收集）。
+    `resolve` 不走这条回落：没有 chat_id 就没有会话可查，那条按 spec §6 就该抛。
+    """
+    try:
+        return ctx.reader.display_name(chat_id)
+    except errors.SchemaDrift:
+        return chat_id
+
+
 # ---------- 工具用例（每个工具一个函数） ----------
 
 def account_status(account: str | None = None) -> dict:
@@ -237,7 +253,7 @@ def recent_messages(contact: str, limit: int = 50,
     if isinstance(chat_id, NeedConfirm):
         return chat_id
     msgs = ctx.reader.recent(chat_id, limit=clamp_limit(limit, LIMIT_RECENT))
-    return RecentMessages(chat_id=chat_id, display=ctx.reader.display_name(chat_id),
+    return RecentMessages(chat_id=chat_id, display=_display_or_id(ctx, chat_id),
                           messages=msgs,
                           degraded=collect_degradations(ctx.reader))
 
@@ -297,7 +313,7 @@ def semantic_search(query: str, contact: str | None = None, limit: int = 10,
                                  limit=clamp_limit(limit, LIMIT_SEMANTIC),
                                  account=ctx.account)
     for h in res.get("hits", []):
-        h["display"] = ctx.reader.display_name(h["chat_id"])   # 缓存命中，只解密一次
+        h["display"] = _display_or_id(ctx, h["chat_id"])   # 缓存命中，只解密一次
     res["degraded"] = ctx.degradations()
     return res
 

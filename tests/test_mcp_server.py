@@ -76,7 +76,7 @@ def test_contact_miss_surfaces_as_documented_envelope(monkeypatch):
     """
     class _StubReader:
         def __init__(self, acct):
-            pass
+            self._drift = []         # 真实 MessageReader 的状态：collect_degradations 会读
 
         def resolve_one(self, contact):
             return None, []
@@ -140,7 +140,7 @@ def test_export_full_history_need_confirm_survives_call_tool(monkeypatch):
     """改走用例层的 export_history 后，歧义信封经 SDK 仍原样到达（不创建任务）。"""
     class _StubReader:
         def __init__(self, acct):
-            pass
+            self._drift = []         # 真实 MessageReader 的状态：collect_degradations 会读
 
         def resolve_one(self, contact):
             return None, [{"username": "wxid_a", "display": "张三", "kind": "direct"},
