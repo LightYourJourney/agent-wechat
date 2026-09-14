@@ -778,3 +778,53 @@ def test_roster_records_both_drifts_when_both_sources_are_gone(env, tmp_path, mo
     r = reader.MessageReader(ACCT)
     assert r.roster() == []
     assert {d.table for d in r._drift if d.capability == "roster"} == {"chat_room", "contact"}
+
+
+def test_second_roster_call_does_not_bypass_the_drift_guard(env, tmp_path, monkeypatch):
+    """同一个 reader 上连续两次 `roster()`：**第二次也得走降级**。
+
+    `_check` 的结论是实例级缓存的（T3）。若「探过」与「探过且漂了」共用一份状态，第二次
+    调用会在缓存命中处早退——既不重抛漂移、也不拦下面那条 SQL，`chat_room` 那段的裸
+    `sqlite3.OperationalError` 就从 `roster()` 里逃出去了（生产路径今天不可达：每个
+    usecase 入口都新建 reader；但 T5 的 `collect_degradations` 测试正是
+    `r.roster(); r.roster()` 这个形状）。**漂移也要按类型重抛**，让调用方看见 `SchemaDrift`
+    而不是一个裸 sqlite 错误。
+    """
+    from agent_wechat import schema                     # 函数内 import，不动文件头
+    root = tmp_path / "wx"
+    drift_tree(root, ACCT, drop_table="chat_room")
+    monkeypatch.setattr(paths, "XWECHAT_FILES", root)
+    r = reader.MessageReader(ACCT)
+
+    first = r.roster()
+    assert first, "第一次就该降级产出（contact 源是好的）"
+    second = r.roster()                                 # 缓存命中：不该抛裸 sqlite 错误
+    assert second == first, "第二次该产出同样的降级结果"
+
+    # 命中时重抛的是**记下来的**结论，不重新探（`_drifted`）：探测虽然便宜，但「探过」
+    # 就该是探过。探针被判失败，说明这条分支走的不是缓存。
+    monkeypatch.setattr(schema, "probe", lambda *a, **k: pytest.fail("缓存命中不该重探"))
+    with r._open("contact/contact.db") as con:          # guard 本身：命中时重抛，不静默放行
+        with pytest.raises(errors.SchemaDrift) as ei:
+            r._check("roster", "contact/contact.db", con, only="chat_room")
+    assert ei.value.table == "chat_room"
+
+    assert [d.table for d in r._drift] == ["chat_room"], "重抛不该让 _drift 长出重复条目"
+
+
+def test_drift_recorded_once_per_capability_and_table(env, tmp_path, monkeypatch):
+    """同一次调用里同一个 `(capability, table)` 只记一条：`username_pool` 逐分片探
+    （每片一条 `message/*.db` 声明），两片都缺 `Name2Id` 说的是同一件事——记两条，
+    用户就会看到两行一模一样的降级说明（spec §7 的去重，T5 只是兜底）。
+
+    去重**不是**为第二次 `roster()` 准备的：那条重抛路径不会再记一次（钉在
+    `test_second_roster_call_does_not_bypass_the_drift_guard`）。真正的重复来自
+    `rel` 不同、`(capability, table)` 相同的多分片场景。
+    """
+    root = tmp_path / "wx"
+    for shard in ("message_0.db", "message_1.db"):
+        enc_db(root / ACCT / "db_storage" / "message" / shard, {})   # 两片都没有 Name2Id
+    monkeypatch.setattr(paths, "XWECHAT_FILES", root)
+    r = reader.MessageReader(ACCT)
+    r.username_pool()                                   # 降级：跳过读不到的源
+    assert [(d.capability, d.table) for d in r._drift] == [("username_pool", "Name2Id")]

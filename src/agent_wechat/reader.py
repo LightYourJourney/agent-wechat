@@ -96,7 +96,8 @@ class MessageReader:
         self.self_wxid = paths.bare_wxid(acct)
         self._contacts_all: list[dict] | None = None   # 实例级缓存，见 _contacts_all_cached
         self._roster_map_cache: dict[tuple[str, str], str] | None = None
-        self._probed: set[tuple[str, str, str]] = set()   # (rel, capability, table)
+        self._probed: set[tuple[str, str, str]] = set()   # (rel, capability, only or table)
+        self._drifted: dict[tuple[str, str, str], errors.SchemaDrift] = {}
         self._drift: list[errors.SchemaDrift] = []        # 本次实例见过的漂移（T5 读）
 
     def _contacts_all_cached(self) -> list[dict]:
@@ -132,10 +133,16 @@ class MessageReader:
         `only=` 只校验**这一张表**的声明：`roster` 要逐源降级（T4），没有它一次调用
         会走完该能力的全部声明、第一条漂移就抛，后面的源永远记不上（`chat_room` 与
         `contact` 物理无关，少一个仍有另一个）。
+
+        **漂了也要按类型重抛（`_drifted`）**：结论是实例级缓存的，命中就静默放行的话，
+        第二次调用会绕开 guard、撞上后面那条裸 SQL——抛的是 `sqlite3.OperationalError`
+        而不是 `SchemaDrift`（同一个 reader 上第二次 `roster()` 就是这种形状）。
         """
         key = (rel, capability, only or table or "")
         if key in self._probed:
             return
+        if key in self._drifted:               # 探过且漂了：重抛同一个漂移，不重新探
+            raise self._drifted[key]
         for req in schema.CAPABILITIES[capability]:
             if not _db_matches(req.db, rel):
                 continue                       # 这条声明属于另一个库
@@ -147,14 +154,28 @@ class MessageReader:
             effective = table if req.table.endswith("*") else req.table
             result = schema.probe(con, req, effective)
             if not result.ok:
-                self._probed.add(key)          # 漂移也缓存：同一个库里不必反复探
                 # 报 `effective` 而不是 `table or req.table`：`Name2Id` 缺了的时候
                 # 后者会点名 `Msg_<md5>`——一张**存在**的表，用户会查错方向。
                 drift = errors.SchemaDrift(capability, rel, effective,
                                            result.missing_columns)
-                self._drift.append(drift)
+                # 漂移单独存一份（不进 `_probed`，否则重抛那条分支永远走不到）——
+                # 它同时也是缓存：同一个库里不必反复探。
+                self._drifted[key] = drift
+                self._record_drift(drift)
                 raise drift
         self._probed.add(key)
+
+    def _record_drift(self, drift: errors.SchemaDrift) -> None:
+        """把漂移记进 `self._drift`（T5 读），**同一 `(capability, table)` 只记一条**。
+
+        `_check` 的缓存键含 `rel`，而 `_drift` 的粒度是 `(capability, table)`：重抛那条
+        路径不会再记一次，真正的重复来自多分片——`username_pool` 逐片探（每片一条
+        `message/*.db` 声明），两片都缺 `Name2Id` 说的是同一件事，不去重用户就看到两行
+        一样的降级说明（T5 的去重只是兜底，不该靠它兜）。
+        """
+        if not any(d.capability == drift.capability and d.table == drift.table
+                   for d in self._drift):
+            self._drift.append(drift)
 
     # ---------- 会话 / 联系人 ----------
 
