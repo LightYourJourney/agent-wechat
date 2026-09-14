@@ -13,7 +13,8 @@ import datetime
 import hashlib
 import pathlib
 import re
-from dataclasses import dataclass
+import subprocess
+from dataclasses import dataclass, field
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
@@ -87,14 +88,23 @@ _CODE_RE = re.compile(r"^key_(\d+)_")
 
 
 def _kvcomm_codes() -> list[str]:
-    """kvcomm 密钥码候选（Documents 与 Data 两级都试；去重保序）。"""
+    """kvcomm 密钥码候选（Documents 与 Data 两级都试；去重保序）。
+
+    目录读不了（权限/坏符号链接）只是**这一个**目录不可用：跳过它继续找别的目录——
+    让裸 OSError 逃出去会击穿「core 只抛项目异常」的契约，而它想表达的降级语义本来
+    就是能力级的（拿不到 code 会在验证阶段归到 MediaKeyError）。
+    """
     codes: list[str] = []
     for base in (paths.CONTAINER, paths.CONTAINER.parent):
         for sub in _KVCOMM_SUBDIRS:
             d = base / sub
             if not d.is_dir():
                 continue
-            for f in d.iterdir():
+            try:
+                entries = list(d.iterdir())      # 先落地：生成器迭代中途也可能抛 OSError
+            except OSError:
+                continue
+            for f in entries:
                 m = _CODE_RE.match(f.name)
                 if m and m.group(1) not in codes:
                     codes.append(m.group(1))
@@ -145,6 +155,12 @@ def derive_keys(account: str) -> MediaKeys:
             code=code)
         try:
             out = decrypt_dat(sample.read_bytes(), keys)
+        except OSError as exc:
+            # 样本是**唯一**的验证手段（设计上只取一个）：读不了就没法验证，只能能力级降级。
+            # 裸 OSError 逃出去会击穿 core 的错误契约（适配层翻译不了它）。
+            raise errors.MediaKeyError(
+                "验证用的样本 dat 读不出来，图片密钥无从验证",
+                hint=f"{exc}；图片解密不可用，语音/视频不受影响") from exc
         except errors.DecryptError:
             continue
         if detect_ext(out):
@@ -152,3 +168,243 @@ def derive_keys(account: str) -> MediaKeys:
     raise errors.MediaKeyError(
         "kvcomm 密钥码与账号不匹配（或样本 dat 损坏）",
         hint="图片解密不可用；语音/视频不受影响。若微信刚更新过可重试，或检查 kvcomm 目录")
+
+
+# ---------- 定位 ----------
+
+def month_of(ts: int) -> str:
+    """时间戳 → 本地时区 YYYY-MM。微信按**本机本地月**建目录，用 UTC 会在月初/月末错位。"""
+    return datetime.datetime.fromtimestamp(ts).strftime("%Y-%m")
+
+
+def _shift_month(mon: str, delta: int) -> str:
+    y, m = int(mon[:4]), int(mon[5:7])
+    i = y * 12 + (m - 1) + delta
+    return f"{i // 12:04d}-{i % 12 + 1:02d}"
+
+
+_SUFFIX_PRIORITY = ("_hd", "_h", "", "_b", "_t")
+
+
+def resolve_image(account: str, chat_md5: str, ts: int, file_key: str) -> pathlib.Path | None:
+    """消息 → dat 文件。月份按本地时区，miss 自动试相邻月；后缀 _hd/_h > 裸名 > _b/_t。"""
+    mon = month_of(ts)
+    for m in (mon, _shift_month(mon, -1), _shift_month(mon, 1)):
+        d = paths.XWECHAT_FILES / account / "msg/attach" / chat_md5 / m / "Img"
+        if not d.is_dir():
+            continue
+        for suf in _SUFFIX_PRIORITY:
+            p = d / f"{file_key}{suf}.dat"
+            if p.exists():
+                return p
+    return None
+
+
+def resolve_video(account: str, ts: int, file_key: str) -> tuple[pathlib.Path, bool] | None:
+    """消息 → 视频本体（明文 mp4）；miss 回退缩略图 → (路径, True)。"""
+    mon = month_of(ts)
+    for m in (mon, _shift_month(mon, -1), _shift_month(mon, 1)):
+        d = paths.XWECHAT_FILES / account / "msg/video" / m
+        if not d.is_dir():
+            continue
+        for name in (f"{file_key}.mp4", f"{file_key}_raw.mp4"):
+            p = d / name
+            if p.exists():
+                return (p, False)
+        t = d / f"{file_key}_thumb.jpg"
+        if t.exists():
+            return (t, True)
+    return None
+
+
+# ---------- 导出 ----------
+
+@dataclass
+class Counts:
+    ok: int = 0
+    failed: int = 0
+    missing: int = 0
+    raw_only: int = 0      # voice 专属：pilk 缺失时导出原始 .slk 的数量
+    thumb: int = 0         # video 专属：回退缩略图数量
+
+
+@dataclass
+class MediaReport:
+    image: Counts = field(default_factory=Counts)
+    voice: Counts = field(default_factory=Counts)
+    video: Counts = field(default_factory=Counts)
+    degraded: list[str] = field(default_factory=list)
+    truncated: bool = False
+
+    def to_dict(self) -> dict:
+        return {"image": {"ok": self.image.ok, "failed": self.image.failed,
+                          "missing": self.image.missing},
+                "voice": {"ok": self.voice.ok, "failed": self.voice.failed,
+                          "raw_only": self.voice.raw_only},
+                "video": {"ok": self.video.ok, "thumb": self.video.thumb,
+                          "missing": self.video.missing},
+                "degraded": list(self.degraded), "truncated": self.truncated}
+
+
+FFMPEG_CANDIDATES = ("ffmpeg", "/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/usr/bin/ffmpeg")
+_ffmpeg_cache: str | None | False = False    # False = 未探测
+
+
+def _find_ffmpeg() -> str | None:
+    """探测一次并缓存：wxgf 转码是**可选**能力，找不到就退回存原容器，不算错误。"""
+    global _ffmpeg_cache
+    if _ffmpeg_cache is False:
+        _ffmpeg_cache = None
+        for c in FFMPEG_CANDIDATES:
+            try:
+                subprocess.run([c, "-version"], capture_output=True, timeout=10)
+                _ffmpeg_cache = c
+                break
+            except (OSError, subprocess.TimeoutExpired):
+                continue
+    return _ffmpeg_cache
+
+
+def _wxgf_to_jpeg(data: bytes, dest: pathlib.Path) -> bool:
+    """wxgf（HEVC 容器）→ 首帧 JPEG，**直写 dest**（必需：微信目录只读）。
+
+    dest 由调用方算成 out_root 下的终路径；HEVC 流走 stdin 交给 ffmpeg，因此全过程
+    一个中间文件都不落——**绝不能**把临时文件写到微信数据目录里（那是本次导出的
+    前置红线），out_root 里也不需要留半成品。失败（无 ffmpeg / 流是坏的）→ False，
+    调用方退回存 .wxgf 原容器。
+    """
+    ff = _find_ffmpeg()
+    if ff is None:
+        return False
+    i = data.find(b"\x00\x00\x00\x01")
+    if i < 0:
+        return False
+    try:
+        r = subprocess.run([ff, "-y", "-loglevel", "error", "-f", "hevc", "-i", "pipe:0",
+                            "-frames:v", "1", str(dest)],
+                           input=data[i:], capture_output=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        r = None
+    if r is None or r.returncode != 0 or not dest.exists() or dest.stat().st_size == 0:
+        dest.unlink(missing_ok=True)       # ffmpeg 万一建了半成品：清掉，不留坏文件
+        return False
+    return True
+
+
+def _dest(out_root: pathlib.Path, cm: str, kind: str, mon: str,
+          stem: str, ext: str) -> pathlib.Path:
+    """导出终路径（父目录 0700）。与 _save 共用：wxgf 转码要先拿路径才能直写。"""
+    d = out_root / cm / kind / mon
+    d.mkdir(mode=0o700, parents=True, exist_ok=True)
+    return d / f"{stem}.{ext}"
+
+
+def _save(out_root: pathlib.Path, cm: str, kind: str, mon: str,
+          stem: str, ext: str, data: bytes) -> pathlib.Path:
+    p = _dest(out_root, cm, kind, mon, stem, ext)
+    p.write_bytes(data)
+    return p
+
+
+def export_media(account: str, chat_ids: list[str], *, kinds: list[str],
+                 months: list[str] | None = None, out_dir: pathlib.Path | None = None,
+                 max_files: int = 2000, progress=None) -> MediaReport:
+    """按会话导出媒体。图片解密（MediaKeyError → 能力级降级不抛）；语音见 Task 3；视频明文复制。"""
+    report = MediaReport()
+    out_root = pathlib.Path(out_dir) if out_dir else paths.HOME_DIR / "media"
+    out_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    want = set(months) if months else None
+    produced = 0
+
+    def full() -> bool:
+        return produced >= max_files
+
+    if "image" in kinds:
+        try:
+            mk = derive_keys(account)
+        except errors.MediaKeyError as exc:
+            mk = None
+            report.degraded.append(f"图片解密不可用：{exc}")
+        if mk is not None:
+            for chat in chat_ids:
+                cm = messages.md5_of(chat)
+                base = paths.XWECHAT_FILES / account / "msg/attach" / cm
+                if not base.is_dir():
+                    continue
+                for month_dir in sorted(p for p in base.iterdir() if p.is_dir()):
+                    if full():
+                        break
+                    mon = month_dir.name
+                    if want is not None and mon not in want:
+                        continue
+                    img_dir = month_dir / "Img"
+                    if not img_dir.is_dir():
+                        continue
+                    wxgf_warned = False
+                    for dat in sorted(img_dir.glob("*.dat")):
+                        if full():
+                            report.truncated = True
+                            break
+                        try:
+                            buf = decrypt_dat(dat.read_bytes(), mk)
+                        except errors.DecryptError:
+                            report.image.failed += 1
+                            continue
+                        ext = detect_ext(buf)
+                        if ext is None:
+                            report.image.failed += 1
+                            continue
+                        if ext == "wxgf":
+                            # 转码成功时 jpeg 已由 ffmpeg 直写 out_root 下的终路径
+                            converted = _wxgf_to_jpeg(
+                                buf, _dest(out_root, cm, "image", mon, dat.stem, "jpg"))
+                        else:
+                            converted = False
+                        if not converted:
+                            if ext == "wxgf" and not wxgf_warned:
+                                report.degraded.append(
+                                    "wxgf 图未转 JPEG（无 ffmpeg 或转码失败），存原容器")
+                                wxgf_warned = True
+                            _save(out_root, cm, "image", mon, dat.stem, ext, buf)
+                        report.image.ok += 1
+                        produced += 1
+                        if progress:
+                            progress(produced)
+    if "video" in kinds:
+        for chat in chat_ids:
+            if full():
+                report.truncated = True
+                break
+            vbase = paths.XWECHAT_FILES / account / "msg/video"
+            if not vbase.is_dir():
+                continue
+            for month_dir in sorted(p for p in vbase.iterdir() if p.is_dir()):
+                mon = month_dir.name
+                if want is not None and mon not in want:
+                    continue
+                mp4_stems = set()
+                for f in sorted(month_dir.glob("*.mp4")):
+                    if full():
+                        report.truncated = True
+                        break
+                    _save(out_root, messages.md5_of(chat), "video", mon,
+                          f.stem, "mp4", f.read_bytes())
+                    mp4_stems.add(f.stem.removesuffix("_raw"))
+                    report.video.ok += 1
+                    produced += 1
+                    if progress:
+                        progress(produced)
+                for f in sorted(month_dir.glob("*_thumb.jpg")):
+                    if full():
+                        report.truncated = True
+                        break
+                    if f.stem.removesuffix("_thumb") in mp4_stems:
+                        continue               # 有本体的不再存缩略图
+                    _save(out_root, messages.md5_of(chat), "video", mon,
+                          f.stem, "jpg", f.read_bytes())
+                    report.video.thumb += 1
+                    produced += 1
+    if "voice" in kinds:
+        report.voice.raw_only += 0             # Task 3 接入；此占位保证 kinds 校验完整
+        report.degraded.append("语音导出尚未接入（下个版本）")
+    return report
