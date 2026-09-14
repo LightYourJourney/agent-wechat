@@ -466,3 +466,198 @@ def test_export_media_unreadable_dir_is_skipped(tmp_path, monkeypatch):
     assert rep.image.ok == 0 and rep.image.failed == 0    # 该会话没东西可导 ≠ 导出失败
     assert rep.video.ok == 1                              # 视频照常导出
     assert rep.degraded == []                             # 一个目录读不了不是能力级降级
+
+
+# ---------- Task 3：语音导出（pilk SILK→WAV，.slk 回退） ----------
+
+def _silk_blob(seconds: float = 0.2, rate: int = 24000) -> bytes:
+    """用 pilk 自身 encode 造一段真 SILK（`\\x02` 前缀，与微信 VoiceInfo.voice_data 同形）。"""
+    import tempfile
+    import pilk
+    pcm = b"\x00\x01" * int(rate * seconds)
+    with tempfile.TemporaryDirectory() as td:
+        p = pathlib.Path(td)
+        (p / "a.pcm").write_bytes(pcm)
+        pilk.encode(str(p / "a.pcm"), str(p / "a.silk"), rate, tencent=True)
+        return (p / "a.silk").read_bytes()
+
+
+def _voice_fixture(account: str, rows: list[tuple[int, int, int, bytes]]) -> None:
+    """合成**明文** media_0.db；rows = [(chat_name_id, create_time, local_id, voice_data)]。
+
+    Name2Id 只放一行 'chatA@chatroom'（rowid=1）；明文库是因为测试把 decrypt.decrypted
+    换成了直通假上下文——真解密管线（sqlcipher）不在本测试的范围内。
+    """
+    import sqlite3
+    db = paths.XWECHAT_FILES / account / "db_storage/message/media_0.db"
+    con = sqlite3.connect(db)
+    con.executescript(
+        "CREATE TABLE Name2Id (user_name TEXT);"
+        "CREATE TABLE VoiceInfo (chat_name_id INTEGER, create_time INTEGER,"
+        " local_id INTEGER, svr_id INTEGER, voice_data BLOB, data_index TEXT);"
+        "INSERT INTO Name2Id (user_name) VALUES ('chatA@chatroom');")
+    con.executemany("INSERT INTO VoiceInfo VALUES (?, ?, ?, 0, ?, 'x')", rows)
+    con.commit()
+    con.close()
+
+
+def _passthrough_decrypted(monkeypatch) -> None:
+    """把 `decrypt.decrypted` 换成「直接 yield 原库」的假上下文（合成库是明文）。
+
+    第二条 setattr 要求 `media.decrypt` 是**模块级**属性（Ruling 17）——函数内 import
+    的话它在调用前不存在，这里会直接 AttributeError。
+    """
+    import contextlib
+    from agent_wechat import decrypt as dec_mod
+
+    @contextlib.contextmanager
+    def fake_decrypted(db_path, passphrase, tmpdir=None):
+        yield db_path
+    monkeypatch.setattr(dec_mod, "decrypted", fake_decrypted)
+    monkeypatch.setattr("agent_wechat.media.decrypt", dec_mod)
+
+
+def test_export_media_voice_silk_to_wav(tmp_path, monkeypatch):
+    """VoiceInfo 命中 → pilk 解码 24kHz WAV；目录 0700、文件 0600。
+
+    夹具不用 kvcomm code：语音走 VoiceInfo，不依赖图片密钥——没有 code 也必须能导出。
+    """
+    root, account = make_tree(tmp_path, monkeypatch)
+    ts = int(datetime.datetime(2026, 9, 15, 12, 0).timestamp())   # 月由 ts 现算
+    mon = media.month_of(ts)
+    _voice_fixture(account, [(1, ts, 7, _silk_blob())])
+    _passthrough_decrypted(monkeypatch)
+
+    out = root / "home" / "media"
+    rep = media.export_media(account, ["chatA@chatroom"], kinds=["voice"],
+                             months=[mon], out_dir=out)
+    assert rep.voice.ok == 1 and rep.voice.raw_only == 0
+    cm = hashlib.md5("chatA@chatroom".encode()).hexdigest()
+    wavs = list((out / cm / "voice" / mon).iterdir())
+    assert len(wavs) == 1 and wavs[0].name == f"{ts}_7.wav"
+    assert wavs[0].read_bytes()[:4] == b"RIFF"
+    assert _mode(wavs[0]) == 0o600                    # pilk 落盘权限跟 umask，导出侧收口
+    for p in (out, out / cm, out / cm / "voice", out / cm / "voice" / mon):
+        assert _mode(p) == 0o700, p
+
+
+def test_export_media_voice_month_filter(tmp_path, monkeypatch):
+    """months 过滤按 create_time 的**本地月**：另一个月那条不导出。
+
+    上个月由 ts 用 datetime 现算（曾经手写的常量对是 2025-08，注释却写 2026-08）。
+    """
+    root, account = make_tree(tmp_path, monkeypatch)
+    ts = int(datetime.datetime(2026, 9, 15, 12, 0).timestamp())
+    mon = media.month_of(ts)
+    prev = datetime.datetime.fromtimestamp(ts).replace(day=1) - datetime.timedelta(days=1)
+    ts_prev = int(prev.timestamp())
+    assert media.month_of(ts_prev) != mon             # 夹具自证：两条确实落在不同月
+    _voice_fixture(account, [(1, ts, 7, _silk_blob()), (1, ts_prev, 8, _silk_blob())])
+    _passthrough_decrypted(monkeypatch)
+
+    rep = media.export_media(account, ["chatA@chatroom"], kinds=["voice"],
+                             months=[mon], out_dir=root / "home" / "media")
+    assert rep.voice.ok == 1                          # 上个月那条被月份过滤掉
+    cm = hashlib.md5("chatA@chatroom".encode()).hexdigest()
+    got = {p.name for p in (root / "home" / "media" / cm / "voice" / mon).iterdir()}
+    assert got == {f"{ts}_7.wav"}
+
+
+def test_export_media_voice_slk_fallback(tmp_path, monkeypatch):
+    """pilk 不可用 → 原始 .slk（字节原样）+ raw_only 计数 + degraded，绝不整批失败。"""
+    root, account = make_tree(tmp_path, monkeypatch)
+    ts = int(datetime.datetime(2026, 9, 15, 12, 0).timestamp())
+    mon = media.month_of(ts)
+    blob = b"\x02#!SILK_V3" + b"\x00" * 32
+    _voice_fixture(account, [(1, ts, 7, blob)])
+    _passthrough_decrypted(monkeypatch)
+    monkeypatch.setattr(media, "_PILK", None)
+
+    out = root / "home" / "media"
+    rep = media.export_media(account, ["chatA@chatroom"], kinds=["voice"],
+                             months=[mon], out_dir=out)
+    assert rep.voice.raw_only == 1 and rep.voice.ok == 0
+    assert len(rep.degraded) == 1                     # 一次导出一条，不按文件刷屏
+    assert any("slk" in d or "语音" in d for d in rep.degraded)
+    cm = hashlib.md5("chatA@chatroom".encode()).hexdigest()
+    slks = list((out / cm / "voice" / mon).iterdir())
+    assert len(slks) == 1 and slks[0].suffix == ".slk"
+    assert slks[0].read_bytes()[:10] == blob[:10]     # 原始形态（\x02 前缀保留）
+    assert _mode(slks[0]) == 0o600
+
+
+# ---------- Ruling 15：chmod 尽力而为 + out_root 一次 stat 检查 ----------
+
+def test_ensure_tree_chmod_failure_is_best_effort(tmp_path, monkeypatch):
+    """Ruling 15：chmod 抛 OSError（`--out` 指向不归自己的既有目录）不得逃出 core。
+
+    mkdir 对已存在目录是 no-op，能被拒的只有 chmod——权限没收紧只该降级提示，
+    不该让整次导出崩在裸 OSError 上；自己建的下级目录照样收紧。
+    """
+    root, account = make_tree(tmp_path, monkeypatch)
+    out = root / "notmine"
+    out.mkdir()
+    os.chmod(out, 0o755)
+    real_chmod = pathlib.Path.chmod
+
+    def fake(self, mode, **kw):
+        if self == out:
+            raise PermissionError(13, "Operation not permitted", str(self))
+        return real_chmod(self, mode, **kw)
+
+    monkeypatch.setattr(pathlib.Path, "chmod", fake)
+    d = media._ensure_tree(out, "cm", "voice", "2026-09")
+    assert d.is_dir() and _mode(d) == 0o700          # 自己能建的照常收紧
+    assert _mode(out) != 0o700                       # 收不紧的那级保持原样
+
+
+def test_export_media_unverifiable_out_root_mode_degrades_once(tmp_path, monkeypatch):
+    """Ruling 15：out_root 权限没收紧 → **一条** degraded（含路径），不是每个文件一条。
+
+    既有的 0755 目录 + chmod 被拒，同时打到「chmod 尽力而为」与「一次 stat 检查」两处。
+    """
+    root, account = make_tree(tmp_path, monkeypatch)
+    out = root / "preexisting"
+    out.mkdir()
+    os.chmod(out, 0o755)
+    real_chmod = pathlib.Path.chmod
+
+    def fake(self, mode, **kw):
+        if self == out:
+            raise PermissionError(13, "Operation not permitted", str(self))
+        return real_chmod(self, mode, **kw)
+
+    monkeypatch.setattr(pathlib.Path, "chmod", fake)
+    mon = _video_fixture(account, int(datetime.datetime(2026, 9, 15, 12, 0).timestamp()))
+    vdir = paths.XWECHAT_FILES / account / "msg/video" / mon
+    for i in range(2):
+        (vdir / f"e{i:03d}.mp4").write_bytes(b"m" * 8)
+    rep = media.export_media(account, ["c@chatroom"], kinds=["video"],
+                             months=[mon], out_dir=out)
+    assert rep.video.ok == 3                          # 权限没收紧不影响导出本身
+    assert _mode(out) != 0o700                        # 自证：确实没收紧（否则这条断言碰运气）
+    assert len(rep.degraded) == 1 and str(out) in rep.degraded[0]
+
+
+# ---------- Ruling 16：_attach_dats 的惰性 glob 归口 ----------
+
+def test_unreadable_attach_tree_raises_media_key_error(tmp_path, monkeypatch):
+    """Ruling 16：attach 树读不了 → 既有的「没有样本」MediaKeyError，不是裸 OSError。
+
+    `glob` 是惰性生成器：不物化的话异常从 `_derive_xor_key` 的 for 或 `next(iter(...))`
+    里裸奔出 core 层。走 `_safe_iter` 后空样本集落到 derive_keys 既有的能力级降级上。
+    """
+    root, account = make_tree(tmp_path, monkeypatch)
+    (paths.CONTAINER / "app_data/net/kvcomm/key_5_x.statistic").write_bytes(b"")
+    attach = paths.XWECHAT_FILES / account / "msg/attach"
+    real_glob = pathlib.Path.glob
+
+    def fake(self, pattern, **kw):
+        if self == attach:
+            raise PermissionError(13, "Operation not permitted", str(self))
+        return real_glob(self, pattern, **kw)
+
+    monkeypatch.setattr(pathlib.Path, "glob", fake)
+    with pytest.raises(errors.MediaKeyError) as ei:
+        media.derive_keys(account)                    # 不抛 PermissionError
+    assert "样本" in str(ei.value)

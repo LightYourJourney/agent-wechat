@@ -13,12 +13,25 @@ import datetime
 import hashlib
 import pathlib
 import re
+import sqlite3
+import stat
 import subprocess
+import tempfile
 from dataclasses import dataclass, field
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
-from . import errors, messages, paths
+from . import decrypt, errors, messages, paths
+from . import keys as keys_mod
+
+# 可选依赖：缺 pilk 只意味着语音出原始 .slk（能力级降级），不是导入失败。
+# 顶层 import（而非函数内）——`media.decrypt` 同理（Ruling 17）：测试要在调用前
+# 就能 monkeypatch 掉它们，函数内 import 会让属性在调用前不存在。
+try:
+    import pilk
+    _PILK = pilk
+except ImportError:  # pragma: no cover
+    _PILK = None
 
 # ---------- 图片容器 ----------
 
@@ -111,8 +124,14 @@ def _kvcomm_codes() -> list[str]:
     return codes
 
 
-def _attach_dats(account: str):
-    return (paths.XWECHAT_FILES / account / "msg/attach").glob("*/*/Img/*.dat")
+def _attach_dats(account: str) -> list[pathlib.Path]:
+    """attach 树里的样本 dat（供 xorKey 统计与密钥验证；Ruling 16）。
+
+    glob 是惰性的，**必须**经 `_safe_iter` 立即物化：否则目录读不了时，异常会从
+    `_derive_xor_key` 的 for 或 `derive_keys` 的 `next(iter(...))` 里裸奔出 core 层。
+    读不了 = 没有样本，落回 derive_keys 既有的「无样本」MediaKeyError。
+    """
+    return _safe_iter(paths.XWECHAT_FILES / account / "msg/attach", "*/*/Img/*.dat")
 
 
 def _derive_xor_key(account: str, limit: int = 200) -> int | None:
@@ -292,6 +311,19 @@ def _wxgf_to_jpeg(data: bytes, dest: pathlib.Path) -> bool:
     return True
 
 
+def _chmod_quiet(p: pathlib.Path) -> None:
+    """尽力收紧权限（Ruling 15）：失败只意味着这一级没收紧，不是导出失败。
+
+    典型场景：`--out` 指向用户不拥有的既有目录——`mkdir(exist_ok=True)` 对它无害，
+    但 `chmod` 会被拒。裸 OSError 逃出 core 层是契约违规，而权限到底有没有收紧由
+    `export_media` 在开头的一次 stat 检查如实告知（恰好一条 degraded，含路径）。
+    """
+    try:
+        p.chmod(0o700)
+    except OSError:
+        pass
+
+
 def _ensure_tree(root: pathlib.Path, *parts: str) -> pathlib.Path:
     """逐级建目录并**逐级 chmod 0700**，返回最终路径（Ruling 11）。
 
@@ -305,11 +337,11 @@ def _ensure_tree(root: pathlib.Path, *parts: str) -> pathlib.Path:
     """
     p = root
     p.mkdir(mode=0o700, parents=True, exist_ok=True)
-    p.chmod(0o700)
+    _chmod_quiet(p)
     for part in parts:
         p = p / part
         p.mkdir(mode=0o700, exist_ok=True)
-        p.chmod(0o700)
+        _chmod_quiet(p)
     return p
 
 
@@ -350,6 +382,15 @@ def export_media(account: str, chat_ids: list[str], *, kinds: list[str],
     （账号级枚举：只有恰好一个会话时可归属，多会话跳过并记 degraded）。"""
     report = MediaReport()
     out_root = _ensure_tree(pathlib.Path(out_dir) if out_dir else paths.HOME_DIR / "media")
+    # 一次 stat 检查（Ruling 15）：chmod 是尽力而为的（见 _chmod_quiet），收紧失败在这里
+    # 如实上报——只报一次、带路径，不按文件刷屏。stat 也失败（目录被换掉/没权限）同样算
+    # 没验证到，按未收紧处理。
+    try:
+        loose = stat.S_IMODE(out_root.stat().st_mode) != 0o700
+    except OSError:
+        loose = True
+    if loose:
+        report.degraded.append(f"输出目录权限未能收紧到 0700（明文媒体可能被他人读到）：{out_root}")
     want = set(months) if months else None
     produced = 0
 
@@ -461,6 +502,82 @@ def export_media(account: str, chat_ids: list[str], *, kinds: list[str],
         elif len(chat_ids) > 1:
             report.degraded.append("视频为账号级枚举，无法归属具体会话；请逐个会话导出")
     if "voice" in kinds:
-        report.voice.raw_only += 0             # Task 3 接入；此占位保证 kinds 校验完整
-        report.degraded.append("语音导出尚未接入（下个版本）")
+        if _PILK is None:
+            report.degraded.append("pilk 不可用：语音导出为原始 .slk（`uv add pilk` 后可转 WAV）")
+        _export_voices(account, chat_ids, out_root, report, want, full, progress)
     return report
+
+
+def _voice_db_paths(account: str) -> list[pathlib.Path]:
+    """语音库分片（`db_storage/message/media_*.db`）。走 `_safe_iter`：目录读不了 = 没有
+    分片可导，不能让惰性 glob 的 OSError 逃出 core 层（同 Ruling 12/16 的规矩）。"""
+    return _safe_iter(paths.db_storage(account) / "message", "media_*.db")
+
+
+def _export_voices(account, chat_ids, out_root, report, want, is_full, progress) -> None:
+    """语音：Name2Id rowid → VoiceInfo(chat_name_id, create_time) → pilk 解码 24kHz WAV。
+    pilk 缺失 → 原始 .slk（微信原始形态，`\\x02` 前缀保留）。单库打不开跳过，不中断。"""
+    remaining_chats = set(chat_ids)
+    for db in _voice_db_paths(account):
+        if not remaining_chats or is_full():
+            break
+        try:
+            passphrase = keys_mod.get_passphrase(account)
+            with decrypt.decrypted(db, passphrase) as plain:
+                con = sqlite3.connect(f"file:{plain}?mode=ro", uri=True)
+                con.text_factory = bytes
+                try:
+                    _export_voices_from(con, remaining_chats, out_root, report,
+                                        want, is_full, progress)
+                finally:
+                    con.close()
+        except (errors.AgentWeChatError, sqlite3.Error):
+            continue                     # 这个库打不开（漂移/密钥缺失）：跳过
+        # 查到语音的会话从 remaining 里移除（见 _export_voices_from 内部）
+
+
+def _export_voices_from(con, remaining_chats, out_root, report, want, is_full, progress) -> None:
+    produced_in_db = set()
+    name2id = {u.decode("utf-8", "replace") if isinstance(u, bytes) else u: rid
+               for rid, u in con.execute("SELECT rowid, user_name FROM Name2Id")}
+    for chat in list(remaining_chats):
+        rid = name2id.get(chat)
+        if rid is None:
+            continue
+        cm = messages.md5_of(chat)
+        for ts, lid, blob in con.execute(
+                "SELECT create_time, local_id, voice_data FROM VoiceInfo "
+                "WHERE chat_name_id=? ORDER BY create_time, local_id", (rid,)):
+            if is_full():
+                report.truncated = True
+                return
+            mon = month_of(ts)
+            if want is not None and mon not in want:
+                continue
+            if blob is None:
+                report.voice.failed += 1
+                continue
+            base = _ensure_tree(out_root, cm, "voice", mon) / f"{ts}_{lid}"
+            wav = base.with_suffix(".wav")
+            if _PILK is not None:
+                try:
+                    with tempfile.TemporaryDirectory() as td:
+                        tmp_silk = pathlib.Path(td) / "v.silk"
+                        tmp_silk.write_bytes(blob)
+                        # 返回值不可靠（实测 None）：以 wav 文件存在为准
+                        _PILK.silk_to_wav(str(tmp_silk), str(wav), 24000)
+                    if wav.exists():
+                        wav.chmod(0o600)   # pilk 落盘权限跟 umask，这里收口（同 _save）
+                        report.voice.ok += 1
+                        produced_in_db.add(chat)
+                        if progress:
+                            progress(report.voice.ok + report.voice.raw_only)
+                        continue
+                except Exception:
+                    pass                  # 解码失败 → 落到 .slk 回退
+            _save(out_root, cm, "voice", mon, f"{ts}_{lid}", "slk", blob)
+            report.voice.raw_only += 1
+            produced_in_db.add(chat)
+            if progress:
+                progress(report.voice.ok + report.voice.raw_only)
+    remaining_chats -= produced_in_db

@@ -15,6 +15,7 @@ dependencies = [
     { name = "cryptography" },
     { name = "fastembed" },
     { name = "mcp" },
+    { name = "pilk" },
     { name = "sqlite-vec" },
     { name = "zstandard" },
 ]
@@ -29,6 +30,7 @@ requires-dist = [
     { name = "cryptography", specifier = ">=50.0.1" },
     { name = "fastembed", specifier = "==0.8.*" },
     { name = "mcp", specifier = ">=2.2.0" },
+    { name = "pilk", specifier = ">=0.2.4" },
     { name = "sqlite-vec", specifier = "==0.1.9" },
     { name = "zstandard", specifier = ">=0.25.0" },
 ]
@@ -867,6 +869,15 @@ sdist = { url = "https://pypi.tuna.tsinghua.edu.cn/packages/7d/fa/3944b40b07da9c
 wheels = [
     { url = "https://pypi.tuna.tsinghua.edu.cn/packages/63/34/ba1c580383c9eada3711951fef0795c80b829a078d72188184bcab9dd527/packaging-26.3-py3-none-any.whl", hash = "sha256:d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c", size = 129956, upload-time = "2026-08-04T18:15:27.159Z" },
 ]
+
+[[package]]
+name = "pilk"
+version = "0.2.4"
+source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }
+dependencies = [
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://pypi.tuna.tsinghua.edu.cn/packages/66/bb/938dd697b6bc2d851ffec4ffe82ed20078e58bd0ef049e84f4d038d6f991/pilk-0.2.4.tar.gz", hash = "sha256:d4a1bcf93dc6ef5e95e0cfd728ed4ef4d49f9c0476d70816fecbe456cc762e7f" }
 
 [[package]]
 name = "pillow"
