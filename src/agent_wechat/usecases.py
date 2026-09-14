@@ -121,6 +121,33 @@ class ChatContext:
         return self.resolve(contact) if contact else None
 
 
+# 名册刷新间隔。刷新 = 解密一次 contact.db（秒级），且落在查询路径上会阻塞用户：
+# 太短则频繁解密，太长则改完备注要等。900 秒是 spec §7 定的取舍。
+ROSTER_TTL = 900
+
+
+def _refresh_roster(ctx: ChatContext) -> None:
+    """名册过期就重读一次 contact.db。**尽力而为，绝不抛。**
+
+    `contact.db` 读不到（没 bootstrap、权限坏了）不该让检索也查不了——那是两条独立的
+    能力（spec §7）。这里吞掉 `AgentWeChatError`：名册旧总比查不了好。
+    """
+    try:
+        with store.open() as con:
+            if not store.roster_is_stale(con, ctx.account, ROSTER_TTL):
+                return
+            rows = ctx.reader.roster()
+            # 空名册不写（T2 review 的 Minor 1）：replace_roster([]) 会清空名册并盖上
+            # refreshed_at，把整个 TTL 锁死成「全是 wxid」而刷新被记成成功。「读成功且
+            # 真没东西」与「读出意外的空」在这里不可区分，按「空 = 这次刷新没发生」处理：
+            # 下次查询再试。罕见代价（没有群/联系人的账号每次查询重读 contact.db）
+            # 由 Ruling 13 接受——正确性无损，性能损失只在罕见账号上。
+            if rows:
+                store.replace_roster(con, ctx.account, rows)
+    except errors.AgentWeChatError:
+        pass
+
+
 # ---------- 工具用例（每个工具一个函数） ----------
 
 def account_status(account: str | None = None) -> dict:
@@ -189,6 +216,7 @@ def search_history(query: str, contact: str | None = None, limit: int = 20,
     chat_id = ctx.resolve_optional(contact)
     if isinstance(chat_id, NeedConfirm):
         return chat_id
+    _refresh_roster(ctx)
     return search.search(query, chat_id=chat_id, limit=clamp_limit(limit),
                          account=ctx.account)
 
@@ -199,6 +227,7 @@ def semantic_search(query: str, contact: str | None = None, limit: int = 10,
     chat_id = ctx.resolve_optional(contact)
     if isinstance(chat_id, NeedConfirm):
         return chat_id
+    _refresh_roster(ctx)
     res = vector.semantic_search(query, chat_id=chat_id,
                                  limit=clamp_limit(limit, LIMIT_SEMANTIC),
                                  account=ctx.account)

@@ -14,7 +14,7 @@ from types import SimpleNamespace
 import pytest
 import zstandard
 
-from agent_wechat import export, keys, paths, reader, search, store
+from agent_wechat import errors, export, keys, paths, reader, search, store, usecases
 
 from helpers import ext_buffer, member, mk_row
 
@@ -455,3 +455,56 @@ def test_iter_all_still_emits_raw_usernames(env):
     assert group_rows, "前提：iter_all 里有 FRIEND 的消息"
     assert group_rows[0]["sender_name"] == FRIEND, \
         f"iter_all 不该换名（换名会让新导出与存量分道扬镳）：{group_rows[0]}"
+
+
+# ---------- usecases：懒刷新 ----------
+
+def test_search_refreshes_roster_when_stale(env):
+    """第一次查询时名册为空 → 自动填充。用户不需要任何初始化仪式（spec §7）。"""
+    usecases.search_history("开会", contact=GROUP, account=ACCT)
+    with store.open() as con:
+        n = con.execute("SELECT COUNT(*) FROM display_names").fetchone()[0]
+    assert n > 0, "名册没有被填充"
+
+
+def test_search_does_not_refresh_within_ttl(env, monkeypatch):
+    usecases.search_history("开会", contact=GROUP, account=ACCT)
+    calls = []
+    real = reader.MessageReader.roster
+    monkeypatch.setattr(reader.MessageReader, "roster",
+                        lambda self: (calls.append(1), real(self))[1])
+    usecases.search_history("开会", contact=GROUP, account=ACCT)
+    assert calls == [], "TTL 内不该重读 contact.db"
+
+
+def test_search_still_works_when_roster_refresh_fails(env, monkeypatch):
+    """**刷新是尽力而为**：contact.db 读不到不该让检索也查不了——那是两条独立的能力。
+    没有这条，`_refresh_roster` 里那个 try/except 被删掉也不会有测试红（spec §9）。"""
+    def boom(self):
+        raise errors.DataNotFound("模拟：contact.db 不可用")
+
+    monkeypatch.setattr(reader.MessageReader, "roster", boom)
+    res = usecases.search_history("开会", contact=GROUP, account=ACCT)
+    assert "hits" in res, f"刷新失败不该阻断检索：{res}"
+
+
+def test_refresh_does_not_write_when_roster_is_empty(env, monkeypatch):
+    """**空名册不得写库**。`replace_roster([])` 会清空该账号名册**并盖上 refreshed_at**——
+    roster_is_stale 从此返回 False，整个 TTL 内不再重试：一次意外的空名册（contact.db
+    半损坏但没抛）会把名册锁死成「全是 wxid」，而刷新被记成了**成功**（T2 review 的
+    Minor 1）。`_refresh_roster` 里「读成功」与「真没东西」不可区分，所以按「空 → 这次
+    刷新没发生」处理：不 replace_roster、不记时间戳，下次查询再试。
+
+    代价（已裁定接受，见 ledger Ruling 13）：没有群也没有联系人的账号每次查询都会
+    重读一次 contact.db——正确性无损，纯性能，且该场景罕见。"""
+    calls = []
+    real = store.replace_roster
+
+    def spy(con, account, rows):
+        calls.append(rows)
+        return real(con, account, rows)
+
+    monkeypatch.setattr(store, "replace_roster", spy)
+    monkeypatch.setattr(reader.MessageReader, "roster", lambda self: [])
+    usecases.search_history("开会", contact=GROUP, account=ACCT)
+    assert calls == [], f"空名册不该触发写库：{calls}"

@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent_wechat import account, cli, errors, mcp_server, reader, search, usecases, vector
+from agent_wechat import account, cli, errors, mcp_server, reader, search, store, usecases, vector
 # 合成微信目录（真实 sqlcipher 解密链路；路径全部指向 tmp_path，绝不碰真实数据）
 from test_reader_export_pipeline import ACCT, FRIEND, env, wechat  # noqa: F401
 
@@ -22,7 +22,7 @@ EXPECTED = [{"username": "wxid_a", "display": "张三", "kind": "direct"},
 
 
 @pytest.fixture()
-def stub(monkeypatch):
+def stub(monkeypatch, tmp_path):
     """把账号解析与 MessageReader 替成桩，并记录会话解析与落库调用的实参。"""
     seen: dict = {}
 
@@ -45,8 +45,13 @@ def stub(monkeypatch):
         def display_name(self, chat_id):
             return f"名:{chat_id}"
 
+        def roster(self):
+            return []            # 检索前的懒刷新会调它；空名册 → 不写库
+
     monkeypatch.setattr(account, "resolve_account", lambda a: "acct")
     monkeypatch.setattr(reader, "MessageReader", _StubReader)
+    # 检索用例现在会先 _refresh_roster → store.open()：不隔离 DB_PATH 就会碰真实索引库
+    monkeypatch.setattr(store, "DB_PATH", tmp_path / "index.db")
     return seen
 
 
