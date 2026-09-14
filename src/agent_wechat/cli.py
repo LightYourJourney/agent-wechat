@@ -270,13 +270,14 @@ def _render_plan(plan: purge.PurgePlan) -> None:
         mark = "" if i.exists else "（不存在）"
         print(f"  {i.artifact.scope:<7} {i.artifact.path}  {size:>10}  "
               f"{'敏感' if i.artifact.sensitive else '否':<4} {i.artifact.rebuild}{mark}")
-    for p in plan.loose:
+    for e in plan.loose:
         # spec §3：每行点名它属于哪个已知产物，或标「散落文件」。models/ 与 tasks.json 是
         # vector/tasks 的已知产物，只是没有对应的 CLI 开关——一律印「不属于任何具名范围」
         # 字面没错，读起来却是「没人认识的文件」。
-        known = purge.known_artifact_label(p)
+        # 体积由 purge 侧算（目录走整树，见 _loose_entry）：CLI 不再自己量一遍，那是第二份来源。
+        known = purge.known_artifact_label(e.path)
         mark = f"已知产物：{known}" if known else "不属于任何具名范围"
-        print(f"  {'all':<7} {p}  （{mark}）")
+        print(f"  {'all':<7} {e.path}  {_human_size(e.size):>10}  （{mark}）")
     print("\n未删除任何文件。加 --yes 执行。")
 
 

@@ -28,8 +28,11 @@ def _never_touch_real_home(monkeypatch, tmp_path):
     # spec §7：lsof 注入桩。必须打在 **_run** 这一层，不能把 _holders 整个换掉——
     # 本文件里的 test_holders_parses_lsof_output 要调的正是真 _holders，autouse fixture
     # 先执行会把它替换成桩，那个测试就永远拿不到真函数。
+    # 三个字段都是被测代码的隐式契约：_holders 只读 stdout，_tmutil 还要读 returncode 与
+    # stderr（非零退出要报「无法判定」而不是「无输出」）。少一个就是一个 AttributeError。
     monkeypatch.setattr(purge, "_run",
-                        lambda *a, **kw: type("R", (), {"stdout": ""})())
+                        lambda *a, **kw: type("R", (), {"stdout": "", "stderr": "",
+                                                        "returncode": 0})())
     arts = purge.artifacts()
     assert len(arts) == 5, \
         f"红线：清单条目数由 5 变为 {len(arts)}，必有产物未被保护，须先核对再改这个数"
@@ -88,12 +91,12 @@ def test_plan_all_enumerates_home_including_strays(tmp_path):
     (home / "models").mkdir()
     p = purge.plan(frozenset(), all_=True)
     assert p.all_ is True
-    assert {x.name for x in p.loose} >= {"leaked.db", "models"}
+    assert {x.path.name for x in p.loose} >= {"leaked.db", "models"}
     # 反断言：`if p not in known` 这条排除若被删掉，这个测试原本仍会通过，但已知产物
     # 会在 items 与 loose 里各出现一次——计划表会把同一个路径渲染两遍。
     # （注意别把它说成「体积重复计入 freed」：--all 的 freed 是 _tree_size 走盘量出来的，
     #   不是 items+loose 求和，所以重复项不会让 freed 翻倍。）
-    assert "index.db" not in {x.name for x in p.loose}
+    assert "index.db" not in {x.path.name for x in p.loose}
 
 
 def test_execute_keys_does_not_touch_index(tmp_path):
@@ -412,6 +415,19 @@ def test_verify_degrades_when_tmutil_missing(tmp_path, monkeypatch):
     assert "无法判定" in rep.tm_excluded
 
 
+def test_tmutil_maps_nonzero_exit_to_undecidable(tmp_path, monkeypatch):
+    """非零退出且只写了 stderr 时，此前被印成「无输出」——用户读到的意思是「就是没输出」，
+    而不是「判不出来」，而这两件事对一门专门用来抓假象的核查字段含义正相反。
+    实测：正常用法恒 rc=0（`[Included]`/`[Excluded]` 都走 stdout，排没排除都是 0），
+    所以这个分支不会误伤正常输出。"""
+    def exit64(*a, **k):
+        return type("R", (), {"stdout": "", "stderr": "boom", "returncode": 64})()
+
+    monkeypatch.setattr(purge, "_run", exit64)
+    rep = purge.verify(purge.plan(frozenset({"keys"})))
+    assert "无法判定" in rep.tm_excluded and "64" in rep.tm_excluded
+
+
 def test_execute_refuses_when_home_is_root(tmp_path, monkeypatch):
     """闸门在 execute 里也要有一道，且是第一句：CLI 是「先 plan → 再 execute」，plan 到
     execute 之间 paths.HOME_DIR 可能已被改指（或首次 plan 走的不是这条路径），到那时就只剩
@@ -421,6 +437,23 @@ def test_execute_refuses_when_home_is_root(tmp_path, monkeypatch):
     with pytest.raises(errors.PurgeRefused) as ei:
         purge.execute(p)
     assert "文件系统根" in str(ei.value)
+
+
+def test_execute_all_watches_loose_entries_for_holders(tmp_path, monkeypatch):
+    """`--all` 的删除面是**整棵树**，而 items 只是具名产物：loose（models/、tasks.json、
+    散落明文）同样会被 rmtree 删掉，那里一个被写着的文件 unlink 会「成功但空间不释放」
+    ——正是这道检查存在的理由。此前只遍历 items，而错误文案「有进程正在使用待删产物」
+    是个超集说法。"""
+    home = tmp_path / "home"; home.mkdir(parents=True)
+    (home / "index.db").write_bytes(b"x" * 10)
+    (home / "models").mkdir()
+    monkeypatch.setattr(purge, "_holders",
+                        lambda p: [777] if p.name == "models" else [])
+    p = purge.plan(frozenset(), all_=True)
+    with pytest.raises(errors.PurgeRefused) as ei:
+        purge.execute(p)
+    assert "正在使用" in str(ei.value) and "models" in str(ei.value)
+    assert (home / "models").exists(), "拒绝时一个字节都不该删"
 
 
 def test_plan_refuses_when_home_unreadable(tmp_path):

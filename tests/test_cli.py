@@ -195,7 +195,11 @@ def _isolate(tmp_path, monkeypatch):
     monkeypatch.setattr(store, "DB_PATH", home / "index.db")
     # lsof（_holders）与 tmutil（_tmutil）都经 _run：桩打在最低层，一处覆盖两个外部命令。
     # 不加这个，任何走进 execute/verify 的 CLI 测试都会去跑**真实的** lsof 与 tmutil。
-    monkeypatch.setattr(purge, "_run", lambda *a, **kw: type("R", (), {"stdout": ""})())
+    # 三个字段都是被测代码的隐式契约：_holders 只读 stdout，_tmutil 还要读 returncode 与
+    # stderr（非零退出要报「无法判定」而不是「无输出」）。少一个就是一个 AttributeError。
+    monkeypatch.setattr(purge, "_run",
+                        lambda *a, **kw: type("R", (), {"stdout": "", "stderr": "",
+                                                        "returncode": 0})())
     # $TMPDIR 同样要隔离：verify 会 glob 它找 awcap_* 残留，否则读的是本机真实临时目录
     monkeypatch.setenv("TMPDIR", str(tmp_path / "tmpdir"))
     return home
@@ -298,6 +302,21 @@ def test_purge_all_dry_run_renders_loose_rows(tmp_path, monkeypatch, capsys):
     assert "leaked.db" in out and "models" in out
     assert "不属于任何具名范围" in out
     assert (home / "leaked.db").exists()            # dry-run，一个字节没删
+
+
+def test_render_plan_all_shows_size_for_loose_entries(tmp_path, monkeypatch, capsys):
+    """spec §3 的 `--all` 样例表里 `models/` 有 95 MB、`tasks.json` 有 2 B，而实现只印路径。
+    目录必须用**整树**体积，不能用 `lstat().st_size`（inode 自身大小）——那正是 T4 在 freed
+    上修过的同一个错误的兄弟形态，落在渲染器里：models/ 会印成「96 B」。"""
+    home = _isolate(tmp_path, monkeypatch)
+    (home / "models").mkdir()
+    (home / "models" / "model.onnx").write_bytes(b"x" * 500_000)
+    (home / "tasks.json").write_bytes(b"{}")
+    with pytest.raises(SystemExit):
+        cli.main(["purge", "--all"])
+    out = capsys.readouterr().out
+    assert "500 KB" in out, f"loose 目录行必须印整树体积（不是 inode 大小）：{out!r}"
+    assert "2 B" in out, f"loose 文件行必须印体积：{out!r}"
 
 
 def test_render_plan_uses_decimal_units(tmp_path, monkeypatch, capsys):

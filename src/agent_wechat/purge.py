@@ -103,11 +103,20 @@ class PlanItem:
 
 
 @dataclass(frozen=True)
+class LooseEntry:
+    """`--all` 时 HOME_DIR 顶层的散落条目。**带体积**，因为计划表要逐条印出来——
+    spec §3 的 `--all` 样例表里 `models/` 有 95 MB、`tasks.json` 有 2 B，只有路径的
+    loose 印不出那一列。"""
+    path: pathlib.Path
+    size: int
+
+
+@dataclass(frozen=True)
 class PurgePlan:
     scopes: frozenset[str]
     all_: bool
     items: tuple[PlanItem, ...]        # 具名产物（--all 时亦为「已知产物」部分）
-    loose: tuple[pathlib.Path, ...]    # 仅 --all：HOME_DIR 顶层不属于任何具名产物的条目
+    loose: tuple[LooseEntry, ...]      # 仅 --all：HOME_DIR 顶层不属于任何具名产物的条目
 
 
 def _item(a: Artifact) -> PlanItem:
@@ -121,6 +130,22 @@ def _item(a: Artifact) -> PlanItem:
         raise errors.PurgeRefused(f"无法读取待删路径：{a.path}",
                                   hint=f"{exc}；请先修正权限再重试") from exc
     return PlanItem(a, True, st.st_size, a.path.is_symlink())
+
+
+def _loose_entry(p: pathlib.Path) -> LooseEntry:
+    """散落条目的体积。**目录量整树**：`lstat().st_size` 是 inode 自身大小（几十到几百字节），
+    会让 models/ 这种几百 MB 的目录印成「96 B」——T4 已在 freed 上修过同一个错误，
+    这是它在计划表里的形态。量不出来就报 0：比报一个假数字好。
+
+    `is_dir() and not is_symlink()` 而不是直接 `is_dir()`：前者跟随符号链接，指向目录的链接
+    会被当成目录量整树，而 --all 下它只会被 rmtree 当作普通条目 unlink，目标留在盘上。
+    """
+    try:
+        if p.is_dir() and not p.is_symlink():
+            return LooseEntry(p, _tree_size(p))
+        return LooseEntry(p, p.lstat().st_size)
+    except OSError:
+        return LooseEntry(p, 0)
 
 
 def _home_of_uid(uid: int) -> pathlib.Path | None:
@@ -241,7 +266,7 @@ def plan(scopes: frozenset[str], all_: bool = False,
             # 幂等。覆盖它的测试是 T4 的 test_execute_all_on_missing_home_is_idempotent，
             # 不是 T3 那两个（它们走 all_=False，根本不进这个分支）。
             top = []
-        loose = tuple(p for p in top if p not in known)
+        loose = tuple(_loose_entry(p) for p in top if p not in known)
     return PurgePlan(scopes=scopes, all_=all_, items=items, loose=loose)
 
 
@@ -401,8 +426,15 @@ def execute(plan: PurgePlan) -> PurgeReport:
             "待删路径是符号链接，拒绝删除：" + "、".join(str(p) for p in links),
             hint="删链接不会删目标，会造成「已清干净」的假象；请手工处理")
 
-    held = {i.artifact.path: pids
-            for i in plan.items if i.exists and (pids := _holders(i.artifact.path))}
+    # --all 的删除面是**整棵树**，而 items 只是具名产物：loose（models/、tasks.json、散落明文）
+    # 同样会被 rmtree 删掉，那里一个被写着的文件 unlink 会「成功但空间不释放」——正是这道检查
+    # 存在的理由。此前只遍历 items，而错误文案（「有进程正在使用待删产物」）是个超集说法。
+    # 残余：树**深处**被持有的文件仍探测不到，那需要 `lsof +D`；_holders 的 docstring 已论证
+    # 它的整树代价不可接受。
+    watched = [i.artifact.path for i in plan.items if i.exists]
+    if plan.all_:
+        watched += [e.path for e in plan.loose]
+    held = {p: pids for p in watched if (pids := _holders(p))}
     if held:
         detail = "；".join(f"{p.name} 被 pid {','.join(map(str, v))} 持有"
                           for p, v in held.items())
@@ -440,7 +472,8 @@ def execute(plan: PurgePlan) -> PurgeReport:
             # 删光整棵 HOME_DIR 之后打印「已删除 0 项，释放 0 B」，与 spec §3/§6 要求的
             # 「删了什么 + 释放多少」直接冲突。体积要在 rmtree **之前**取。
             freed = _tree_size(paths.HOME_DIR)
-            shown = [i.artifact.path for i in plan.items if i.exists] + list(plan.loose)
+            shown = ([i.artifact.path for i in plan.items if i.exists]
+                     + [e.path for e in plan.loose])
             # onexc 收集而非抛出：与「部分失败继续删完」同一语义。
             # 用 onexc 不用 onerror——后者在 3.12 已弃用，本仓库 requires-python >=3.12。
             shutil.rmtree(paths.HOME_DIR,
@@ -470,6 +503,13 @@ def _tmutil(args: list[str]) -> str:
         r = _run(["tmutil", *args], capture_output=True, text=True, timeout=10)
     except Exception:
         return "无法判定（tmutil 不可用或超时）"
+    if r.returncode != 0:
+        # 非零退出此前被印成「无输出」——用户读到的意思是「就是没输出」而不是「判不出来」，
+        # 而这两件事对一门专门用来抓假象的核查字段含义正相反。
+        # 实测：正常用法恒 rc=0（[Included]/[Excluded] 都走 stdout，排没排除都是 0；
+        # 用法错是 64），所以这个分支不会误伤正常输出。
+        detail = (r.stderr or "").strip().splitlines()
+        return f"无法判定（tmutil 退出码 {r.returncode}：{detail[0] if detail else '无 stderr'}）"
     return (r.stdout or "").strip() or "无输出"
 
 
@@ -480,7 +520,7 @@ def verify(plan: PurgePlan) -> ResidueReport:
     # 只查 items 而把 loose 仅用于从 kept 里排除的话，一个在部分失败中活下来的 loose 条目
     # （models/、tasks.json、散落明文）**两个桶都不进**，报告会说「计划内路径已清空」——
     # 正是本字段存在的意义所在的那种假象（spec §5.2 第 1 项）。
-    planned = [i.artifact.path for i in plan.items] + list(plan.loose)
+    planned = [i.artifact.path for i in plan.items] + [e.path for e in plan.loose]
     # lexists 而非 exists：exists 跟随符号链接，断链会被判成「已删除」而链接文件明明还在——
     # 在这门专门用来抓假象的字段里制造假象。
     not_removed = tuple(p for p in planned if os.path.lexists(p))
