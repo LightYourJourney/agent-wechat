@@ -4,6 +4,7 @@
 完整 DDL）与真机实测（contact.db 那部分文档没记全，见 spec §2.4）。
 """
 import pathlib
+import sqlite3
 
 import pytest
 
@@ -67,3 +68,54 @@ def test_schema_drift_carries_the_fields_the_degrade_table_needs():
                             missing_columns=("nick_name",))
     assert d2.missing_columns == ("nick_name",)
     assert isinstance(d2, errors.AgentWeChatError)     # core 层的契约
+
+
+def _con(*ddl: str):
+    con = sqlite3.connect(":memory:")
+    for s in ddl:
+        con.execute(s)
+    return con
+
+
+def test_probe_ok_when_table_and_columns_match():
+    con = _con("CREATE TABLE contact (username TEXT, alias TEXT, remark TEXT, nick_name TEXT)")
+    r = schema.probe(con, schema.Requirement("contact/contact.db", "contact",
+                                             ("username", "alias", "remark", "nick_name")))
+    assert r.ok and r.missing_columns == ()
+
+
+def test_probe_reports_missing_table_as_empty_columns():
+    """实测（spec §2.2）：PRAGMA table_info 对不存在的表返回**空 list**、不抛异常。
+    所以「表不存在」与「表在但没有任何列」在这个探针下不可区分——而后者在 SQLite 里
+    不可能存在，所以空 = 表不存在是安全的读法。"""
+    con = _con()
+    r = schema.probe(con, schema.Requirement("contact/contact.db", "nope", ("a",)))
+    assert not r.ok and r.missing_columns == ()
+
+
+def test_probe_names_the_missing_columns():
+    """只报缺的、不报多出来的——微信**新增**列不是漂移（我们不用它就不会崩）。"""
+    con = _con("CREATE TABLE contact (username TEXT, extra_col TEXT)")
+    r = schema.probe(con, schema.Requirement("contact/contact.db", "contact",
+                                             ("username", "nick_name")))
+    assert not r.ok and r.missing_columns == ("nick_name",)
+
+
+def test_probe_accepts_an_explicit_table_name_for_the_wildcard():
+    """`Msg_*` 的真名是 md5、运行时才知道，所以探测要能接收显式的真实表名。"""
+    con = _con("CREATE TABLE Msg_abc123 (local_id INTEGER, local_type INTEGER, "
+               "real_sender_id INTEGER, create_time INTEGER, message_content BLOB, "
+               "WCDB_CT_message_content INTEGER)")
+    req = schema.Requirement("message/*.db", "Msg_*",
+                             ("local_id", "local_type", "real_sender_id", "create_time",
+                              "message_content", "WCDB_CT_message_content"))
+    assert schema.probe(con, req, table="Msg_abc123").ok
+    assert not schema.probe(con, req, table="Msg_missing").ok
+
+
+def test_probe_is_silent_on_hostile_table_names():
+    """表名来自 sqlite_master（微信自己的），但仍然不该有注入面——实测带引号的表名
+    同样返回空 list、不抛。"""
+    con = _con()
+    r = schema.probe(con, schema.Requirement("x.db", "t", ("a",)), table="t' OR 1=1 --")
+    assert not r.ok

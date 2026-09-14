@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+import sqlite3
 from dataclasses import dataclass
 
 
@@ -53,3 +54,31 @@ CAPABILITIES: dict[str, tuple[Requirement, ...]] = {
         Requirement("message/*.db", "Name2Id", ("user_name",)),
     ),
 }
+
+
+@dataclass(frozen=True)
+class ProbeResult:
+    """探测结果。`ok=False` 且 `missing_columns` 为空 = 表不存在。"""
+    ok: bool
+    missing_columns: tuple[str, ...] = ()
+
+
+def probe(con, req: Requirement, table: str | None = None) -> ProbeResult:
+    """该连接下的库是否满足这条声明。
+
+    `table` 用于通配声明（`Msg_*`）：真名由调用方从 sqlite_master 拿到后传进来。
+
+    探针本身**不会失败**（spec §2.2 实测）：表名按**带引号的标识符**插入（内嵌的 `"`
+    翻倍转义），所以不存在的表返回空 list、不抛异常，含引号的表名同样返回空、不抛，
+    也注入不了。这也是不裸插表名的原因——裸插时 `t' OR 1=1 --` 会抛
+    `unrecognized token`。因此这里不需要 try/except——「探不出来」这个状态不存在，
+    存在的只有「探出来是空的」。
+
+    **只报缺的列，不报多的列**：微信新增列不是漂移——我们不读它就不会崩。
+    """
+    name = (table or req.table).replace('"', '""')
+    actual = {row[1] for row in con.execute(f'PRAGMA table_info("{name}")')}
+    if not actual:
+        return ProbeResult(ok=False)                       # 表不存在
+    missing = tuple(c for c in req.columns if c not in actual)
+    return ProbeResult(ok=False, missing_columns=missing) if missing else ProbeResult(ok=True)
