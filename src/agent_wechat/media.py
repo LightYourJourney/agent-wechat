@@ -368,10 +368,15 @@ def _dest(out_root: pathlib.Path, cm: str, kind: str, mon: str,
 
 
 def _save(out_root: pathlib.Path, cm: str, kind: str, mon: str,
-          stem: str, ext: str, data: bytes) -> pathlib.Path:
+          stem: str, ext: str, data: bytes) -> pathlib.Path | None:
+    """写一个导出文件（0600）。落盘失败（磁盘满/权限/只读挂载）返回 None（Ruling 20）——
+    调用方按自己的口径计数（图片 failed / 视频 missing / 语音 failed），裸 OSError 不逃出 core。"""
     p = _dest(out_root, cm, kind, mon, stem, ext)
-    p.write_bytes(data)
-    p.chmod(0o600)                             # 导出的是明文媒体：除了属主谁也读不到
+    try:
+        p.write_bytes(data)
+        p.chmod(0o600)                         # 导出的是明文媒体：除了属主谁也读不到
+    except OSError:
+        return None
     return p
 
 
@@ -396,6 +401,13 @@ def export_media(account: str, chat_ids: list[str], *, kinds: list[str],
 
     def full() -> bool:
         return produced >= max_files
+
+    def bump() -> int:
+        """计一个已落盘的媒体文件，返回累计数（Ruling 18：语音与图片/视频同一个口径——
+        `max_files` 必须也管住语音，否则一个有几千条语音的会话会无视 `--limit`）。"""
+        nonlocal produced
+        produced += 1
+        return produced
 
     if "image" in kinds:
         try:
@@ -447,7 +459,9 @@ def export_media(account: str, chat_ids: list[str], *, kinds: list[str],
                                 report.degraded.append(
                                     "wxgf 图未转 JPEG（无 ffmpeg 或转码失败），存原容器")
                                 wxgf_warned = True
-                            _save(out_root, cm, "image", mon, dat.stem, ext, buf)
+                            if _save(out_root, cm, "image", mon, dat.stem, ext, buf) is None:
+                                report.image.failed += 1     # 落盘失败（Ruling 20）
+                                continue
                         report.image.ok += 1
                         produced += 1
                         if progress:
@@ -479,7 +493,9 @@ def export_media(account: str, chat_ids: list[str], *, kinds: list[str],
                         except OSError:
                             report.video.missing += 1    # 文件在、拿不到本体（Ruling 9）
                             continue
-                        _save(out_root, cm, "video", mon, f.stem, "mp4", buf)
+                        if _save(out_root, cm, "video", mon, f.stem, "mp4", buf) is None:
+                            report.video.missing += 1    # 落盘失败 → 与读不到本体同归口（Ruling 20）
+                            continue
                         mp4_stems.add(f.stem.removesuffix("_raw"))
                         report.video.ok += 1
                         produced += 1
@@ -496,7 +512,9 @@ def export_media(account: str, chat_ids: list[str], *, kinds: list[str],
                         except OSError:
                             report.video.missing += 1    # 缩略图也拿不到：同样的归口
                             continue
-                        _save(out_root, cm, "video", mon, f.stem, "jpg", buf)
+                        if _save(out_root, cm, "video", mon, f.stem, "jpg", buf) is None:
+                            report.video.missing += 1    # 同上：缩略图也 write 不出来
+                            continue
                         report.video.thumb += 1
                         produced += 1
         elif len(chat_ids) > 1:
@@ -504,8 +522,22 @@ def export_media(account: str, chat_ids: list[str], *, kinds: list[str],
     if "voice" in kinds:
         if _PILK is None:
             report.degraded.append("pilk 不可用：语音导出为原始 .slk（`uv add pilk` 后可转 WAV）")
-        _export_voices(account, chat_ids, out_root, report, want, full, progress)
+        _export_voices(account, chat_ids, out_root, report, want, full, bump, progress)
     return report
+
+
+def _wav_bytes(pcm: bytes, rate: int = 24000) -> bytes:
+    """44 字节 RIFF 头 + 16-bit 单声道 PCM（Ruling 19：自己封头，不用 `silk_to_wav`——
+    那个会在系统 TMPDIR 里留一份从不清理的中间明文 .pcm）。"""
+    return (b"RIFF" + (36 + len(pcm)).to_bytes(4, "little") + b"WAVE"
+            + b"fmt " + (16).to_bytes(4, "little")
+            + (1).to_bytes(2, "little")                # PCM
+            + (1).to_bytes(2, "little")                # 单声道
+            + rate.to_bytes(4, "little")               # 24000
+            + (rate * 2).to_bytes(4, "little")         # byte_rate = 48000
+            + (2).to_bytes(2, "little")                # block_align = 2
+            + (16).to_bytes(2, "little")               # bits_per_sample
+            + b"data" + len(pcm).to_bytes(4, "little") + pcm)
 
 
 def _voice_db_paths(account: str) -> list[pathlib.Path]:
@@ -514,12 +546,16 @@ def _voice_db_paths(account: str) -> list[pathlib.Path]:
     return _safe_iter(paths.db_storage(account) / "message", "media_*.db")
 
 
-def _export_voices(account, chat_ids, out_root, report, want, is_full, progress) -> None:
+def _export_voices(account, chat_ids, out_root, report, want, is_full, bump, progress) -> None:
     """语音：Name2Id rowid → VoiceInfo(chat_name_id, create_time) → pilk 解码 24kHz WAV。
     pilk 缺失 → 原始 .slk（微信原始形态，`\\x02` 前缀保留）。单库打不开跳过，不中断。"""
+    decrypt.ensure_home_dirs()           # 中间明文只落 HOME/tmp（0700、已排除 Time Machine）
     remaining_chats = set(chat_ids)
     for db in _voice_db_paths(account):
-        if not remaining_chats or is_full():
+        if not remaining_chats:
+            break
+        if is_full():
+            report.truncated = True      # 上限已到：与图片/视频分支同一口径（Ruling 18）
             break
         try:
             passphrase = keys_mod.get_passphrase(account)
@@ -528,7 +564,7 @@ def _export_voices(account, chat_ids, out_root, report, want, is_full, progress)
                 con.text_factory = bytes
                 try:
                     _export_voices_from(con, remaining_chats, out_root, report,
-                                        want, is_full, progress)
+                                        want, is_full, bump, progress)
                 finally:
                     con.close()
         except (errors.AgentWeChatError, sqlite3.Error):
@@ -536,7 +572,8 @@ def _export_voices(account, chat_ids, out_root, report, want, is_full, progress)
         # 查到语音的会话从 remaining 里移除（见 _export_voices_from 内部）
 
 
-def _export_voices_from(con, remaining_chats, out_root, report, want, is_full, progress) -> None:
+def _export_voices_from(con, remaining_chats, out_root, report, want, is_full, bump,
+                        progress) -> None:
     produced_in_db = set()
     name2id = {u.decode("utf-8", "replace") if isinstance(u, bytes) else u: rid
                for rid, u in con.execute("SELECT rowid, user_name FROM Name2Id")}
@@ -557,27 +594,33 @@ def _export_voices_from(con, remaining_chats, out_root, report, want, is_full, p
             if blob is None:
                 report.voice.failed += 1
                 continue
-            base = _ensure_tree(out_root, cm, "voice", mon) / f"{ts}_{lid}"
-            wav = base.with_suffix(".wav")
+            wav_bytes = None
             if _PILK is not None:
                 try:
-                    with tempfile.TemporaryDirectory() as td:
+                    # 输入 silk 与中间 pcm **都**只落在 HOME/tmp 的 0700 临时目录里，退出即清
+                    # （Ruling 19：silk_to_wav 会把中间明文 pcm 留在系统 TMPDIR 且不删）
+                    with tempfile.TemporaryDirectory(dir=decrypt.tmp_dir(),
+                                                     prefix="awvoice-") as td:
                         tmp_silk = pathlib.Path(td) / "v.silk"
                         tmp_silk.write_bytes(blob)
-                        # 返回值不可靠（实测 None）：以 wav 文件存在为准
-                        _PILK.silk_to_wav(str(tmp_silk), str(wav), 24000)
-                    if wav.exists():
-                        wav.chmod(0o600)   # pilk 落盘权限跟 umask，这里收口（同 _save）
-                        report.voice.ok += 1
-                        produced_in_db.add(chat)
-                        if progress:
-                            progress(report.voice.ok + report.voice.raw_only)
-                        continue
+                        tmp_pcm = pathlib.Path(td) / "v.pcm"
+                        _PILK.decode(str(tmp_silk), str(tmp_pcm), 24000)
+                        if tmp_pcm.exists():
+                            wav_bytes = _wav_bytes(tmp_pcm.read_bytes())
                 except Exception:
-                    pass                  # 解码失败 → 落到 .slk 回退
-            _save(out_root, cm, "voice", mon, f"{ts}_{lid}", "slk", blob)
-            report.voice.raw_only += 1
+                    wav_bytes = None  # 解码失败 → 落到 .slk 回退
+            if wav_bytes is not None:
+                if _save(out_root, cm, "voice", mon, f"{ts}_{lid}", "wav", wav_bytes) is None:
+                    report.voice.failed += 1         # 落盘失败（Ruling 20）
+                    continue
+                report.voice.ok += 1
+            else:
+                if _save(out_root, cm, "voice", mon, f"{ts}_{lid}", "slk", blob) is None:
+                    report.voice.failed += 1
+                    continue
+                report.voice.raw_only += 1
             produced_in_db.add(chat)
+            done = bump()
             if progress:
-                progress(report.voice.ok + report.voice.raw_only)
+                progress(done)
     remaining_chats -= produced_in_db

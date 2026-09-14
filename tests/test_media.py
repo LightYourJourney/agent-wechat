@@ -536,7 +536,12 @@ def test_export_media_voice_silk_to_wav(tmp_path, monkeypatch):
     wavs = list((out / cm / "voice" / mon).iterdir())
     assert len(wavs) == 1 and wavs[0].name == f"{ts}_7.wav"
     assert wavs[0].read_bytes()[:4] == b"RIFF"
-    assert _mode(wavs[0]) == 0o600                    # pilk 落盘权限跟 umask，导出侧收口
+    # 头是导出侧自己封的（Ruling 19）：wave 模块能解析 = 结构合法，且参数确为单声道 16-bit 24kHz
+    import wave
+    with wave.open(str(wavs[0])) as f:
+        assert f.getnchannels() == 1 and f.getsampwidth() == 2 and f.getframerate() == 24000
+        assert f.getnframes() == 4800                 # 0.2s × 24kHz
+    assert _mode(wavs[0]) == 0o600                    # 明文媒体只有属主可读（经 _save）
     for p in (out, out / cm, out / cm / "voice", out / cm / "voice" / mon):
         assert _mode(p) == 0o700, p
 
@@ -584,6 +589,134 @@ def test_export_media_voice_slk_fallback(tmp_path, monkeypatch):
     assert len(slks) == 1 and slks[0].suffix == ".slk"
     assert slks[0].read_bytes()[:10] == blob[:10]     # 原始形态（\x02 前缀保留）
     assert _mode(slks[0]) == 0o600
+
+
+# ---------- Ruling 18：max_files 必须也管住语音 ----------
+
+def test_export_media_voice_respects_max_files(tmp_path, monkeypatch):
+    """Ruling 18：语音计入与图片/视频同一个 produced——两条语音 + max_files=1 → 只出 1 条。
+
+    改前语音从不递增 produced，一个有几千条语音的会话会无视 `--limit` 全量落盘。
+    """
+    root, account = make_tree(tmp_path, monkeypatch)
+    ts = int(datetime.datetime(2026, 9, 15, 12, 0).timestamp())
+    mon = media.month_of(ts)
+    _voice_fixture(account, [(1, ts, 7, _silk_blob()), (1, ts, 8, _silk_blob())])
+    _passthrough_decrypted(monkeypatch)
+
+    out = root / "home" / "media"
+    rep = media.export_media(account, ["chatA@chatroom"], kinds=["voice"],
+                             months=[mon], out_dir=out, max_files=1)
+    assert rep.voice.ok == 1 and rep.truncated is True
+    cm = hashlib.md5("chatA@chatroom".encode()).hexdigest()
+    assert [p.name for p in (out / cm / "voice" / mon).iterdir()] == [f"{ts}_7.wav"]
+
+
+# ---------- Ruling 19：中间明文不得落系统 TMPDIR ----------
+
+def test_export_media_voice_plaintext_stays_in_home_tmp(tmp_path, monkeypatch):
+    """Ruling 19：silk/pcm 中间文件只落 HOME/tmp（0700）的临时目录，导出后一片不留。
+
+    `pilk.silk_to_wav` 会在**系统 TMPDIR** 里留一份从不清理的明文 .pcm——改后用
+    `pilk.decode` + 自己的 44 字节 RIFF 头，中间产物全在可 purge 的目录里。
+    """
+    import tempfile
+    from agent_wechat import decrypt
+    root, account = make_tree(tmp_path, monkeypatch)
+    ts = int(datetime.datetime(2026, 9, 15, 12, 0).timestamp())
+    mon = media.month_of(ts)
+    _voice_fixture(account, [(1, ts, 7, _silk_blob())])
+    _passthrough_decrypted(monkeypatch)
+
+    sys_tmp = pathlib.Path(tempfile.gettempdir())
+    before = sorted(p.name for p in (*sys_tmp.glob("*.pcm"), *sys_tmp.glob("*.silk")))
+    rep = media.export_media(account, ["chatA@chatroom"], kinds=["voice"],
+                             months=[mon], out_dir=root / "home" / "media")
+    assert rep.voice.ok == 1
+    after = sorted(p.name for p in (*sys_tmp.glob("*.pcm"), *sys_tmp.glob("*.silk")))
+    assert after == before                            # 系统临时目录零新增
+    assert list(decrypt.tmp_dir().iterdir()) == []    # HOME/tmp 自己也收干净了
+    assert _mode(decrypt.tmp_dir()) == 0o700          # 中间明文的落点是 0700
+
+
+# ---------- Ruling 20：落盘失败的归口 ----------
+
+def test_export_media_image_write_error_counts_failed(tmp_path, monkeypatch):
+    """Ruling 20：图片 write_bytes 抛 OSError（磁盘满/只读）→ image.failed，不逃出 core。"""
+    root, account = make_tree(tmp_path, monkeypatch)
+    code = "999999"
+    (paths.CONTAINER / "app_data/net/kvcomm/key_999999_1_2_3_4_5_input.statistic").write_bytes(b"")
+    cm = hashlib.md5("chatA@chatroom".encode()).hexdigest()
+    aes = hashlib.md5((code + paths.bare_wxid(account)).encode()).hexdigest()[:16].encode()
+    sdir = paths.XWECHAT_FILES / account / "msg/attach" / cm / "2026-03" / "Img"
+    sdir.mkdir(parents=True)
+    samples = [sdir / f"sam{i}.dat" for i in range(4)]
+    for p in samples:
+        p.write_bytes(build_v2_dat(jpeg_like(64), b"\x33" * 8 + b"\xff\xd9", aes, FAKE_XOR))
+    monkeypatch.setattr(media, "_attach_dats", lambda acct: iter(samples))
+    img = paths.XWECHAT_FILES / account / "msg/attach" / cm / "2026-09" / "Img"
+    img.mkdir(parents=True)
+    (img / "beef.dat").write_bytes(
+        build_v2_dat(jpeg_like(1024), b"\x11" * 50 + b"\xff\xd9", aes, FAKE_XOR))
+    real_write = pathlib.Path.write_bytes
+
+    def fake(self, data):
+        if self.name == "beef.jpg":
+            raise OSError(28, "No space left on device", str(self))
+        return real_write(self, data)
+
+    monkeypatch.setattr(pathlib.Path, "write_bytes", fake)
+    rep = media.export_media(account, ["chatA@chatroom"], kinds=["image"],
+                             months=["2026-09"], out_dir=root / "home" / "media")
+    assert rep.image.ok == 0 and rep.image.failed == 1
+
+
+def test_export_media_video_write_error_counts_missing(tmp_path, monkeypatch):
+    """Ruling 20：视频本体/缩略图落盘失败 → video.missing（写不出来 = 拿不到本体）。
+
+    这条打的是 `_save` 里 write 成功之后的 chmod——Ruling 20 点名了 write_bytes 与
+    chmod 两条语句，两条都要归口。
+    """
+    root, account = make_tree(tmp_path, monkeypatch)
+    mon = _video_fixture(account, int(datetime.datetime(2026, 9, 15, 12, 0).timestamp()))
+    vdir = paths.XWECHAT_FILES / account / "msg/video" / mon
+    (vdir / "cccc_thumb.jpg").write_bytes(b"t" * 8)
+    (vdir / "bbbb.mp4").write_bytes(b"m" * 8)
+    (vdir / "dddd_thumb.jpg").write_bytes(b"t" * 8)
+    real_chmod = pathlib.Path.chmod
+    # 按**文件名**匹配：chmod 打在导出目标（out_root 下），不是微信树里的源文件——
+    # 与读失败用例的 `self in (src, ...)` 写法不同，这里比较源路径永远不会命中。
+    blocked = {"bbbb.mp4", "dddd_thumb.jpg"}
+
+    def fake(self, mode, **kw):
+        if self.name in blocked:
+            raise PermissionError(13, "Operation not permitted", str(self))
+        return real_chmod(self, mode, **kw)
+
+    monkeypatch.setattr(pathlib.Path, "chmod", fake)
+    rep = media.export_media(account, ["c@chatroom"], kinds=["video"],
+                             months=[mon], out_dir=root / "home" / "media")
+    assert rep.video.ok == 1 and rep.video.thumb == 1 and rep.video.missing == 2
+
+
+def test_export_media_voice_write_error_counts_failed(tmp_path, monkeypatch):
+    """Ruling 20：语音落盘失败 → voice.failed（不退回 .slk：磁盘满时它一样写不出来）。"""
+    root, account = make_tree(tmp_path, monkeypatch)
+    ts = int(datetime.datetime(2026, 9, 15, 12, 0).timestamp())
+    mon = media.month_of(ts)
+    _voice_fixture(account, [(1, ts, 7, _silk_blob())])
+    _passthrough_decrypted(monkeypatch)
+    real_write = pathlib.Path.write_bytes
+
+    def fake(self, data):
+        if self.suffix == ".wav":                     # 中间 silk 写在临时目录（.silk）：不受影响
+            raise OSError(28, "No space left on device", str(self))
+        return real_write(self, data)
+
+    monkeypatch.setattr(pathlib.Path, "write_bytes", fake)
+    rep = media.export_media(account, ["chatA@chatroom"], kinds=["voice"],
+                             months=[mon], out_dir=root / "home" / "media")
+    assert rep.voice.ok == 0 and rep.voice.failed == 1 and rep.voice.raw_only == 0
 
 
 # ---------- Ruling 15：chmod 尽力而为 + out_root 一次 stat 检查 ----------
