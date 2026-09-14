@@ -12,6 +12,7 @@ dependencies = [
     "zstandard>=0.25.0",
     "fastembed==0.8.*",
     "sqlite-vec==0.1.9",
+    "cryptography>=50.0.1",
 ]
 
 [project.scripts]

@@ -128,6 +128,14 @@ class PurgeRefused(AgentWeChatError):
     """
 
 
+class MediaKeyError(AgentWeChatError):
+    """图片密钥推导/验证失败（kvcomm 无 code、密钥不匹配、无样本可验）。
+
+    语义是**能力级**的：图片解不了，语音/视频不受影响——调用方（export_media）
+    捕获它降级，不要让它打断整次导出。
+    """
+
+
 def to_payload(exc: AgentWeChatError) -> dict:
     """异常 → MCP 工具错误信封。形状与旧手写的 {"error"[, "hint"]} 逐字节一致。"""
     payload = {"error": redact(str(exc))}
