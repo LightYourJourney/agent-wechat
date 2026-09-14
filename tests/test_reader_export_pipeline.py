@@ -16,7 +16,7 @@ import zstandard
 
 from agent_wechat import export, keys, paths, reader, search, store
 
-from helpers import mk_row
+from helpers import ext_buffer, member, mk_row
 
 PW = "0123456789abcdef0123456789abcdef"   # 文本 passphrase；sqlcipher 默认 KDF 与 keys.derive_key 一致
 ACCT = "wxid_t_a1b2"
@@ -84,6 +84,12 @@ def wechat(tmp_path_factory):
                      ("wxid_friend02", None, "李四", "ls", None),
                      ("888@chatroom", None, "项目群", "pm", None),
                      ("wxid_blocked", None, "已删除", "bl", 1)]),
+        "chat_room": ("CREATE TABLE chat_room (id INTEGER PRIMARY KEY, username TEXT, "
+                      "owner TEXT, ext_buffer BLOB)",
+                      [(2, GROUP, FRIEND,
+                        ext_buffer(member(FRIEND, "群里的张三"),
+                                   member("wxid_friend02"),
+                                   member(SELF)))]),
     })
     # shard0：friend 5 条（文本/本人/高比特位类型/zstd/appmsg）+ group 1 条（群前缀）
     friend_rows0 = [
@@ -365,3 +371,55 @@ def test_incremental_export_covers_non_latest_shard(tmp_path, monkeypatch):
     rows0[x].append((4, 1, 1, T0 + 4, "分片零四（新增）", 0))
     build_shard(wx, ACCT, "message_0.db", rows0, [x, SELF])   # 重建分片0（新盐无妨）
     assert export.run_export(ACCT) == 1                        # 增量应只补这 1 条
+
+
+# ---------- 显示名名册 ----------
+
+def test_roster_reads_group_members_with_optional_nickname(env):
+    """群昵称是**可选**的：fixture 里 FRIEND 有群名片、另两人没有（真实数据就是这样）。"""
+    r = reader.MessageReader(ACCT)
+    got = dict(((c, k), d) for c, k, d in r.roster())
+    assert got[(GROUP, FRIEND)] == "群里的张三"        # 群昵称优先于备注「张三」
+    assert got[(GROUP, "wxid_friend02")] == "李四"     # 无群昵称 → 备注
+    assert got[(GROUP, SELF)] == SELF                  # 不在 contact 表里 → username
+
+
+def test_roster_includes_private_chat_rows(env):
+    """私聊行 (chat_id=对方, member_key=对方)——同一条 join 覆盖两种会话。"""
+    r = reader.MessageReader(ACCT)
+    got = dict(((c, k), d) for c, k, d in r.roster())
+    assert got[(FRIEND, FRIEND)] == "张三"
+    assert got[("wxid_friend02", "wxid_friend02")] == "李四"
+
+
+def test_roster_skips_deleted_contacts(env):
+    """`delete_flag=1` 的是已删除联系人——与 reader.contacts() 同一条过滤规则。"""
+    r = reader.MessageReader(ACCT)
+    keys = {k for _, k, _ in r.roster()}
+    assert "wxid_blocked" not in keys
+
+
+def test_roster_does_not_use_the_search_limit(env, tmp_path, monkeypatch):
+    """**这条钉一个实测发现的坑**：`_contacts_all_cached()` 走 `contacts(limit=5000)`，
+    而真实 contact 表有 12,782 行——照着它实现会静默漏掉一半人。夹具造的小数据代不了
+    这个：必须真的超过 5000 行才测得出 LIMIT 的存在。
+
+    所以这条用一个**本测试自己造的**独立库（不污染 module 级的 wechat fixture）：
+    `_open` 拼的是 `paths.db_storage(acct) / rel`，而 `db_storage` 就是
+    `XWECHAT_FILES / acct / "db_storage"`——把 `XWECHAT_FILES` 指过去即可。
+    """
+    n = 5001
+    root = tmp_path / "bulkwx"
+    enc_db(root / ACCT / "db_storage" / "contact" / "contact.db", {
+        "name2id": ("CREATE TABLE name2id (username TEXT)", [(FRIEND,)]),
+        "contact": ("CREATE TABLE contact (username TEXT, alias TEXT, remark TEXT, "
+                    "nick_name TEXT, delete_flag INTEGER)",
+                    [(f"wxid_bulk{i:05d}", None, f"名字{i}", None, None)
+                     for i in range(n)]),
+        "chat_room": ("CREATE TABLE chat_room (id INTEGER PRIMARY KEY, username TEXT, "
+                      "owner TEXT, ext_buffer BLOB)", []),
+    })
+    monkeypatch.setattr(paths, "XWECHAT_FILES", root)
+    rows = reader.MessageReader(ACCT).roster()
+    private = [x for x in rows if x[0] == x[1]]
+    assert len(private) == n, f"联系人被截断了：拿到 {len(private)}，应为 {n}"

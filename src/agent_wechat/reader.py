@@ -11,7 +11,7 @@ import contextlib
 import sqlite3
 from dataclasses import dataclass, asdict
 
-from . import decrypt, keys, messages, paths, store
+from . import decrypt, keys, messages, paths, roster, store
 from .errors import DataNotFound, DependencyMissing
 
 try:
@@ -171,6 +171,33 @@ class MessageReader:
     def display_name(self, chat_id: str) -> str:
         return next((c["display"] for c in self._contacts_all_cached()
                      if c["username"] == chat_id), chat_id)
+
+    def roster(self) -> list[roster.RosterRow]:
+        """本账号的显示名名册：全部群成员 + 全部联系人（私聊行用）。
+
+        两次查询在同一次 contact.db 解密里完成，由 `_open` 管理生命周期。
+        名册的**规则**不在这里——`roster.build_rows` 是全项目唯一那份。
+        """
+        groups: dict[str, list[tuple[str, str | None]]] = {}
+        contacts: dict[str, tuple[str, str]] = {}
+        with self._open("contact/contact.db") as con:
+            # chat_room.id → name2id.rowid → 群 username（实测 3/3 相等，spec §2.1）
+            for username, blob in con.execute(
+                    "SELECT n.username, cr.ext_buffer FROM chat_room cr "
+                    "JOIN name2id n ON n.rowid = cr.id"):
+                chat_id = _s(username)
+                if chat_id:
+                    groups[chat_id] = roster.parse_members(
+                        blob if isinstance(blob, bytes) else None)
+            # **不带 limit**：`_contacts_all_cached()` 走的是 contacts(limit=5000)，
+            # 而真实 contact 表有 12,782 行——拿它当名册会静默漏掉一半人（spec §2.6）。
+            for u, remark, nick in con.execute(
+                    "SELECT username, remark, nick_name FROM contact "
+                    "WHERE COALESCE(delete_flag,0)=0"):
+                key = _s(u)
+                if key:
+                    contacts[key] = (_s(remark), _s(nick))
+        return roster.build_rows(groups, contacts)
 
     # ---------- 消息 ----------
 
