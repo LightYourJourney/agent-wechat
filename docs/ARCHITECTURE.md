@@ -28,7 +28,7 @@ src/agent_wechat/
 ├── messages.py     messages 行契约：列清单、行构造器、两条哨兵编解码、类型词汇表
 ├── roster.py       显示名规则：ext_buffer 的 protobuf 解析 + 群昵称/备注/昵称优先级（纯逻辑，不碰 IO）
 ├── schema.py       微信库结构声明：能力 × 必需表/列 + 探测（纯数据，不碰 IO）
-├── reader.py       消息读取：表发现、内容解码、流式产出（读微信库**内容**的唯一模块；结构与探测声明在 schema.py）
+├── reader.py       消息读取：表发现、内容解码、流式产出（按语义**解码消息内容**的唯一模块——`inspect` 也会读库，但它只 dump 结构与样例行；结构与探测声明在 schema.py）
 ├── export.py       导出管道：流式批处理 + 水位线续跑（任务登记归 usecases 层）
 ├── store.py        本地检索库：DDL、幂等 upsert、水位线、FTS 触发器
 ├── search.py       检索路由：trigram FTS / LIKE 兜底
