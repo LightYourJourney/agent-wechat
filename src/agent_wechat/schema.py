@@ -63,6 +63,12 @@ class ProbeResult:
     missing_columns: tuple[str, ...] = ()
 
 
+def _text(v):
+    """PRAGMA 的返回值走连接的 `text_factory`：reader 的库连接统一是 bytes
+    （库内 TEXT 含非 UTF-8 字节，docs/schema-4.1.13.md:71）。列名是文本，归一化后再比。"""
+    return v.decode("utf-8", "replace") if isinstance(v, bytes) else v
+
+
 def probe(con, req: Requirement, table: str | None = None) -> ProbeResult:
     """该连接下的库是否满足这条声明。
 
@@ -77,7 +83,7 @@ def probe(con, req: Requirement, table: str | None = None) -> ProbeResult:
     **只报缺的列，不报多的列**：微信新增列不是漂移——我们不读它就不会崩。
     """
     name = (table or req.table).replace('"', '""')
-    actual = {row[1] for row in con.execute(f'PRAGMA table_info("{name}")')}
+    actual = {_text(row[1]) for row in con.execute(f'PRAGMA table_info("{name}")')}
     if not actual:
         return ProbeResult(ok=False)                       # 表不存在
     missing = tuple(c for c in req.columns if c not in actual)

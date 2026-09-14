@@ -113,6 +113,17 @@ def test_probe_accepts_an_explicit_table_name_for_the_wildcard():
     assert not schema.probe(con, req, table="Msg_missing").ok
 
 
+def test_probe_works_on_a_connection_that_returns_bytes():
+    """`reader._open` 的连接统一 `text_factory = bytes`（库内 TEXT 含非 UTF-8 字节，
+    docs/schema-4.1.13.md:71）——那时 `PRAGMA table_info` 的列名以 **bytes** 回来。
+    不归一化的话每个声明列都被判成「缺」：**健康库上四个能力全部误报漂移**。
+    （T3 把探测接进 reader 时实测踩到，T2 的单测用的都是普通连接所以没暴露。）"""
+    con = _con("CREATE TABLE contact (username TEXT, nick_name TEXT)")
+    con.text_factory = bytes
+    req = schema.Requirement("contact/contact.db", "contact", ("username", "nick_name"))
+    assert schema.probe(con, req).ok
+
+
 def test_probe_is_silent_on_hostile_table_names():
     """表名来自 sqlite_master（微信自己的），但仍然不该有注入面——实测带引号的表名
     同样返回空 list、不抛。"""
