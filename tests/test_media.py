@@ -285,3 +285,85 @@ def test_unreadable_sample_raises_media_key_error(tmp_path, monkeypatch):
     with pytest.raises(errors.MediaKeyError) as ei:
         media.derive_keys(account)
     assert ei.value.hint
+
+
+# ---------- Ruling 8：视频是账号级媒体 ----------
+
+def test_export_media_multi_chat_skips_video(tmp_path, monkeypatch):
+    """Ruling 8：`msg/video/{月}` 没有会话维度——多会话调用无从归属，跳过 + degraded。
+
+    按会话循环会把同一批文件重复写进 N 个目录、`video.ok`/`produced`（进而 max_files 口径）
+    翻 N 倍；单会话路径由 test_export_media_images_and_videos 的 ok==1/thumb==1 守住。
+    """
+    root, account = make_tree(tmp_path, monkeypatch)
+    vdir = paths.XWECHAT_FILES / account / "msg/video/2026-09"
+    vdir.mkdir(parents=True)
+    (vdir / "abcd.mp4").write_bytes(b"m" * 8)
+    (vdir / "ef01_thumb.jpg").write_bytes(b"t" * 8)
+    out = root / "home" / "media"
+    rep = media.export_media(account, ["chatA@chatroom", "chatB@chatroom"], kinds=["video"],
+                             months=["2026-09"], out_dir=out)
+    assert rep.video.ok == 0 and rep.video.thumb == 0
+    assert "视频为账号级枚举，无法归属具体会话；请逐个会话导出" in rep.degraded
+    assert list(out.iterdir()) == []              # 一个会话目录都不建（更别说两份视频）
+
+
+# ---------- Ruling 9：export_media 内的 OSError 归口 ----------
+
+def test_export_media_image_read_error_counts_failed(tmp_path, monkeypatch):
+    """Ruling 9：dat 在但读不了（权限/被微信重写）→ image.failed，不逃出 core 层。
+
+    `read_bytes` 用 monkeypatch 定点抛 OSError（不用 chmod，跨环境稳定）；`_attach_dats`
+    换成 4 个可读样本，免得 `derive_keys` 的 `next(iter(...))` 命中坏文件而整段能力降级。
+    """
+    root, account = make_tree(tmp_path, monkeypatch)
+    code = "999999"
+    (paths.CONTAINER / "app_data/net/kvcomm/key_999999_1_2_3_4_5_input.statistic").write_bytes(b"")
+    cm = hashlib.md5("chatA@chatroom".encode()).hexdigest()
+    aes = hashlib.md5((code + paths.bare_wxid(account)).encode()).hexdigest()[:16].encode()
+    sdir = paths.XWECHAT_FILES / account / "msg/attach" / cm / "2026-03" / "Img"
+    sdir.mkdir(parents=True)
+    samples = [sdir / f"sam{i}.dat" for i in range(4)]
+    for p in samples:
+        p.write_bytes(build_v2_dat(jpeg_like(64), b"\x33" * 8 + b"\xff\xd9", aes, FAKE_XOR))
+    monkeypatch.setattr(media, "_attach_dats", lambda acct: iter(samples))
+    img = paths.XWECHAT_FILES / account / "msg/attach" / cm / "2026-09" / "Img"
+    img.mkdir(parents=True)
+    (img / "beef.dat").write_bytes(
+        build_v2_dat(jpeg_like(1024), b"\x11" * 50 + b"\xff\xd9", aes, FAKE_XOR))
+    bad = img / "dead.dat"
+    bad.write_bytes(b"x")
+    real_read = pathlib.Path.read_bytes
+
+    def fake(self):
+        if self == bad:
+            raise PermissionError(13, "Operation not permitted", str(self))
+        return real_read(self)
+
+    monkeypatch.setattr(pathlib.Path, "read_bytes", fake)
+    rep = media.export_media(account, ["chatA@chatroom"], kinds=["image"],
+                             months=["2026-09"], out_dir=root / "home" / "media")
+    assert rep.image.ok == 1 and rep.image.failed == 1 and rep.degraded == []
+
+
+def test_export_media_video_read_error_counts_missing(tmp_path, monkeypatch):
+    """Ruling 9：视频本体/缩略图在但读不了 → video.missing（拿不到本体），不逃出 core 层。"""
+    root, account = make_tree(tmp_path, monkeypatch)
+    vdir = paths.XWECHAT_FILES / account / "msg/video/2026-09"
+    vdir.mkdir(parents=True)
+    (vdir / "aaaa.mp4").write_bytes(b"m" * 8)
+    (vdir / "cccc_thumb.jpg").write_bytes(b"t" * 8)
+    bad_mp4, bad_thumb = vdir / "bbbb.mp4", vdir / "dddd_thumb.jpg"
+    bad_mp4.write_bytes(b"m" * 8)
+    bad_thumb.write_bytes(b"t" * 8)              # 两个读不了的文件：本体与缩略图各占一处
+    real_read = pathlib.Path.read_bytes
+
+    def fake(self):
+        if self in (bad_mp4, bad_thumb):
+            raise PermissionError(13, "Operation not permitted", str(self))
+        return real_read(self)
+
+    monkeypatch.setattr(pathlib.Path, "read_bytes", fake)
+    rep = media.export_media(account, ["c@chatroom"], kinds=["video"],
+                             months=["2026-09"], out_dir=root / "home" / "media")
+    assert rep.video.ok == 1 and rep.video.thumb == 1 and rep.video.missing == 2

@@ -309,7 +309,8 @@ def _save(out_root: pathlib.Path, cm: str, kind: str, mon: str,
 def export_media(account: str, chat_ids: list[str], *, kinds: list[str],
                  months: list[str] | None = None, out_dir: pathlib.Path | None = None,
                  max_files: int = 2000, progress=None) -> MediaReport:
-    """按会话导出媒体。图片解密（MediaKeyError → 能力级降级不抛）；语音见 Task 3；视频明文复制。"""
+    """按会话导出媒体。图片解密（MediaKeyError → 能力级降级不抛）；语音见 Task 3；视频明文复制
+    （账号级枚举：只有恰好一个会话时可归属，多会话跳过并记 degraded）。"""
     report = MediaReport()
     out_root = pathlib.Path(out_dir) if out_dir else paths.HOME_DIR / "media"
     out_root.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -347,7 +348,9 @@ def export_media(account: str, chat_ids: list[str], *, kinds: list[str],
                             break
                         try:
                             buf = decrypt_dat(dat.read_bytes(), mk)
-                        except errors.DecryptError:
+                        except (errors.DecryptError, OSError):
+                            # 后半是 Ruling 9：文件在但读不了（权限/导出中途被微信重写）算
+                            # failed（导出失败），裸 OSError 不得逃出 core 层。
                             report.image.failed += 1
                             continue
                         ext = detect_ext(buf)
@@ -371,39 +374,52 @@ def export_media(account: str, chat_ids: list[str], *, kinds: list[str],
                         if progress:
                             progress(produced)
     if "video" in kinds:
-        for chat in chat_ids:
+        # 视频树是**账号级**的（`msg/video/{月}`，没有会话维度）：整个调用只枚举一次。
+        # 唯一会话时才能归属（输出仍落在 out_root/{chat_md5}/video/{月}/）；多会话无从归属
+        # ——按会话循环会把同一批文件重复写进 N 个目录、计数翻 N 倍。按消息级归属需要
+        # media_refs（后续任务能力），本期不做。
+        if len(chat_ids) == 1:
+            cm = messages.md5_of(chat_ids[0])
+            vbase = paths.XWECHAT_FILES / account / "msg/video"
             if full():
                 report.truncated = True
-                break
-            vbase = paths.XWECHAT_FILES / account / "msg/video"
-            if not vbase.is_dir():
-                continue
-            for month_dir in sorted(p for p in vbase.iterdir() if p.is_dir()):
-                mon = month_dir.name
-                if want is not None and mon not in want:
-                    continue
-                mp4_stems = set()
-                for f in sorted(month_dir.glob("*.mp4")):
-                    if full():
-                        report.truncated = True
-                        break
-                    _save(out_root, messages.md5_of(chat), "video", mon,
-                          f.stem, "mp4", f.read_bytes())
-                    mp4_stems.add(f.stem.removesuffix("_raw"))
-                    report.video.ok += 1
-                    produced += 1
-                    if progress:
-                        progress(produced)
-                for f in sorted(month_dir.glob("*_thumb.jpg")):
-                    if full():
-                        report.truncated = True
-                        break
-                    if f.stem.removesuffix("_thumb") in mp4_stems:
-                        continue               # 有本体的不再存缩略图
-                    _save(out_root, messages.md5_of(chat), "video", mon,
-                          f.stem, "jpg", f.read_bytes())
-                    report.video.thumb += 1
-                    produced += 1
+            elif vbase.is_dir():
+                for month_dir in sorted(p for p in vbase.iterdir() if p.is_dir()):
+                    mon = month_dir.name
+                    if want is not None and mon not in want:
+                        continue
+                    mp4_stems = set()
+                    for f in sorted(month_dir.glob("*.mp4")):
+                        if full():
+                            report.truncated = True
+                            break
+                        try:
+                            buf = f.read_bytes()
+                        except OSError:
+                            report.video.missing += 1    # 文件在、拿不到本体（Ruling 9）
+                            continue
+                        _save(out_root, cm, "video", mon, f.stem, "mp4", buf)
+                        mp4_stems.add(f.stem.removesuffix("_raw"))
+                        report.video.ok += 1
+                        produced += 1
+                        if progress:
+                            progress(produced)
+                    for f in sorted(month_dir.glob("*_thumb.jpg")):
+                        if full():
+                            report.truncated = True
+                            break
+                        if f.stem.removesuffix("_thumb") in mp4_stems:
+                            continue               # 有本体的不再存缩略图
+                        try:
+                            buf = f.read_bytes()
+                        except OSError:
+                            report.video.missing += 1    # 缩略图也拿不到：同样的归口
+                            continue
+                        _save(out_root, cm, "video", mon, f.stem, "jpg", buf)
+                        report.video.thumb += 1
+                        produced += 1
+        elif len(chat_ids) > 1:
+            report.degraded.append("视频为账号级枚举，无法归属具体会话；请逐个会话导出")
     if "voice" in kinds:
         report.voice.raw_only += 0             # Task 3 接入；此占位保证 kinds 校验完整
         report.degraded.append("语音导出尚未接入（下个版本）")
