@@ -20,8 +20,8 @@ uv run pytest tests/ -q          # 运行测试
   一律放核心模块——保证 Agent 与 CLI 行为一致
 - **只读红线**：任何代码不得写入微信容器目录。涉及微信路径的新功能，先自问：
   "这条路径在微信进程打开的文件列表里吗？"
-- **单一 schema 认知点**：只有 `reader.py` 允许知道微信表结构；schema 变化只改这里
-  与 [schema-4.1.13.md](schema-4.1.13.md)
+- **单一 schema 认知点**：结构声明只在 `schema.py`（`CAPABILITIES`），读取与探测接入在
+  `reader.py`；schema 变化改 `schema.py` 与 [schema-4.1.13.md](schema-4.1.13.md)
 - **自验证门不可绕过**：任何密钥候选必须过 `keys.page1_hmac_ok`；禁止"看起来像就采用"
 - **路径注入**：模块不硬编码 `Path.home()`，通过 `paths.HOME_DIR`（可被环境变量覆盖）
   引用，保证可测试性

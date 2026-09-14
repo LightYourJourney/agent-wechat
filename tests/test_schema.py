@@ -1,7 +1,8 @@
 """schema 声明清单的完整性测试。
 
-这份清单是「关于微信的知识」——它的对照物是 docs/schema-4.1.13.md（message/session 有
-完整 DDL）与真机实测（contact.db 那部分文档没记全，见 spec §2.4）。
+这份清单是「关于微信的知识」——它的对照物是 docs/schema-4.1.13.md：四个能力声明的
+每一列都要能在那份文档里找到。`contact.db` 的声明从 T7 起也纳入核对（此前那份文档只有
+描述性列举，`chat_room` / `ext_buffer` 连一行 DDL 都没有，核对基准不存在）。
 """
 import pathlib
 import sqlite3
@@ -33,31 +34,19 @@ def test_the_four_capabilities_are_exactly_these():
     assert set(schema.CAPABILITIES) == {"contacts", "roster", "messages", "username_pool"}
 
 
-def test_message_requirements_match_the_schema_doc():
-    """`message_*.db` 与 `session.db` 的声明照 docs/schema-4.1.13.md 的 DDL 逐列核对
-    （spec §2.4：这两份文档有完整 DDL，可信）。
+def test_all_declarations_match_the_schema_doc():
+    """四个能力声明的每一列，都要能在 docs/schema-4.1.13.md 里找到（逐列核对）。
 
-    这条测试的价值是「声明不是凭记忆写的」——文档改了它就会红。
+    这条测试的价值是「声明不是凭记忆写的」——文档改了它就会红。`contact.db` 的声明
+    也在这里：它曾在文档里无一行 DDL（`chat_room` / `ext_buffer` 只有名字或干脆缺席），
+    T7 补齐后才有了可核对的基准。
     """
     doc = (pathlib.Path(__file__).resolve().parents[1]
            / "docs" / "schema-4.1.13.md").read_text()
-    declared = set()
-    for reqs in schema.CAPABILITIES.values():
-        for r in reqs:
-            if r.db.startswith("message/") or r.db.startswith("session/"):
-                declared |= set(r.columns)
+    declared = {c for reqs in schema.CAPABILITIES.values() for r in reqs
+                for c in r.columns}
     missing = [c for c in declared if c not in doc]
     assert not missing, f"这些列在 schema-4.1.13.md 里找不到，声明可能与实测脱节：{missing}"
-
-
-def test_contact_db_declarations_are_marked_for_real_test():
-    """`contact.db` 的声明**无法**照文档核对（spec §2.4 实测：文档只有描述性列举，
-    且 chat_room / ext_buffer 一次都没出现）。所以它们的存在本身就是一条提示：
-    T7 要补齐那份文档，T2 的真机测试要对照真实库。这里只断言「确实有这类声明」，
-    防止有人为了让上一条测试通过而把 contact.db 的声明删掉。"""
-    contact_reqs = [r for reqs in schema.CAPABILITIES.values() for r in reqs
-                    if r.db.startswith("contact/")]
-    assert contact_reqs, "contact.db 的声明不该为空——它是本设计的主要对象"
 
 
 def test_schema_drift_carries_the_fields_the_degrade_table_needs():

@@ -99,10 +99,11 @@
 }
 ```
 
-**降级说明**：降级发生时信封会多一个 `degraded` 键（数组），每项是 `{capability, effect}`——
-例如微信升级改了库结构时 `[{"capability": "roster", "effect": "显示名暂不可用，发送者会回落到原始帐号标识"}]`。
-不认识的客户端可以忽略该键；**它在正常情况下是空数组**。降级**不是错误**：结果仍然可用，
-只是比平时少了一部分（`search_history` / `semantic_search` 同样带这个键，形状见本节）。
+**降级说明**：信封**总是**带 `degraded` 键（数组，正常情况下是空数组），每项是
+`{capability, effect}`——例如微信升级改了库结构时
+`[{"capability": "roster", "effect": "显示名暂不可用，发送者会回落到原始帐号标识"}]`。
+不认识的客户端可以忽略该键。降级**不是错误**：结果仍然可用，只是比平时少了一部分
+（`search_history` / `semantic_search` 同样总是带这个键）。
 
 **名字消歧返回**（传入展示名且命中多个联系人时——调用方应让用户选择）：
 
@@ -193,8 +194,8 @@
 - `mode`: `fts`（trigram 命中，含高亮 `snip`）| `like`（1-2 字兜底，`snip` 为 null）
 - 1-2 字查询**建议传 `contact`**，否则全表扫描（秒级）
 - 索引为空时返回 `{"hits": [], "hint": "本地索引为空：请先运行 export_full_history", ...}`
-- 显示名降级时信封另带 `degraded` 键（形状与含义见 §3）：那时 `sender_name` 会回落成
-  wxid，**不要**当成真实姓名呈现
+- `degraded` 键（§3）在显示名降级时非空：那时 `sender_name` 会回落成 wxid，
+  **不要**当成真实姓名呈现
 
 ---
 
@@ -257,8 +258,7 @@
 ```
 
 - `distance` 为 cosine 距离，越小越相近。
-- 显示名降级时信封另带 `degraded` 键（形状与含义见 §3）——那时 `display` / `sender`
-  会回落成 wxid。
+- `degraded` 键（§3）在显示名降级时非空——那时 `display` / `sender` 会回落成 wxid。
 - **没有相关性阈值**：KNN 恒返回距离最近的 `limit` 条（无论多不相关）；`total` 是本次
   返回的条数（≤ `limit`），**不代表相关程度**——结果是否可用由调用方按 `distance` 判断，
   不要把 `hits` 直接当作「相关结果」呈现。
