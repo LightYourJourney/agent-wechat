@@ -7,9 +7,14 @@ from . import messages, store
 from .errors import SearchInputError
 
 # 命中行的列清单（fts / like 两条路径共用；两处 SQL 曾各抄一份）
-_HIT_COLUMNS = messages.column_list(
-    "id", "chat_id", "shard", "local_id", "ts", "msg_type", "sender_id",
-    "sender_name", "is_self", "content", "media_hint", prefix="m.")
+_HIT_COLUMNS = (
+    messages.column_list("id", "chat_id", "shard", "local_id", "ts", "msg_type",
+                         "sender_id", prefix="m.")
+    + f", {store._SENDER_EXPR} AS sender_name, "
+    + messages.column_list("is_self", "content", "media_hint", prefix="m."))
+
+_RECENT_COLUMNS = (messages.column_list(*messages.ROW_COLUMNS, prefix="m.")
+                   .replace("m.sender_name", store._SENDER_EXPR + " AS sender_name"))
 
 
 def _fts_safe(q: str) -> str:
@@ -44,6 +49,7 @@ def search(query: str, chat_id: str | None = None, limit: int = 20,
             sql = (f"SELECT {_HIT_COLUMNS}, "
                    f"snippet(messages_fts, 0, '【', '】', '…', 12) AS snip "
                    f"FROM messages_fts JOIN messages m ON m.id = messages_fts.rowid "
+                   f"{store._SENDER_JOIN} "
                    f"WHERE messages_fts MATCH ? AND {w} "
                    f"ORDER BY m.ts DESC LIMIT ?")
             rows = con.execute(sql, [_fts_safe(query), *args, limit]).fetchall()
@@ -55,7 +61,8 @@ def search(query: str, chat_id: str | None = None, limit: int = 20,
             mode = "like"
             like = f"%{query.strip()}%"
             sql = (f"SELECT {_HIT_COLUMNS}, "
-                   f"NULL AS snip FROM messages m WHERE m.content LIKE ? AND {w} "
+                   f"NULL AS snip FROM messages m {store._SENDER_JOIN} "
+                   f"WHERE m.content LIKE ? AND {w} "
                    f"ORDER BY m.ts DESC LIMIT ?")
             args2 = [like, *args, limit]
             rows = con.execute(sql, args2).fetchall()
@@ -68,6 +75,7 @@ def recent_from_store(chat_id: str, limit: int = 50) -> list[dict]:
     """本地库读取近期消息（毫秒级；需先导出）。"""
     with store.open() as con:
         rows = con.execute(
-            "SELECT * FROM messages WHERE chat_id=? ORDER BY ts DESC, local_id DESC LIMIT ?",
+            f"SELECT {_RECENT_COLUMNS} FROM messages m {store._SENDER_JOIN} "
+            "WHERE m.chat_id=? ORDER BY m.ts DESC, m.local_id DESC LIMIT ?",
             (chat_id, limit)).fetchall()
     return [dict(r) for r in reversed(rows)]  # 时间正序
