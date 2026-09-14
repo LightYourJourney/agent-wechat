@@ -29,7 +29,9 @@ CREATE TABLE messages (
     ts          INTEGER NOT NULL,         -- unix 秒
     msg_type    INTEGER NOT NULL,         -- 微信消息类型（已掩码，见 §3）
     sender_id   TEXT,                     -- 发送者 username（Name2Id 解析）
-    sender_name TEXT,                     -- 群聊时从内容前缀解析的发送者
+    sender_name TEXT,                     -- 导出时从内容前缀取的原值（群聊为 <sender> 原文）；
+                                          -- 查询时优先用 display_names 名册覆盖，本列是
+                                          -- join 不上时的兜底
     is_self     INTEGER NOT NULL,         -- 1 = 本人发送
     content     TEXT,                     -- 文本正文；非文本为 [image] 等提示
     media_hint  TEXT,                     -- 非文本类型的提示串
@@ -65,6 +67,9 @@ CREATE VIRTUAL TABLE messages_fts USING fts5(
 的 LIKE 路由兜底（1-2 字查询）。见 ARCHITECTURE.md §4。
 
 向量表（`vec_messages` / `vector_meta` / `vector_watermark`）见 ARCHITECTURE.md §3.6。
+
+`display_names` 与 `roster_meta` 两张表由 `store.SCHEMA` 建
+（`CREATE TABLE IF NOT EXISTS`，每次连接都会跑），无需迁移。
 
 ## 4. 去重主键与增量策略
 
@@ -104,7 +109,7 @@ CREATE TABLE watermark (
 | `WCDB_CT_message_content=4`（zstd 压缩） | 解压为 UTF-8 文本 |
 | `WCDB_CT_message_content=0`（明文） | 直接 UTF-8 |
 | `local_type` 高位含标志位（如 244813135921） | `& 0xffffffff` 取真实类型 |
-| 群消息正文 `<sender_wxid>:\n<正文>` | 前缀拆出 `sender_id`/`sender_name`，正文归 content |
+| 群消息正文 `<sender_wxid>:\n<正文>` | 前缀拆出 `sender_id`/`sender_name`，正文归 content（`sender_name` 是原值，展示时由 `display_names` 名册覆盖） |
 | 非文本消息（图片/语音/appmsg XML…） | content = `[image]` / `[appmsg: 标题]` 等提示，原始 XML 不入库 |
 | `real_sender_id`（整数） | 经同库 `Name2Id` 表解析为 username |
 | 表 md5 无法反查会话名 | `chat_id = "md5:<hash>"`（数据不丢，展示降级） |

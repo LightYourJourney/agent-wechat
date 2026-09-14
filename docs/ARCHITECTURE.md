@@ -153,7 +153,7 @@ vector.semantic_search(query, chat_id, limit, account)
 | 1-2 字高频查询 | LIKE 兜底（限 contact 时够用） | 增加 bigram 影子 FTS 表（存储约 +2×，做成配置项） |
 | 更大规模（千万级） | 单文件 SQLite（百万级实测流畅） | 分库（按账号/年份）或迁移 PostgreSQL + pgvector |
 | 媒体导出 | 仅元数据提示 | 数据层已保留 `msg_type` 与源路径解析点，按需扩展 |
-| 群成员解析 | 群消息 sender 为 wxid/前缀名 | `contact.db` 的 `chatroom_member` 表可映射群昵称 |
+| 群成员显示名 | 已实现：索引库存 `display_names` 名册，查询时 join；实时路径 `recent` 用内存名册 | 群昵称在 `contact.db` 的 `chat_room.ext_buffer`（protobuf，字段 f2，可选），回落 `contact.remark` / `nick_name` |
 | 增量自动同步 | 手动重跑 export（秒级） | export 管道与水位线已就绪，加定时触发即可 |
 
 ## 7. 已知边界
