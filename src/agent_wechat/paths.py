@@ -13,6 +13,8 @@ import os
 import pathlib
 import re
 
+from .errors import HomeUnavailable
+
 CONTAINER = pathlib.Path.home() / "Library/Containers/com.tencent.xinWeChat/Data/Documents"
 XWECHAT_FILES = CONTAINER / "xwechat_files"
 APP_DATA = CONTAINER / "app_data"
@@ -31,7 +33,16 @@ _tm_exclusion_checked = False
 def ensure_home_dirs() -> None:
     """确保数据目录存在（0700）并排除出 Time Machine（幂等，失败静默）。"""
     global _tm_exclusion_checked
-    HOME_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        HOME_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    except OSError as exc:
+        # exist_ok=True 挡不住符号链接环：CPython 的 mkdir 是
+        # `except FileExistsError: if not exist_ok or not self.is_dir(): raise`，
+        # 而 is_dir() 对环返回 False，于是 FileExistsError 原样抛出。
+        # 建不出来就是不可用——core 层只抛项目异常（errors.py 开篇那条契约）。
+        raise HomeUnavailable(
+            f"数据目录不可用：{HOME_DIR}",
+            hint=f"{exc}；请检查 AGENT_WECHAT_HOME 指向的位置是否可用") from exc
     if not _tm_exclusion_checked:
         _tm_exclusion_checked = True
         try:

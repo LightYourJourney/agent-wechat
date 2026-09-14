@@ -25,7 +25,7 @@ import struct
 import time
 
 from . import paths
-from .errors import KeyNotFound
+from .errors import HomeUnavailable, KeyNotFound
 
 KDF_ITER = 256_000
 FAST_KDF_ITER = 2
@@ -43,8 +43,16 @@ CACHE_FILE = paths.HOME_DIR / "passphrase.json"
 def _load_cache() -> dict:
     try:
         return json.loads(CACHE_FILE.read_text())
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {"accounts": {}}
+    except FileNotFoundError:
+        return {"accounts": {}}          # 真的没有：首次使用
+    except json.JSONDecodeError:
+        return {"accounts": {}}          # 缓存损坏：与「没有」等价，重新 bootstrap 即可
+    except OSError as exc:
+        # 读不到 ≠ 不存在。当成「没有缓存」会让 status 印「缓存 ✗」，而真相是根本读不了
+        # ——用户会照着去重新 bootstrap（那也会失败）。core 层只抛项目异常（errors.py 开篇）。
+        raise HomeUnavailable(
+            f"无法读取密钥缓存：{CACHE_FILE}",
+            hint=f"{exc}；请检查 AGENT_WECHAT_HOME 指向的位置是否可用") from exc
 
 
 def load_cached_hex(bare: str) -> str | None:

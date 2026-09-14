@@ -81,6 +81,16 @@ class DataNotFound(AgentWeChatError):
     """要读取的库/数据文件不存在。"""
 
 
+class HomeUnavailable(AgentWeChatError):
+    """数据目录（`$AGENT_WECHAT_HOME` / `~/.agent-wechat`）不可用：解析不了、建不出来、读不了。
+
+    与 DataNotFound 的区别：那个是「东西不在」，这个是「**位置本身坏了**」——符号链接环让
+    `mkdir`/`read_text` 抛 ELOOP，权限不足抛 EACCES，只读挂载抛 EROFS。不翻译的话裸 OSError
+    会穿透适配层：CLI 那边是一整个 traceback，MCP 那边落到 `generic_payload` 兜底，agent 只
+    拿到「内部错误: FileExistsError: ...」，没有 hint。本模块开篇那条契约就是为此而立的。
+    """
+
+
 class TaskNotFound(AgentWeChatError):
     """查询的任务 id 不在注册表里（含重启后记录仍在、但 id 写错的情形）。"""
 

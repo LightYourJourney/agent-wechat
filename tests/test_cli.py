@@ -406,6 +406,29 @@ def test_purge_dry_run_refuses_symlink_loop_without_traceback(tmp_path, monkeypa
     assert "无法解析" in err
 
 
+def test_status_refuses_symlink_loop_home_without_traceback(tmp_path, monkeypatch, capsys):
+    """status 是诊断命令：环境坏掉时它正是用户唯一的工具，不能自己也崩。
+    头三行不依赖 HOME_DIR，照常打印；到读缓存那行转成项目异常，退 1、理由可读。
+
+    账号用 stub——不依赖微信此刻是否在跑（真实 st.accounts 为空时循环不执行，
+    这条测试就会静默地什么都不测）。"""
+    from agent_wechat import paths as _paths
+    a = tmp_path / "a"; b = tmp_path / "b"
+    a.symlink_to(b); b.symlink_to(a)
+    monkeypatch.setattr(account, "status",
+                        lambda: SimpleNamespace(running=False, current=None,
+                                                accounts=["wxid_stub_ab12"], pid=None))
+    monkeypatch.setattr(_paths, "HOME_DIR", a)
+    monkeypatch.setattr(keys, "CACHE_FILE", a / "passphrase.json")
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["status"])
+    assert ei.value.code == 1
+    out, err = capsys.readouterr()
+    assert "本机账号: wxid_stub_ab12" in out, f"不依赖 HOME_DIR 的部分该照常输出：{out!r}"
+    assert "Traceback" not in err, f"不得以裸异常穿透：{err!r}"
+    assert "无法读取" in err
+
+
 def test_purge_dry_run_prints_absolute_target(tmp_path, monkeypatch, capsys):
     """计划表必须印出绝对目标目录。此前只印相对路径（`keys passphrase.json`、`all sub`），
     用户按下 --yes 时看不出这些相对路径指的是当前工作目录。"""
