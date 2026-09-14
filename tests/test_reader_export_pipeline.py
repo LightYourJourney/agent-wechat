@@ -53,6 +53,32 @@ def enc_db(dest, tables: dict) -> None:
     assert r.returncode == 0 and dest.exists(), r.stderr
 
 
+def drift_tree(wx, acct: str, *, drop_table: str | None = None,
+               drop_column: str | None = None) -> None:
+    """造一棵接触 contact.db 的树，其中某个表或某列被拿掉，模拟微信升级。
+
+    `drop_column` 只在 `contact` 表上支持（那是列级漂移最现实的场景）。
+    """
+    ds = wx / acct / "db_storage"
+    contact_cols = {"username": "TEXT", "alias": "TEXT", "remark": "TEXT",
+                    "nick_name": "TEXT", "delete_flag": "INTEGER"}
+    contact_vals = {"username": "wxid_a", "alias": None, "remark": "张三",
+                    "nick_name": "zc", "delete_flag": None}
+    if drop_column:
+        contact_cols.pop(drop_column)
+    tables = {
+        "name2id": ("CREATE TABLE name2id (username TEXT)", [("wxid_a",)]),
+        "contact": (f"CREATE TABLE contact "
+                    f"({', '.join(f'{c} {t}' for c, t in contact_cols.items())})",
+                    [tuple(contact_vals[c] for c in contact_cols)]),
+        "chat_room": ("CREATE TABLE chat_room (id INTEGER PRIMARY KEY, username TEXT, "
+                      "owner TEXT, ext_buffer BLOB)", []),
+    }
+    if drop_table:
+        tables.pop(drop_table, None)
+    enc_db(ds / "contact" / "contact.db", tables)
+
+
 def build_shard(wx, acct: str, shard: str, msg_tables: dict, users: list[str]) -> None:
     """msg_tables: {chat_username: [(local_id, local_type, sender_rowid, ts, content, ct)]}。"""
     tables = {"Name2Id": ("CREATE TABLE Name2Id (user_name TEXT)", [(u,) for u in users])}
@@ -540,3 +566,112 @@ def test_refresh_does_not_write_when_roster_is_empty(env, monkeypatch):
     monkeypatch.setattr(reader.MessageReader, "roster", lambda self: [])
     usecases.search_history("开会", contact=GROUP, account=ACCT)
     assert calls == [], f"空名册不该触发写库：{calls}"
+
+
+# ---------- 结构漂移 ----------
+# 这几条自造漂移树，所以要把 XWECHAT_FILES 指过去；`env` 负责另一半环境——
+# passphrase 缓存（`MessageReader.__init__` 就要用，缺了连构造都过不去）。
+# env 先指到合成目录，测试体再指到漂移树，后者生效。
+
+def test_contacts_raises_schema_drift_when_table_missing(env, tmp_path, monkeypatch):
+    """`contacts` 是唯一来源，漂移时**不降级**——返回空会让用户以为「没有这个人」。"""
+    root = tmp_path / "wx"
+    drift_tree(root, ACCT, drop_table="contact")
+    monkeypatch.setattr(paths, "XWECHAT_FILES", root)
+    with pytest.raises(errors.SchemaDrift) as ei:
+        reader.MessageReader(ACCT).contacts()
+    assert ei.value.capability == "contacts" and ei.value.table == "contact"
+    assert ei.value.missing_columns == ()          # 空 = 表不存在
+
+
+def test_contacts_raises_schema_drift_and_names_the_missing_column(env, tmp_path, monkeypatch):
+    root = tmp_path / "wx"
+    drift_tree(root, ACCT, drop_column="nick_name")
+    monkeypatch.setattr(paths, "XWECHAT_FILES", root)
+    with pytest.raises(errors.SchemaDrift) as ei:
+        reader.MessageReader(ACCT).contacts()
+    assert ei.value.missing_columns == ("nick_name",)
+
+
+def test_recent_raises_schema_drift_when_message_columns_change(env, tmp_path, monkeypatch):
+    """`messages` 也是唯一来源——分片是**按时间分区**的，跳过它会让时间线上出现
+    用户看不出来的空洞（spec §10 的排除项）。"""
+    root = tmp_path / "wx"
+    enc_db(root / ACCT / "db_storage" / "message" / "message_0.db", {
+        "Name2Id": ("CREATE TABLE Name2Id (user_name TEXT)", [(FRIEND,)]),
+        f"Msg_{md5(FRIEND)}": (
+            # 故意缺 WCDB_CT_message_content
+            f"CREATE TABLE Msg_{md5(FRIEND)} (local_id INTEGER, local_type INTEGER, "
+            "real_sender_id INTEGER, create_time INTEGER, message_content BLOB)",
+            [(1, 1, 1, T0, "hi")]),
+    })
+    monkeypatch.setattr(paths, "XWECHAT_FILES", root)
+    with pytest.raises(errors.SchemaDrift) as ei:
+        reader.MessageReader(ACCT).recent(FRIEND, limit=5)
+    assert "WCDB_CT_message_content" in ei.value.missing_columns
+
+
+def test_export_raises_schema_drift_when_message_columns_change(env, tmp_path, monkeypatch):
+    """`export` 是 spec §8 列的第三条「不降」路径（`contacts`/`recent`/`export`），
+    但它走的是**另一条代码路径**（`iter_all`）——只钉 `recent` 的话，`iter_all` 里的
+    接入被删掉也不会有测试红。分片按时间分区，跳过它导出的时间线会出现看不出来的空洞。"""
+    root = tmp_path / "wx"
+    enc_db(root / ACCT / "db_storage" / "message" / "message_0.db", {
+        "Name2Id": ("CREATE TABLE Name2Id (user_name TEXT)", [(FRIEND,)]),
+        f"Msg_{md5(FRIEND)}": (
+            # 故意缺 WCDB_CT_message_content
+            f"CREATE TABLE Msg_{md5(FRIEND)} (local_id INTEGER, local_type INTEGER, "
+            "real_sender_id INTEGER, create_time INTEGER, message_content BLOB)",
+            [(1, 1, 1, T0, "hi")]),
+    })
+    monkeypatch.setattr(paths, "XWECHAT_FILES", root)
+    with pytest.raises(errors.SchemaDrift) as ei:
+        list(reader.MessageReader(ACCT).iter_all())     # 生成器：必须消费才触发
+    assert ei.value.capability == "messages"
+    assert "WCDB_CT_message_content" in ei.value.missing_columns
+
+
+def test_username_pool_degrades_when_one_source_drifts(env, tmp_path, monkeypatch):
+    """四个源汇集，少一个仍有三个（spec §6）——**不抛**，跳过它继续。"""
+    root = tmp_path / "wx"
+    drift_tree(root, ACCT, drop_table="name2id")        # contact 源没了
+    monkeypatch.setattr(paths, "XWECHAT_FILES", root)
+    r = reader.MessageReader(ACCT)
+    pool = r.username_pool()                            # 不该抛
+    assert FRIEND not in pool                           # 别的源也没造，但至少不炸
+    assert any(d.capability == "username_pool" for d in r._drift)
+
+
+def test_a_bare_sql_column_typo_still_crashes(env, tmp_path, monkeypatch):
+    """**本设计最重要的一条测试**（spec §5）：探测只保**声明过的**列。
+    把某条 SQL 的列名改成声明里没有的名字，探测会放行、SQL 必须崩——
+    自家的 bug 不该被降级掩盖。没有这条，整个设计就退化成「统一 catch 一切」。"""
+    root = tmp_path / "wx"
+    drift_tree(root, ACCT)                              # 结构完全正常
+    monkeypatch.setattr(paths, "XWECHAT_FILES", root)
+
+    def broken_contacts(self, *a, **k):
+        with self._open("contact/contact.db") as con:
+            self._check("contacts", "contact/contact.db", con)      # 探测通过
+            con.execute("SELECT nick_nam FROM contact").fetchall()  # 拼错的列名
+
+    monkeypatch.setattr(reader.MessageReader, "contacts", broken_contacts)
+    with pytest.raises(sqlite3.OperationalError):
+        reader.MessageReader(ACCT).contacts()           # 探测放行，SQL 崩
+
+
+def test_inspect_still_works_in_a_drifted_tree(env, tmp_path, monkeypatch):
+    """`inspect` 的职责就是面对漂移——它是用户的诊断工具，降级等于把它变成废物。
+    它直连解密后的库、不经过 reader 的探测，所以这条测试同时也钉住了「探测接入
+    没有顺手把 inspect 也管起来」。"""
+    from agent_wechat import cli                     # 函数内 import，不动文件头
+    root = tmp_path / "wx"
+    drift_tree(root, ACCT, drop_table="contact")     # 结构是坏的
+    monkeypatch.setattr(paths, "XWECHAT_FILES", root)
+    monkeypatch.setattr(reader, "MessageReader",           # 若它被间接调用，必须炸
+                        lambda *a: pytest.fail("inspect 不该经过 reader"))
+    with pytest.raises(SystemExit) as ei:
+        # --account 必须显式给：省略时 resolve_account 走 pgrep/lsof 认**真机**的
+        # 登录账号，测试就寄生在本机微信状态上（密码缓存由 env fixture 落好）。
+        cli.main(["inspect", "contact/contact.db", "--account", ACCT])
+    assert ei.value.code == 0, "漂移环境下 inspect 仍该成功"

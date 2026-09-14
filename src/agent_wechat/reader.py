@@ -12,7 +12,7 @@ import dataclasses
 import sqlite3
 from dataclasses import dataclass, asdict
 
-from . import decrypt, keys, messages, paths, roster, store
+from . import decrypt, errors, keys, messages, paths, roster, schema, store
 from .errors import DataNotFound, DependencyMissing
 
 try:
@@ -80,6 +80,13 @@ def is_chat_id(s: str) -> bool:
     return s.endswith("@chatroom") or s.startswith(("wxid_", "gh_", "filehelper"))
 
 
+def _db_matches(pattern: str, rel: str) -> bool:
+    """`"message/*.db"` 匹配 `"message/message_0.db"`；其余是精确匹配。"""
+    if pattern.endswith("/*.db"):
+        return rel.startswith(pattern[:-5]) and rel.endswith(".db")
+    return pattern == rel
+
+
 class MessageReader:
     """按账号读取消息。只读微信目录；解密副本用后即焚。"""
 
@@ -89,6 +96,8 @@ class MessageReader:
         self.self_wxid = paths.bare_wxid(acct)
         self._contacts_all: list[dict] | None = None   # 实例级缓存，见 _contacts_all_cached
         self._roster_map_cache: dict[tuple[str, str], str] | None = None
+        self._probed: set[tuple[str, str, str]] = set()   # (rel, capability, table)
+        self._drift: list[errors.SchemaDrift] = []        # 本次实例见过的漂移（T5 读）
 
     def _contacts_all_cached(self) -> list[dict]:
         """全量联系人。同一 reader 生命周期内只解密一次 contact.db
@@ -110,25 +119,61 @@ class MessageReader:
             finally:
                 con.close()
 
+    def _check(self, capability: str, rel: str, con: sqlite3.Connection, *,
+               table: str | None = None) -> None:
+        """校验该能力在**这个库**上的声明，缺了抛 `SchemaDrift`。
+
+        缓存键含表名：`Msg_*` 的真名是 md5，同一个 capability 在不同分片上对应不同的表。
+
+        通配声明（`Msg_*`）的抽样规则：调用方先把该库里真实存在的匹配表名传进来
+        （`table=`）；一条也没有时调用方**不该调这个方法**——那是「没有消息」而不是
+        「结构漂移」（spec §4 的陷阱）。
+        """
+        key = (rel, capability, table or "")
+        if key in self._probed:
+            return
+        for req in schema.CAPABILITIES[capability]:
+            if not _db_matches(req.db, rel):
+                continue                       # 这条声明属于另一个库
+            # `table=` 只对**通配**声明有意义（`Msg_*` 的真名运行时才知道）；
+            # 精确表名的声明用它自己的表名——否则探 chat_room 时会拿这个名字
+            # 去探 name2id 的声明，得到的是无关的结论。
+            effective = table if req.table.endswith("*") else req.table
+            result = schema.probe(con, req, effective)
+            if not result.ok:
+                self._probed.add(key)          # 漂移也缓存：同一个库里不必反复探
+                drift = errors.SchemaDrift(capability, rel, table or req.table,
+                                           result.missing_columns)
+                self._drift.append(drift)
+                raise drift
+        self._probed.add(key)
+
     # ---------- 会话 / 联系人 ----------
 
     def username_pool(self) -> set[str]:
-        """全部已知用户名（session + contact + 各分片 Name2Id），供 md5 反查。"""
+        """全部已知用户名（session + contact + 各分片 Name2Id），供 md5 反查。
+
+        **降级的能力**：源之间彼此独立，缺一个仍有其余（spec §6）——漂移的那一支跳过，
+        继续用剩下的。抛在这里等于让「少一个源」变成「什么都查不到」。
+        """
         pool: set[str] = {self.self_wxid, "filehelper"}
         for rel, sql in (("session/session.db", "SELECT username FROM SessionTable"),
                          ("contact/contact.db", "SELECT username FROM name2id")):
             try:
                 with self._open(rel) as con:
+                    self._check("username_pool", rel, con)
                     pool |= {u.decode("utf-8", "replace")
                              for (u,) in con.execute(sql) if isinstance(u, bytes)}
-            except DataNotFound:
+            except (DataNotFound, errors.SchemaDrift):
                 continue
         for shard in paths.message_shards(self.acct):
+            rel = f"message/{shard.name}"
             try:
-                with self._open(f"message/{shard.name}") as con:
+                with self._open(rel) as con:
+                    self._check("username_pool", rel, con)
                     pool |= {u.decode("utf-8", "replace")
                              for (u,) in con.execute("SELECT user_name FROM Name2Id")}
-            except DataNotFound:
+            except (DataNotFound, errors.SchemaDrift):
                 continue
         return pool
 
@@ -139,6 +184,7 @@ class MessageReader:
     def contacts(self, query: str | None = None, limit: int = 200) -> list[dict]:
         """联系人搜索：备注/昵称/微信号模糊匹配。"""
         with self._open("contact/contact.db") as con:
+            self._check("contacts", "contact/contact.db", con)
             sql = ("SELECT username, alias, remark, nick_name FROM contact "
                    "WHERE COALESCE(delete_flag,0)=0")
             args: list = []
@@ -288,8 +334,11 @@ class MessageReader:
         pieces: list[Message] = []
         for shard in reversed(paths.message_shards(self.acct)):
             with self._open(f"message/{shard.name}") as con:
+                tables = self._shard_tables(con, md5hex)
+                if tables:          # 空 = 该会话在这分片里没有消息，**不是**漂移（spec §4）
+                    self._check("messages", f"message/{shard.name}", con, table=tables[0])
                 n2i = self._name2id(con)
-                for table in self._shard_tables(con, md5hex):
+                for table in tables:
                     pieces += self._read_rows(con, table, shard.name, md5hex, chat_map,
                                               n2i, order_desc=True, limit=limit)
             if len(pieces) >= limit:
@@ -311,8 +360,11 @@ class MessageReader:
         want_md5 = messages.md5_of(chat_id) if chat_id else None
         for shard in paths.message_shards(self.acct):
             with self._open(f"message/{shard.name}") as con:
+                tables = self._shard_tables(con, want_md5)
+                if tables:          # 空 = 该分片里没有匹配的表，**不是**漂移（spec §4）
+                    self._check("messages", f"message/{shard.name}", con, table=tables[0])
                 n2i = self._name2id(con)
-                for table in self._shard_tables(con, want_md5):
+                for table in tables:
                     md5hex = table[4:]
                     if want_md5 and md5hex != want_md5:
                         continue
