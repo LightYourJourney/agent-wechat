@@ -41,9 +41,10 @@ def _call(fn, **kwargs):
     ("search_history", {"query": "会议"}),
     ("semantic_search", {"query": "爬山"}),
     ("export_chat_media", {"contact": "张三"}),
+    ("export_moments", {}),
 ])
 def test_tools_with_missing_account_return_error_not_raise(name, kwargs):
-    """经 _acct 的 6 个工具：account 不存在时必须返回 error 信封，零异常逃逸。"""
+    """经 _acct 的 7 个工具：account 不存在时必须返回 error 信封，零异常逃逸。"""
     res = _call(getattr(mcp_server, name), account=BOGUS, **kwargs)
     assert isinstance(res, dict) and res.get("error"), res
     assert "账号目录不存在" in res["error"]
@@ -56,6 +57,7 @@ def test_tools_with_missing_account_return_error_not_raise(name, kwargs):
     ("search_history", {"query": "会议"}),
     ("semantic_search", {"query": "爬山"}),
     ("export_chat_media", {"contact": "张三"}),
+    ("export_moments", {}),
 ])
 def test_errors_reach_the_agent_through_call_tool(name, args):
     """端到端：经 SDK 的 `call_tool` 也必须拿到中文信封、is_error=False。
@@ -126,7 +128,8 @@ def test_every_registered_tool_is_guarded():
     """防止将来新增工具漏加 @_guard（functools.wraps 会留下 __wrapped__）。"""
     for name in ("get_account_status", "list_contacts", "get_recent_messages",
                  "export_full_history", "get_task_status", "search_history",
-                 "semantic_search", "build_vector_index", "export_chat_media"):
+                 "semantic_search", "build_vector_index", "export_chat_media",
+                 "export_moments"):
         assert getattr(mcp_server, name).__wrapped__ is not None, f"{name} 缺 @_guard"
 
 

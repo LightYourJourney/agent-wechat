@@ -205,6 +205,44 @@ def export_chat_media(contact: str, kinds: str = "image,voice,video",
             "degraded": res.report.degraded, "truncated": res.report.truncated}
 
 
+@server.tool()
+@_guard
+def export_moments(contact: str | None = None, months: str | None = None,
+                   with_media: bool = False, limit: int = 500,
+                   account: str | None = None) -> dict:
+    """导出朋友圈为可读的 HTML 时间线（读取本账号可见的动态、评论与点赞）。
+
+    contact 可选，按**作者**筛选（username 或展示名），省略则导出全部好友；
+    歧义返回 need_confirm，不要猜。months 为逗号分隔的 YYYY-MM。
+
+    **默认不联网**：with_media=False 时全程零网络，产物里的媒体一律标注
+    「远程，未下载」。设为 True 才会下载并解密媒体本体——这会向微信 CDN 发起
+    请求（本项目「零网络」红线上唯一的显式例外），且耗时随媒体数量增长。
+    产物落 out_dir 的 index.html（目录 0700），用文件系统工具自行打开；
+    信封不回传文件清单。
+
+    counts 里的 media_failed 是常态而非错误：微信服务端会清理老媒体，
+    实测抽样中约三成带 token 仍返回 404。window 给出动态的时间跨度——
+    **注意这是微信本地缓存的窗口，不是完整历史**（本机实测 1,923 条覆盖
+    2013-02~2026-09，密度极不均）。触及 limit 时 truncated=true。
+    """
+    res = usecases.moments_export(
+        contact,
+        months=[m.strip() for m in months.split(",") if m.strip()] if months else None,
+        with_media=with_media, limit=limit, account=account)
+    if isinstance(res, usecases.NeedConfirm):
+        return _need_confirm(res)
+    r = res.report
+    return {"out_dir": res.out_dir,
+            "counts": {"posts": r.posts, "comments": r.comments, "likes": r.likes,
+                       "media_downloaded": r.media_downloaded,
+                       "media_not_downloaded": r.media_not_downloaded,
+                       "media_failed": r.media_failed},
+            "window": ({"earliest": r.window[0], "latest": r.window[1]}
+                       if r.window else None),
+            "degraded": r.degraded, "truncated": r.truncated}
+
+
 def main() -> None:
     asyncio.run(server.run_stdio_async())
 
