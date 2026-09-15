@@ -88,6 +88,79 @@ def test_text_only_post_has_no_media():
     assert p.media == () and p.comments == () and p.text == "只有文字"
 
 
+# ---------- 分支覆盖：视频 / 实况 / 回复 / 富文本 ----------
+# spec §7.1 要求样本含视频、回复、表情评论。T2 的 build_url 会按 kind == KIND_VIDEO
+# 分支，这条 "6" → video 的映射一旦回归，视频就会静默拼出图片形式的 URL 且无人报错。
+
+VIDEO_XML = """<SnsDataItem>
+  <TimelineObject>
+    <id>V1</id><username>wxid_friend</username><createTime>1735689600</createTime>
+    <contentDesc>视频加实况</contentDesc>
+    <ContentObject><type>15</type><mediaList>
+      <media>
+        <id>mv</id><type>6</type><sub_type>0</sub_type>
+        <videoDuration>12</videoDuration>
+        <thumb type="1" token="TOK_VTHUMB">http://shmmsns.qpic.cn/sns/vt/150</thumb>
+        <url type="1" md5="cd" key="VKEY" enc_idx="0" token="TOK_VURL">http://shmmsns.qpic.cn/sns/v/0</url>
+      </media>
+      <media>
+        <id>ml</id><type>2</type>
+        <url type="1" key="IKEY" token="TOK_IURL">http://shmmsns.qpic.cn/sns/i/0</url>
+        <LivePhoto><liveMedia>
+          <url type="1">http://snsvideo.qpic.cn/live/0</url>
+          <enc key="LIVEKEY" ver="1"/>
+        </liveMedia></LivePhoto>
+      </media>
+    </mediaList></ContentObject>
+  </TimelineObject>
+  <LocalExtraInfo><nickname>老王</nickname></LocalExtraInfo>
+</SnsDataItem>"""
+
+INTERACT_XML = """<SnsDataItem>
+  <TimelineObject>
+    <id>P9</id><username>wxid_friend</username><createTime>1735689600</createTime>
+    <contentDesc>互动</contentDesc>
+    <ContentObject><type>2</type><mediaList/></ContentObject>
+    <user_comment>
+      <comment_id>1</comment_id><type>2</type><nickname>小明</nickname>
+      <ref_username>小红</ref_username><create_time>1735689700</create_time>
+      <content>回复你</content><is_rich_text>1</is_rich_text>
+    </user_comment>
+    <user_comment>
+      <comment_id>2</comment_id><type>1</type><nickname>小红</nickname>
+      <create_time>1735689800</create_time>
+    </user_comment>
+  </TimelineObject>
+  <LocalExtraInfo><nickname>老王</nickname></LocalExtraInfo>
+</SnsDataItem>"""
+
+
+def test_video_media_kind_duration_and_live_photo():
+    p = moments.parse_post("T3", VIDEO_XML)
+    assert p.is_video_post is True                       # ContentObject/type == 15
+    vid, live = p.media
+    assert vid.kind == moments.KIND_VIDEO                # media/type == 6
+    assert vid.video_duration == 12
+    # videoDuration 缺省 / 非数字 → None（不是 0、不抛）
+    assert moments.parse_post("T3", VIDEO_XML.replace(
+        "<videoDuration>12</videoDuration>", "")).media[0].video_duration is None
+    assert moments.parse_post("T3", VIDEO_XML.replace(
+        "<videoDuration>12</videoDuration>",
+        "<videoDuration>abc</videoDuration>")).media[0].video_duration is None
+    # 实况照片：url 取元素文本、key 取 **属性**（与 url@key 同一个坑）
+    assert live.kind == moments.KIND_IMAGE
+    assert live.live_url == "http://snsvideo.qpic.cn/live/0"
+    assert live.live_key == "LIVEKEY"
+
+
+def test_comment_ref_nickname_and_rich_text():
+    reply, like = moments.parse_post("T4", INTERACT_XML).comments
+    assert reply.ref_nickname == "小红"                   # <ref_username>
+    assert reply.is_rich is True                         # <is_rich_text>1</is_rich_text>
+    assert like.ref_nickname is None                     # 缺省 → None
+    assert like.is_rich is False
+
+
 # ---------- iter_posts：合成 sns.db + 假解密 ----------
 
 @contextlib.contextmanager
