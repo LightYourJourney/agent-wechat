@@ -169,13 +169,19 @@ SnsTimeLine(tid, user_name, content, pack_info_buf)
 | `media/url@token`、`@key`、`@md5`、`@enc_idx` | **属性，不是子元素**——只看元素文本会漏掉全部鉴权信息（踩过的坑） |
 | `media/videoDuration` | 视频时长（秒，可缺省） |
 | `media/LivePhoto/liveMedia/url`、`enc@key` | 实况照片；其主 `url` 无 `token` → 不可下载 |
-| `LocalExtraInfo/comment_user_list/user_comment` | 评论（`type=2`；带 `ref_username` 即「A 回复 B」） |
+| `LocalExtraInfo/comment_user_list/user_comment` | 评论（`type=2`；带 `ref_username` 即「A 回复 B」，见下方⚠️） |
 | `LocalExtraInfo/like_user_list/user_comment` | 点赞（`type=1`，只有昵称、无正文） |
 | `LocalExtraInfo/with_user_list/user_comment` | `type=4`，与评论同归一类 |
 
 ⚠️ **`<user_comment>` 在 `LocalExtraInfo` 下，不在 `TimelineObject` 内**：本机 2,450 条
 互动全部落在 `comment_user_list`(1,289) / `like_user_list`(1,157) / `with_user_list`(4)，
 `TimelineObject` 里一条都没有。解析时把根节点取错**不会报错**，只会静默得 0 条互动。
+
+⚠️ **`ref_username` 是 wxid，不是昵称**（本机 183/183 条回复全是 `wxid_…`）。XML 里没有
+回复方的昵称字段（`ref_*` 子元素只有 `ref_comment_id` / `ref_comment_64id` /
+`ref_username`），所以 `moments._comments_of` 按 `username` 在**同一条动态**的
+`<user_comment>` 里反查昵称（被回复者点过赞或评论过就查得到，本机 183/183 命中）；
+查不到时 `ref_nickname` 为 `None`，渲染层据此省掉「回复 X」那段。
 
 ### 缓存窗口（产物必须如实标注的边界）
 
