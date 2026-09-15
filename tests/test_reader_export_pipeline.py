@@ -15,7 +15,8 @@ from types import SimpleNamespace
 import pytest
 import zstandard
 
-from agent_wechat import errors, export, keys, paths, reader, search, store, usecases, vector
+from agent_wechat import (errors, export, keys, messages, paths, reader, search, store,
+                          usecases, vector)
 
 from helpers import ext_buffer, member, mk_row
 
@@ -80,13 +81,19 @@ def drift_tree(wx, acct: str, *, drop_table: str | None = None,
 
 
 def build_shard(wx, acct: str, shard: str, msg_tables: dict, users: list[str]) -> None:
-    """msg_tables: {chat_username: [(local_id, local_type, sender_rowid, ts, content, ct)]}。"""
+    """msg_tables: {chat_username: [(local_id, local_type, sender_rowid, ts, content, ct)]}。
+
+    真实 `Msg_` 表还有 packed_info_data（docs/schema-4.1.13.md）——T5 把它加进 messages
+    能力声明（Ruling 24）后，夹具必须跟着有这一列，否则健康夹具全体误报漂移。
+    既有 6 元组行补 None；图片/视频消息直接传第 7 个元素（packed 的 32-hex bytes）。
+    """
     tables = {"Name2Id": ("CREATE TABLE Name2Id (user_name TEXT)", [(u,) for u in users])}
     for chat, rows in msg_tables.items():
         tables[f"Msg_{md5(chat)}"] = (
             f"CREATE TABLE Msg_{md5(chat)} (local_id INTEGER, local_type INTEGER, "
             "real_sender_id INTEGER, create_time INTEGER, message_content, "
-            "WCDB_CT_message_content INTEGER)", rows)
+            "WCDB_CT_message_content INTEGER, packed_info_data BLOB)",
+            [tuple(r) + (None,) * (7 - len(r)) for r in rows])
     enc_db(wx / acct / "db_storage" / "message" / shard, tables)
 
 
@@ -508,7 +515,7 @@ def test_iter_all_still_emits_raw_usernames(env):
     而索引库从此一半名字一半 wxid。
     """
     r = reader.MessageReader(ACCT)
-    raw = [row for batch in r.iter_all(GROUP) for row in batch]
+    raw = [row for rows, _ in r.iter_all(GROUP) for row in rows]
     group_rows = [x for x in raw if x.get("sender_id") == FRIEND]
     assert group_rows, "前提：iter_all 里有 FRIEND 的消息"
     assert group_rows[0]["sender_name"] == FRIEND, \
@@ -713,6 +720,26 @@ def test_export_raises_schema_drift_when_message_columns_change(env, tmp_path, m
         list(reader.MessageReader(ACCT).iter_all())     # 生成器：必须消费才触发
     assert ei.value.capability == "messages"
     assert "WCDB_CT_message_content" in ei.value.missing_columns
+
+
+def test_iter_all_raises_schema_drift_when_packed_info_data_missing(env, tmp_path, monkeypatch):
+    """Ruling 24：`iter_all` 的 SELECT 增了 `packed_info_data`，声明必须同步增——
+    否则缺这一列的微信版本会在探测放行后撞上裸 `OperationalError`，而不是
+    `SchemaDrift`，声明式探测就白做了（schema.py 的模块注释）。"""
+    root = tmp_path / "wx"
+    enc_db(root / ACCT / "db_storage" / "message" / "message_0.db", {
+        "Name2Id": ("CREATE TABLE Name2Id (user_name TEXT)", [(FRIEND,)]),
+        f"Msg_{md5(FRIEND)}": (
+            f"CREATE TABLE Msg_{md5(FRIEND)} (local_id INTEGER, local_type INTEGER, "
+            "real_sender_id INTEGER, create_time INTEGER, message_content BLOB, "
+            "WCDB_CT_message_content INTEGER)",     # 其余声明列齐全，唯独缺 packed_info_data
+            [(1, 1, 1, T0, "hi", 0)]),
+    })
+    monkeypatch.setattr(paths, "XWECHAT_FILES", root)
+    with pytest.raises(errors.SchemaDrift) as ei:
+        list(reader.MessageReader(ACCT).iter_all())
+    assert ei.value.capability == "messages"
+    assert ei.value.missing_columns == ("packed_info_data",)
 
 
 def test_username_pool_degrades_when_one_source_drifts(env, tmp_path, monkeypatch):
@@ -989,3 +1016,100 @@ def test_semantic_search_survives_contact_table_drift(env, tmp_path, monkeypatch
     res = usecases.semantic_search("你好", account=ACCT)
     assert res["total"] == 1 and res["hits"][0]["display"] == FRIEND
     assert "contacts" in [d["capability"] for d in res["degraded"]]
+
+
+# ---------- media_refs 管道（T5） ----------
+# 三条共用同一个树：合成目录的副本里，分片 0 换成一条图片消息（local_type=3、
+# zstd 压缩的 XML、packed_info_data 带 32-hex 文件名哈希）。分片 1 保留夹具原有的
+# 2 条旧文本——refs 与行数两边都有参照。
+
+IMG_MD5 = "0123456789abcdef0123456789abcdef"
+IMG_XML = (f'<msg><img aeskey="aes_key_abc" encryver="1" cdnthumburl="cdn" '
+           f'md5="{IMG_MD5}"/></msg>')
+
+
+def _tree_with_image_message(env, tmp_path):
+    root = tmp_path / "imgwx"
+    shutil.copytree(env.wx, root)
+    build_shard(root, ACCT, "message_0.db",
+                {FRIEND: [(1, 3, 1, T0, zstandard.compress(IMG_XML.encode()), 4, b"E" * 32)]},
+                [FRIEND, SELF])
+    return root
+
+
+def test_iter_all_yields_refs_for_image_message(env, tmp_path, monkeypatch):
+    """iter_all 的 yield 变为 (rows, refs)：图片消息的 packed 32-hex 进 refs（文件名权威），
+    XML md5 随行佐证。XML 只存在于**原始** content（_decode_row 产出的是 "[image]" 占位），
+    且这里是 zstd 压缩的——实现若把占位符或未解压字节当 content 传下去，这条必红。"""
+    monkeypatch.setattr(paths, "XWECHAT_FILES", _tree_with_image_message(env, tmp_path))
+
+    batches = list(reader.MessageReader(ACCT).iter_all())
+    rows = [r for batch, _ in batches for r in batch]
+    refs = [ref for _, rf in batches for ref in rf]
+    key = messages.row_key(ACCT, md5(FRIEND), "message_0.db", 1)
+    assert refs == [(key, "image", "e" * 32, IMG_MD5)]   # packed 大写 hex 被归一小写
+    assert len(rows) == 3                                 # 图片 1 + 分片 1 的旧 2：yield 改形不丢行
+    img = next(r for r in rows if r["msg_type"] == 3)
+    assert img["content"] == "[image]"                    # 行内容照旧是占位符
+
+
+def test_run_export_writes_media_refs_same_transaction(env, tmp_path, monkeypatch):
+    """run_export 把 refs 与 messages 写进**同一个事务**（spec §4.3）。
+
+    原子性构造：在 upsert_batch 处炸掉——此刻 refs 已先行写入（先写 refs 再 upsert_batch），
+    若 upsert_media_refs 自带 commit，refs 会在回滚后幸存。恢复后跑成功路径：refs 落地，
+    且 messages 不因 refs 多出行。
+    """
+    monkeypatch.setattr(paths, "XWECHAT_FILES", _tree_with_image_message(env, tmp_path))
+
+    real_batch = store.upsert_batch
+
+    def boom(con, rows):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(store, "upsert_batch", boom)
+    with pytest.raises(RuntimeError, match="boom"):
+        export.run_export(ACCT, full=True)
+    with store.open() as con:
+        assert con.execute("SELECT count(*) FROM messages").fetchone()[0] == 0
+        assert con.execute("SELECT count(*) FROM media_refs").fetchone()[0] == 0
+
+    monkeypatch.setattr(store, "upsert_batch", real_batch)
+    assert export.run_export(ACCT, full=True) == 3
+    with store.open() as con:
+        assert con.execute("SELECT count(*) FROM messages").fetchone()[0] == 3
+        assert con.execute("SELECT count(*) FROM media_refs").fetchone()[0] == 1
+        row = con.execute("SELECT media_kind, file_key, xml_md5 FROM media_refs").fetchone()
+    assert tuple(row) == ("image", "e" * 32, IMG_MD5)
+
+
+def test_media_rebuild_refs_idempotent_and_does_not_touch_messages(env, tmp_path, monkeypatch):
+    """media_rebuild_refs 只回填 media_refs，**不碰 messages**；幂等，且能把既有但
+    不一致的 refs 纠正过来。
+
+    「不碰 messages」断言在**空索引**上做：若实现顺手走了 upsert_batch，这里会凭空长出
+    3 行消息——先跑过导出的话，幂等 upsert 会让这一违规不可见。"""
+    monkeypatch.setattr(paths, "XWECHAT_FILES", _tree_with_image_message(env, tmp_path))
+    key = messages.row_key(ACCT, md5(FRIEND), "message_0.db", 1)
+
+    assert usecases.media_rebuild_refs(account=ACCT) == 1
+    with store.open() as con:
+        assert con.execute("SELECT count(*) FROM messages").fetchone()[0] == 0
+        row = con.execute("SELECT media_kind, file_key, xml_md5 FROM media_refs").fetchone()
+    assert tuple(row) == ("image", "e" * 32, IMG_MD5)
+
+    # 存量 refs 是别的样子（kind/file_key 全错）→ rebuild 覆盖纠正，不产生第二行
+    with store.open() as con:
+        store.upsert_media_refs(con, [(key, "video", "0" * 32, None)])
+    assert usecases.media_rebuild_refs(account=ACCT) == 1
+    with store.open() as con:
+        assert con.execute("SELECT count(*) FROM media_refs").fetchone()[0] == 1
+        assert con.execute("SELECT count(*) FROM messages").fetchone()[0] == 0
+        row = con.execute("SELECT media_kind, file_key, xml_md5 FROM media_refs").fetchone()
+    assert tuple(row) == ("image", "e" * 32, IMG_MD5)
+
+    # 再跑一遍：幂等（refs 不增长、messages 仍为 0）
+    assert usecases.media_rebuild_refs(account=ACCT) == 1
+    with store.open() as con:
+        assert con.execute("SELECT count(*) FROM media_refs").fetchone()[0] == 1
+        assert con.execute("SELECT count(*) FROM messages").fetchone()[0] == 0

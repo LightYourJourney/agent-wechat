@@ -25,9 +25,12 @@ def run_export(acct: str, chat_id: str | None = None, full: bool = False,
         resume = {} if full else None
         if resume is None:
             resume = store.load_export_watermarks(con, acct)
-        for batch in r.iter_all(chat_id=chat_id, resume=resume):
-            store.upsert_batch(con, batch)
-            total += len(batch)
+        for rows, refs in r.iter_all(chat_id=chat_id, resume=resume):
+            if refs:
+                # 先写 refs，再 upsert_batch——后者尾部的 commit 把两者收进同一事务（spec §4.3）
+                store.upsert_media_refs(con, refs)
+            store.upsert_batch(con, rows)
+            total += len(rows)
             if progress and total % 20_000 < store.BATCH:
                 progress(total)
     if on_reader is not None:

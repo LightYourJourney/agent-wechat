@@ -45,7 +45,7 @@ CAPABILITIES: dict[str, tuple[Requirement, ...]] = {
         Requirement("message/*.db", "Name2Id", ("user_name",)),
         Requirement("message/*.db", "Msg_*",
                     ("local_id", "local_type", "real_sender_id", "create_time",
-                     "message_content", "WCDB_CT_message_content")),
+                     "message_content", "WCDB_CT_message_content", "packed_info_data")),
     ),
     "username_pool": (
         Requirement("session/session.db", "SessionTable", ("username",)),

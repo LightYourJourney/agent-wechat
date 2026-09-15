@@ -12,7 +12,7 @@ import dataclasses
 import sqlite3
 from dataclasses import dataclass, asdict
 
-from . import decrypt, errors, keys, messages, paths, roster, schema, store
+from . import decrypt, errors, keys, media, messages, paths, roster, schema, store
 from .errors import DataNotFound, DependencyMissing
 
 try:
@@ -386,7 +386,9 @@ class MessageReader:
 
         resume: {(shard, chat_md5): 已导出的 max(local_id)}（来自 store.load_export_watermarks；
         local_id 是分片内序号，键必须含 shard）。
-        yield 批次为 list[dict]，字段与 store.upsert_batch 对齐。
+        yield (rows, refs)：rows 是 list[dict]，字段与 store.upsert_batch 对齐；refs 是
+        [(msg_key, media_kind, file_key, xml_md5)]，与 store.upsert_media_refs 对齐——
+        图片/视频消息顺带抽取（spec §4.3），调用方得以把两者写进同一个事务。
         """
         batch = batch or store.BATCH
         resume = resume or {}
@@ -405,11 +407,24 @@ class MessageReader:
                     start = resume.get((shard.name, md5hex), 0)
                     cur = con.execute(
                         f"SELECT local_id, local_type, real_sender_id, create_time, "
-                        f"message_content, WCDB_CT_message_content FROM '{table}' "
-                        f"WHERE local_id > ? ORDER BY local_id", (start,))
+                        f"message_content, WCDB_CT_message_content, packed_info_data "
+                        f"FROM '{table}' WHERE local_id > ? ORDER BY local_id", (start,))
                     rows: list[messages.MessageRow] = []
+                    refs: list[tuple[str, str, str | None, str | None]] = []
                     for row in cur:
-                        m = self._decode_row(*row, md5hex, chat_map, n2i)
+                        lid, ltype, sender, ts, mc, ct, packed = row
+                        m = self._decode_row(lid, ltype, sender, ts, mc, ct,
+                                             md5hex, chat_map, n2i)
+                        if m.msg_type in (messages.TYPE_IMAGE, messages.TYPE_VIDEO):
+                            # 提取只用原始 XML（_decode_row 产出的 content 是 [image] 占位）；
+                            # 只在图片/视频上多解一次压缩，量小可忽略
+                            ref = media.extract_media_ref(m.msg_type, _decode_content(mc, ct),
+                                                          packed)
+                            if ref:
+                                kind, fk, xm = ref
+                                refs.append((messages.row_key(self.acct, md5hex,
+                                                              shard.name, lid),
+                                             kind, fk, xm))
                         rows.append(messages.make_row(
                             account=self.acct, chat_md5=md5hex, chat_id=m.chat_id,
                             shard=shard.name, local_id=m.local_id, ts=m.ts,
@@ -417,7 +432,8 @@ class MessageReader:
                             sender_name=m.sender_name, is_self=1 if m.is_self else 0,
                             content=m.content, media_hint=m.media_hint))
                         if len(rows) >= batch:
-                            yield rows
+                            yield rows, refs
                             rows = []
+                            refs = []
                     if rows:
-                        yield rows
+                        yield rows, refs

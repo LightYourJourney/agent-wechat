@@ -286,6 +286,20 @@ def export_history(contact: str | None = None, full: bool = False,
     return {"task_id": task_id, "status": "running"}
 
 
+def media_rebuild_refs(account: str | None = None, progress=None) -> int:
+    """全量重扫微信库，只为存量历史回填 media_refs（spec §4.5）。幂等 upsert；
+    **不写 messages**（消息内容不变，只有 refs 需要补）。分钟级，同步执行。"""
+    ctx = ChatContext(account)
+    n = 0
+    with store.open() as con:
+        for _rows, refs in ctx.reader.iter_all():
+            store.upsert_media_refs(con, refs)
+            n += len(refs)
+            if progress and n and n % 20_000 < store.BATCH:
+                progress(n)
+    return n
+
+
 def search_history(query: str, contact: str | None = None, limit: int = 20,
                    account: str | None = None) -> dict | NeedConfirm:
     """hits 的 `sender_name` 来自名册（`search.py:13`），而 `_refresh_roster` 吞掉漂移——
