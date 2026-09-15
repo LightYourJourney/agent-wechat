@@ -1,0 +1,151 @@
+"""朋友圈解析层测试：合成 XML + 合成 sns.db，全部离线。"""
+import contextlib
+import json
+import sqlite3
+
+import pytest
+
+from agent_wechat import keys, media, moments, paths
+
+ACCT = "wxid_testacct01_ab12"
+
+POST_XML = """<SnsDataItem>
+  <TimelineObject>
+    <id>P1</id><username>wxid_friend</username><createTime>1735689600</createTime>
+    <contentDesc>今天的晚饭</contentDesc>
+    <ContentObject><type>2</type><mediaList>
+      <media>
+        <id>m1</id><type>2</type><sub_type>0</sub_type>
+        <thumb type="1" token="TOK_THUMB">http://shmmsns.qpic.cn/sns/t/150</thumb>
+        <url type="1" md5="ab" key="12345678901234567890" enc_idx="1" token="TOK_URL">http://shmmsns.qpic.cn/sns/u/0</url>
+        <size width="100" height="200"/>
+      </media>
+    </mediaList></ContentObject>
+    <user_comment>
+      <comment_id>1</comment_id><type>2</type><nickname>小明</nickname>
+      <username>wxid_xm</username><create_time>1735689700</create_time>
+      <content>好吃</content>
+    </user_comment>
+    <user_comment>
+      <comment_id>2</comment_id><type>1</type><nickname>小红</nickname>
+      <create_time>1735689800</create_time>
+    </user_comment>
+  </TimelineObject>
+  <LocalExtraInfo><nickname>老王</nickname></LocalExtraInfo>
+</SnsDataItem>"""
+
+
+def test_parse_post_fields():
+    p = moments.parse_post("T1", POST_XML)
+    assert p is not None
+    assert (p.tid, p.post_id, p.username, p.nickname) == ("T1", "P1", "wxid_friend", "老王")
+    assert p.create_time == 1735689600
+    assert p.text == "今天的晚饭"
+    assert p.is_video_post is False
+    assert len(p.media) == 1
+
+
+def test_token_and_key_come_from_attributes():
+    """token/key 是 url 元素的属性——这个坑踩过一次，锁死它。"""
+    m = moments.parse_post("T1", POST_XML).media[0]
+    assert m.kind == moments.KIND_IMAGE
+    assert m.token == "TOK_URL"
+    assert m.key == "12345678901234567890"
+    assert m.enc_idx == "1"
+    assert m.thumb == "http://shmmsns.qpic.cn/sns/t/150"
+    assert m.video_duration is None
+
+
+def test_comments_split_like_vs_comment():
+    p = moments.parse_post("T1", POST_XML)
+    kinds = sorted(c.kind for c in p.comments)
+    assert kinds == [moments.CMT_COMMENT, moments.CMT_LIKE]
+    cmt = next(c for c in p.comments if c.kind == moments.CMT_COMMENT)
+    assert (cmt.nickname, cmt.content, cmt.create_time) == ("小明", "好吃", 1735689700)
+    like = next(c for c in p.comments if c.kind == moments.CMT_LIKE)
+    assert like.content is None
+
+
+def test_repr_hides_credentials():
+    """token/key 不得经 repr 泄漏（与 MediaKeys 同规则）。"""
+    m = moments.parse_post("T1", POST_XML).media[0]
+    r = repr(m)
+    assert "TOK_URL" not in r and "12345678901234567890" not in r
+
+
+def test_malformed_xml_returns_none():
+    assert moments.parse_post("T1", "<SnsDataItem><TimelineObject>") is None
+    assert moments.parse_post("T1", "") is None
+    assert moments.parse_post("T1", "<Other/>") is None
+
+
+def test_text_only_post_has_no_media():
+    xml = ("""<SnsDataItem><TimelineObject><id>P2</id><username>u</username>"""
+           """<createTime>1735689600</createTime><contentDesc>只有文字</contentDesc>"""
+           """<ContentObject><type>2</type><mediaList/></ContentObject>"""
+           """</TimelineObject><LocalExtraInfo><nickname>n</nickname></LocalExtraInfo></SnsDataItem>""")
+    p = moments.parse_post("T2", xml)
+    assert p.media == () and p.comments == () and p.text == "只有文字"
+
+
+# ---------- iter_posts：合成 sns.db + 假解密 ----------
+
+@contextlib.contextmanager
+def _passthrough(db_path, passphrase, tmpdir=None):
+    yield db_path
+
+
+@pytest.fixture()
+def sns(tmp_path, monkeypatch):
+    """合成 sns.db（明文 SQLite；decrypt 被打桩成直通）。
+
+    同时隔离密钥缓存并写入假 passphrase——`iter_posts` 会经 `keys.get_passphrase`
+    取钥，不隔离就会读到**真实机器的** passphrase.json。
+    """
+    from agent_wechat import decrypt as dec_mod
+    wx, home = tmp_path / "wx", tmp_path / "home"
+    d = wx / ACCT / "db_storage" / "sns"
+    d.mkdir(parents=True)
+    home.mkdir()
+    (home / "passphrase.json").write_text(json.dumps(
+        {"accounts": {"wxid_testacct01": {"passphrase_hex": "aa" * 32, "captured_at": 0}}}))
+    monkeypatch.setattr(paths, "XWECHAT_FILES", wx)
+    monkeypatch.setattr(paths, "HOME_DIR", home)
+    monkeypatch.setattr(keys, "CACHE_FILE", home / "passphrase.json")
+    monkeypatch.setattr(dec_mod, "decrypted", _passthrough)
+    monkeypatch.setattr("agent_wechat.moments.decrypt", dec_mod)
+    con = sqlite3.connect(d / "sns.db")
+    con.execute("CREATE TABLE SnsTimeLine(tid INTEGER PRIMARY KEY DESC, user_name TEXT,"
+                " content TEXT, pack_info_buf TEXT)")
+    con.commit()
+    return con
+
+
+def _add(con, tid, xml):
+    con.execute("INSERT INTO SnsTimeLine(tid, user_name, content) VALUES (?,?,?)",
+                (tid, "wxid_friend", xml))
+    con.commit()
+
+
+def test_iter_posts_reads_all_and_skips_malformed(sns):
+    _add(sns, 1, POST_XML)
+    _add(sns, 2, "<SnsDataItem><TimelineObject>")          # 畸形 → 跳过
+    _add(sns, 3, POST_XML.replace("P1", "P3"))
+    assert [p.post_id for p in moments.iter_posts(ACCT)] == ["P1", "P3"]
+
+
+def test_iter_posts_filters_by_month_and_chat(sns):
+    # 月中时间戳：任何本地时区（UTC-12..UTC+14）都落在同一个月，期望月用 month_of 现算
+    jan_ts, jul_ts = 1736899200, 1752537600
+    _add(sns, 1, POST_XML.replace("1735689600", str(jan_ts)))
+    _add(sns, 2, POST_XML.replace("1735689600", str(jul_ts)).replace("P1", "P2"))
+    assert [p.post_id for p in moments.iter_posts(ACCT, months=[media.month_of(jan_ts)])] == ["P1"]
+    assert [p.post_id for p in moments.iter_posts(ACCT, chat_filter="wxid_friend")] == ["P1", "P2"]
+    assert [p.post_id for p in moments.iter_posts(ACCT, chat_filter="wxid_other")] == []
+
+
+def test_iter_posts_missing_db_raises_data_not_found(tmp_path, monkeypatch):
+    from agent_wechat import errors
+    monkeypatch.setattr(paths, "XWECHAT_FILES", tmp_path / "nope")
+    with pytest.raises(errors.DataNotFound):
+        list(moments.iter_posts(ACCT))
