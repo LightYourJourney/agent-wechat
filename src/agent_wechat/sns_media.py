@@ -213,10 +213,11 @@ def fetch(m: moments.SnsMedia, *, timeout: float = 20.0, attempts: int = 3,
     if not host_allowed(url):
         host = urllib.parse.urlsplit(url).hostname or "?"
         raise SnsMediaError(f"拒绝非微信 CDN 域名：{host}")
-    if urllib.parse.urlsplit(url).scheme != "https":
-        # `build_url` 只替换**小写**的 `http://`：`HTTP://shmmsns.qpic.cn/…` 原样过关，
+    if not https_allowed(url):
+        # 域已在上一行确认过，走到这里的唯一可能就是 scheme 不对。第一跳同样卡 scheme：
+        # `build_url` 只替换**小写**的 `http://`，`HTTP://shmmsns.qpic.cn/…` 原样过关，
         # 而 urllib 会把 scheme 归一成小写——域名白名单对此无感，于是第一跳走明文、
-        # token 跟着明文出去。scheme 判据与重定向那边同源（都走 https_allowed 的那半）。
+        # token 跟着明文出去。判据与重定向的每一跳共用同一个 `https_allowed`。
         raise SnsMediaError("拒绝非 https 的媒体地址")
 
     op = opener if opener is not None else _default_opener()
