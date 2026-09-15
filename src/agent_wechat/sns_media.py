@@ -132,9 +132,23 @@ def build_url(m: moments.SnsMedia) -> str | None:
 
 
 def host_allowed(url: str) -> bool:
-    """只允许微信 CDN 两个域——防止恶意 XML 把请求引向任意主机。"""
+    """只允许微信 CDN 两个域——防止恶意 XML 把请求引向任意主机。
+
+    **只判 host、不判 scheme**：完整判据是 `https_allowed`。两者分开只为让「域不对」与
+    「域对但 scheme 不对」在错误文案里分得开。
+    """
     host = (urllib.parse.urlsplit(url).hostname or "").lower()
     return any(host.endswith(sfx) for sfx in ALLOWED_SUFFIXES)
+
+
+def https_allowed(url: str) -> bool:
+    """微信 CDN 域名 **且** https——第一跳与每一跳重定向共用这个判据。
+
+    域对了但 scheme 不对同样是洞：只查 host 时，`*.qpic.cn` 上一个 302 到
+    `http://shmmsns.qpic.cn/…`（**同一个域**）会被照常跟随，第二跳是明文，
+    而这条请求带着 token。
+    """
+    return urllib.parse.urlsplit(url).scheme == "https" and host_allowed(url)
 
 
 def decrypt_stream(data: bytes, key: str, *, video: bool = False) -> bytes:
@@ -160,7 +174,7 @@ class _AllowlistedRedirect(urllib.request.HTTPRedirectHandler):
     """
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        if not host_allowed(newurl):
+        if not https_allowed(newurl):
             return None
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
@@ -199,6 +213,11 @@ def fetch(m: moments.SnsMedia, *, timeout: float = 20.0, attempts: int = 3,
     if not host_allowed(url):
         host = urllib.parse.urlsplit(url).hostname or "?"
         raise SnsMediaError(f"拒绝非微信 CDN 域名：{host}")
+    if urllib.parse.urlsplit(url).scheme != "https":
+        # `build_url` 只替换**小写**的 `http://`：`HTTP://shmmsns.qpic.cn/…` 原样过关，
+        # 而 urllib 会把 scheme 归一成小写——域名白名单对此无感，于是第一跳走明文、
+        # token 跟着明文出去。scheme 判据与重定向那边同源（都走 https_allowed 的那半）。
+        raise SnsMediaError("拒绝非 https 的媒体地址")
 
     op = opener if opener is not None else _default_opener()
     last: Exception | None = None

@@ -220,6 +220,28 @@ def test_fetch_without_token_raises_without_request():
     assert op.calls == []
 
 
+def test_fetch_rejects_plaintext_url_without_request():
+    """第一跳也必须是 https，`build_url` 挡不住这一路：它只替换**小写**的 `http://`，
+    而 `HTTP://…` 原样过关、urllib 又把 scheme 归一成小写——域名白名单对此完全无感，
+    于是 token 跟着明文出去。
+
+    变异：删掉 `fetch` 里那段 scheme 检查 → 请求被发出（`op.calls` 非空）→ 红。
+    """
+    m = _m(url="HTTP://shmmsns.qpic.cn/sns/u/150")
+    assert sns_media.build_url(m).startswith("HTTP://")   # 前提：确实没被归一化
+    op = _Opener([])
+    with pytest.raises(sns_media.SnsMediaError) as ei:
+        sns_media.fetch(m, opener=op)
+    assert "https" in str(ei.value)
+    assert op.calls == []                                 # 一个请求都没发
+
+
+def test_https_allowed_requires_both():
+    assert sns_media.https_allowed("https://shmmsns.qpic.cn/x")
+    assert not sns_media.https_allowed("http://shmmsns.qpic.cn/x")
+    assert not sns_media.https_allowed("https://evil.example.com/x")
+
+
 def test_default_opener_ignores_proxies():
     """实测走本机代理反而超时，设计取直连（环境里确有 http_proxy=127.0.0.1:7897）。
 
@@ -288,6 +310,22 @@ def _redirect_opener(*results):
     t = _Transport(list(results))
     op.add_handler(t)
     return op, t
+
+
+def test_redirect_to_http_is_refused():
+    """白名单只查 host 不查 scheme：302 到 `http://shmmsns.qpic.cn/…`——**同一个域**、
+    host 白名单完全满意——会被照常跟随，第二跳是**明文**，而这条请求带着 token。
+
+    变异：把 `https_allowed` 换回 `host_allowed` → 第二跳被发出（`len(t.calls) == 2`）→ 红。
+    """
+    op, t = _redirect_opener(
+        _Buf(headers={"location": "http://shmmsns.qpic.cn/sns/yyy/0?token=TOK&idx=1"},
+             code=302, msg="Found"),
+        _Buf(body=b"\xff\xd8\xffok"))
+    with pytest.raises(sns_media.SnsMediaError) as ei:
+        sns_media.fetch(_m(), opener=op, attempts=1)
+    assert len(t.calls) == 1                    # 明文那一跳根本没发出去
+    assert "HTTPError" in str(ei.value)         # 拒的是重定向，不是别的岔路报错
 
 
 def test_redirect_to_foreign_host_is_refused():
