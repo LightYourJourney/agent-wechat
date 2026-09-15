@@ -150,18 +150,38 @@ def decrypt_stream(data: bytes, key: str, *, video: bool = False) -> bytes:
     return bytes(a ^ b for a, b in zip(data[:n], ks)) + data[n:]
 
 
+class _AllowlistedRedirect(urllib.request.HTTPRedirectHandler):
+    """重定向目标必须**也在白名单内**——白名单只对第一跳成立等于没有白名单。
+
+    urllib 默认跟随重定向、且没人复查 `resp.geturl()`：`*.qpic.cn` 上一个 302
+    就能把请求（带着 token）带去任意主机。目标不在白名单时返回 `None`，
+    urllib 会因此抛 `HTTPError`，落进 `fetch` 既有的重试/包装路径
+    （消息只含类型名，不会把攻击者指定的主机回显出去）。
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if not host_allowed(newurl):
+            return None
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
 def _default_opener() -> urllib.request.OpenerDirector:
-    """**强制直连**（不读 `http_proxy` 等环境变量），机制不是「空 ProxyHandler 生效」：
+    """**强制直连**（不读 `http_proxy` 等环境变量）+ **跨跳域白名单**。
 
-    `ProxyHandler({})` 在 `add_handler` 里走 `handler_order` → 因为 `proxies` 为空，
-    它**不暴露任何 `*_open` 方法**，于是 `OpenerDirector.add_handler` 末尾的 `if added:`
-    为假、这个 handler 被**静默丢弃**；与此同时，传了 handler 又让 `build_opener`
-    **跳过安装默认的 `ProxyHandler(getproxies())`**。净效果 = 完全没有代理处理 = 直连。
-
+    直连的机制不是「空 ProxyHandler 生效」：`ProxyHandler({})` 因为 `proxies` 为空
+    而**不暴露任何 `*_open` 方法**，于是 `OpenerDirector.add_handler` 末尾的
+    `if added:` 为假、这个 handler 被**静默丢弃**；与此同时，传了 handler 又让
+    `build_opener` **跳过安装默认的 `ProxyHandler(getproxies())`**。
+    净效果 = 完全没有代理处理 = 直连。
     所以：**不要「简化」成 `build_opener()`** —— 那会静默把环境代理装回来。
     实测本机 `http_proxy=http://127.0.0.1:7897`：直连 6/6 成功（0.2–0.3s），走代理反复超时。
+
+    第二个 handler 是 `_AllowlistedRedirect`：`build_opener` 见到它会**跳过**安装
+    默认的 `HTTPRedirectHandler`（后者会无条件跟随重定向）。域白名单必须**跨跳成立**，
+    否则 `host_allowed` 只管得住第一跳。
     """
-    return urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    return urllib.request.build_opener(urllib.request.ProxyHandler({}),
+                                       _AllowlistedRedirect())
 
 
 def fetch(m: moments.SnsMedia, *, timeout: float = 20.0, attempts: int = 3,

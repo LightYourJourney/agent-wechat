@@ -1,4 +1,7 @@
-"""sns_media 纯函数层：ISAAC64 向量 / URL 构造 / 解密。不发任何网络请求。"""
+"""sns_media 纯函数层：ISAAC64 向量 / URL 构造 / 解密 / 下载。不发任何网络请求。"""
+import urllib.error
+import urllib.request
+
 import pytest
 
 from agent_wechat import errors, moments, sns_media
@@ -180,9 +183,17 @@ def test_fetch_exhausts_attempts_raises():
 
 
 def test_fetch_error_never_echoes_token():
-    op = _Opener([TimeoutError()] * 3)
+    """假异常的文本里**真的带 URL/token**，断言才有牙。
+
+    `str(TimeoutError())` 是空串：只锁异常类型的话，把消息退化成 `f"…：{last}"`
+    （最现实的那种「改进」）依然会绿——已实证。
+    """
+    m = _m(token="SECRETTOKEN")
+    url = sns_media.build_url(m)
+    assert url and "SECRETTOKEN" in url           # 前提：URL 里确实有 token
+    op = _Opener([urllib.error.URLError(f"<urlopen error {url}>")] * 3)
     with pytest.raises(sns_media.SnsMediaError) as ei:
-        sns_media.fetch(_m(token="SECRETTOKEN"), opener=op)
+        sns_media.fetch(m, opener=op)
     assert "SECRETTOKEN" not in str(ei.value)
 
 
@@ -196,9 +207,16 @@ def test_fetch_rejects_foreign_host_before_any_request():
 
 
 def test_fetch_without_token_raises_without_request():
+    """断言的是**早退身份**，不是「反正都会抛 SnsMediaError」。
+
+    删掉 `build_url(m) is None` 早退分支后，`url=None` 会一路走到域检查
+    （`host_allowed(None)` 为假）而**照样不发请求、照样抛 SnsMediaError**——
+    只断言异常类型 + `op.calls == []` 对这个变异是假绿（已实证）。
+    """
     op = _Opener([])
-    with pytest.raises(sns_media.SnsMediaError):
+    with pytest.raises(sns_media.SnsMediaError) as ei:
         sns_media.fetch(_m(token=None), opener=op)
+    assert "无法下载" in str(ei.value)      # 早退那条消息，而非重试耗尽那条
     assert op.calls == []
 
 
@@ -212,3 +230,91 @@ def test_default_opener_ignores_proxies():
     import urllib.request
     op = sns_media._default_opener()
     assert all(not getattr(h, "proxies", None) for h in op.handlers)
+
+
+# ---------- 重定向：白名单必须跨跳成立 ----------
+
+class _Buf:
+    """假响应：只提供 urllib 重定向链真正会碰到的几个面。"""
+
+    def __init__(self, body=b"", headers=None, code=200, msg="OK"):
+        self._body = body
+        self.headers = headers or {}
+        self.code = code
+        self.msg = msg
+
+    def info(self):
+        return self.headers
+
+    def read(self):
+        return self._body
+
+    def close(self):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+class _Transport(urllib.request.BaseHandler):
+    """假传输层：按序发牌并记录**真实发出**的请求（含重定向的第二跳）。"""
+
+    handler_order = 100          # 必须排在 HTTPHandler 的 500 之前，否则会拨真网络
+
+    def __init__(self, results):
+        self.results = list(results)
+        self.calls = []
+
+    def _take(self, req):
+        self.calls.append(req)
+        r = self.results.pop(0)
+        if isinstance(r, Exception):
+            raise r
+        return r
+
+    def http_open(self, req):
+        return self._take(req)
+
+    def https_open(self, req):
+        return self._take(req)
+
+
+def _redirect_opener(*results):
+    """真 `_default_opener()`（真重定向处理链）+ 假传输层。"""
+    op = sns_media._default_opener()
+    t = _Transport(list(results))
+    op.add_handler(t)
+    return op, t
+
+
+def test_redirect_to_foreign_host_is_refused():
+    """白名单只查第一跳等于没查：urllib 默认跟随 302 且没人复查 `geturl()`，
+    于是 CDN 上一个重定向就能把请求带去任意主机。"""
+    first = sns_media.build_url(_m())
+    op, t = _redirect_opener(
+        _Buf(headers={"location": "https://evil.example.com/steal.jpg"},
+             code=302, msg="Found"),
+        _Buf(body=b"PWNED"))
+    with pytest.raises(sns_media.SnsMediaError) as ei:
+        sns_media.fetch(_m(), opener=op, attempts=1)
+    assert [r.full_url for r in t.calls] == [first]   # 只有第一跳，第三方一个请求都没发
+    assert "HTTPError" in str(ei.value)               # 拒的是重定向，不是别的岔路报错
+    assert "evil.example.com" not in str(ei.value)    # 目标主机也不回显
+
+
+def test_redirect_to_same_host_is_followed():
+    """正对照：同主机 302 照常跟随。
+
+    没有它，「跨主机被拒」可能只是链路压根没走到重定向（比如假响应缺了某个属性
+    导致 AttributeError）——那种情况下 `t.calls` 同样只有一条。
+    """
+    op, t = _redirect_opener(
+        _Buf(headers={"location": "/sns/yyy/0?token=TOK&idx=1"},
+             code=302, msg="Found"),
+        _Buf(body=b"\xff\xd8\xffok"))
+    assert sns_media.fetch(_m(), opener=op, attempts=1) == b"\xff\xd8\xffok"
+    assert len(t.calls) == 2
+    assert t.calls[1].full_url == "https://shmmsns.qpic.cn/sns/yyy/0?token=TOK&idx=1"
