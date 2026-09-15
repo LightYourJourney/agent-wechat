@@ -29,6 +29,8 @@ class SnsMedia:
     video_duration: int | None = None
     live_url: str | None = None
     live_key: str | None = None
+    md5: str | None = None        # 取自 url 元素的 md5 属性（媒体文件名哈希）
+    local: str | None = None      # 产物内的相对路径（由导出编排赋值；解析层恒 None）
 
     def __repr__(self) -> str:            # pragma: no cover - 简单表达式
         return f"SnsMedia(kind={self.kind!r}, video_duration={self.video_duration!r}, live={self.live_url is not None})"
@@ -81,6 +83,7 @@ def _media_of(m: ET.Element) -> SnsMedia:
         token=u.get("token") if u is not None else None,
         key=u.get("key") if u is not None else None,
         enc_idx=u.get("enc_idx") if u is not None else None,
+        md5=u.get("md5") if u is not None else None,
         thumb=(th.text or "").strip() or None if th is not None else None,
         video_duration=_int(_text(m, "videoDuration")) or None,
         # 实况照片：url 无 token → 本机不可下载（spec §8）；密钥在 liveMedia/enc@key
@@ -159,3 +162,22 @@ def _dec(v) -> str:
     if v is None:
         return ""
     return v.decode("utf-8", "replace") if isinstance(v, bytes) else str(v)
+
+
+@dataclass
+class MomentsReport:
+    """一次导出的统计与降级说明（CLI/MCP 共用，渲染层消费）。"""
+    posts: int = 0
+    comments: int = 0
+    likes: int = 0
+    media_local: int = 0              # 使用了本地缓存图
+    media_downloaded: int = 0         # 本轮联网下载成功
+    media_failed: int = 0             # 下载或解密失败
+    media_not_downloaded: int = 0     # 未开启联网，或该媒体不可下载
+    window: tuple[int, int] | None = None      # (最早, 最新) 时间戳
+    degraded: list[str] = dataclasses.field(default_factory=list)
+    truncated: bool = False
+    out_dir: str = ""
+
+    def to_dict(self) -> dict:
+        return dataclasses.asdict(self)

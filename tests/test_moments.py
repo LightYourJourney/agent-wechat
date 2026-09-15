@@ -56,6 +56,16 @@ def test_token_and_key_come_from_attributes():
     assert m.video_duration is None
 
 
+def test_md5_read_from_url_attribute():
+    """`url@md5` 也是**属性**（同 token/key 的坑）；缺省即 None，不拿别的字段顶替。"""
+    m = moments.parse_post("T1", POST_XML).media[0]
+    assert m.md5 == "ab"
+    assert m.local is None                            # 解析层不碰产物路径
+    live = moments.parse_post("T3", VIDEO_XML).media[1]
+    assert live.md5 is None                           # 该 <url> 没有 md5 属性 → None
+    assert moments.parse_post("T3", VIDEO_XML).media[0].md5 == "cd"
+
+
 def test_comments_split_like_vs_comment():
     p = moments.parse_post("T1", POST_XML)
     kinds = sorted(c.kind for c in p.comments)

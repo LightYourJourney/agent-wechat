@@ -1,0 +1,101 @@
+"""HTML 渲染：转义、窗口说明、媒体占位、评论回复。纯函数，无 IO。"""
+import dataclasses
+import html.parser
+
+from agent_wechat import moments, moments_html
+
+
+class _P(html.parser.HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.text = []
+
+    def handle_data(self, d):
+        self.text.append(d)
+
+
+def _mk(media=(), comments=(), text="正文"):
+    m = moments.SnsMedia(kind=moments.KIND_IMAGE, url="http://x", token="T", key="1")
+    return moments.SnsPost(tid="T", post_id="P", username="wxid_a", nickname="老王",
+                           create_time=1735689600, text=text, is_video_post=False,
+                           media=tuple(media), comments=tuple(comments))
+
+
+def _rep(**kw):
+    base = dict(posts=1, comments=0, likes=0, media_local=0, media_downloaded=0,
+                media_failed=0, media_not_downloaded=0, window=(1735689600, 1735689600))
+    base.update(kw)
+    return moments.MomentsReport(**base)
+
+
+def _text_of(doc):
+    p = _P()
+    p.feed(doc)
+    return "".join(p.text)
+
+
+def test_html_is_parseable_and_has_window_notice():
+    doc = moments_html.render([_mk()], _rep())
+    _P().feed(doc)                                   # 不抛即结构可解析
+    t = _text_of(doc)
+    assert "缓存窗口" in t and "不是完整历史" in t
+    assert "老王" in t and "正文" in t
+
+
+def test_text_is_escaped():
+    """正文含 HTML 必须转义——朋友圈内容是不可信输入。"""
+    doc = moments_html.render([_mk(text="<script>alert(1)</script>")], _rep())
+    assert "<script>alert(1)</script>" not in doc
+    assert "&lt;script&gt;" in doc
+
+
+def test_nickname_and_comment_fields_are_escaped():
+    """昵称同样不可信：不进 _esc 就能凭 onerror 属性执行脚本。"""
+    c = moments.SnsComment(kind=moments.CMT_COMMENT, nickname='<img src=x onerror="alert(1)">',
+                           content='<b>同问</b>', ref_nickname="<i>x</i>",
+                           create_time=2, is_rich=False)
+    post = dataclasses.replace(_mk(comments=[c]), nickname='<b onmouseover="alert(2)">老王</b>')
+    doc = moments_html.render([post], _rep(comments=1))
+    # 原始标签一律不存活；属性引号也必须转义（`onerror="…"` 里的引号漏转 = 仍可触发）
+    assert "<img src=x" not in doc and "<b onmouseover" not in doc
+    assert '"alert(1)"' not in doc and '="alert(2)"' not in doc
+    assert "<b>同问</b>" not in doc and "<i>x</i>" not in doc
+    assert "&lt;img src=x onerror=&quot;alert(1)&quot;&gt;" in doc
+    assert "&lt;b onmouseover=&quot;alert(2)&quot;&gt;老王&lt;/b&gt;" in doc
+    assert "&lt;b&gt;同问&lt;/b&gt;" in doc and "&lt;i&gt;x&lt;/i&gt;" in doc
+
+
+def test_undownloaded_media_shows_placeholder():
+    m = moments.SnsMedia(kind=moments.KIND_IMAGE, url="http://x", token="T", key="1")
+    doc = moments_html.render([_mk(media=[m])], _rep(media_not_downloaded=1))
+    t = _text_of(doc)
+    assert "远程，未下载" in t
+    assert "<img" not in doc                          # 没有本地文件就不放 img
+
+
+def test_downloaded_media_references_relative_path():
+    m = dataclasses.replace(
+        moments.SnsMedia(kind=moments.KIND_IMAGE, url="http://x", token="T", key="1"),
+        local="media/2025-01/abc.jpg")
+    doc = moments_html.render([_mk(media=[m])], _rep(media_downloaded=1))
+    assert 'src="media/2025-01/abc.jpg"' in doc
+
+
+def test_comment_reply_and_likes_render():
+    like = moments.SnsComment(kind=moments.CMT_LIKE, nickname="小红", content=None,
+                              ref_nickname=None, create_time=1, is_rich=False)
+    reply = moments.SnsComment(kind=moments.CMT_COMMENT, nickname="小明", content="同问",
+                               ref_nickname="小红", create_time=2, is_rich=False)
+    t = _text_of(moments_html.render([_mk(comments=[like, reply])], _rep(likes=1, comments=1)))
+    assert "小红" in t and "小明" in t and "同问" in t
+    assert "回复" in t                                 # 「小明 回复 小红：同问」
+
+
+def test_degraded_section_lists_reasons():
+    t = _text_of(moments_html.render([_mk()], _rep(degraded=["3 张媒体下载失败"])))
+    assert "3 张媒体下载失败" in t
+
+
+def test_truncated_is_disclosed():
+    t = _text_of(moments_html.render([_mk()], _rep(truncated=True)))
+    assert "截断" in t or "truncated" in t.lower()
