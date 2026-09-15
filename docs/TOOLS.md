@@ -1,6 +1,6 @@
 # TOOLS — MCP 工具参考
 
-> 本文档逐个说明 agent-wechat MCP Server 暴露的 8 个工具：用途、参数、返回结构、
+> 本文档逐个说明 agent-wechat MCP Server 暴露的 9 个工具：用途、参数、返回结构、
 > 示例与错误。所有工具经 stdio JSON-RPC 调用；示例为 Agent 视角的调用与实际返回。
 
 通用约定：
@@ -277,6 +277,54 @@
 
 ---
 
+## 9. export_chat_media
+
+**用途**：把某会话的媒体文件导出到本机（图片解密 / 语音转 WAV / 视频明文复制），
+返回各类计数与输出目录。图片依赖磁盘密钥推导；语音转 WAV 依赖 pilk（缺失时导出
+原始 `.slk` 并记 `degraded`）；视频直接复制明文。
+
+| 参数 | 类型 | 必填 | 默认 | 说明 |
+|---|---|---|---|---|
+| `contact` | string | **是** | — | username（`wxid_*` / `*@chatroom` / `filehelper`）或展示名（歧义返回 `need_confirm`，形状见 §3；未命中返回 `{"error": "找不到联系人「XXX」，请用 list_contacts 查询"}`） |
+| `kinds` | string | 否 | `"image,voice,video"` | 逗号分隔的媒体类型（`image` / `voice` / `video`）；含未知值报错 |
+| `months` | string | 否 | null | 逗号分隔的月份（`YYYY-MM`），按消息时间过滤；省略不限 |
+| `limit` | int | 否 | 500 | 导出文件数上限（1-2000，超出按边界处理） |
+| `account` | string | 否 | null | 同通用约定 |
+
+**成功返回**：
+
+```json
+{
+  "chat_id": "wxid_abc123def456",
+  "out_dir": "/Users/you/.agent-wechat/media",
+  "counts": {
+    "image": { "ok": 12, "failed": 1, "missing": 0 },
+    "voice": { "ok": 8, "failed": 0, "raw_only": 2 },
+    "video": { "ok": 3, "thumb": 1, "missing": 0 }
+  },
+  "degraded": [],
+  "truncated": false
+}
+```
+
+**说明**：
+- 产物按 `out_dir/<会话md5>/<类型>/<月份>/` 落盘，目录 0700、文件 0600。信封**不回传
+  文件清单**（大结果膨胀上下文），明细用文件系统工具在 `out_dir` 下自行查看。
+- **导出数量远小于会话里的媒体消息数是常态**：微信按需下载并定期清理本地媒体，
+  历史图片/视频大概率已不在磁盘上——能导出的只有磁盘还保留的部分，`missing` 大
+  不是错误。
+- 计数口径：`image.failed` = 解密/未知格式/落盘失败数；`voice.raw_only` = pilk 缺失时
+  导出的原始 `.slk` 数；`video.thumb` = 本体不在、回退缩略图的数量；
+  `video.missing` = 本体/缩略图在但读不了或写不出来。
+- `degraded` 键**恒存在**（与 §3 同一惯例：降级不是错误），但此处每项是**中文字符串**
+  （图片密钥推导失败、pilk 缺失、wxgf 未转 JPEG、输出目录权限未收紧等），不是
+  `{capability, effect}`。图片密钥问题不影响语音/视频导出。
+- `truncated=true` 表示触及 `limit` 提前收手，结果不完整——可按 `months` 分批重跑补齐。
+- 存量历史回填（`media rebuild-refs`）是一次性运维动作，仅提供 CLI（见 USAGE.md），
+  MCP 侧无对应工具。
+
+---
+
 ## 错误汇总
 
 | 现象 | 原因 | 处置 |
@@ -316,4 +364,4 @@ async def main():
 asyncio.run(main())
 ```
 
-期望输出包含 8 个工具名与 `get_account_status` 的 JSON。
+期望输出包含 9 个工具名与 `get_account_status` 的 JSON。

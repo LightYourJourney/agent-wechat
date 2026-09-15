@@ -12,8 +12,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent_wechat import (account, errors, export, mcp_server, paths, reader, tasks,
-                          usecases)
+from agent_wechat import (account, errors, export, media, mcp_server, paths, reader,
+                          tasks, usecases)
 # 合成微信目录（真实 sqlcipher 解密链路；路径全部指向 tmp_path，绝不碰真实数据）
 from test_reader_export_pipeline import ACCT, drift_tree, env, wechat  # noqa: F401
 
@@ -40,9 +40,10 @@ def _call(fn, **kwargs):
     ("export_full_history", {}),
     ("search_history", {"query": "会议"}),
     ("semantic_search", {"query": "爬山"}),
+    ("export_chat_media", {"contact": "张三"}),
 ])
 def test_tools_with_missing_account_return_error_not_raise(name, kwargs):
-    """经 _acct 的 5 个工具：account 不存在时必须返回 error 信封，零异常逃逸。"""
+    """经 _acct 的 6 个工具：account 不存在时必须返回 error 信封，零异常逃逸。"""
     res = _call(getattr(mcp_server, name), account=BOGUS, **kwargs)
     assert isinstance(res, dict) and res.get("error"), res
     assert "账号目录不存在" in res["error"]
@@ -54,6 +55,7 @@ def test_tools_with_missing_account_return_error_not_raise(name, kwargs):
     ("export_full_history", {}),
     ("search_history", {"query": "会议"}),
     ("semantic_search", {"query": "爬山"}),
+    ("export_chat_media", {"contact": "张三"}),
 ])
 def test_errors_reach_the_agent_through_call_tool(name, args):
     """端到端：经 SDK 的 `call_tool` 也必须拿到中文信封、is_error=False。
@@ -124,7 +126,7 @@ def test_every_registered_tool_is_guarded():
     """防止将来新增工具漏加 @_guard（functools.wraps 会留下 __wrapped__）。"""
     for name in ("get_account_status", "list_contacts", "get_recent_messages",
                  "export_full_history", "get_task_status", "search_history",
-                 "semantic_search", "build_vector_index"):
+                 "semantic_search", "build_vector_index", "export_chat_media"):
         assert getattr(mcp_server, name).__wrapped__ is not None, f"{name} 缺 @_guard"
 
 
@@ -238,3 +240,63 @@ def test_search_history_envelope_carries_degraded_key(env, tmp_path, monkeypatch
     assert "degraded" in res, res
     assert [d["capability"] for d in res["degraded"]] == ["roster"]
     assert "显示名" in res["degraded"][0]["effect"]
+
+
+# ---------- T7：export_chat_media 的信封（spec §4.6） ----------
+
+def test_export_chat_media_envelope(monkeypatch):
+    """正常路径：counts 三类 + degraded 恒存在 + truncated；顺带钉参数编组
+    （kinds/months 拆列表、limit/account 透传）。media_export 打桩：不打真库。"""
+    seen: dict = {}
+
+    def fake_media_export(contact, **kw):
+        seen.update(kw, contact=contact)
+        return usecases.MediaExportResult(
+            chat_id="wxid_target", out_dir="/tmp/out/media",
+            report=media.MediaReport(
+                image=media.Counts(ok=3, failed=1, missing=2),
+                voice=media.Counts(ok=4, raw_only=1),
+                video=media.Counts(ok=1, thumb=2, missing=5),
+                degraded=["pilk 不可用：语音导出为原始 .slk"], truncated=True))
+
+    monkeypatch.setattr(usecases, "media_export", fake_media_export)
+    res = _call(mcp_server.export_chat_media, contact="张三", kinds="image,voice",
+                months="2026-08, 2026-09", limit=10, account="acct")
+    assert res == {"chat_id": "wxid_target", "out_dir": "/tmp/out/media",
+                   "counts": {"image": {"ok": 3, "failed": 1, "missing": 2},
+                              "voice": {"ok": 4, "failed": 0, "raw_only": 1},
+                              "video": {"ok": 1, "thumb": 2, "missing": 5}},
+                   "degraded": ["pilk 不可用：语音导出为原始 .slk"], "truncated": True}
+    assert seen == {"contact": "张三", "kinds": ["image", "voice"],
+                    "months": ["2026-08", "2026-09"], "limit": 10, "account": "acct"}
+
+
+def test_export_chat_media_defaults_split_cleanly(monkeypatch):
+    """months 省略 → None（不得对 None 调 split）；kinds 默认拆三类；wire 默认
+    limit=500。未降级/未截断时 degraded 恒存在（空数组）、truncated=false。"""
+    seen: dict = {}
+
+    def fake_media_export(contact, **kw):
+        seen.update(kw, contact=contact)
+        return usecases.MediaExportResult(chat_id="wxid_target", out_dir="/tmp/out/media",
+                                          report=media.MediaReport())
+
+    monkeypatch.setattr(usecases, "media_export", fake_media_export)
+    res = _call(mcp_server.export_chat_media, contact="张三")
+    assert seen == {"contact": "张三", "kinds": ["image", "voice", "video"],
+                    "months": None, "limit": 500, "account": None}
+    assert res["counts"] == {"image": {"ok": 0, "failed": 0, "missing": 0},
+                             "voice": {"ok": 0, "failed": 0, "raw_only": 0},
+                             "video": {"ok": 0, "thumb": 0, "missing": 0}}
+    assert res["degraded"] == [] and res["truncated"] is False
+
+
+def test_export_chat_media_need_confirm_passthrough(monkeypatch):
+    """歧义原样透传成 need_confirm 信封（与 recent/search/export 同形），不猜。"""
+    monkeypatch.setattr(usecases, "media_export", lambda *a, **k: usecases.NeedConfirm(
+        [usecases.Candidate("wxid_a", "张三01", "direct"),
+         usecases.Candidate("888@chatroom", "张三（群）", "group")]))
+    res = _call(mcp_server.export_chat_media, contact="张三")
+    assert res == {"need_confirm": [
+        {"username": "wxid_a", "display": "张三01", "kind": "direct"},
+        {"username": "888@chatroom", "display": "张三（群）", "kind": "group"}]}

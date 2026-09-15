@@ -177,6 +177,34 @@ def build_vector_index(rebuild: bool = False, account: str | None = None) -> dic
     return usecases.build_vector_index(account, rebuild)
 
 
+@server.tool()
+@_guard
+def export_chat_media(contact: str, kinds: str = "image,voice,video",
+                      months: str | None = None, limit: int = 500,
+                      account: str | None = None) -> dict:
+    """导出某会话的媒体文件到本机（图片解密 / 语音转 WAV / 视频复制），返回计数与输出目录。
+
+    contact 可以是 username（wxid / xxx@chatroom）或展示名（备注/昵称），歧义返回
+    need_confirm 让用户消歧，不要猜。kinds/months 为逗号分隔字符串（kinds:
+    image,voice,video；months: YYYY-MM，可多个）。产物落 out_dir 指向的输出根
+    （默认 ~/.agent-wechat/media，目录 0700），用文件系统工具自行取用——信封不回传
+    文件清单（大结果膨胀上下文）。历史媒体大多未被微信保留，counts 里的 missing
+    是常态，不是错误。图片依赖磁盘密钥推导，失败时 degraded 会说明且语音/视频
+    不受影响；其余能力级降级也汇总在 degraded（未降级为空数组）。触及 limit 时
+    truncated=true，可分月份重跑补齐。
+    """
+    res = usecases.media_export(
+        contact, kinds=[k.strip() for k in kinds.split(",") if k.strip()],
+        months=[m.strip() for m in months.split(",") if m.strip()] if months else None,
+        limit=limit, account=account)
+    if isinstance(res, usecases.NeedConfirm):
+        return _need_confirm(res)
+    d = res.report.to_dict()
+    return {"chat_id": res.chat_id, "out_dir": res.out_dir,
+            "counts": {k: d[k] for k in ("image", "voice", "video")},
+            "degraded": res.report.degraded, "truncated": res.report.truncated}
+
+
 def main() -> None:
     asyncio.run(server.run_stdio_async())
 
