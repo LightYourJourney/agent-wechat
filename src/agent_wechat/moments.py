@@ -67,7 +67,10 @@ def _text(el: ET.Element | None, path: str) -> str | None:
 
 
 def _int(v: str | None) -> int:
-    return int(v) if v and v.isdigit() else 0
+    # `isdecimal` 而非 `isdigit`：后者对 `"²"` 这类上标字符也为真，随后 `int()` 抛 ValueError，
+    # 而 `parse_post` 只 catch ET.ParseError——畸形 XML 能一路崩到整次导出（F26，与 F25 同源）。
+    # 十进制数字（含 `٣` 这类 Unicode 十进制）两谓词一致，合法输入行为不变。
+    return int(v) if v and v.isdecimal() else 0
 
 
 # `datetime.fromtimestamp` 按**本地时区**换算（`media.month_of` 与 `moments_html._when` 都是），

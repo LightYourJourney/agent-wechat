@@ -270,3 +270,28 @@ def test_create_time_accepts_only_decimal_digits():
     assert moments._ts("1735689600") == 1735689600
     assert moments._ts("\u00b2") == 0
     assert moments._ts(None) == 0
+
+
+# ---------- F26：videoDuration 走同一个 _int，同样不可崩 ----------
+
+VIDEO_DURATION_XML = """<SnsDataItem><TimelineObject>
+  <id>V9</id><username>wxid_friend</username><createTime>1735689600</createTime>
+  <ContentObject><type>2</type><mediaList><media>
+    <id>m9</id><type>2</type>
+    <videoDuration>{dur}</videoDuration>
+  </media></mediaList></ContentObject>
+</TimelineObject><LocalExtraInfo><nickname>老王</nickname></LocalExtraInfo></SnsDataItem>"""
+
+
+@pytest.mark.parametrize("bad", ["\u00b2", "abc", "", "-3"])
+def test_malformed_video_duration_is_none_and_does_not_raise(bad):
+    """F26：`videoDuration` 与 createTime 同源（`_int` 的 `isdigit()` 对 `"\u00b2"` 为真、
+    `int()` 却抛 ValueError），而 `parse_post` 只 catch `ET.ParseError`——
+    畸形 XML 能一路崩到整次导出。谓词改 isdecimal 后归 0，再由 `or None` 折成 None。"""
+    post = moments.parse_post("T1", VIDEO_DURATION_XML.format(dur=bad))
+    assert post.media[0].video_duration is None
+
+
+def test_video_duration_still_parsed():
+    """有效输入行为不变的对照：真实 videoDuration 是 ASCII 数字。"""
+    assert moments.parse_post("T1", VIDEO_DURATION_XML.format(dur="13")).media[0].video_duration == 13
