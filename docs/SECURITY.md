@@ -12,6 +12,7 @@
 | 解密后的消息明文 | `~/.agent-wechat/tmp/`（临时）→ `index.db`（持久） | 极高 |
 | 解密后的媒体明文（图片/语音 WAV/视频） | `~/.agent-wechat/media/`（持久） | 极高 |
 | 朋友圈正文 / 评论 / 点赞 / 媒体明文（`moments export` 产物） | `~/.agent-wechat/moments/`（持久；目录 0700、文件 0600） | 极高 |
+| **例外**：`moments export --out DIR` 会把同一份朋友圈明文（含已下载的媒体）写到**任意指定目录** | `DIR`（代码尽力 chmod 0700，但不在 `~/.agent-wechat/` 之下） | 极高（用后必须手动删除；不受 Time Machine 排除与 `purge` 覆盖） |
 | **例外**：`decrypt <db> --out` 调试命令会**持久**写出整库明文 | `~/.agent-wechat/<out>` | 极高（用后必须手动删除） |
 | **例外**：`media export --out DIR` 会把同一份媒体明文写到**任意指定目录** | `DIR`（代码尽力 chmod 0700，但不在 `~/.agent-wechat/` 之下） | 极高（用后必须手动删除；不受 Time Machine 排除与 `purge` 覆盖） |
 
@@ -21,7 +22,9 @@
 
 ### 零网络例外（仅朋友圈媒体下载）
 
-上面那句「不存在任何网络上传路径」有**一个**显式例外，必须在这里说清楚：
+上面那句「不存在任何网络**上传**路径」在本例外下**依然成立**——这里被打破的是「零网络」，
+不是「零上传」：流量是**入站方向**的（只从微信 CDN **取**媒体本体），本机不向任何服务器
+发送聊天 / 索引 / 密钥内容。这个例外具体是什么：
 
 - **触发条件**：只有用户显式指定 `--with-media`（CLI `moments export`）或
   `with_media=True`（MCP `export_moments`）时才成立。两者默认都是 `False`

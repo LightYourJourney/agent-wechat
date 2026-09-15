@@ -33,7 +33,8 @@
 等提示占位，保留"此处有一条图片"的事实与类型/时间元数据。
 媒体**本体**是按需另行导出的：CLI `agent-wechat media export --chat 小李`
 （MCP 对应 `export_chat_media`）把某会话的图片 / 语音 / 视频落到 `~/.agent-wechat/media/`。
-能导出的通常远少于会话里的媒体消息数——微信按需下载并定期清理，`missing` 是常态。
+能导出的通常远少于会话里的媒体消息数——微信按需下载并定期清理。计数口径见 TOOLS.md §9：
+`video.missing` 是常态，而 `image.missing` **恒为 0**（图片按目录枚举，不按消息逐条清点）。
 **朋友圈**（`agent-wechat moments export`）的媒体全在远程，默认不下载；要拿到本体需显式加
 `--with-media`（MCP 对应 `with_media=True`），这会联网——见 Q7。
 
@@ -50,7 +51,7 @@ MCP（stdio）均无网络路径，MCP 只在你的 Agent 客户端与本地 Ser
    `*.video.qq.com`）；不指定则一个网络请求都不发。请求只携带微信自己签发的媒体
    `token` 与固定 `User-Agent`，**不含本机任何聊天 / 索引内容**；**不使用代理**，一律直连。
 
-第 2 条是本项目「零网络」红线上**唯一的显式例外**，详见 SECURITY.md §1「零网络例外」。
+第 2 条是本项目零网络红线上**本次新增的**显式例外，详见 SECURITY.md §1「零网络例外」。
 
 **Q8：为什么需要 sudo 和重签名？能避免吗？**
 lldb attach 需要 `task_for_pid` 权限；Hardened Runtime 会阻止它，所以要 ad-hoc

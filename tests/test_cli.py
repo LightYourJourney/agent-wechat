@@ -177,7 +177,7 @@ def test_contact_miss_suffix_names_the_cli_command(monkeypatch, capsys):
     """未命中时 CLI 该提示 `contacts`，不是 MCP 的工具名 list_contacts。
 
     core 只抛中立的 ContactNotFound；下一步指引是入口专属的，由适配层追加
-    （USAGE.md:195-196 文档化的就是这一条）。
+    （USAGE.md §9「输出约定与错误提示」文档化的就是这一条）。
     """
     monkeypatch.setattr(account, "resolve_account", lambda a: "acct")
 

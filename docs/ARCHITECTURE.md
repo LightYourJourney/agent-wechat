@@ -31,7 +31,7 @@ src/agent_wechat/
 ├── reader.py       消息读取：表发现、内容解码、流式产出（按语义**解码消息内容**的唯一模块——`inspect` 也会读库，但它只 dump 结构与样例行；结构与探测声明在 schema.py）
 ├── media.py        媒体导出：图片 dat 解密（密钥纯磁盘推导 + 样本验证）、语音 SILK→WAV、视频定位（唯一接触媒体容器与媒体密钥的模块；reader import 它抽 `media_refs`，不反向）
 ├── moments.py      朋友圈解析：sns.db 的 `TimelineObject` XML → 结构化动态（纯读取，不联网）
-├── sns_media.py    朋友圈远程媒体：URL 构造 → 下载 → WX-ISAAC64 解密（**唯一联网模块**，隔离带）
+├── sns_media.py    朋友圈远程媒体：URL 构造 → 下载 → WX-ISAAC64 解密（本项目**唯一直接向微信 CDN 发请求**的模块，隔离带）
 ├── moments_html.py 朋友圈渲染：单文件自包含 HTML 时间线（纯函数，不写文件、不联网）
 ├── export.py       导出管道：流式批处理 + 水位线续跑（任务登记归 usecases 层）
 ├── store.py        本地检索库：DDL、幂等 upsert、水位线、FTS 触发器
@@ -152,7 +152,7 @@ moments.iter_posts(account)                 # 复用 passphrase 解密 sns/sns.d
   → 按 chat_filter（作者）与 months（本地月份）过滤
        ↓ with_media=False（默认，零网络）
   → 远程媒体一律在产物里标「远程，未下载」
-       ↓ with_media=True（唯一的联网例外）
+       ↓ with_media=True（本次新增的联网例外）
   → sns_media.build_url → 直连（不走代理）微信 CDN 两域白名单 → WX-ISAAC64 解密
   → moments_html.render → 单文件 HTML 落 ~/.agent-wechat/moments/index.html
 ```

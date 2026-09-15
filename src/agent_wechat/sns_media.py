@@ -1,6 +1,6 @@
 """朋友圈远程媒体：URL 构造 / 下载 / WX-ISAAC64 解密。
 
-**本模块是「零网络」红线上唯一的显式例外**（spec §6）：只有 `fetch()` 会发请求，
+**本模块是零网络红线上本次新增的显式例外**（spec §6）：只有 `fetch()` 会发请求，
 且只连微信 CDN 两个域；调用方默认不启用（`--with-media` / `with_media=True`）。
 """
 from __future__ import annotations

@@ -194,7 +194,7 @@ agent-wechat moments export
 # 限定月份（逗号分隔 YYYY-MM）；--chat 按**作者**筛选（名字或 wxid），不是「会话」
 agent-wechat moments export --months 2026-01,2026-02 --chat 小李
 
-# 联网下载媒体本体——本项目「零网络」红线上唯一的显式例外
+# 联网下载媒体本体——本项目零网络红线上本次新增的显式例外
 agent-wechat moments export --limit 5 --with-media
 # 已导出 5 条动态（评论 2 / 点赞 12）
 # 媒体：已下载 22 / 未下载 0 / 失败 0

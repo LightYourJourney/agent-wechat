@@ -217,7 +217,7 @@ def export_moments(contact: str | None = None, months: str | None = None,
 
     **默认不联网**：with_media=False 时全程零网络，产物里的媒体一律标注
     「远程，未下载」。设为 True 才会下载并解密媒体本体——这会向微信 CDN 发起
-    请求（本项目「零网络」红线上唯一的显式例外），且耗时随媒体数量增长。
+    请求（本项目零网络红线上本次新增的显式例外），且耗时随媒体数量增长。
     产物落 out_dir 的 index.html（目录 0700），用文件系统工具自行打开；
     信封不回传文件清单。
 

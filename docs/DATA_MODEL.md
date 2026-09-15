@@ -172,7 +172,6 @@ SnsTimeLine(tid, user_name, content, pack_info_buf)
 | `LocalExtraInfo/comment_user_list/user_comment` | 评论（`type=2`；带 `ref_username` 即「A 回复 B」） |
 | `LocalExtraInfo/like_user_list/user_comment` | 点赞（`type=1`，只有昵称、无正文） |
 | `LocalExtraInfo/with_user_list/user_comment` | `type=4`，与评论同归一类 |
-| `TimelineObject/location` | 定位（本机 1,923 条全空） |
 
 ⚠️ **`<user_comment>` 在 `LocalExtraInfo` 下，不在 `TimelineObject` 内**：本机 2,450 条
 互动全部落在 `comment_user_list`(1,289) / `like_user_list`(1,157) / `with_user_list`(4)，
