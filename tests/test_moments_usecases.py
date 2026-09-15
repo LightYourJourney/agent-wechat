@@ -215,6 +215,28 @@ def test_export_absolute_md5_traversal_is_confined(env, tmp_path):
     _assert_confined(res, home)
 
 
+# ---------- F25：畸形 createTime 不得让整次导出崩掉（离线也崩） ----------
+
+BAD_TS_XML = """<SnsDataItem><TimelineObject>
+ <id>P8</id><username>wxid_friend</username><createTime>99999999999999999999</createTime>
+ <contentDesc>畸形时间戳</contentDesc>
+</TimelineObject><LocalExtraInfo><nickname>老王</nickname></LocalExtraInfo></SnsDataItem>"""
+
+
+def test_export_survives_malformed_create_time_offline(env, monkeypatch):
+    """畸形 `createTime` 曾让**离线**导出整次抛裸 OverflowError 逃出 core 层——
+    不需要开 --with-media。这里顺带把 fetch 打成必炸，确认修复后仍是零网络。"""
+    def boom(*a, **k):
+        raise AssertionError("离线导出不应发起任何网络请求")
+    monkeypatch.setattr(sns_media, "fetch", boom)
+    _add_post(BAD_TS_XML)
+
+    res = usecases.moments_export(account=ACCT)
+    assert res.report.posts == 2                        # 畸形那条仍在（create_time 归 0）
+    assert res.report.media_not_downloaded == 1
+    assert (pathlib.Path(res.out_dir) / "index.html").exists()
+
+
 # ---------- 嗅探与落盘失败：`fetch` 的文档把「自行嗅探校验」移交给了本层 ----------
 
 def test_export_garbage_media_is_counted_and_never_written(env):

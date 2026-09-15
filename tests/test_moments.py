@@ -5,7 +5,7 @@ import sqlite3
 
 import pytest
 
-from agent_wechat import keys, media, moments, paths
+from agent_wechat import keys, media, moments, moments_html, paths
 
 ACCT = "wxid_testacct01_ab12"
 
@@ -232,3 +232,41 @@ def test_iter_posts_missing_db_raises_data_not_found(tmp_path, monkeypatch):
     monkeypatch.setattr(paths, "XWECHAT_FILES", tmp_path / "nope")
     with pytest.raises(errors.DataNotFound):
         list(moments.iter_posts(ACCT))
+
+
+# ---------- F25：createTime 消毒（下游 datetime.fromtimestamp 会抛裸异常） ----------
+
+@pytest.mark.parametrize("bad", [
+    "99999999999999999999",       # 远超 time_t：OverflowError
+    "253402300799",               # UTC 的 9999-12-31——本机 UTC+8 会落进公元 10000 年：ValueError
+    "\u00b2",                     # isdigit() 为真、int() 抛 ValueError（故不能用 isdigit）
+    "0", "-1", "", "abc",         # 非正 / 非数字
+])
+def test_malformed_create_time_is_zeroed_and_still_renderable(bad):
+    """`createTime` 是**好友可控**的 XML 字段。越界值会让 `media.month_of`
+    （含 `iter_posts` 的月份过滤）与 `moments_html._when` 抛 OverflowError / ValueError——
+    都不是 AgentWeChatError，会逃出 core 层；而且**离线渲染路径同样会踩**（无需 --with-media）。
+    故在解析边界收口为 0，并实测下游两个消费者都不再抛。"""
+    xml = POST_XML.replace("<createTime>1735689600</createTime>",
+                           f"<createTime>{bad}</createTime>")
+    post = moments.parse_post("T1", xml)
+    assert post.create_time == 0
+    media.month_of(post.create_time)                       # 不抛
+    doc = moments_html.render([post], moments.MomentsReport())
+    assert isinstance(doc, str)                            # 不抛
+
+
+def test_create_time_boundary_is_actually_safe():
+    """上界本身必须真能被 `datetime` 表示——否则等于把洞从「超大值」挪到「边界值」。
+    `_MAX_TS` 取本地时区最不利（UTC+14）也安全的那一刻，故任何时区都成立。"""
+    assert moments._ts(str(moments._MAX_TS)) == moments._MAX_TS
+    assert moments._ts(str(moments._MAX_TS + 1)) == 0
+    media.month_of(moments._MAX_TS)                        # 边界值不抛
+    moments_html._when(moments._MAX_TS)                    # 边界值不抛
+
+
+def test_create_time_accepts_only_decimal_digits():
+    """`isdigit()` 对 "\u00b2" 这类上标为真但 `int()` 会抛——白名单用 isdecimal。"""
+    assert moments._ts("1735689600") == 1735689600
+    assert moments._ts("\u00b2") == 0
+    assert moments._ts(None) == 0

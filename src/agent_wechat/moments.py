@@ -70,6 +70,30 @@ def _int(v: str | None) -> int:
     return int(v) if v and v.isdigit() else 0
 
 
+# `datetime.fromtimestamp` 按**本地时区**换算（`media.month_of` 与 `moments_html._when` 都是），
+# 所以上界比 UTC 的 9999-12-31 还早：本机 UTC+8 实测，UTC 的 `253402300799` 会落进公元 10000 年
+# 并抛 `ValueError`（不是 OverflowError，但同样是裸异常）。取「UTC+14」（现实中的最大偏移）
+# 也不越界的那一刻，任何时区都安全。
+_MAX_TS = 253402250399        # UTC 9999-12-31T01:59:59 = 本地 9999-12-31T23:59:59 @UTC+14
+
+
+def _ts(v: str | None) -> int:
+    """时间戳：仅接受 `datetime` 能安全表示的正整数，否则 0。
+
+    `createTime` 来自动态 XML（好友可控）。下游 `media.month_of`（含 `iter_posts` 的月份过滤）、
+    `moments_html._when` 都会对它做 `datetime.fromtimestamp`，越界即抛 `OverflowError` 或
+    `ValueError`——两者**都不是 AgentWeChatError**，会逃出 core 层；而且**离线渲染路径同样会踩**
+    （不需要开 `--with-media`）。故在解析边界一次收口，未来新增的消费者自动免疫。
+
+    用 `isdecimal` 而非 `isdigit`：后者对 `"²"` 这类上标字符也为真，随后 `int()` 抛
+    `ValueError`（实测），等于把同一个洞换个入口留着。
+    """
+    if not v or not v.isdecimal():
+        return 0
+    n = int(v)
+    return n if 0 < n <= _MAX_TS else 0
+
+
 def _media_of(m: ET.Element) -> SnsMedia:
     t = _text(m, "type")
     kind = KIND_VIDEO if t == "6" else KIND_IMAGE if t == "2" else KIND_OTHER
@@ -103,7 +127,7 @@ def _comments_of(root: ET.Element) -> tuple[SnsComment, ...]:
             nickname=_text(c, "nickname") or "",
             content=_text(c, "content"),
             ref_nickname=_text(c, "ref_username"),
-            create_time=_int(_text(c, "create_time")),
+            create_time=_ts(_text(c, "create_time")),
             is_rich=(_text(c, "is_rich_text") or "0") == "1",
         ))
     return tuple(out)
@@ -126,7 +150,7 @@ def parse_post(tid: str, xml_text: str) -> SnsPost | None:
         post_id=(tlo.findtext("id") or "").strip(),
         username=(tlo.findtext("username") or "").strip(),
         nickname=_text(root, "LocalExtraInfo/nickname") or "",
-        create_time=_int(_text(tlo, "createTime")),
+        create_time=_ts(_text(tlo, "createTime")),
         text=_text(tlo, "contentDesc"),
         is_video_post=(ctype == str(TYPE_VIDEO_POST)),
         media=tuple(_media_of(m) for m in tlo.findall("ContentObject/mediaList/media")),

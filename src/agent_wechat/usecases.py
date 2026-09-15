@@ -489,7 +489,7 @@ def moments_export(contact: str | None = None, *, months: list[str] | None = Non
 # 产物根之外，`md5="/tmp/x"` 更会因 pathlib 丢弃左操作数而直接落在绝对路径上（已实测复现；
 # 后者还会让 `relative_to` 抛 ValueError 穿透 core 层）。故走白名单：只有 32 位 hex 才认
 # （真实数据 4899/5076 命中），其余一律回落到 URL 的 md5。
-_HEX32 = re.compile(r"^[0-9a-fA-F]{32}$")
+_HEX32 = re.compile(r"^[0-9a-fA-F]{32}\Z")
 
 
 def _resolve_media(p: "moments.SnsPost", out_root, report, with_media: bool,
