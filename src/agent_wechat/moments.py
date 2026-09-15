@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import dataclasses
+import math
 import sqlite3
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
@@ -66,11 +67,24 @@ def _text(el: ET.Element | None, path: str) -> str | None:
     return v.strip() if v and v.strip() else None
 
 
-def _int(v: str | None) -> int:
-    # `isdecimal` 而非 `isdigit`：后者对 `"²"` 这类上标字符也为真，随后 `int()` 抛 ValueError，
-    # 而 `parse_post` 只 catch ET.ParseError——畸形 XML 能一路崩到整次导出（F26，与 F25 同源）。
-    # 十进制数字（含 `٣` 这类 Unicode 十进制）两谓词一致，合法输入行为不变。
-    return int(v) if v and v.isdecimal() else 0
+def _duration(v: str | None) -> int | None:
+    """视频时长（秒）。**真机是浮点**（`"30.0009995"` / `"15.033"`）。
+
+    此前走整数谓词（`isdecimal`）→ 87%（158/181）的真实时长被静默判成「没有时长」，
+    与「如实导出」相悖（F29）。改 `float()` 后：越界值（`inf`/`nan`）、非正值、非数字
+    一律 None（不是 0——0 秒是「时长 0」，语义不同），`round()` 保持 `int | None`。
+
+    不崩是硬要求：`float()` 对畸形输入只抛 `ValueError`，而 `parse_post` 只 catch
+    `ET.ParseError`——漏出去就能一路崩到整次导出（F26，与 F25 同源）。`"²"` 与 `"abc"`
+    走的是同一条 ValueError 路径。
+    """
+    if not v:
+        return None
+    try:
+        f = float(v)
+    except ValueError:
+        return None
+    return round(f) if math.isfinite(f) and f > 0 else None
 
 
 # `datetime.fromtimestamp` 按**本地时区**换算（`media.month_of` 与 `moments_html._when` 都是），
@@ -112,7 +126,7 @@ def _media_of(m: ET.Element) -> SnsMedia:
         enc_idx=u.get("enc_idx") if u is not None else None,
         md5=u.get("md5") if u is not None else None,
         thumb=(th.text or "").strip() or None if th is not None else None,
-        video_duration=_int(_text(m, "videoDuration")) or None,
+        video_duration=_duration(_text(m, "videoDuration")),
         # 实况照片：url 无 token → 本机不可下载（spec §8）；密钥在 liveMedia/enc@key
         live_url=(lmu.text or "").strip() or None if lmu is not None else None,
         live_key=lmk.get("key") if lmk is not None else None,

@@ -282,7 +282,7 @@ def test_create_time_accepts_only_decimal_digits():
     assert moments._ts(None) == 0
 
 
-# ---------- F26：videoDuration 走同一个 _int，同样不可崩 ----------
+# ---------- videoDuration：真机是浮点（F29）；畸形输入不可崩（F26） ----------
 
 VIDEO_DURATION_XML = """<SnsDataItem><TimelineObject>
   <id>V9</id><username>wxid_friend</username><createTime>1735689600</createTime>
@@ -293,15 +293,25 @@ VIDEO_DURATION_XML = """<SnsDataItem><TimelineObject>
 </TimelineObject><LocalExtraInfo><nickname>老王</nickname></LocalExtraInfo></SnsDataItem>"""
 
 
-@pytest.mark.parametrize("bad", ["\u00b2", "abc", "", "-3"])
+@pytest.mark.parametrize("bad", ["\u00b2", "abc", "", "-3", "-1.5", "0", "0.0", "inf", "-inf", "nan"])
 def test_malformed_video_duration_is_none_and_does_not_raise(bad):
-    """F26：`videoDuration` 与 createTime 同源（`_int` 的 `isdigit()` 对 `"\u00b2"` 为真、
-    `int()` 却抛 ValueError），而 `parse_post` 只 catch `ET.ParseError`——
-    畸形 XML 能一路崩到整次导出。谓词改 isdecimal 后归 0，再由 `or None` 折成 None。"""
+    """F26：`videoDuration` 与 createTime 同源（整数谓词对 `"\u00b2"` 为真、`int()` 却抛），
+    而 `parse_post` 只 catch `ET.ParseError`——畸形 XML 能一路崩到整次导出（F25 同源）。
+
+    F29：非正值与**非有限值**（`inf`/`nan`）同样归 None——「时长 0」与「没有时长」
+    不是一回事，硬塞一个 0 等于替调用方编数。
+    """
     post = moments.parse_post("T1", VIDEO_DURATION_XML.format(dur=bad))
     assert post.media[0].video_duration is None
 
 
-def test_video_duration_still_parsed():
-    """有效输入行为不变的对照：真实 videoDuration 是 ASCII 数字。"""
-    assert moments.parse_post("T1", VIDEO_DURATION_XML.format(dur="13")).media[0].video_duration == 13
+@pytest.mark.parametrize("raw, want", [("13", 13), ("30.0009995", 30), ("15.033", 15)])
+def test_video_duration_accepts_float(raw, want):
+    """F29：**真机的 `videoDuration` 是浮点**（实测 `"30.0009995"` / `"15.033"`），
+    整数谓词会把 158/181（87%）的真实时长静默丢成 None。
+
+    变异验证：把 `_duration` 换回整数谓词（`v.isdecimal()`），本用例必须**红**。
+    `"13"` 是对照组——它在两种实现下都对，用来证明红的是浮点那两条而不是别的东西。
+    """
+    assert moments.parse_post(
+        "T1", VIDEO_DURATION_XML.format(dur=raw)).media[0].video_duration == want
