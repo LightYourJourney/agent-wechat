@@ -12,13 +12,16 @@
 """
 from __future__ import annotations
 
+import dataclasses
+import hashlib
+import pathlib
 import re
 import sqlite3
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from . import account as acc_mod
-from . import errors, export, keys, reader, search, store, tasks, vector
+from . import errors, export, keys, paths, reader, search, store, tasks, vector
 
 if TYPE_CHECKING:
     # 仅类型检查期：media 顶层拉起 cryptography，运行时在 media_export 内惰性 import
@@ -420,3 +423,110 @@ def index_ready() -> bool:
             return store.counts(con)["messages"] > 0
     except Exception:
         return False
+
+
+@dataclasses.dataclass
+class MomentsExportResult:
+    """moments_export 的成功返回（CLI 与 MCP 共用）。out_dir 由本用例赋值，入口不重算。"""
+    out_dir: str
+    report: "moments.MomentsReport"
+
+
+def moments_export(contact: str | None = None, *, months: list[str] | None = None,
+                   with_media: bool = False, limit: int = 2000, out_dir=None,
+                   account: str | None = None, fetch=None) -> "MomentsExportResult | NeedConfirm":
+    """朋友圈导出用例：解析 →（可选）下载解密 → 渲染 HTML。
+
+    `with_media=False`（默认）时**全程零网络**——这是「零网络」红线上唯一例外的开关，
+    默认必须关闭。`fetch` 仅作测试注入，生产调用方不传。
+    """
+    from . import media, moments, moments_html, sns_media   # 惰性：moments_html 只在导出时用
+    ctx = ChatContext(account)
+    author = ctx.resolve_optional(contact)
+    if isinstance(author, NeedConfirm):
+        return author
+    bad_months = [m for m in (months or []) if not MONTH_RE.fullmatch(m)]
+    if bad_months:
+        raise errors.SearchInputError(f"月份格式应为 YYYY-MM：{', '.join(bad_months)}")
+    cap = clamp_limit(limit, (1, 2000))
+    do_fetch = fetch if fetch is not None else sns_media.fetch
+
+    out_root = media._ensure_tree(
+        pathlib.Path(out_dir) if out_dir else paths.HOME_DIR / "moments")
+    report = moments.MomentsReport()
+    kept: list[moments.SnsPost] = []
+    lo = hi = None
+    for p in moments.iter_posts(ctx.account, chat_filter=author, months=months):
+        if len(kept) >= cap:
+            report.truncated = True
+            break
+        lo = p.create_time if lo is None else min(lo, p.create_time)
+        hi = p.create_time if hi is None else max(hi, p.create_time)
+        report.comments += sum(1 for c in p.comments if c.kind == moments.CMT_COMMENT)
+        report.likes += sum(1 for c in p.comments if c.kind == moments.CMT_LIKE)
+        kept.append(_resolve_media(p, out_root, report, with_media, do_fetch))
+    report.posts = len(kept)
+    report.window = (lo, hi) if lo is not None else None
+    report.out_dir = str(out_root)
+
+    doc = moments_html.render(kept, report)
+    index = out_root / "index.html"
+    try:
+        index.write_text(doc, encoding="utf-8")
+        index.chmod(0o600)
+    except OSError as exc:
+        raise errors.MediaOutputError(f"写产物失败：{index}") from exc
+    return MomentsExportResult(out_dir=str(out_root), report=report)
+
+
+def _resolve_media(p: "moments.SnsPost", out_root, report, with_media: bool,
+                   do_fetch) -> "moments.SnsPost":
+    """逐条媒体决定「下载并落盘」还是「标注未下载」。单条失败只计数，不外抛。"""
+    from . import media, moments, sns_media
+    out = []
+    for m in p.media:
+        if not with_media:
+            report.media_not_downloaded += 1
+            out.append(m)
+            continue
+        if sns_media.build_url(m) is None:
+            report.media_not_downloaded += 1          # 无 token（如实况照片）→ 不可下载
+            out.append(m)
+            continue
+        try:
+            data = do_fetch(m)
+            ext = _sniff_ext(data)
+            if ext is None:
+                report.media_failed += 1
+                report.degraded.append("有媒体解密后不是已知图片格式")
+                out.append(m)
+                continue
+            stem = m.md5 or hashlib.md5((m.url or "").encode()).hexdigest()
+            saved = media._save(out_root, "media", m.kind,
+                                media.month_of(p.create_time), stem, ext, data)
+            if saved is None:
+                report.media_failed += 1
+                out.append(m)
+                continue
+            report.media_downloaded += 1
+            out.append(dataclasses.replace(
+                m, local=str(saved.relative_to(out_root))))
+        except sns_media.SnsMediaError:
+            report.media_failed += 1
+            out.append(m)
+    return dataclasses.replace(p, media=tuple(out))
+
+
+def _sniff_ext(data: bytes) -> str | None:
+    """按魔数判扩展名——解密成功但内容非图片时返回 None（spec §5）。"""
+    if data[:3] == b"\xff\xd8\xff":
+        return "jpg"
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "png"
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return "gif"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "webp"
+    if data[4:8] == b"ftyp":
+        return "mp4"
+    return None
