@@ -30,6 +30,9 @@ src/agent_wechat/
 ├── schema.py       微信库结构声明：能力 × 必需表/列 + 探测（纯数据，不碰 IO）
 ├── reader.py       消息读取：表发现、内容解码、流式产出（按语义**解码消息内容**的唯一模块——`inspect` 也会读库，但它只 dump 结构与样例行；结构与探测声明在 schema.py）
 ├── media.py        媒体导出：图片 dat 解密（密钥纯磁盘推导 + 样本验证）、语音 SILK→WAV、视频定位（唯一接触媒体容器与媒体密钥的模块；reader import 它抽 `media_refs`，不反向）
+├── moments.py      朋友圈解析：sns.db 的 `TimelineObject` XML → 结构化动态（纯读取，不联网）
+├── sns_media.py    朋友圈远程媒体：URL 构造 → 下载 → WX-ISAAC64 解密（**唯一联网模块**，隔离带）
+├── moments_html.py 朋友圈渲染：单文件自包含 HTML 时间线（纯函数，不写文件、不联网）
 ├── export.py       导出管道：流式批处理 + 水位线续跑（任务登记归 usecases 层）
 ├── store.py        本地检索库：DDL、幂等 upsert、水位线、FTS 触发器
 ├── search.py       检索路由：trigram FTS / LIKE 兜底
@@ -37,7 +40,7 @@ src/agent_wechat/
 ├── tasks.py        长任务注册表：后台线程 + 进度落盘 + 中断回收（不认识任何具体任务）
 ├── usecases.py     用例层：两个入口共享的入口策略（参数归一化、账号/会话解析、结果形状）
 ├── purge.py        数据销毁：清单 → 计划 → 执行 → 核查（只做 CLI，不进 MCP）
-├── mcp_server.py   MCP 薄适配层（9 工具，只做参数编组与渲染）
+├── mcp_server.py   MCP 薄适配层（10 工具，只做参数编组与渲染）
 └── cli.py          命令行入口（只做参数编组与渲染）
 ```
 
@@ -141,6 +144,22 @@ media.export_media(account, chat_ids, kinds, months)
 `media rebuild-refs` 全量回填（见 DATA_MODEL.md §3）；导出本身目前仍按磁盘目录枚举定位，
 该表是留给「按消息定位媒体」的索引。
 
+### 3.8 朋友圈读取与导出（离线默认，联网需显式开启）
+
+```
+moments.iter_posts(account)                 # 复用 passphrase 解密 sns/sns.db（只读）
+  → SnsTimeLine.content 的 TimelineObject XML → SnsPost（正文/媒体引用/评论/点赞）
+  → 按 chat_filter（作者）与 months（本地月份）过滤
+       ↓ with_media=False（默认，零网络）
+  → 远程媒体一律在产物里标「远程，未下载」
+       ↓ with_media=True（唯一的联网例外）
+  → sns_media.build_url → 直连（不走代理）微信 CDN 两域白名单 → WX-ISAAC64 解密
+  → moments_html.render → 单文件 HTML 落 ~/.agent-wechat/moments/index.html
+```
+
+产物页首固定标注「这是微信本地缓存窗口，不是完整历史」——`createTime` 覆盖的只是
+微信滚动缓存的窗口。单条媒体失败只计入计数与降级区，不中断整次导出。
+
 ## 4. 关键设计决策与取舍
 
 | 决策 | 备选 | 理由 |
@@ -173,7 +192,8 @@ media.export_media(account, chat_ids, kinds, months)
 | 向量语义检索 | 已实现：`vector.py`（fastembed 本地嵌入 + sqlite-vec KNN） | 逐条消息 + 确定性上下文前缀；`vec0` 表按 `account\|chat_md5` partition key 分片、`account` metadata 做账号隔离；水位线按 `messages.id` 续跑；导出与嵌入解耦（手动触发） |
 | 1-2 字高频查询 | LIKE 兜底（限 contact 时够用） | 增加 bigram 影子 FTS 表（存储约 +2×，做成配置项） |
 | 更大规模（千万级） | 单文件 SQLite（百万级实测流畅） | 分库（按账号/年份）或迁移 PostgreSQL + pgvector |
-| 媒体导出 | 已实现：`media.py`（图片 dat 解密 / 语音 SILK→WAV / 视频定位）+ `media_refs` 映射 | 按会话导出与存量回填已就绪；朋友圈图（本地缓存与远程）均不在枚举范围，按相册批量导出未做 |
+| 媒体导出 | 已实现：`media.py`（图片 dat 解密 / 语音 SILK→WAV / 视频定位）+ `media_refs` 映射 | 按会话导出与存量回填已就绪；按相册批量导出未做 |
+| 朋友圈读取与导出 | 已实现：`moments.py`（离线解析 `sns.db`）+ `moments_html.py`（单文件 HTML）+ `sns_media.py`（远程媒体，默认关） | 远程媒体需联网——`--with-media` / `with_media=True` 显式开启，只连微信 CDN 两域（`*.qpic.cn` / `*.video.qq.com`），默认全程零网络；本地缓存图不参与（文件名与动态对不上）；发布 / 删除等写操作不做 |
 | 群成员显示名 | 已实现：索引库存 `display_names` 名册，查询时 join；实时路径 `recent` 用内存名册 | 群昵称在 `contact.db` 的 `chat_room.ext_buffer`（protobuf，字段 f2，可选），回落 `contact.remark` / `nick_name` |
 | 增量自动同步 | 手动重跑 export（秒级） | export 管道与水位线已就绪，加定时触发即可 |
 

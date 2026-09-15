@@ -12,6 +12,7 @@
 ├── index.db-wal / -shm     # WAL 伴生文件
 ├── tasks.json              # 导出长任务的状态与进度
 ├── media/                  # 媒体导出产物（图片/语音 WAV/视频，0700，明文）
+├── moments/                # 朋友圈导出产物（单文件 HTML + 媒体，0700，明文）
 └── tmp/                    # 解密临时目录（单分片明文，用后即焚）
 ```
 
@@ -139,7 +140,56 @@ CREATE TABLE watermark (
 | 语音 `VoiceInfo.voice_data`（明文 SILK，`\x02#!SILK_V3` 开头） | pilk 解码 + 自封 44B RIFF 头 → 24kHz 单声道 WAV；pilk 缺失时回退存原始 `.slk`（`\x02` 前缀保留） |
 | 视频（`msg/video/{YYYY-MM}/{file_key}.mp4`，本身是明文，微信按需下载） | 账号级枚举 `msg/video/{月份}/` 后直接复制为 `.mp4`；本体不在时回退缩略图 `{file_key}_thumb.jpg`（多会话导出时无从归属，记 `degraded` 跳过） |
 
-## 6. 面向 LLM 蒖馏的数据获取
+## 6. 朋友圈数据源（sns.db）
+
+朋友圈**不进本地检索库**：`moments export` 直接从微信的 `db_storage/sns/sns.db`
+（sqlcipher，复用同一套 passphrase）读取，只产出单文件 HTML 时间线，不写 `index.db`。
+产物落 `~/.agent-wechat/moments/`（目录 0700、文件 0600）。
+
+源头是一张表：
+
+```sql
+SnsTimeLine(tid, user_name, content, pack_info_buf)
+```
+
+`content` 是完整的 XML `<SnsDataItem><TimelineObject>…</TimelineObject><LocalExtraInfo>…`。
+本机实测 1,923 行，全部可解析。
+
+### XML 字段（`moments.parse_post` 读的就是这些）
+
+| 路径 | 说明 |
+|---|---|
+| `TimelineObject/id` | 动态 id |
+| `TimelineObject/username` | 作者 wxid |
+| `LocalExtraInfo/nickname` | 作者昵称——**直接带在动态里，不需要 join 联系人** |
+| `TimelineObject/createTime` | 时间戳（unix 秒） |
+| `TimelineObject/contentDesc` | 动态正文（可空；本机 1,718/1,923 非空） |
+| `TimelineObject/ContentObject/type` | `15` = 视频动态 |
+| `ContentObject/mediaList/media` | 媒体引用；`media/type`：`2`=图片、`6`=视频、其余归「未分类」 |
+| `media/url@token`、`@key`、`@md5`、`@enc_idx` | **属性，不是子元素**——只看元素文本会漏掉全部鉴权信息（踩过的坑） |
+| `media/videoDuration` | 视频时长（秒，可缺省） |
+| `media/LivePhoto/liveMedia/url`、`enc@key` | 实况照片；其主 `url` 无 `token` → 不可下载 |
+| `LocalExtraInfo/comment_user_list/user_comment` | 评论（`type=2`；带 `ref_username` 即「A 回复 B」） |
+| `LocalExtraInfo/like_user_list/user_comment` | 点赞（`type=1`，只有昵称、无正文） |
+| `LocalExtraInfo/with_user_list/user_comment` | `type=4`，与评论同归一类 |
+| `TimelineObject/location` | 定位（本机 1,923 条全空） |
+
+⚠️ **`<user_comment>` 在 `LocalExtraInfo` 下，不在 `TimelineObject` 内**：本机 2,450 条
+互动全部落在 `comment_user_list`(1,289) / `like_user_list`(1,157) / `with_user_list`(4)，
+`TimelineObject` 里一条都没有。解析时把根节点取错**不会报错**，只会静默得 0 条互动。
+
+### 缓存窗口（产物必须如实标注的边界）
+
+`createTime` 覆盖的只是微信**滚动缓存**的窗口，不是好友的完整历史：本机实测 1,923 条
+覆盖 2013-02 ~ 2026-09，但密度极不均（2013–2023 多数月份仅 1–13 条，2026-01 单月 348 条）。
+产物页首固定写明「这是微信本地缓存窗口，不是完整历史」。
+
+媒体**全部是远程的**：每个媒体项只有远程 URL，需联网下载并解密
+（默认关闭，见 SECURITY.md §1「零网络例外」）。本机 `cache/*/Sns/Img/` 里的朋友圈缓存图
+与聊天图同一把钥匙、可解，但**文件名与动态对不上**（与 `url@md5`、`thumb@md5`、
+`media/id` 及 URL 的四种 md5 变体全部 0 命中），因此不参与导出。
+
+## 7. 面向 LLM 蒖馏的数据获取
 
 导出后的每条消息已是结构化字段（会话/发送者/是否本人/时间/类型/正文）。
 两种取用方式：
@@ -162,9 +212,9 @@ for chat, in con.execute("SELECT DISTINCT chat_id FROM messages"):
 
 > 📌 按对话窗口自动切片（如 30 分钟静默切段）的蒸馏导出格式为**规划中功能**，
 > 当前需按上述方式自行组织。非文本消息在 `messages` 里以提示占位，媒体本体不入 `index.db`
-> ——需要本体时走 `agent-wechat media export`（见 USAGE.md §6），产物在 `~/.agent-wechat/media/`。
+> ——需要本体时走 `agent-wechat media export`（见 USAGE.md §7），产物在 `~/.agent-wechat/media/`。
 
-## 7. 备份与销毁
+## 8. 备份与销毁
 
 - 备份：拷贝 `index.db`（+`-wal`/`-shm`）即可；`~/.agent-wechat/` 已排除出 Time Machine
 - 销毁：`agent-wechat purge --all --yes`（密钥缓存与全部索引一并清除；微信源数据不受影响）。默认 dry-run，手工 `rm -rf ~/.agent-wechat` 仍是等价后备

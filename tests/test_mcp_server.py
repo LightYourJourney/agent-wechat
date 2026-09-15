@@ -44,7 +44,7 @@ def _call(fn, **kwargs):
     ("export_moments", {}),
 ])
 def test_tools_with_missing_account_return_error_not_raise(name, kwargs):
-    """经 _acct 的 7 个工具：account 不存在时必须返回 error 信封，零异常逃逸。"""
+    """经 `usecases` 账号解析的这 7 个工具：account 不存在时必须返回 error 信封，零异常逃逸。"""
     res = _call(getattr(mcp_server, name), account=BOGUS, **kwargs)
     assert isinstance(res, dict) and res.get("error"), res
     assert "账号目录不存在" in res["error"]

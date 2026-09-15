@@ -1,6 +1,6 @@
 # TOOLS — MCP 工具参考
 
-> 本文档逐个说明 agent-wechat MCP Server 暴露的 9 个工具：用途、参数、返回结构、
+> 本文档逐个说明 agent-wechat MCP Server 暴露的 10 个工具：用途、参数、返回结构、
 > 示例与错误。所有工具经 stdio JSON-RPC 调用；示例为 Agent 视角的调用与实际返回。
 
 通用约定：
@@ -328,6 +328,60 @@
 
 ---
 
+## 10. export_moments
+
+**用途**：读取本账号可见的朋友圈动态（正文、作者、时间、评论、点赞），渲染成
+**单文件自包含的 HTML 时间线**，返回计数、时间窗口与输出目录。
+**默认不联网**——不加 `with_media` 时全程零网络，产物里的媒体一律标「远程，未下载」。
+
+| 参数 | 类型 | 必填 | 默认 | 说明 |
+|---|---|---|---|---|
+| `contact` | string | 否 | null | 按**作者**筛选（username 或展示名）；省略 = 全部好友。歧义返回 `need_confirm`（形状见 §3），未命中返回 `{"error": "找不到联系人「XXX」，请用 list_contacts 查询"}` |
+| `months` | string | 否 | null | 逗号分隔的月份（`YYYY-MM`），按动态时间过滤；省略不限 |
+| `with_media` | bool | 否 | `false` | **是否联网下载并解密媒体本体**。`false`（默认）= 零网络；`true` = 向微信 CDN 发起请求（见下方「联网边界」） |
+| `limit` | int | 否 | 500 | 动态条数上限（1-2000，超出按边界处理） |
+| `account` | string | 否 | null | 同通用约定 |
+
+**成功返回**：
+
+```json
+{
+  "out_dir": "/Users/you/.agent-wechat/moments",
+  "counts": {
+    "posts": 500, "comments": 312, "likes": 288,
+    "media_downloaded": 0, "media_not_downloaded": 1204, "media_failed": 0
+  },
+  "window": { "earliest": 1360159626, "latest": 1789046525 },
+  "degraded": [],
+  "truncated": true
+}
+```
+
+**说明**：
+- 产物是 `out_dir/index.html`（目录 0700、文件 0600），双击即可离线阅读。信封**不回传
+  文件清单**，明细用文件系统工具在 `out_dir` 下自行查看。
+- **`window` 是微信本地缓存的窗口，不是完整历史**——更早的动态不在本机。本机实测
+  1,923 条覆盖 2013-02~2026-09，且密度极不均。产物页首也会如实标注这一点。
+- **`with_media=false` 时产物不含任何图片**：朋友圈媒体只有远程 URL，本机的缓存图
+  与动态对不上（文件名四种哈希变体全部 0 命中），因此不参与渲染。想要图必须开 `with_media`。
+- **联网边界**（本项目「零网络」红线上唯一的显式例外）：仅当 `with_media=true` 时，
+  按动态逐条构造 URL 并**直连**（不使用环境代理，不读 `http_proxy`）微信 CDN 的
+  `*.qpic.cn` / `*.video.qq.com`；域白名单**跨重定向也成立**。请求只携带微信自己签发的
+  媒体 `token` 与固定 `User-Agent`，不含本机任何聊天 / 索引内容。媒体密钥与 token
+  绝不进日志、异常消息或本信封。
+- **`media_failed` 是常态而非错误**：微信服务端会清理老媒体，实测抽样中约三成带 token
+  仍返回 404。单条媒体失败只计数，不中断整次导出。
+- `degraded` 键**恒存在**（与 §3 同一惯例：降级不是错误），此处每项是**中文字符串**。
+  本工具目前只在「下载成功但解密后不是已知图片格式」时写入一项。
+- `media_not_downloaded` 涵盖两种情形：「未开启 `with_media`」与「该媒体没有 `token`，
+  构造不出下载地址」。
+- 表情评论只渲染 `[表情评论]` 占位，本体不下载；分享链接自带的第三方缩略图不是
+  朋友圈媒体，不抓取。
+- 歧义走既有 `{"need_confirm": [...]}`、未命中走 `{"error": …}`、账号不存在走
+  `{"error": "账号目录不存在: …"}`，与其它工具同形（见 §3）。
+
+---
+
 ## 错误汇总
 
 | 现象 | 原因 | 处置 |
@@ -367,4 +421,4 @@ async def main():
 asyncio.run(main())
 ```
 
-期望输出包含 9 个工具名与 `get_account_status` 的 JSON。
+期望输出包含 10 个工具名与 `get_account_status` 的 JSON。

@@ -29,14 +29,28 @@
 千万级以上建议分库（见 ARCHITECTURE.md §6）。
 
 **Q6：会导出图片 / 语音 / 视频吗？**
-不导出媒体文件本体（避免数 GB 级膨胀）。非文本消息在索引中以 `[image]`、
-`[appmsg: 标题]` 等提示占位，保留"此处有一条图片"的事实与类型/时间元数据。
+**本地检索库（`index.db`）里没有媒体本体**：非文本消息以 `[image]`、`[appmsg: 标题]`
+等提示占位，保留"此处有一条图片"的事实与类型/时间元数据。
+媒体**本体**是按需另行导出的：CLI `agent-wechat media export --chat 小李`
+（MCP 对应 `export_chat_media`）把某会话的图片 / 语音 / 视频落到 `~/.agent-wechat/media/`。
+能导出的通常远少于会话里的媒体消息数——微信按需下载并定期清理，`missing` 是常态。
+**朋友圈**（`agent-wechat moments export`）的媒体全在远程，默认不下载；要拿到本体需显式加
+`--with-media`（MCP 对应 `with_media=True`），这会联网——见 Q7。
 
 **Q7：数据会上传云端吗？**
-不会。全链路本机闭环：解密、索引、embedding（本地 ONNX 推理）、MCP（stdio）均无网络路径。
-唯一一次联网是首次构建向量索引时下载约 95MB 的模型文件（fastembed + `bge-small-zh-v1.5`）
-到 `~/.agent-wechat/models`；模型就位后嵌入与检索完全离线（见 Q15）。
-MCP 只在你的 Agent 客户端与本地 Server 之间通信。
+**默认全程零网络，没有任何数据会被上传**：解密、索引、embedding（本地 ONNX 推理）、
+MCP（stdio）均无网络路径，MCP 只在你的 Agent 客户端与本地 Server 之间通信。
+
+只有两个都需要你**主动触发**的例外：
+
+1. 首次构建向量索引时下载约 95MB 的模型文件（fastembed + `bge-small-zh-v1.5`）到
+   `~/.agent-wechat/models`；模型就位后嵌入与检索完全离线（见 Q15）。
+2. **朋友圈媒体下载**：只有显式指定 `--with-media`（CLI）/ `with_media=True`
+   （MCP `export_moments`）时才发起请求，且**只连微信 CDN 两个域**（`*.qpic.cn`、
+   `*.video.qq.com`）；不指定则一个网络请求都不发。请求只携带微信自己签发的媒体
+   `token` 与固定 `User-Agent`，**不含本机任何聊天 / 索引内容**；**不使用代理**，一律直连。
+
+第 2 条是本项目「零网络」红线上**唯一的显式例外**，详见 SECURITY.md §1「零网络例外」。
 
 **Q8：为什么需要 sudo 和重签名？能避免吗？**
 lldb attach 需要 `task_for_pid` 权限；Hardened Runtime 会阻止它，所以要 ad-hoc
