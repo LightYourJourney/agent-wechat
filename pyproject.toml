@@ -46,5 +46,6 @@ dev = [
 [tool.pytest.ini_options]
 markers = [
     "slow: 需要真实 fastembed 模型（默认不跑；用 -m slow 运行）",
+    "real: 需要本机真实数据/模型（默认不跑；用 -m real 运行）",
 ]
 addopts = "-m 'not slow'"
