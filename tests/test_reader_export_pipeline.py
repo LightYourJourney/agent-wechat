@@ -257,6 +257,37 @@ def test_clear_export_watermarks_only_clears_named_account(tmp_path, monkeypatch
         assert store.load_export_watermarks(con, "b") == {("message_0.db", md5(FRIEND)): 2}
 
 
+def test_store_media_refs_upsert_idempotent(tmp_path, monkeypatch):
+    monkeypatch.setattr(paths, "HOME_DIR", tmp_path)
+    # **必须**隔离 DB_PATH：store.DB_PATH 在 import 期绑定真实 HOME_DIR，
+    # 只 patch paths.HOME_DIR 拦不住它——会把假数据写进真实 index.db
+    monkeypatch.setattr(store, "DB_PATH", tmp_path / f"index-{uuid.uuid4().hex[:8]}.db")
+    with store.open() as con:
+        store.upsert_media_refs(con, [("k1", "image", "aaaa", "bbbb")])
+        store.upsert_media_refs(con, [("k1", "image", "cccc", "bbbb")])   # 幂等更新
+        row = con.execute("SELECT media_kind, file_key, xml_md5 FROM media_refs WHERE msg_key='k1'").fetchone()
+        assert con.execute("SELECT count(*) FROM media_refs").fetchone()[0] == 1
+        store.upsert_media_refs(con, [])                                  # 空列表是 no-op
+    assert tuple(row) == ("image", "cccc", "bbbb")
+
+
+def test_store_upsert_media_refs_does_not_own_transaction(tmp_path, monkeypatch):
+    """media_refs 与 messages 同事务（spec §4.3）：调用方回滚时 refs 必须一起消失。
+
+    判别性：`upsert_media_refs` 若自己 commit 一下，回滚后这行仍在——同事务的保证就没了
+    （T5 的 `run_export` 正是靠 upsert_batch 的 commit 把 refs 和 messages 收进一个事务）。
+    """
+    monkeypatch.setattr(paths, "HOME_DIR", tmp_path)
+    monkeypatch.setattr(store, "DB_PATH", tmp_path / "i.db")
+    with pytest.raises(RuntimeError, match="boom"):
+        with store.open() as con:
+            store.upsert_media_refs(con, [("k1", "image", "aaaa", None)])
+            assert con.execute("SELECT count(*) FROM media_refs").fetchone()[0] == 1
+            raise RuntimeError("boom")
+    with store.open() as con:
+        assert con.execute("SELECT count(*) FROM media_refs").fetchone()[0] == 0
+
+
 # ---------- reader ----------
 
 def test_contacts_and_resolve(env):

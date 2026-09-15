@@ -95,6 +95,12 @@ CREATE TABLE IF NOT EXISTS roster_meta (
     account      TEXT PRIMARY KEY,
     refreshed_at INTEGER NOT NULL
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS media_refs (
+    msg_key    TEXT PRIMARY KEY,          -- = messages.msg_key（account 等字段经 join 取回）
+    media_kind TEXT NOT NULL,             -- 'image' | 'video'
+    file_key   TEXT,                      -- packed_info_data 的 32-hex（dat/mp4 文件名权威）
+    xml_md5    TEXT                       -- XML md5（兜底留证，与文件名无关）
+) WITHOUT ROWID;
 """
 
 # ---------- 向量索引（sqlite-vec；由 vector.py 在加载扩展后建表） ----------
@@ -195,6 +201,17 @@ def upsert_batch(con: sqlite3.Connection, rows: list[messages.MessageRow]) -> No
              updated_at=excluded.updated_at""",
         [(a, s, m, mx, now) for (a, s, m), mx in wm.items()])
     con.commit()
+
+
+def upsert_media_refs(con: sqlite3.Connection,
+                      rows: list[tuple[str, str, str | None, str | None]]) -> None:
+    """批量幂等写 media_refs。不 commit：由 upsert_batch 的 commit（同事务）或 store.open() 收口。"""
+    if not rows:
+        return
+    con.executemany(
+        "INSERT INTO media_refs (msg_key, media_kind, file_key, xml_md5) VALUES (?,?,?,?) "
+        "ON CONFLICT(msg_key) DO UPDATE SET media_kind=excluded.media_kind, "
+        "file_key=excluded.file_key, xml_md5=excluded.xml_md5", rows)
 
 
 def get_watermark(con: sqlite3.Connection, account: str, shard: str, chat_md5: str) -> int:

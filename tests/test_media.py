@@ -482,14 +482,15 @@ def _silk_blob(seconds: float = 0.2, rate: int = 24000) -> bytes:
         return (p / "a.silk").read_bytes()
 
 
-def _voice_fixture(account: str, rows: list[tuple[int, int, int, bytes]]) -> None:
-    """合成**明文** media_0.db；rows = [(chat_name_id, create_time, local_id, voice_data)]。
+def _voice_fixture(account: str, rows: list[tuple[int, int, int, bytes]],
+                   shard: int = 0) -> None:
+    """合成**明文** media_{shard}.db；rows = [(chat_name_id, create_time, local_id, voice_data)]。
 
     Name2Id 只放一行 'chatA@chatroom'（rowid=1）；明文库是因为测试把 decrypt.decrypted
     换成了直通假上下文——真解密管线（sqlcipher）不在本测试的范围内。
     """
     import sqlite3
-    db = paths.XWECHAT_FILES / account / "db_storage/message/media_0.db"
+    db = paths.XWECHAT_FILES / account / "db_storage/message" / f"media_{shard}.db"
     con = sqlite3.connect(db)
     con.executescript(
         "CREATE TABLE Name2Id (user_name TEXT);"
@@ -794,3 +795,151 @@ def test_unreadable_attach_tree_raises_media_key_error(tmp_path, monkeypatch):
     with pytest.raises(errors.MediaKeyError) as ei:
         media.derive_keys(account)                    # 不抛 PermissionError
     assert "样本" in str(ei.value)
+
+
+# ---------- Task 4：消息 → 媒体引用（media_refs 的数据源） ----------
+
+def test_extract_media_ref_packed_is_authoritative():
+    # 前缀用**非 hex**字节（brief 里是 b"ab"——'a'/'b' 本身就是 hex 字符，最左匹配会
+    # 从 'a' 起算，切出 "ab0123…abcd" 这个错窗口；这条测试的断言恰好是这个窗口的判别式）
+    packed = b"\x00\x01" + b"zz" + b"0123456789ABCDEF0123456789abcdef" + b"\x00\x02"
+    kind, fk, xm = media.extract_media_ref(3, '<msg><img md5="11111111111111111111111111111111"/></msg>', packed)
+    assert kind == "image" and fk == "0123456789abcdef0123456789abcdef"
+    assert xm == "11111111111111111111111111111111"
+
+
+def test_extract_media_ref_xml_fallback_only_when_packed_missing():
+    kind, fk, xm = media.extract_media_ref(43, '<msg><videomsg md5="22222222222222222222222222222222"/></msg>', None)
+    assert kind == "video" and fk == "22222222222222222222222222222222" and xm == fk
+    # packed 与 XML 同时在：file_key 用 packed，xml_md5 只记录
+    packed = b"33333333333333333333333333333333"
+    _, fk2, xm2 = media.extract_media_ref(3, '<img md5="22222222222222222222222222222222"/>', packed)
+    assert fk2 == "33333333333333333333333333333333" and xm2 == "22222222222222222222222222222222"
+
+
+def test_extract_media_ref_non_media_and_empty():
+    assert media.extract_media_ref(1, "hi", b"44444444444444444444444444444444") is None
+    assert media.extract_media_ref(34, "hi", b"44444444444444444444444444444444") is None   # 语音不入表
+    assert media.extract_media_ref(3, None, None) is None
+    assert media.extract_media_ref(3, "<img/>", None) is None
+
+
+def test_extract_media_ref_short_xml_md5_recorded_but_not_a_key():
+    """16-hex 的 XML md5 只记录、**不**当文件名兜底（现网 md5 是 32-hex；短形态认了 = 乱猜文件）。
+
+    packed 在 → 三元组保留 xml 的 16-hex；packed 缺 → 没有可信 file_key，整体 None。
+    """
+    packed = b"\x00\x07" + b"55555555555555555555555555555555"
+    kind, fk, xm = media.extract_media_ref(3, '<img md5="AbCdEfAbCdEfAbCd"/>', packed)
+    assert (kind, fk, xm) == ("image", "55555555555555555555555555555555", "abcdefabcdefabcd")
+    assert media.extract_media_ref(3, '<img md5="AbCdEfAbCdEfAbCd"/>', None) is None
+
+
+# ---------- Ruling 21：_wxgf_to_jpeg 的收尾 OSError 收口 ----------
+
+def test_wxgf_jpeg_chmod_failure_falls_back_to_container(tmp_path, monkeypatch):
+    """Ruling 21：_wxgf_to_jpeg 收尾的 chmod/unlink 抛 OSError → 返回 False，不逃出 core。
+
+    ffmpeg 整段换成假的 subprocess.run（真机装没装 ffmpeg 不该决定这条断言的成败）：
+    它把 dest 落盘并返回 0，从而精确打到收尾的 chmod。回退必须干净——宁可存 .wxgf
+    容器，也不留一个权限没收紧的明文 jpeg（_save 的替代路径会补 0600）。
+    """
+    root, account = make_tree(tmp_path, monkeypatch)
+    code = "999999"
+    (paths.CONTAINER / "app_data/net/kvcomm/key_999999_1_2_3_4_5_input.statistic").write_bytes(b"")
+    cm = hashlib.md5("chatA@chatroom".encode()).hexdigest()
+    aes = hashlib.md5((code + paths.bare_wxid(account)).encode()).hexdigest()[:16].encode()
+    sdir = paths.XWECHAT_FILES / account / "msg/attach" / cm / "2026-03" / "Img"
+    sdir.mkdir(parents=True)
+    samples = [sdir / f"sam{i}.dat" for i in range(4)]
+    for p in samples:
+        p.write_bytes(build_v2_dat(jpeg_like(64), b"\x33" * 8 + b"\xff\xd9", aes, FAKE_XOR))
+    monkeypatch.setattr(media, "_attach_dats", lambda acct: iter(samples))
+    img = paths.XWECHAT_FILES / account / "msg/attach" / cm / "2026-09" / "Img"
+    img.mkdir(parents=True)
+    wxgf = b"wxgf" + b"\x00\x00\x00\x01" + b"\x00" * 16
+    (img / "c0de.dat").write_bytes(build_v2_dat(wxgf, b"\x22" * 20, aes, FAKE_XOR))
+
+    class _Proc:
+        returncode = 0
+
+    def fake_run(cmd, **kw):
+        pathlib.Path(cmd[-1]).write_bytes(b"\xff\xd8\xff" + b"\x00" * 16)   # 假装 ffmpeg 直写成功
+        return _Proc()
+
+    monkeypatch.setattr(media, "_find_ffmpeg", lambda: "ffmpeg")
+    monkeypatch.setattr(media.subprocess, "run", fake_run)
+    real_chmod = pathlib.Path.chmod
+
+    def fake_chmod(self, mode, **kw):
+        if self.suffix == ".jpg":                    # 只拒绝 jpeg 落盘那一下，.wxgf 照常
+            raise PermissionError(13, "Operation not permitted", str(self))
+        return real_chmod(self, mode, **kw)
+
+    monkeypatch.setattr(pathlib.Path, "chmod", fake_chmod)
+    out = root / "home" / "media"
+    rep = media.export_media(account, ["chatA@chatroom"], kinds=["image"],
+                             months=["2026-09"], out_dir=out)
+    assert rep.image.ok == 1                         # 回退存 .wxgf 成功
+    assert [p.name for p in (out / cm / "image" / "2026-09").iterdir()] == ["c0de.wxgf"]
+    assert rep.degraded == ["wxgf 图未转 JPEG（无 ffmpeg 或转码失败），存原容器"]
+
+
+# ---------- Ruling 22：语音分片不退场 ----------
+
+def test_export_media_voice_present_in_two_shards_exports_both(tmp_path, monkeypatch):
+    """Ruling 22：同一会话在**两个**媒体分片里都有语音 → 两条都要导出（ok==2）。
+
+    实测依据：media_0/media_1 的 Name2Id 交集 13 人、其中 12 个会话两分片都有语音。
+    改前的「查到就退场」（`remaining_chats -= produced_in_db` + 循环顶 break）在第一个
+    分片后就把会话划掉，第二个分片里同一会话的其他语音被静默丢弃（ok 只会是 1）。
+    """
+    root, account = make_tree(tmp_path, monkeypatch)
+    ts = int(datetime.datetime(2026, 9, 15, 12, 0).timestamp())
+    mon = media.month_of(ts)
+    _voice_fixture(account, [(1, ts, 7, _silk_blob())], shard=0)
+    _voice_fixture(account, [(1, ts, 8, _silk_blob())], shard=1)
+    _passthrough_decrypted(monkeypatch)
+
+    out = root / "home" / "media"
+    rep = media.export_media(account, ["chatA@chatroom"], kinds=["voice"],
+                             months=[mon], out_dir=out)
+    assert rep.voice.ok == 2
+    cm = hashlib.md5("chatA@chatroom".encode()).hexdigest()
+    assert {p.name for p in (out / cm / "voice" / mon).iterdir()} == {f"{ts}_7.wav", f"{ts}_8.wav"}
+
+
+# ---------- Ruling 23a：语音分片的 OSError 归口 ----------
+
+def test_export_media_voice_unreadable_shard_is_skipped(tmp_path, monkeypatch):
+    """Ruling 23a：一个分片打不开（库读不了 / HOME/tmp 建不出来）→ 跳过该分片，
+    其余分片照常导出，裸 OSError 不得逃出 core 层。
+
+    在 `decrypt.decrypted` 上定点抛 OSError——真机上抛它的是 `tempfile.mkdtemp(dir=HOME/tmp)`
+    与 `snapshot()` 的 copy2/read_bytes，三者都不带包装（decrypt.py）。
+    """
+    root, account = make_tree(tmp_path, monkeypatch)
+    ts = int(datetime.datetime(2026, 9, 15, 12, 0).timestamp())
+    mon = media.month_of(ts)
+    _voice_fixture(account, [(1, ts, 7, _silk_blob())], shard=0)
+    _voice_fixture(account, [(1, ts, 8, _silk_blob())], shard=1)
+
+    import contextlib
+    from agent_wechat import decrypt as dec_mod
+
+    @contextlib.contextmanager
+    def flaky(db_path, passphrase, tmpdir=None):
+        if db_path.name == "media_0.db":
+            raise OSError(28, "No space left on device", str(db_path))
+        yield db_path
+
+    # 与 _passthrough_decrypted 同一套 monkeypatch（含 Ruling 17 的模块级属性那条）
+    monkeypatch.setattr(dec_mod, "decrypted", flaky)
+    monkeypatch.setattr("agent_wechat.media.decrypt", dec_mod)
+
+    out = root / "home" / "media"
+    rep = media.export_media(account, ["chatA@chatroom"], kinds=["voice"],
+                             months=[mon], out_dir=out)
+    assert rep.voice.ok == 1
+    cm = hashlib.md5("chatA@chatroom".encode()).hexdigest()
+    assert {p.name for p in (out / cm / "voice" / mon).iterdir()} == {f"{ts}_8.wav"}

@@ -236,6 +236,39 @@ def resolve_video(account: str, ts: int, file_key: str) -> tuple[pathlib.Path, b
     return None
 
 
+# ---------- 消息 → 媒体引用（media_refs 的数据源） ----------
+
+# 实测（spec §2.6）：dat/mp4 文件名哈希在 packed_info_data 里（32-hex）；
+# XML md5 与文件名**无关**（19,832 条 0 命中），只作 packed 缺失时的兜底记录。
+_HEX32 = re.compile(r"[0-9a-fA-F]{32}")
+_XML_MD5 = re.compile(r'<(?:img|videomsg)[^>]*?\smd5="([0-9a-fA-F]{16,32})"')
+
+
+def extract_media_ref(local_type: int, content: str | None,
+                      packed: bytes | None) -> tuple[str, str, str | None] | None:
+    """(kind, file_key, xml_md5)；非图片/视频或两处都没有 → None。纯函数。"""
+    if local_type == messages.TYPE_IMAGE:
+        kind = "image"
+    elif local_type == messages.TYPE_VIDEO:
+        kind = "video"
+    else:
+        return None
+    file_key = xml_md5 = None
+    if packed:
+        m = _HEX32.search(packed.decode("latin-1", "ignore"))
+        if m:
+            file_key = m.group(0).lower()
+    if content:
+        m = _XML_MD5.search(content)
+        if m:
+            xml_md5 = m.group(1).lower()
+    if file_key is None and xml_md5 is not None and len(xml_md5) == 32:
+        file_key = xml_md5                # 兜底（现网命中率 0，仅防 packed 缺失）
+    if file_key is None:
+        return None
+    return (kind, file_key, xml_md5)
+
+
 # ---------- 导出 ----------
 
 @dataclass
@@ -304,10 +337,21 @@ def _wxgf_to_jpeg(data: bytes, dest: pathlib.Path) -> bool:
                            input=data[i:], capture_output=True, timeout=30)
     except (OSError, subprocess.TimeoutExpired):
         r = None
-    if r is None or r.returncode != 0 or not dest.exists() or dest.stat().st_size == 0:
-        dest.unlink(missing_ok=True)       # ffmpeg 万一建了半成品：清掉，不留坏文件
+    try:
+        if r is None or r.returncode != 0 or not dest.exists() or dest.stat().st_size == 0:
+            dest.unlink(missing_ok=True)   # ffmpeg 万一建了半成品：清掉，不留坏文件
+            return False
+        dest.chmod(0o600)                  # ffmpeg 落盘的权限跟 umask，这里收口（同 _save）
+    except OSError:
+        # 收尾这几步（stat / unlink / chmod）任一 OSError 都只能算「这次没转成」：裸 OSError
+        # 逃出去会击穿 core 的错误契约（Ruling 21，与 Ruling 9/20 同族），而调用方对 False
+        # 的处置是完整的（回退存 .wxgf 容器）。可能已落盘的 jpeg 在这里尽力清掉——宁可回退
+        # 存原容器，也不留一个权限没收紧的明文图。
+        try:
+            dest.unlink(missing_ok=True)
+        except OSError:
+            pass
         return False
-    dest.chmod(0o600)                      # ffmpeg 落盘的权限跟 umask，这里收口（同 _save）
     return True
 
 
@@ -548,12 +592,14 @@ def _voice_db_paths(account: str) -> list[pathlib.Path]:
 
 def _export_voices(account, chat_ids, out_root, report, want, is_full, bump, progress) -> None:
     """语音：Name2Id rowid → VoiceInfo(chat_name_id, create_time) → pilk 解码 24kHz WAV。
-    pilk 缺失 → 原始 .slk（微信原始形态，`\\x02` 前缀保留）。单库打不开跳过，不中断。"""
+    pilk 缺失 → 原始 .slk（微信原始形态，`\\x02` 前缀保留）。单库打不开跳过，不中断。
+
+    每个分片都对**全部**请求会话查一遍 Name2Id（不在本分片里的自然跳过）——实测 media_0 与
+    media_1 的 Name2Id 交集 13 人、其中 12 个会话**两分片都有语音**，所以「查到就把会话从待办
+    里划掉」会在第一个分片后丢掉同一会话在其余分片的语音（Ruling 22）。
+    """
     decrypt.ensure_home_dirs()           # 中间明文只落 HOME/tmp（0700、已排除 Time Machine）
-    remaining_chats = set(chat_ids)
     for db in _voice_db_paths(account):
-        if not remaining_chats:
-            break
         if is_full():
             report.truncated = True      # 上限已到：与图片/视频分支同一口径（Ruling 18）
             break
@@ -563,24 +609,25 @@ def _export_voices(account, chat_ids, out_root, report, want, is_full, bump, pro
                 con = sqlite3.connect(f"file:{plain}?mode=ro", uri=True)
                 con.text_factory = bytes
                 try:
-                    _export_voices_from(con, remaining_chats, out_root, report,
+                    _export_voices_from(con, chat_ids, out_root, report,
                                         want, is_full, bump, progress)
                 finally:
                     con.close()
-        except (errors.AgentWeChatError, sqlite3.Error):
-            continue                     # 这个库打不开（漂移/密钥缺失）：跳过
-        # 查到语音的会话从 remaining 里移除（见 _export_voices_from 内部）
+        except (errors.AgentWeChatError, sqlite3.Error, OSError):
+            # 这个库打不开（漂移/密钥缺失/库读不了/HOME 的 tmp 建不出来）：跳过，不中断。
+            # OSError 那一支是 Ruling 23a：decrypt.decrypted 里 mkdtemp 与 snapshot 的
+            # copy2/read_bytes 都直接抛 OSError（不包装），漏了它就带 traceback 冲出 core。
+            continue
 
 
-def _export_voices_from(con, remaining_chats, out_root, report, want, is_full, bump,
+def _export_voices_from(con, chat_ids, out_root, report, want, is_full, bump,
                         progress) -> None:
-    produced_in_db = set()
     name2id = {u.decode("utf-8", "replace") if isinstance(u, bytes) else u: rid
                for rid, u in con.execute("SELECT rowid, user_name FROM Name2Id")}
-    for chat in list(remaining_chats):
+    for chat in chat_ids:
         rid = name2id.get(chat)
         if rid is None:
-            continue
+            continue                     # 本分片没有它：别的分片可能还有（Ruling 22）
         cm = messages.md5_of(chat)
         for ts, lid, blob in con.execute(
                 "SELECT create_time, local_id, voice_data FROM VoiceInfo "
@@ -619,8 +666,6 @@ def _export_voices_from(con, remaining_chats, out_root, report, want, is_full, b
                     report.voice.failed += 1
                     continue
                 report.voice.raw_only += 1
-            produced_in_db.add(chat)
             done = bump()
             if progress:
                 progress(done)
-    remaining_chats -= produced_in_db

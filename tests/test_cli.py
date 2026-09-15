@@ -55,7 +55,9 @@ def test_recent_clamps_large_limit_to_500(captured):
     assert captured["recent_limit"] == 500
 
 
-def test_search_clamps_non_positive_limit(monkeypatch):
+def test_search_clamps_non_positive_limit(env, monkeypatch):
+    """`env` 不只是给数据：`usecases._refresh_roster` 会开 `store.open()`，缺了它就按
+    import 期绑定的 `store.DB_PATH` 打开**真实** index.db（新加的 DDL 会写进去）。"""
     seen: dict = {}
 
     def fake_search(query, **kwargs):
@@ -121,8 +123,11 @@ def test_main_success_still_exits_0(monkeypatch):
     assert ei.value.code == 0
 
 
-def test_semantic_core_error_reaches_stderr_with_hint(monkeypatch, capsys):
-    """semantic_search 现在抛异常而非返回 error dict；CLI 的翻转必须含 hint 单行输出。"""
+def test_semantic_core_error_reaches_stderr_with_hint(env, monkeypatch, capsys):
+    """semantic_search 现在抛异常而非返回 error dict；CLI 的翻转必须含 hint 单行输出。
+
+    `env` 同 test_search_clamps_non_positive_limit：这条也会先经 `_refresh_roster`
+    开一次 store——不隔离就会碰真实 index.db。"""
     monkeypatch.setattr(account, "resolve_account", lambda a: "acct")
 
     def boom(*a, **k):
