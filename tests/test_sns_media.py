@@ -14,18 +14,21 @@ def test_isaac64_matches_known_vector():
     assert sns_media.WxIsaac64(1).keystream(32) == VEC_SEED1
 
 
-def test_isaac64_differs_from_common_golden_constant():
-    """防回归：微信用 0x…7C13，公开实现多用 0x…7C15。
-    有人「顺手改回常见值」会让全部解密静默产出乱码——这条测试必须红。"""
-    class Common(sns_media.WxIsaac64):
-        pass
+def test_golden_constant_is_wechat_variant():
+    """防回归：微信用的是 0x…7C13，公开实现多用 0x…7C15，一个字符之差解出乱码。
+
+    必须**直锁常量**——「改常量再看输出」那种写法在常量本身被改错时会退化成空操作
+    （`saved` 拿到的已是被改错的值，patch 无事发生，输出仍 ≠ VEC 而假绿），是假护栏。
+    """
+    assert sns_media.GOLDEN == 0x9E3779B97F4A7C13
+    # 第二半仍保留：它证明「常量确实驱动输出」（即向量测试的失败模式真实存在），
+    # 以及 monkeypatch 通道有效——但判别力来自上面那行，不是这半。
     saved = sns_media.GOLDEN
     try:
         sns_media.GOLDEN = 0x9E3779B97F4A7C15
-        wrong = sns_media.WxIsaac64(1).keystream(32)
+        assert sns_media.WxIsaac64(1).keystream(32) != VEC_SEED1
     finally:
         sns_media.GOLDEN = saved
-    assert wrong != VEC_SEED1
 
 
 def test_isaac64_repr_hides_seed():
@@ -70,6 +73,8 @@ def test_build_url_none_for_other_kind():
     m = _m(kind=moments.KIND_OTHER)
     assert m.url and m.token
     assert sns_media.build_url(m) is None
+    # 白名单语义：将来新增的未知 kind 同样被拒，而不是静默落进图片分支
+    assert sns_media.build_url(_m(kind="weird")) is None
 
 
 def test_host_allowed():
