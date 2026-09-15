@@ -5,13 +5,14 @@
 于是 `-n -1` **静默丢掉一条**消息、`-n 0` 返回空；`search` 则退化成无上限全表
 扫描。归一化现已收进 usecases（见 tests/test_usecases.py），CLI 只负责渲染。
 """
+import json
 import os
 import pathlib
 from types import SimpleNamespace
 
 import pytest
 
-from agent_wechat import account, bootstrap, cli, errors, keys, reader, search, usecases, vector
+from agent_wechat import account, bootstrap, cli, errors, keys, media, reader, search, usecases, vector
 # 合成微信目录（真实 sqlcipher 解密链路；路径全部指向 tmp_path，绝不碰真实数据）。
 # 跨模块复用夹具与 test_usecases 同法：`env` 依赖它**自己模块**里的 module 级 `wechat`。
 from test_reader_export_pipeline import (ACCT, FRIEND, T0, build_shard, drift_tree,  # noqa: F401
@@ -642,3 +643,84 @@ def test_export_renders_username_pool_degradation_to_stderr(env, tmp_path, monke
                    f"完成：本轮 1 行；索引总量 {{'messages': 1, 'chats': 1, 'last_ts': {T0}}}\n")
     assert "部分会话的显示名无法反查" in err      # 策略表的文案，用户不需要知道表名
     assert "SessionTable" in err                 # Degradation 形状带得出诊断
+
+
+# ---------- media export / media rebuild-refs（CLI 渲染层；用例层测试在 test_usecases.py） ----------
+
+def test_media_export_needs_confirm_on_ambiguous_contact(monkeypatch, capsys):
+    """多候选 → stdout 出候选 JSON、退出码 1（与 recent/search 同形）。
+
+    media_export 打桩：CLI 渲染层测试不打真库。"""
+    monkeypatch.setattr(usecases, "media_export", lambda *a, **k: usecases.NeedConfirm(
+        [usecases.Candidate("wxid_a", "张三01", "friend"),
+         usecases.Candidate("wxid_b", "张三02", "friend")]))
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["media", "export", "--chat", "张三"])
+    assert ei.value.code == 1
+    out, err = capsys.readouterr()
+    cands = json.loads(out)              # stdout 可被脚本直接 json 解析（_need_confirm 契约）
+    assert [c["username"] for c in cands] == ["wxid_a", "wxid_b"]
+    assert cands[0] == {"username": "wxid_a", "display": "张三01", "kind": "friend"}
+    assert "无法唯一解析「张三」" in err
+
+
+def test_media_export_renders_counts_and_degraded_to_stderr(monkeypatch, capsys):
+    """ok/failed 计数到 stdout；degraded 行到 stderr（spec §7）。
+
+    用例层打桩返回合成 MediaExportResult：CLI 测试不跑真实导出（不碰微信树）。
+    顺带钉住 CLI → 用例层的参数编组（--kinds/--months 拆列表、--limit/--out 透传）。"""
+    seen: dict = {}
+
+    def fake_media_export(contact, **kw):
+        seen.update(kw, contact=contact)
+        return usecases.MediaExportResult(
+            chat_id="wxid_target", out_dir="/tmp/out/media",
+            report=media.MediaReport(
+                image=media.Counts(ok=3, failed=1), voice=media.Counts(ok=2, raw_only=1),
+                video=media.Counts(ok=1, thumb=2, missing=1),
+                degraded=["pilk 不可用：语音导出为原始 .slk"],
+                truncated=True))
+
+    monkeypatch.setattr(usecases, "media_export", fake_media_export)
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["media", "export", "--chat", "张三", "--out", "/tmp/out"])
+    assert ei.value.code == 0
+    assert seen == {"contact": "张三", "kinds": ["image", "voice", "video"],
+                    "months": None, "out_dir": "/tmp/out", "limit": 2000, "account": None}
+    out, err = capsys.readouterr()
+    assert out == ("会话 wxid_target\n"
+                   "图片   ok=3  failed=1  missing=0\n"
+                   "语音   ok=2  failed=0  raw_only=1\n"
+                   "视频   ok=1  thumb=2  missing=1\n"
+                   "（达到 --limit 上限，已提前收手）\n"
+                   "输出目录: /tmp/out/media\n")
+    assert err == "⚠️  pilk 不可用：语音导出为原始 .slk\n"
+
+
+def test_media_rebuild_refs_prints_total(monkeypatch, capsys):
+    """进度行与总数行都到 stdout（media_rebuild_refs 打桩，不打真库）。"""
+
+    def fake_rebuild(account=None, progress=None):
+        if progress:
+            progress(20_000)
+        return 20_042
+
+    monkeypatch.setattr(usecases, "media_rebuild_refs", fake_rebuild)
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["media", "rebuild-refs"])
+    assert ei.value.code == 0
+    out = capsys.readouterr().out
+    assert "  已回填 20000 条媒体引用…" in out
+    assert "完成：media_refs 共 20042 条" in out
+
+
+def test_media_export_rejects_unknown_kind_with_search_input_error(captured, capsys):
+    """kinds 非法 → SearchInputError 经 main() 既有 AgentWeChatError 翻译：单行中文到
+    stderr、退出码 1。这条走**真实** usecases.media_export（captured 桩掉账号与
+    reader）——非法 kinds 必须在碰任何导出逻辑之前被拒。"""
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["media", "export", "--chat", "张三", "--kinds", "image,sticker"])
+    assert ei.value.code == 1
+    err = capsys.readouterr().err
+    assert "未知的媒体类型" in err and "sticker" in err
+    assert "Traceback" not in err

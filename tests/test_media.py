@@ -229,6 +229,17 @@ def test_export_media_output_dir_is_0700(tmp_path, monkeypatch):
     assert st.S_IMODE(os.stat(out).st_mode) == 0o700
 
 
+def test_export_media_report_carries_actual_out_dir(tmp_path, monkeypatch):
+    """MediaReport.out_dir = **实际使用的**输出根（export_media 赋值）：CLI/MCP 的信封
+    从这取，不再各自重算默认回退（T6 裁定：给 MediaReport 加字段，不加小工具函数）。"""
+    root, account = make_tree(tmp_path, monkeypatch)
+    out = root / "somewhere" / "out"
+    rep = media.export_media(account, ["c@chatroom"], kinds=["video"], out_dir=out)
+    assert rep.out_dir == str(out)
+    rep = media.export_media(account, ["c@chatroom"], kinds=["video"])   # 省略 --out
+    assert rep.out_dir == str(root / "home" / "media")                   # = HOME_DIR/media
+
+
 def test_export_media_max_files_truncates(tmp_path, monkeypatch):
     root, account = make_tree(tmp_path, monkeypatch)
     (paths.CONTAINER / "app_data/net/kvcomm/key_1_a.statistic").write_bytes(b"")

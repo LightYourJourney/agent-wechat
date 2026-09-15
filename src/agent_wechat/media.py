@@ -287,6 +287,7 @@ class MediaReport:
     video: Counts = field(default_factory=Counts)
     degraded: list[str] = field(default_factory=list)
     truncated: bool = False
+    out_dir: str = ""      # 实际使用的输出根（export_media 赋值；CLI/MCP 信封从这取，不重算）
 
     def to_dict(self) -> dict:
         return {"image": {"ok": self.image.ok, "failed": self.image.failed,
@@ -431,6 +432,7 @@ def export_media(account: str, chat_ids: list[str], *, kinds: list[str],
     （账号级枚举：只有恰好一个会话时可归属，多会话跳过并记 degraded）。"""
     report = MediaReport()
     out_root = _ensure_tree(pathlib.Path(out_dir) if out_dir else paths.HOME_DIR / "media")
+    report.out_dir = str(out_root)
     # 一次 stat 检查（Ruling 15）：chmod 是尽力而为的（见 _chmod_quiet），收紧失败在这里
     # 如实上报——只报一次、带路径，不按文件刷屏。stat 也失败（目录被换掉/没权限）同样算
     # 没验证到，按未收紧处理。

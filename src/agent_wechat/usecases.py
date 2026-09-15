@@ -14,9 +14,14 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from . import account as acc_mod
 from . import errors, export, keys, reader, search, store, tasks, vector
+
+if TYPE_CHECKING:
+    # 仅类型检查期：media 顶层拉起 cryptography，运行时在 media_export 内惰性 import
+    from . import media
 
 # ---------- 参数归一化 ----------
 
@@ -284,6 +289,40 @@ def export_history(contact: str | None = None, full: bool = False,
         lambda _tid: export.run_export(plan.account, chat_id=plan.chat_id, full=plan.full),
         account=plan.account, chat_id=plan.chat_id)
     return {"task_id": task_id, "status": "running"}
+
+
+MEDIA_KINDS = ("image", "voice", "video")
+
+
+@dataclass(frozen=True)
+class MediaExportResult:
+    """media_export 的成功返回（CLI 与 MCP 共用，T7 消费）。out_dir 取自 report——
+    实际使用的输出根（--out 省略时是 HOME_DIR/media），由 export_media 赋值，不重算。"""
+
+    chat_id: str
+    out_dir: str
+    report: media.MediaReport
+
+
+def media_export(contact: str, *, kinds: list[str], months: list[str] | None = None,
+                 out_dir=None, limit: int = 2000,
+                 account: str | None = None) -> MediaExportResult | NeedConfirm:
+    """媒体导出用例：会话消歧 + 交 media.export_media。kinds/months 由入口解析成列表。
+
+    chat_ids 恒为单元素——当前调用方一次只导一个会话，重复无从发生，故**不去重**；
+    若未来放开多会话，调用方须自行保证无重复（重复 chat_id 会使图片/语音计数翻倍）。
+    """
+    from . import media                       # 惰性：media 顶层拉起 cryptography
+    ctx = ChatContext(account)
+    chat_id = ctx.resolve(contact)
+    if isinstance(chat_id, NeedConfirm):
+        return chat_id
+    bad = [k for k in kinds if k not in MEDIA_KINDS]
+    if bad:
+        raise errors.SearchInputError(f"未知的媒体类型: {bad}（可用: {', '.join(MEDIA_KINDS)}）")
+    report = media.export_media(ctx.account, [chat_id], kinds=kinds, months=months,
+                                out_dir=out_dir, max_files=clamp_limit(limit, (1, 2000)))
+    return MediaExportResult(chat_id=chat_id, out_dir=report.out_dir, report=report)
 
 
 def media_rebuild_refs(account: str | None = None, progress=None) -> int:

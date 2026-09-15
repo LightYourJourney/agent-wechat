@@ -270,6 +270,30 @@ def test_export_without_contact_keeps_full_scope(stub):
     assert stub.get("readers") is None
 
 
+# ---------- media_export：单会话 + limit 夹取（T6，MCP T7 共用此入口） ----------
+
+def test_media_export_wires_single_chat_and_clamped_limit(stub, monkeypatch):
+    """media_export：消歧后以**单元素** chat_ids 交 export_media，limit 夹到 1-2000，
+    结果 out_dir 直取 report.out_dir（media.py 赋的实际输出根，入口不重算）。"""
+    from agent_wechat import media
+    _unique(stub)
+    seen: dict = {}
+
+    def fake_export_media(account, chat_ids, *, kinds, months, out_dir, max_files,
+                          progress=None):
+        seen.update(account=account, chat_ids=chat_ids, kinds=kinds, months=months,
+                    out_dir=out_dir, max_files=max_files)
+        return media.MediaReport(image=media.Counts(ok=1), out_dir="/default/media")
+
+    monkeypatch.setattr(media, "export_media", fake_export_media)
+    res = usecases.media_export("张三", kinds=["image"], months=["2026-09"],
+                                out_dir=None, limit=99999)
+    assert seen == {"account": "acct", "chat_ids": ["wxid_target"], "kinds": ["image"],
+                    "months": ["2026-09"], "out_dir": None, "max_files": 2000}
+    assert res.chat_id == "wxid_target" and res.out_dir == "/default/media"
+    assert res.report.image.ok == 1
+
+
 # ---------- CLI recent 上界 500（有意的用户可见变更） ----------
 
 def test_cli_recent_n_1000_is_capped_at_500(stub, capsys):

@@ -220,6 +220,41 @@ def cmd_semantic(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_media_export(args: argparse.Namespace) -> int:
+    from . import usecases
+    kinds = [k.strip() for k in args.kinds.split(",") if k.strip()]
+    months = ([m.strip() for m in args.months.split(",") if m.strip()]
+              if args.months else None)
+    res = usecases.media_export(args.chat, kinds=kinds, months=months,
+                                out_dir=args.out, limit=args.limit, account=args.account)
+    if isinstance(res, usecases.NeedConfirm):
+        return _need_confirm(args.chat, res)
+    rep = res.report.to_dict()
+    print(f"会话 {res.chat_id}")
+    print(f"图片   ok={rep['image']['ok']}  failed={rep['image']['failed']}"
+          f"  missing={rep['image']['missing']}")
+    print(f"语音   ok={rep['voice']['ok']}  failed={rep['voice']['failed']}"
+          f"  raw_only={rep['voice']['raw_only']}")
+    print(f"视频   ok={rep['video']['ok']}  thumb={rep['video']['thumb']}"
+          f"  missing={rep['video']['missing']}")
+    if rep["truncated"]:
+        print("（达到 --limit 上限，已提前收手）")
+    print(f"输出目录: {res.out_dir}")
+    _render_degradations(res.report.degraded)
+    return 0
+
+
+def cmd_media_rebuild_refs(args: argparse.Namespace) -> int:
+    from . import usecases
+
+    def progress(n: int) -> None:
+        print(f"  已回填 {n} 条媒体引用…", flush=True)
+
+    n = usecases.media_rebuild_refs(account=args.account, progress=progress)
+    print(f"完成：media_refs 共 {n} 条")
+    return 0
+
+
 def _human_size(n: int) -> str:
     """十进制单位。spec §3 的表样就是十进制的：5.30 GB / 12 MB / 182 B。
 
@@ -320,13 +355,16 @@ def _render_residue(rep: purge.ResidueReport) -> None:
 def _render_degradations(degraded) -> None:
     """降级说明走 stderr：成功但有保留，不该污染 stdout（spec §7）。
 
-    两种形状都要收：`recent` 给 `usecases.Degradation`（dataclass，带 db/table，故能印出
+    三种形状都要收：`recent` 给 `usecases.Degradation`（dataclass，带 db/table，故能印出
     那句诊断），search/semantic 给随信封走的 dict（`{"capability", "effect"}`，与 MCP 同一
-    形状——它刻意不带表名，用户不需要知道）。
+    形状——它刻意不带表名，用户不需要知道），media 给 media.py 就地写好的整句 str
+    （能力级降级的成文权在 core：无 ffmpeg、密钥不可用这些原因只有它自己知道）。
     """
     for d in degraded:
         if isinstance(d, dict):
             print(f"⚠️  {d['effect']}", file=sys.stderr)
+        elif isinstance(d, str):
+            print(f"⚠️  {d}", file=sys.stderr)
         else:
             print(f"⚠️  {d.effect}（{d.db} 的 {d.table} 结构不符）", file=sys.stderr)
 
@@ -400,6 +438,21 @@ def main(argv: list[str] | None = None) -> None:
                     help="整个 ~/.agent-wechat（含 models/ 与散落文件），与具名范围互斥")
     sp.add_argument("--yes", action="store_true", help="真正执行删除")
     sp.set_defaults(fn=cmd_purge)
+
+    sp = sub.add_parser("media", help="媒体导出（图片/语音/视频）")
+    media_sub = sp.add_subparsers(dest="media_cmd", required=True)
+    msp = media_sub.add_parser("export", help="导出某会话的媒体到本地目录")
+    msp.add_argument("--chat", required=True, help="会话（名字或 username）")
+    msp.add_argument("--kinds", default="image,voice,video",
+                     help="逗号分隔：image,voice,video（默认全部）")
+    msp.add_argument("--months", default=None, help="逗号分隔的 YYYY-MM（默认不限）")
+    msp.add_argument("--out", default=None, help="输出目录（默认 ~/.agent-wechat/media/）")
+    msp.add_argument("--limit", type=int, default=2000, help="最多导出文件数（1-2000）")
+    msp.add_argument("--account")
+    msp.set_defaults(fn=cmd_media_export)
+    msp = media_sub.add_parser("rebuild-refs", help="全量重扫微信库回填 media_refs 索引")
+    msp.add_argument("--account")
+    msp.set_defaults(fn=cmd_media_rebuild_refs)
 
     args = p.parse_args(argv)
     if args.cmd == "purge":
