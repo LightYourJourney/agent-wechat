@@ -39,6 +39,27 @@ def test_real_sns_parses_posts():
     assert any(p.comments for p in posts), "至少一条应带评论或点赞（否则互动解析静默失效）"
 
 
+def test_real_reply_target_is_a_nickname_not_a_wxid():
+    """真机上回复目标必须是**昵称**：`<ref_username>` 是 wxid（本机 183/183 全是
+    `wxid_…`），修复前它被直接当昵称渲染，产物里每条回复都印成「小明 回复 wxid_abc123」。
+
+    两条断言缺一不可：少了第一条，「反查整个失效 → 全部 None」会因为 `replies` 为空而
+    静默通过；少了第二条，回退成 `ref_username` 就没人拦。
+    """
+    try:
+        acc = account.resolve_account(None)
+        posts = list(moments.iter_posts(acc))
+    except _UNAVAILABLE as e:
+        pytest.skip(f"本机不可用：{type(e).__name__}")
+    if not posts:
+        pytest.skip("本机朋友圈缓存为空")
+    replies = [c for p in posts for c in p.comments if c.ref_nickname]
+    # 本机实测 183 条回复全部能反查到昵称；一条都没有 = 反查链路整个失效
+    assert replies, "本机有 183 条带 ref_username 的回复，一条都反查不出来说明反查已失效"
+    assert not any(c.ref_nickname.startswith("wxid_") for c in replies), \
+        "回复目标是 wxid —— `<ref_username>` 又被当成昵称用了"
+
+
 def test_real_media_download_decrypts_one_image():
     """真下载一张并解出已知媒体魔数——打的是第 2 条可用媒体（避开同义反复）。
 

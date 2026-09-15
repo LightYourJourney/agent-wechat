@@ -141,13 +141,15 @@ INTERACT_XML = """<SnsDataItem>
     <comment_user_list>
       <user_comment>
         <comment_id>1</comment_id><type>2</type><nickname>小明</nickname>
-        <ref_username>小红</ref_username><create_time>1735689700</create_time>
+        <username>wxid_xm</username>
+        <ref_username>wxid_xh</ref_username><create_time>1735689700</create_time>
         <content>回复你</content><is_rich_text>1</is_rich_text>
       </user_comment>
     </comment_user_list>
     <like_user_list>
       <user_comment>
         <comment_id>2</comment_id><type>1</type><nickname>小红</nickname>
+        <username>wxid_xh</username>
         <create_time>1735689800</create_time>
       </user_comment>
     </like_user_list>
@@ -174,11 +176,28 @@ def test_video_media_kind_duration_and_live_photo():
 
 
 def test_comment_ref_nickname_and_rich_text():
+    """回复目标是**昵称**，不是 `<ref_username>` 里的 wxid。
+
+    真机 183/183 条 `ref_username` 全是 `wxid_…`：直接拿它当昵称渲染，产物里每条回复
+    都会印成「小明 回复 wxid_abc123」。XML 没有回复方的昵称字段，故按 `username`
+    在**本条动态**的 `<user_comment>` 里反查（被回复者点过赞或评论过就查得到）。
+
+    变异：把 `ref_nickname` 改回 `_text(c, "ref_username")` → 本用例红（拿到 `wxid_xh`）。
+    """
     reply, like = moments.parse_post("T4", INTERACT_XML).comments
-    assert reply.ref_nickname == "小红"                   # <ref_username>
+    assert reply.ref_nickname == "小红"                   # wxid_xh → 昵称
     assert reply.is_rich is True                         # <is_rich_text>1</is_rich_text>
     assert like.ref_nickname is None                     # 缺省 → None
     assert like.is_rich is False
+
+
+def test_unresolvable_reply_target_is_none_not_a_wxid():
+    """反查不到（被回复者在本条动态里既没评论也没点赞）时留 None，**不拿 wxid 顶替**——
+    渲染层据此省掉「回复 X」，而不是编一个昵称出来。"""
+    xml = INTERACT_XML.replace("<ref_username>wxid_xh</ref_username>",
+                               "<ref_username>wxid_nobody</ref_username>")
+    reply = moments.parse_post("T4", xml).comments[0]
+    assert reply.ref_nickname is None
 
 
 # ---------- iter_posts：合成 sns.db + 假解密 ----------
@@ -227,13 +246,27 @@ def test_iter_posts_reads_all_and_skips_malformed(sns):
     assert [p.post_id for p in moments.iter_posts(ACCT)] == ["P1", "P3"]
 
 
+def test_iter_posts_is_newest_first(sns):
+    """**最新在前**：调用方的 limit 靠 `iter_posts` 的产出序截断，扫描序（rowid 序）
+    会把最旧的那端留住。时间与 tid 序**故意相反**（宽时刻在后插入），这样「碰巧对」
+    不可能成立。
+
+    变异：删掉 `iter_posts` 里的 `out.sort(...)` → 退化成扫描序 ["旧","新"] → 红。
+    """
+    old_ts, new_ts = 1735689600, 1789000000
+    _add(sns, 1, POST_XML.replace("1735689600", str(new_ts)).replace("P1", "NEW"))
+    _add(sns, 2, POST_XML.replace("1735689600", str(old_ts)).replace("P1", "OLD"))
+    assert [p.post_id for p in moments.iter_posts(ACCT)] == ["NEW", "OLD"]
+
+
 def test_iter_posts_filters_by_month_and_chat(sns):
     # 月中时间戳：任何本地时区（UTC-12..UTC+14）都落在同一个月，期望月用 month_of 现算
     jan_ts, jul_ts = 1736899200, 1752537600
     _add(sns, 1, POST_XML.replace("1735689600", str(jan_ts)))
     _add(sns, 2, POST_XML.replace("1735689600", str(jul_ts)).replace("P1", "P2"))
     assert [p.post_id for p in moments.iter_posts(ACCT, months=[media.month_of(jan_ts)])] == ["P1"]
-    assert [p.post_id for p in moments.iter_posts(ACCT, chat_filter="wxid_friend")] == ["P1", "P2"]
+    # 产出是最新在前（7 月那条在前），过滤本身不改变次序
+    assert [p.post_id for p in moments.iter_posts(ACCT, chat_filter="wxid_friend")] == ["P2", "P1"]
     assert [p.post_id for p in moments.iter_posts(ACCT, chat_filter="wxid_other")] == []
 
 
@@ -242,6 +275,40 @@ def test_iter_posts_missing_db_raises_data_not_found(tmp_path, monkeypatch):
     monkeypatch.setattr(paths, "XWECHAT_FILES", tmp_path / "nope")
     with pytest.raises(errors.DataNotFound):
         list(moments.iter_posts(ACCT))
+
+
+def test_missing_sns_timeline_table_raises_schema_drift(sns):
+    """旧版微信的 sns.db 里没有 `SnsTimeLine`：裸 `sqlite3.OperationalError` 会穿透
+    `usecases`（CLI 印 traceback、MCP 退化成通用内部错误），违反「core 只抛
+    AgentWeChatError 子类」。spec §5 点名的就是这一行。
+
+    变异：删掉 `iter_posts` 里那圈 `except sqlite3.OperationalError` → 抛的是
+    OperationalError（不是 SchemaDrift）→ 红。
+    """
+    from agent_wechat import errors
+    sns.execute("DROP TABLE SnsTimeLine")
+    sns.commit()
+    with pytest.raises(errors.SchemaDrift) as ei:
+        list(moments.iter_posts(ACCT))
+    assert ei.value.table == "SnsTimeLine"
+    assert isinstance(ei.value, errors.AgentWeChatError)     # 适配层能翻译
+
+
+def test_parse_failures_are_counted(sns):
+    """解析失败必须**有计数**：整个账号的 XML 形状变了时，否则就是「退出码 0 + 0 条动态」，
+    与「这个账号没有朋友圈」无法区分（spec §5 第 1 行要求计入 failed）。
+
+    变异：删掉 `iter_posts` 里的 `report.failed += 1` → 计数恒 0 → 红。
+    """
+    _add(sns, 1, POST_XML)
+    _add(sns, 2, "<SnsDataItem><TimelineObject>")          # 畸形
+    _add(sns, 3, "<Other><Nothing/></Other>")              # 认识的 XML、不是朋友圈结构
+    rep = moments.MomentsReport()
+    posts = list(moments.iter_posts(ACCT, report=rep))
+    assert [p.post_id for p in posts] == ["P1"]
+    assert rep.failed == 2
+    assert moments.MomentsReport().failed == 0             # 缺省为 0
+    assert rep.to_dict()["failed"] == 2                    # 随报告一起出库
 
 
 # ---------- F25：createTime 消毒（下游 datetime.fromtimestamp 会抛裸异常） ----------

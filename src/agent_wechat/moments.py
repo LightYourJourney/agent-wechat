@@ -91,7 +91,7 @@ def _duration(v: str | None) -> int | None:
 # 所以上界比 UTC 的 9999-12-31 还早：本机 UTC+8 实测，UTC 的 `253402300799` 会落进公元 10000 年
 # 并抛 `ValueError`（不是 OverflowError，但同样是裸异常）。取「UTC+14」（现实中的最大偏移）
 # 也不越界的那一刻，任何时区都安全。
-_MAX_TS = 253402250399        # UTC 9999-12-31T01:59:59 = 本地 9999-12-31T23:59:59 @UTC+14
+_MAX_TS = 253402250399        # UTC 9999-12-31T09:59:59 = 本地 9999-12-31T23:59:59 @UTC+14
 
 
 def _ts(v: str | None) -> int:
@@ -141,15 +141,28 @@ def _comments_of(root: ET.Element) -> tuple[SnsComment, ...]:
     `<user_comment>` 全部落在 `LocalExtraInfo/` 下的 `comment_user_list`(1289) /
     `like_user_list`(1157) / `with_user_list`(4)，`TimelineObject` 内一条都没有。
     传错了不会报错，只会**静默返回 0 条互动**（本机 1,923 条动态全空，直到真机冒烟才暴露）。
+
+    **回复目标要反查昵称**：`<ref_username>` 是 **wxid 不是昵称**（本机 183/183 全是
+    `wxid_…`），直接当昵称渲染出来就是「小明 回复 wxid_abc123」。XML 里没有回复方的昵称
+    字段（`ref_*` 子元素只有 `ref_comment_id` / `ref_comment_64id` / `ref_username`），但被
+    回复的人若在**本条动态**里点过赞或发过评论，他自己的 `<user_comment>` 就带着 `nickname`
+    ——按 `username` 建一张表反查即可（本机 183/183 命中）。查不到就留 `None`，由渲染层
+    省掉「回复 X」那段，**不编一个昵称**。本模块不 import store/reader，只在本条动态内自洽。
     """
+    els = list(root.iter("user_comment"))
+    nick_of = {}
+    for c in els:
+        u, n = _text(c, "username"), _text(c, "nickname")
+        if u and n:
+            nick_of[u] = n
     out = []
-    for c in root.iter("user_comment"):
+    for c in els:
         ctype = _text(c, "type")
         out.append(SnsComment(
             kind=CMT_LIKE if ctype == "1" else CMT_COMMENT,
             nickname=_text(c, "nickname") or "",
             content=_text(c, "content"),
-            ref_nickname=_text(c, "ref_username"),
+            ref_nickname=nick_of.get(_text(c, "ref_username") or ""),
             create_time=_ts(_text(c, "create_time")),
             is_rich=(_text(c, "is_rich_text") or "0") == "1",
         ))
@@ -182,8 +195,20 @@ def parse_post(tid: str, xml_text: str) -> SnsPost | None:
 
 
 def iter_posts(account: str, *, chat_filter: str | None = None,
-               months: list[str] | None = None) -> Iterator[SnsPost]:
-    """流式产出动态。`chat_filter` 匹配作者 wxid；`months` 为本地月份（`media.month_of`）。"""
+               months: list[str] | None = None,
+               report: MomentsReport | None = None) -> Iterator[SnsPost]:
+    """产出动态，**最新在前**（`createTime` 降序，与渲染层同序）。
+    `chat_filter` 匹配作者 wxid；`months` 为本地月份（`media.month_of`）。
+
+    为什么不再「边扫边 yield」：`SnsTimeLine` 的列只有
+    `(tid, user_name, content, pack_info_buf)`——**没有 createTime 列**，时间在 XML 里，
+    SQL 排不了。而调用方的 limit 语义是「留**最新**的 N 条」：靠扫描序截断留住的是最旧的
+    那一端（实测 limit=2 留下两条最早的，窗口也随之报成那两个最早的时刻）。故先解析整表、
+    再按 `create_time` 稳定排序后产出；本机 1,923 条的量级下这点内存可忽略。
+
+    解析失败的单条（XML 畸形 / 不是朋友圈结构）计入 `report.failed` 并跳过，不中断整批；
+    `report=None` 表示只读遍历（真机探针），不计数。
+    """
     db = paths.db_storage(account) / "sns" / "sns.db"
     if not db.exists():
         raise errors.DataNotFound(f"{db} 不存在（该微信版本可能没有朋友圈库）")
@@ -192,17 +217,29 @@ def iter_posts(account: str, *, chat_filter: str | None = None,
         con = sqlite3.connect(f"file:{plain}?mode=ro", uri=True)
         con.text_factory = bytes          # 库内含非 UTF-8 字节，统一按 bytes 取
         try:
-            for tid, content in con.execute("SELECT tid, content FROM SnsTimeLine"):
+            try:
+                rows = con.execute("SELECT tid, content FROM SnsTimeLine")
+            except sqlite3.OperationalError as exc:
+                # 旧版微信的 sns.db 没有这张表（或列被改名）。裸 sqlite3 异常会一路穿透到
+                # 适配层：CLI 印 traceback、MCP 退化成通用内部错误。「core 只抛
+                # AgentWeChatError 子类」这条契约在此收口（spec §5 的原话就是 SchemaDrift）。
+                raise errors.SchemaDrift("朋友圈", str(db), "SnsTimeLine") from exc
+            out = []
+            for tid, content in rows:
                 p = parse_post(str(tid), _dec(content))
                 if p is None:
+                    if report is not None:
+                        report.failed += 1
                     continue
                 if chat_filter and p.username != chat_filter:
                     continue
                 if want and media.month_of(p.create_time) not in want:
                     continue
-                yield p
+                out.append(p)
         finally:
             con.close()
+    out.sort(key=lambda p: p.create_time, reverse=True)   # 稳定：同一时刻保持扫描序
+    yield from out
 
 
 def _dec(v) -> str:
@@ -217,9 +254,11 @@ class MomentsReport:
     posts: int = 0
     comments: int = 0
     likes: int = 0
+    failed: int = 0                   # 解析失败被跳过的动态条数（与 media_failed 无关）
     media_local: int = 0              # 使用了本地缓存图
     media_downloaded: int = 0         # 本轮联网下载成功
     media_failed: int = 0             # 下载或解密失败
+    media_garbage: int = 0            # 其中「解密后不是已知图片格式」的条数（降级行带它）
     media_not_downloaded: int = 0     # 未开启联网，或该媒体不可下载
     window: tuple[int, int] | None = None      # (最早, 最新) 时间戳
     degraded: list[str] = dataclasses.field(default_factory=list)
