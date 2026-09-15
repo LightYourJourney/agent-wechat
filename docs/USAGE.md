@@ -206,10 +206,10 @@ agent-wechat media export --chat filehelper --kinds image --months 2026-09 --lim
 # 导到别处（--out 是持久明文目录，用完自行清理；微信目录始终只读）
 agent-wechat media export --chat 小李 --out /tmp/media-out
 
-# 存量历史回填「消息 → 媒体文件」映射（全量重扫该账号分片，分钟级，幂等）
+# 存量历史回填「消息 → 媒体文件」映射（全量重扫该账号分片，幂等；本机实测约 20 秒）
 agent-wechat media rebuild-refs
-#   已回填 20000 条媒体引用…
-# 完成：media_refs 共 20042 条
+#   已回填 21880 条媒体引用…
+# 完成：media_refs 共 43969 条
 ```
 
 **产物与计数**：
@@ -219,8 +219,9 @@ agent-wechat media rebuild-refs
 - **能导出的远少于会话里的媒体消息数**：微信按需下载并定期清理本地媒体，`missing` 大
   是常态而不是错误（本机实测：84.1 万条索引里 39,344 条图片消息，磁盘上只剩 198 个 dat）
 - 计数含义：`failed` = 解密/未知格式/落盘失败；`raw_only` = pilk 缺失时导出的原始 `.slk` 数；
-  `thumb` = 视频本体不在、回退缩略图的数量；`truncated`（打印「达到 --limit 上限」）= 还有
-  没导完的，可按 `--months` 分批重跑补齐。`image.missing` 恒为 0（图片按目录枚举，不按消息清点）
+  `thumb` = 视频本体不在、回退缩略图的数量；触及 `--limit` 时会多印一行
+  「（达到 --limit 上限，已提前收手）」，说明还有没导完的，可按 `--months` 分批重跑补齐。
+  `image.missing` 恒为 0（图片按目录枚举，不按消息清点）
 - **依赖是能力级的**：图片解密的密钥纯磁盘推导、不需要 bootstrap；语音要读 `media_*.db`，
   因此需要 passphrase 缓存（即已跑过 bootstrap）与 pilk（缺失则出原始 `.slk`）；
   wxgf 图要 ffmpeg（缺失则存 `.wxgf` 原容器）。缺哪项就只退哪项，降级说明走 stderr
@@ -235,8 +236,9 @@ agent-wechat media export --chat 小李
 ```
 
 `media rebuild-refs` 只回填 `media_refs` 索引（不重写 messages），是给**本次功能之前**
-已导出的存量历史补映射用的；新导出会与消息同事务顺带写入，无需手动跑。Agent 侧对应
-MCP 工具 `export_chat_media`（见 TOOLS.md §9；rebuild-refs 仅 CLI）。
+已导出的存量历史补映射用的；新导出会与消息同事务顺带写入，无需手动跑。它要解密全部分片，
+因此同样需要 passphrase 缓存（先 bootstrap）。Agent 侧对应 MCP 工具 `export_chat_media`
+（见 TOOLS.md §9；rebuild-refs 仅 CLI）。
 
 ### purge（销毁本地产物）
 
