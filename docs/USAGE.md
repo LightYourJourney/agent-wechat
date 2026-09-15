@@ -206,7 +206,7 @@ agent-wechat media export --chat filehelper --kinds image --months 2026-09 --lim
 # 导到别处（--out 是持久明文目录，用完自行清理；微信目录始终只读）
 agent-wechat media export --chat 小李 --out /tmp/media-out
 
-# 存量历史回填「消息 → 媒体文件」映射（全量重扫该账号分片，幂等；本机实测约 20 秒）
+# 存量历史回填「消息 → 媒体文件」映射（全量重扫该账号分片，幂等；本机实测 22.6 秒）
 agent-wechat media rebuild-refs
 #   已回填 21880 条媒体引用…
 # 完成：media_refs 共 43969 条

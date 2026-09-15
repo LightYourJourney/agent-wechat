@@ -131,7 +131,7 @@ media.export_media(account, chat_ids, kinds, months)
       → 解密 dat（V2 = AES-128-ECB 段 + XOR 尾）→ 明文图片落 media/<会话md5>/image/<月份>/
   → 语音：media_*.db 快照解密（HOME/tmp，用后即焚）→ VoiceInfo.voice_data（明文 SILK）
       → pilk 解 SILK → 自封 44B 头的 24kHz 单声道 WAV
-  → 视频：msg/video/{YYYY-MM}/ 下按 file_key 定位明文 mp4（本体不在则回退缩略图）→ 复制
+  → 视频：枚举 msg/video/{月份}/ 下的明文 mp4 与 {file_key}_thumb.jpg（本体不在则回退缩略图）→ 复制
   → 产物一律落 ~/.agent-wechat/media/（0700、文件 0600）；微信目录始终只读
 ```
 
@@ -173,7 +173,7 @@ media.export_media(account, chat_ids, kinds, months)
 | 向量语义检索 | 已实现：`vector.py`（fastembed 本地嵌入 + sqlite-vec KNN） | 逐条消息 + 确定性上下文前缀；`vec0` 表按 `account\|chat_md5` partition key 分片、`account` metadata 做账号隔离；水位线按 `messages.id` 续跑；导出与嵌入解耦（手动触发） |
 | 1-2 字高频查询 | LIKE 兜底（限 contact 时够用） | 增加 bigram 影子 FTS 表（存储约 +2×，做成配置项） |
 | 更大规模（千万级） | 单文件 SQLite（百万级实测流畅） | 分库（按账号/年份）或迁移 PostgreSQL + pgvector |
-| 媒体导出 | 已实现：`media.py`（图片 dat 解密 / 语音 SILK→WAV / 视频定位）+ `media_refs` 映射 | 按会话导出与存量回填已就绪；朋友圈远程媒体、按相册批量导出未做 |
+| 媒体导出 | 已实现：`media.py`（图片 dat 解密 / 语音 SILK→WAV / 视频定位）+ `media_refs` 映射 | 按会话导出与存量回填已就绪；朋友圈图（本地缓存与远程）均不在枚举范围，按相册批量导出未做 |
 | 群成员显示名 | 已实现：索引库存 `display_names` 名册，查询时 join；实时路径 `recent` 用内存名册 | 群昵称在 `contact.db` 的 `chat_room.ext_buffer`（protobuf，字段 f2，可选），回落 `contact.remark` / `nick_name` |
 | 增量自动同步 | 手动重跑 export（秒级） | export 管道与水位线已就绪，加定时触发即可 |
 

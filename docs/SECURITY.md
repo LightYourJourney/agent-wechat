@@ -12,6 +12,7 @@
 | 解密后的消息明文 | `~/.agent-wechat/tmp/`（临时）→ `index.db`（持久） | 极高 |
 | 解密后的媒体明文（图片/语音 WAV/视频） | `~/.agent-wechat/media/`（持久） | 极高 |
 | **例外**：`decrypt <db> --out` 调试命令会**持久**写出整库明文 | `~/.agent-wechat/<out>` | 极高（用后必须手动删除） |
+| **例外**：`media export --out DIR` 会把同一份媒体明文写到**任意指定目录** | `DIR`（代码尽力 chmod 0700，但不在 `~/.agent-wechat/` 之下） | 极高（用后必须手动删除；不受 Time Machine 排除与 `purge` 覆盖） |
 
 数据流向**始终在本机**：embedding、检索、MCP（stdio 传输）全部本地闭环，
 不存在任何网络上传路径。媒体导出同理——pilk（进程内调用）与 ffmpeg（本地子进程）
