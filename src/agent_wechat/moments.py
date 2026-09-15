@@ -202,9 +202,10 @@ def iter_posts(account: str, *, chat_filter: str | None = None,
 
     为什么不再「边扫边 yield」：`SnsTimeLine` 的列只有
     `(tid, user_name, content, pack_info_buf)`——**没有 createTime 列**，时间在 XML 里，
-    SQL 排不了。而调用方的 limit 语义是「留**最新**的 N 条」：靠扫描序截断留住的是最旧的
-    那一端（实测 limit=2 留下两条最早的，窗口也随之报成那两个最早的时刻）。故先解析整表、
-    再按 `create_time` 稳定排序后产出；本机 1,923 条的量级下这点内存可忽略。
+    SQL 排不了。而调用方的 limit 语义是「留**最新**的 N 条」：靠扫描序截断留住的是**碰运气
+    的那一段**（本机实测 limit=2 留在 2024-11-14/11-23，而真正最新的两条是
+    2026-09-13/09-14，window 也跟着报成 2024-11）。故先解析整表、再按 `create_time`
+    稳定排序后产出；本机 1,923 条的量级下这点内存可忽略。
 
     解析失败的单条（XML 畸形 / 不是朋友圈结构）计入 `report.failed` 并跳过，不中断整批；
     `report=None` 表示只读遍历（真机探针），不计数。
