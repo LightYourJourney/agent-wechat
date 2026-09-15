@@ -121,7 +121,13 @@ def _media_of(m: ET.Element) -> SnsMedia:
 
 def _comments_of(root: ET.Element) -> tuple[SnsComment, ...]:
     """`<user_comment>` 同时出现在评论列表与 like_user_list 内，按 type 区分：
-    1=点赞、2=评论、其余（4）按评论处理。"""
+    1=点赞、2=评论、其余（4）按评论处理。
+
+    **`root` 必须是 `SnsDataItem`（整个动态），不是 `TimelineObject`**：实测 2,450 条
+    `<user_comment>` 全部落在 `LocalExtraInfo/` 下的 `comment_user_list`(1289) /
+    `like_user_list`(1157) / `with_user_list`(4)，`TimelineObject` 内一条都没有。
+    传错了不会报错，只会**静默返回 0 条互动**（本机 1,923 条动态全空，直到真机冒烟才暴露）。
+    """
     out = []
     for c in root.iter("user_comment"):
         ctype = _text(c, "type")
@@ -157,7 +163,7 @@ def parse_post(tid: str, xml_text: str) -> SnsPost | None:
         text=_text(tlo, "contentDesc"),
         is_video_post=(ctype == str(TYPE_VIDEO_POST)),
         media=tuple(_media_of(m) for m in tlo.findall("ContentObject/mediaList/media")),
-        comments=_comments_of(tlo),
+        comments=_comments_of(root),      # 整个 SnsDataItem：互动在 LocalExtraInfo 下，不在 tlo 内
     )
 
 

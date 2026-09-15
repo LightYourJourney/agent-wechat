@@ -21,17 +21,22 @@ POST_XML = """<SnsDataItem>
         <size width="100" height="200"/>
       </media>
     </mediaList></ContentObject>
-    <user_comment>
-      <comment_id>1</comment_id><type>2</type><nickname>小明</nickname>
-      <username>wxid_xm</username><create_time>1735689700</create_time>
-      <content>好吃</content>
-    </user_comment>
-    <user_comment>
-      <comment_id>2</comment_id><type>1</type><nickname>小红</nickname>
-      <create_time>1735689800</create_time>
-    </user_comment>
   </TimelineObject>
-  <LocalExtraInfo><nickname>老王</nickname></LocalExtraInfo>
+  <LocalExtraInfo><nickname>老王</nickname>
+    <comment_user_list>
+      <user_comment>
+        <comment_id>1</comment_id><type>2</type><nickname>小明</nickname>
+        <username>wxid_xm</username><create_time>1735689700</create_time>
+        <content>好吃</content>
+      </user_comment>
+    </comment_user_list>
+    <like_user_list>
+      <user_comment>
+        <comment_id>2</comment_id><type>1</type><nickname>小红</nickname>
+        <create_time>1735689800</create_time>
+      </user_comment>
+    </like_user_list>
+  </LocalExtraInfo>
 </SnsDataItem>"""
 
 
@@ -131,17 +136,22 @@ INTERACT_XML = """<SnsDataItem>
     <id>P9</id><username>wxid_friend</username><createTime>1735689600</createTime>
     <contentDesc>互动</contentDesc>
     <ContentObject><type>2</type><mediaList/></ContentObject>
-    <user_comment>
-      <comment_id>1</comment_id><type>2</type><nickname>小明</nickname>
-      <ref_username>小红</ref_username><create_time>1735689700</create_time>
-      <content>回复你</content><is_rich_text>1</is_rich_text>
-    </user_comment>
-    <user_comment>
-      <comment_id>2</comment_id><type>1</type><nickname>小红</nickname>
-      <create_time>1735689800</create_time>
-    </user_comment>
   </TimelineObject>
-  <LocalExtraInfo><nickname>老王</nickname></LocalExtraInfo>
+  <LocalExtraInfo><nickname>老王</nickname>
+    <comment_user_list>
+      <user_comment>
+        <comment_id>1</comment_id><type>2</type><nickname>小明</nickname>
+        <ref_username>小红</ref_username><create_time>1735689700</create_time>
+        <content>回复你</content><is_rich_text>1</is_rich_text>
+      </user_comment>
+    </comment_user_list>
+    <like_user_list>
+      <user_comment>
+        <comment_id>2</comment_id><type>1</type><nickname>小红</nickname>
+        <create_time>1735689800</create_time>
+      </user_comment>
+    </like_user_list>
+  </LocalExtraInfo>
 </SnsDataItem>"""
 
 
