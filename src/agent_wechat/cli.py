@@ -268,8 +268,11 @@ def cmd_moments_export(args: argparse.Namespace) -> int:
     r = res.report
     print(f"已导出 {r.posts} 条动态（评论 {r.comments} / 点赞 {r.likes}）")
     if r.window:
-        print("覆盖：" + media.month_of(r.window[0]) + " ~ " + media.month_of(r.window[1])
-              + "（微信本地缓存窗口，非完整历史）")
+        # 时间戳 0 = 「没解析出来」（`moments._ts` 的消毒结果），不是 1970 年。照直印
+        # `month_of(0)` 会得到「覆盖：1970-01 ~ 1970-01」——一个凭空造出来的日期。
+        lo = media.month_of(r.window[0]) if r.window[0] else "?"
+        hi = media.month_of(r.window[1]) if r.window[1] else "?"
+        print(f"覆盖：{lo} ~ {hi}（微信本地缓存窗口，非完整历史）")
     print(f"媒体：已下载 {r.media_downloaded} / 未下载 {r.media_not_downloaded}"
           f" / 失败 {r.media_failed}")
     if r.truncated:

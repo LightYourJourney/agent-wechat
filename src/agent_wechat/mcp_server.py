@@ -222,9 +222,12 @@ def export_moments(contact: str | None = None, months: str | None = None,
     信封不回传文件清单。
 
     counts 里的 media_failed 是常态而非错误：微信服务端会清理老媒体，
-    实测抽样中约三成带 token 仍返回 404。window 给出动态的时间跨度——
-    **注意这是微信本地缓存的窗口，不是完整历史**（本机实测 1,923 条覆盖
-    2013-02~2026-09，密度极不均）。触及 limit 时 truncated=true。
+    实测抽样中约三成带 token 仍返回 404。counts.failed 是**动态解析失败**被跳过的
+    条数（与媒体无关）：非零说明部分动态没读懂，若它接近 posts 的总量，多半是微信
+    改了动态的 XML 结构——此时不要把它当成「这个账号没有朋友圈」。window 给出动态的
+    时间跨度——**注意这是微信本地缓存的窗口，不是完整历史**（本机实测 1,923 条覆盖
+    2013-02~2026-09，密度极不均）。触及 limit 时 truncated=true，留下的是**最新**的
+    那些动态。
     """
     res = usecases.moments_export(
         contact,
@@ -235,6 +238,7 @@ def export_moments(contact: str | None = None, months: str | None = None,
     r = res.report
     return {"out_dir": res.out_dir,
             "counts": {"posts": r.posts, "comments": r.comments, "likes": r.likes,
+                       "failed": r.failed,
                        "media_downloaded": r.media_downloaded,
                        "media_not_downloaded": r.media_not_downloaded,
                        "media_failed": r.media_failed},

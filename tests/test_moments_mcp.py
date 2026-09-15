@@ -55,9 +55,10 @@ def env(tmp_path, monkeypatch):
 def test_envelope_shape(env):
     d = mcp_server.export_moments(account=ACCT)
     assert set(d) == {"out_dir", "counts", "window", "degraded", "truncated"}
-    assert set(d["counts"]) == {"posts", "comments", "likes", "media_downloaded",
+    assert set(d["counts"]) == {"posts", "comments", "likes", "failed", "media_downloaded",
                                 "media_not_downloaded", "media_failed"}
     assert d["counts"]["posts"] == 1
+    assert d["counts"]["failed"] == 0                   # 解析失败与媒体失败各算各的
     assert d["window"] == {"earliest": 1735689600, "latest": 1735689600}
     assert d["degraded"] == [] and d["truncated"] is False
 
@@ -78,6 +79,23 @@ def test_envelope_never_leaks_token(env):
     d = mcp_server.export_moments(account=ACCT)
     assert "token" not in repr(d).lower()
     assert TOKEN not in repr(d)
+
+
+def test_envelope_reports_parse_failures(env):
+    """XML 形状变了（每条都解析不了）时，信封必须**说出**来：否则 `{"posts": 0,
+    "degraded": []}` 与「这个账号没有朋友圈」逐字节相同。
+
+    变异：删掉 mcp_server 里的 `"failed": r.failed` → KeyError → 红；删掉 usecases
+    里那条降级 → `degraded` 为空 → 红。
+    """
+    con = sqlite3.connect(paths.db_storage(ACCT) / "sns" / "sns.db")
+    con.execute("UPDATE SnsTimeLine SET content = '<FutureShape><Whatever/></FutureShape>'")
+    con.commit()
+    con.close()
+    d = mcp_server.export_moments(account=ACCT)
+    assert d["counts"]["posts"] == 0
+    assert d["counts"]["failed"] == 1
+    assert any("解析失败" in x for x in d["degraded"])
 
 
 def test_need_confirm_passthrough(env, monkeypatch):

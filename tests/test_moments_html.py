@@ -91,6 +91,32 @@ def test_comment_reply_and_likes_render():
     assert "回复" in t                                 # 「小明 回复 小红：同问」
 
 
+def test_parse_failures_are_disclosed_in_the_notice():
+    """解析失败必须出现在页首：否则「0 条动态」与「这个账号没有朋友圈」长得一模一样。
+
+    变异：删掉 `_notice` 里 `if report.failed` 那两行 → 红。
+    """
+    doc = moments_html.render([], _rep(posts=0, failed=7))
+    t = _text_of(doc)
+    assert "解析失败 7 条" in t
+    assert "没有匹配的动态" in t          # 空列表仍然照说，但不再是唯一解释
+    assert "解析失败" not in _text_of(moments_html.render([_mk()], _rep()))  # 0 条时不出现
+
+
+def test_unparseable_window_timestamp_is_not_a_date():
+    """`create_time == 0` 是「时间戳没解析出来」，不是 1970 年。`_when(0)` 返回空串，
+    直接套用会把这一行渲染成「覆盖 <b> ~ </b>」——空档看不出是「没有」还是「坏了」。
+
+    变异：去掉 `_notice` 里两个 `if report.window[...]` 守卫 → 渲染成「覆盖 <b> ~ </b>」→ 红。
+    """
+    doc = moments_html.render([_mk()], _rep(window=(0, 0)))
+    assert "覆盖 <b>— ~ —</b>" in doc
+    assert "1970" not in doc
+    # 一端可解析时只保留那一端，另一端仍是占位符
+    doc2 = moments_html.render([_mk()], _rep(window=(0, 1735689600)))
+    assert "覆盖 <b>— ~ 2025" in doc2
+
+
 def test_degraded_section_lists_reasons():
     t = _text_of(moments_html.render([_mk()], _rep(degraded=["3 张媒体下载失败"])))
     assert "3 张媒体下载失败" in t

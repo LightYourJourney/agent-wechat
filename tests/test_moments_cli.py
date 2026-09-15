@@ -13,6 +13,10 @@ XML = """<SnsDataItem><TimelineObject><id>P1</id><username>u</username>
 <ContentObject><type>2</type><mediaList/></ContentObject></TimelineObject>
 <LocalExtraInfo><nickname>老王</nickname></LocalExtraInfo></SnsDataItem>"""
 
+# 畸形 createTime → `moments._ts` 归 0（正确），但 CLI 不许把它印成 1970-01。
+BAD_TS_XML = XML.replace("<createTime>1735689600</createTime>",
+                         "<createTime>99999999999999999999</createTime>")
+
 
 @contextlib.contextmanager
 def _passthrough(db_path, passphrase, tmpdir=None):
@@ -59,6 +63,30 @@ def test_moments_export_rejects_bad_month(env, capsys):
         cli.main(["moments", "export", "--account", ACCT, "--months", "2025-13"])
     assert ei.value.code != 0
     assert "YYYY-MM" in capsys.readouterr().err
+
+
+def _sole_row(xml: str) -> None:
+    """把合成库换成只有这一条动态（夹具默认已插一条）。"""
+    con = sqlite3.connect(paths.db_storage(ACCT) / "sns" / "sns.db")
+    con.execute("DELETE FROM SnsTimeLine")
+    con.execute("INSERT INTO SnsTimeLine(tid, user_name, content) VALUES (1,'u',?)", (xml,))
+    con.commit()
+    con.close()
+
+
+def test_unparseable_create_time_is_not_printed_as_1970(env, capsys):
+    """`createTime` 畸形时 `_ts` 归 0，CLI 此前印「覆盖：1970-01 ~ 1970-01」——一个凭空
+    造出来的日期。0 的含义是「没解析出来」，故空出来而不是编一个。
+
+    变异：把 `lo`/`hi` 换回无条件的 `media.month_of(...)` → 印出 1970-01 → 红。
+    """
+    _sole_row(BAD_TS_XML)
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["moments", "export", "--account", ACCT])
+    assert ei.value.code == 0
+    out = capsys.readouterr().out
+    assert "1970-01" not in out
+    assert "覆盖：? ~ ?" in out
 
 
 def test_with_media_flag_defaults_off(env, monkeypatch):

@@ -152,6 +152,43 @@ def test_export_media_failure_is_isolated(env):
     assert (pathlib.Path(res.out_dir) / "index.html").exists()
 
 
+def test_export_limit_keeps_the_newest(env):
+    """`--limit` 留的必须是**最新**的那些：夹具第二条（tid 更大）的 createTime **更晚**，
+    于是扫描序与时间序**故意相反**——修复前按扫描序截断，留下的是**最早**那条，产物
+    （按时间倒序渲染）于是只显示时间线最旧的一头，window 也照错报。
+
+    变异：删掉 `iter_posts` 的 `out.sort(...)` → 留下 P1（最旧）→ 红。
+    """
+    _add_post(SECOND_XML)                                  # tid 更大、时间更早
+    res = usecases.moments_export(account=ACCT, limit=1)
+    assert res.report.truncated is True
+    assert res.report.window == (1735776000, 1735776000)   # 留下的是**新**那条（P2）
+    doc = (pathlib.Path(res.out_dir) / "index.html").read_text(encoding="utf-8")
+    assert "第二条" in doc and "正文" not in doc            # 产物里是新的那条，不是旧的
+
+
+def test_export_parse_failures_are_visible(env):
+    """最坏情况：微信改了 XML 形状 → 每条都解析不了。**不许**是一次静默的空成功：
+    计数得进报告、降级说明得有一条、产物页首要说明白。
+
+    变异：删掉 usecases 里 `if report.failed:` 那段 → degraded 为空 → 红。
+    """
+    con = sqlite3.connect(paths.db_storage(ACCT) / "sns" / "sns.db")
+    con.execute("DELETE FROM SnsTimeLine")                 # 库里**一条可解析的都没有**
+    con.commit()
+    con.close()
+    for tid, xml in ((1, "<SnsDataItem><TimelineObject>"),  # 畸形
+                     (3, "<Other><Nothing/></Other>"),       # 不是朋友圈结构
+                     (4, "<FutureShape><Whatever/></FutureShape>")):   # 将来换了形状
+        _add_post(xml, tid=tid)
+    res = usecases.moments_export(account=ACCT, limit=1)   # limit 也拦不住解析失败
+    assert res.report.posts == 0
+    assert res.report.failed == 3
+    assert any("解析失败" in d for d in res.report.degraded)
+    doc = (pathlib.Path(res.out_dir) / "index.html").read_text(encoding="utf-8")
+    assert "解析失败 3 条" in doc
+
+
 def test_export_limit_sets_truncated(env):
     """截断标志必须**如实**置位：恒真或恒假都等于没测，故自建两组的对照。
 
@@ -247,6 +284,34 @@ def test_export_garbage_media_is_counted_and_never_written(env):
     assert res.report.media_failed == 1
     assert res.report.media_downloaded == 0
     assert res.report.degraded                          # 有一条降级说明
+    assert res.report.media_garbage == 1
+
+
+def test_export_repeated_media_failures_share_one_degraded_line(env):
+    """同类降级只写**一条**、且带条数：50 条乱码此前会写 50 行一模一样的话（stderr 刷屏、
+    信封里 50 个重复项）。仓库既有先例是能力级问题用 once-flag（media.py 的
+    `wxgf_warned` / 语音分片那两条），TOOLS.md/USAGE.md 也已经写的是「写入一项」。
+
+    变异：把 `report.media_garbage += 1` 换回就地 `degraded.append(...)` → 3 条 → 红。
+    """
+    for tid in (2, 3):
+        _add_post(_md5_xml("00112233445566778899aabbccddeeff"
+                           if tid == 2 else "ffeeddccbbaa99887766554433221100"), tid=tid)
+    res = usecases.moments_export(account=ACCT, with_media=True,
+                                  fetch=lambda m, **k: b"\x00" * 64)
+    assert res.report.media_failed == 3
+    assert len(res.report.degraded) == 1
+    assert "3 条" in res.report.degraded[0]
+
+
+def test_export_unparseable_window_is_not_1970(env):
+    """畸形 `createTime` 归 0（`_ts` 的消毒），但产物不许把它印成 1970 年——
+    那是凭空造出来的日期（CLI 侧另有一条用例盯 stdout）。"""
+    _add_post(BAD_TS_XML, tid=2)
+    res = usecases.moments_export(account=ACCT)
+    assert res.report.window == (0, 1735689600)          # 0 是「没解析出来」
+    doc = (pathlib.Path(res.out_dir) / "index.html").read_text(encoding="utf-8")
+    assert "1970" not in doc
     out_root = pathlib.Path(res.out_dir)
     assert not (out_root / "media").exists()            # 连目录都没建
     assert [p for p in out_root.rglob("*")

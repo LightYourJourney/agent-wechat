@@ -456,7 +456,8 @@ def moments_export(contact: str | None = None, *, months: list[str] | None = Non
     report = moments.MomentsReport()
     kept: list[moments.SnsPost] = []
     lo = hi = None
-    for p in moments.iter_posts(ctx.account, chat_filter=author, months=months):
+    for p in moments.iter_posts(ctx.account, chat_filter=author, months=months,
+                                report=report):
         if len(kept) >= cap:
             report.truncated = True
             break
@@ -465,6 +466,16 @@ def moments_export(contact: str | None = None, *, months: list[str] | None = Non
         report.comments += sum(1 for c in p.comments if c.kind == moments.CMT_COMMENT)
         report.likes += sum(1 for c in p.comments if c.kind == moments.CMT_LIKE)
         kept.append(_resolve_media(p, out_root, report, with_media, do_fetch))
+    # 解析失败此前是**无声**的：`parse_post` 返回 None、`iter_posts` 直接 continue，既没有
+    # 计数也没有说明。最坏情况下微信改了 XML 形状 → 每条动态都被丢掉 → 退出码 0、信封
+    # `{"posts": 0, "degraded": []}`、HTML 写着「没有匹配的动态」，与「这个账号没有朋友圈」
+    # **完全无法区分**。故这里补一条带条数的降级说明（CLI 走 stderr、MCP 走 degraded、
+    # 产物页首的降级区也读它），并把同类问题合并成一条（50 条失败写 50 行同样的话是噪音）。
+    if report.failed:
+        report.degraded.append(f"{report.failed} 条动态解析失败（XML 结构不符，已跳过）")
+    if report.media_garbage:
+        report.degraded.append(
+            f"{report.media_garbage} 条媒体解密后不是已知图片格式（未落盘）")
     report.posts = len(kept)
     report.window = (lo, hi) if lo is not None else None
     report.out_dir = str(out_root)
@@ -511,7 +522,7 @@ def _resolve_media(p: "moments.SnsPost", out_root, report, with_media: bool,
             ext = _sniff_ext(data)
             if ext is None:
                 report.media_failed += 1
-                report.degraded.append("有媒体解密后不是已知图片格式")
+                report.media_garbage += 1          # 降级说明在收尾处统一写一条
                 out.append(m)
                 continue
             raw = m.md5 or ""

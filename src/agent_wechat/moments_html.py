@@ -65,7 +65,13 @@ def _notice(report: moments.MomentsReport, n: int) -> str:
     """页首说明区——spec §2.4 的硬要求：必须写明这是缓存窗口。"""
     lo = hi = "—"
     if report.window:
-        lo, hi = _when(report.window[0])[:10], _when(report.window[1])[:10]
+        # `create_time == 0` 是「时间戳没解析出来」，不是 1970 年（`_ts` 的消毒结果）。
+        # `_when(0)` 返回空串，直接用它会把这一行渲染成「覆盖 <b> ~ </b>」——空档看不出
+        # 是「没有」还是「坏了」，故保留占位符。
+        if report.window[0]:
+            lo = _when(report.window[0])[:10]
+        if report.window[1]:
+            hi = _when(report.window[1])[:10]
     rows = [
         f"本产物覆盖 <b>{lo} ~ {hi}</b>，共 <b>{n}</b> 条动态。",
         "<b>这是微信本地缓存窗口，不是完整历史</b>——更早的动态不在本机。",
@@ -73,6 +79,10 @@ def _notice(report: moments.MomentsReport, n: int) -> str:
          f"未下载 {report.media_not_downloaded} · 失败 {report.media_failed}。"),
         f"互动：评论 {report.comments} · 点赞 {report.likes}。",
     ]
+    if report.failed:
+        # 「0 条动态」与「这个账号没有朋友圈」必须能分辨：解析失败是不出声的那一类，
+        # 不写在这里，整页看起来就是一次成功的空导出。
+        rows.append(f"<b>解析失败 {report.failed} 条</b>（XML 结构不符，已跳过）。")
     if report.truncated:
         rows.append("<b>本次导出被 limit 截断</b>，可调大 --limit 重跑。")
     for d in report.degraded:
