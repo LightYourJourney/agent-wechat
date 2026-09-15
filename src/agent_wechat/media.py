@@ -379,13 +379,28 @@ def _ensure_tree(root: pathlib.Path, *parts: str) -> pathlib.Path:
     **root 本身（out_root）也在收紧范围内**，即使它已存在（`--out` 指向既有目录是 spec §6
     允许的用法）：它是本次导出的输出根，明文照片/视频全在里面，spec 要求 0700——这不是
     误伤用户目录，是导出数据的安全边界。只 chmod 权限，不动既有的任何文件。
+
+    mkdir 失败（只读目录/磁盘满/不可写 HOME）→ MediaOutputError：输出根建不出来的意思是
+    整次导出无从落盘，不是某个文件失败；裸 OSError 会穿透 core 层的错误契约。
     """
     p = root
-    p.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        p.mkdir(mode=0o700, parents=True, exist_ok=True)
+    except OSError as exc:
+        # 裸 OSError 会穿透 core 层（CLI 印 traceback、MCP 落 generic_payload 兜底）：
+        # 建不出来是**整次导出**不可用（磁盘满、只读挂载、不可写 HOME），不是某个文件失败。
+        raise errors.MediaOutputError(
+            f"输出目录不可用：{p}",
+            hint="请检查该路径的权限与磁盘空间，或用 --out 指定一个可写目录") from exc
     _chmod_quiet(p)
     for part in parts:
         p = p / part
-        p.mkdir(mode=0o700, exist_ok=True)
+        try:
+            p.mkdir(mode=0o700, exist_ok=True)
+        except OSError as exc:
+            raise errors.MediaOutputError(
+                f"输出目录不可用：{p}",
+                hint="请检查该路径的权限与磁盘空间，或用 --out 指定一个可写目录") from exc
         _chmod_quiet(p)
     return p
 
@@ -520,9 +535,10 @@ def export_media(account: str, chat_ids: list[str], *, kinds: list[str],
         if len(chat_ids) == 1:
             cm = messages.md5_of(chat_ids[0])
             vbase = paths.XWECHAT_FILES / account / "msg/video"
-            if full():
-                report.truncated = True
-            elif vbase.is_dir():
+            # 不在入口判 full()：此刻只是「上限已到」，还没看见任何条目——真要有视频被跳过，
+            # 下面两个循环里的逐项检查会如实置位 truncated（此处置位会把「一个视频都没剩」
+            # 也说成「已提前收手」）。
+            if vbase.is_dir():
                 for month_dir in _safe_iter(vbase):
                     if not month_dir.is_dir():
                         continue
@@ -548,11 +564,14 @@ def export_media(account: str, chat_ids: list[str], *, kinds: list[str],
                         if progress:
                             progress(produced)
                     for f in _safe_iter(month_dir, "*_thumb.jpg"):
+                        if f.stem.removesuffix("_thumb") in mp4_stems:
+                            continue               # 有本体的不再存缩略图
+                        # 顺序有意义：先判「本来就不导出」再判上限。反过来的话，`--limit`
+                        # 恰好用尽时会把一条**本来就跳过**的缩略图当成「因上限跳过」，
+                        # truncated 就成了假话。
                         if full():
                             report.truncated = True
                             break
-                        if f.stem.removesuffix("_thumb") in mp4_stems:
-                            continue               # 有本体的不再存缩略图
                         try:
                             buf = f.read_bytes()
                         except OSError:
@@ -594,17 +613,16 @@ def _voice_db_paths(account: str) -> list[pathlib.Path]:
 
 def _export_voices(account, chat_ids, out_root, report, want, is_full, bump, progress) -> None:
     """语音：Name2Id rowid → VoiceInfo(chat_name_id, create_time) → pilk 解码 24kHz WAV。
-    pilk 缺失 → 原始 .slk（微信原始形态，`\\x02` 前缀保留）。单库打不开跳过，不中断。
+    pilk 缺失 → 原始 .slk（微信原始形态，`\\x02` 前缀保留）。单库打不开则跳过该分片、
+    在 report.degraded 里公告一次，不中断。
 
     每个分片都对**全部**请求会话查一遍 Name2Id（不在本分片里的自然跳过）——实测 media_0 与
     media_1 的 Name2Id 交集 13 人、其中 12 个会话**两分片都有语音**，所以「查到就把会话从待办
     里划掉」会在第一个分片后丢掉同一会话在其余分片的语音（Ruling 22）。
     """
     decrypt.ensure_home_dirs()           # 中间明文只落 HOME/tmp（0700、已排除 Time Machine）
+    warned = False                       # 一次导出只说一次（wxgf_warned 同款 once-flag）
     for db in _voice_db_paths(account):
-        if is_full():
-            report.truncated = True      # 上限已到：与图片/视频分支同一口径（Ruling 18）
-            break
         try:
             passphrase = keys_mod.get_passphrase(account)
             with decrypt.decrypted(db, passphrase) as plain:
@@ -615,10 +633,17 @@ def _export_voices(account, chat_ids, out_root, report, want, is_full, bump, pro
                                         want, is_full, bump, progress)
                 finally:
                     con.close()
-        except (errors.AgentWeChatError, sqlite3.Error, OSError):
-            # 这个库打不开（漂移/密钥缺失/库读不了/HOME 的 tmp 建不出来）：跳过，不中断。
+        except (errors.AgentWeChatError, sqlite3.Error, OSError) as exc:
+            # 这个库打不开（漂移/密钥缺失/库读不了/HOME 的 tmp 建不出来）：跳过该分片，不中断。
             # OSError 那一支是 Ruling 23a：decrypt.decrypted 里 mkdtemp 与 snapshot 的
             # copy2/read_bytes 都直接抛 OSError（不包装），漏了它就带 traceback 冲出 core。
+            # 但**跳过必须可见**：会话的语音全在这种分片里时 voice 计数为 0，没有这条说明
+            # 就与「这个会话没有语音消息」不可区分（本功能其它能力级失败都会公告）。
+            # 文案经 redact：DecryptError 可能带回 sqlcipher 回显的 `PRAGMA key` 原文。
+            if not warned:
+                warned = True
+                report.degraded.append(
+                    f"语音分片打不开（首个原因：{errors.redact(str(exc))}），该分片的语音未导出")
             continue
 
 
@@ -634,12 +659,13 @@ def _export_voices_from(con, chat_ids, out_root, report, want, is_full, bump,
         for ts, lid, blob in con.execute(
                 "SELECT create_time, local_id, voice_data FROM VoiceInfo "
                 "WHERE chat_name_id=? ORDER BY create_time, local_id", (rid,)):
+            mon = month_of(ts)
+            if want is not None and mon not in want:
+                continue                     # 月份外的条目本来就不导出，不算「因上限收手」
+            # 上限检查排在这两条之后：只有**本会导出**的条目被上限挡下，truncated 才成立。
             if is_full():
                 report.truncated = True
                 return
-            mon = month_of(ts)
-            if want is not None and mon not in want:
-                continue
             if blob is None:
                 report.voice.failed += 1
                 continue

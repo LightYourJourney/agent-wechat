@@ -12,6 +12,7 @@
 """
 from __future__ import annotations
 
+import re
 import sqlite3
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -293,6 +294,10 @@ def export_history(contact: str | None = None, full: bool = False,
 
 MEDIA_KINDS = ("image", "voice", "video")
 
+# 月份入参格式：与 media.month_of / 磁盘目录名（`%Y-%m`）逐字符同形。月份部分限定 01-12：
+# `2026-13` 同样比不中任何目录，一起被拒（只放行 `\d{2}` 会漏掉它）。
+MONTH_RE = re.compile(r"\d{4}-(?:0[1-9]|1[0-2])")
+
 
 @dataclass(frozen=True)
 class MediaExportResult:
@@ -320,6 +325,11 @@ def media_export(contact: str, *, kinds: list[str], months: list[str] | None = N
     bad = [k for k in kinds if k not in MEDIA_KINDS]
     if bad:
         raise errors.SearchInputError(f"未知的媒体类型: {bad}（可用: {', '.join(MEDIA_KINDS)}）")
+    # months 与磁盘目录名逐字符比对：格式错的串永远比不中，不拦就是静默 0 命中、exit 0
+    # （用户看到的是「这个月没有媒体」而不是「月份写错了」）。
+    bad_months = [m for m in (months or []) if not MONTH_RE.fullmatch(m)]
+    if bad_months:
+        raise errors.SearchInputError(f"月份格式应为 YYYY-MM：{', '.join(bad_months)}")
     report = media.export_media(ctx.account, [chat_id], kinds=kinds, months=months,
                                 out_dir=out_dir, max_files=clamp_limit(limit, (1, 2000)))
     return MediaExportResult(chat_id=chat_id, out_dir=report.out_dir, report=report)

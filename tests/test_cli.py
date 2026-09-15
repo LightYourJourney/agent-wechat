@@ -724,3 +724,32 @@ def test_media_export_rejects_unknown_kind_with_search_input_error(captured, cap
     err = capsys.readouterr().err
     assert "未知的媒体类型" in err and "sticker" in err
     assert "Traceback" not in err
+
+
+def test_media_export_rejects_bad_months_with_search_input_error(captured, capsys):
+    """`--months 2026-9` → 单行报错 + 退出码 1，而不是静默 0 命中、exit 0。"""
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["media", "export", "--chat", "张三", "--months", "2026-9"])
+    assert ei.value.code == 1
+    err = capsys.readouterr().err
+    assert "月份格式应为 YYYY-MM" in err and "2026-9" in err
+    assert "Traceback" not in err
+
+
+def test_media_export_unwritable_out_dir_is_one_line(captured, tmp_path, monkeypatch, capsys):
+    """`--out` 建不出来（只读目录/磁盘满）→ MediaOutputError 经既有翻译成单行，不是 traceback。"""
+    bad = tmp_path / "ro" / "media"
+    real_mkdir = pathlib.Path.mkdir
+
+    def fake(self, *a, **kw):
+        if self == bad:
+            raise PermissionError(13, "Operation not permitted", str(self))
+        return real_mkdir(self, *a, **kw)
+
+    monkeypatch.setattr(pathlib.Path, "mkdir", fake)
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["media", "export", "--chat", "张三", "--out", str(bad)])
+    assert ei.value.code == 1
+    err = capsys.readouterr().err
+    assert "输出目录不可用" in err and str(bad) in err
+    assert "Traceback" not in err

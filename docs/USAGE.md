@@ -222,9 +222,11 @@ agent-wechat media rebuild-refs
   `thumb` = 视频本体不在、回退缩略图的数量；触及 `--limit` 时会多印一行
   「（达到 --limit 上限，已提前收手）」，说明还有没导完的，可按 `--months` 分批重跑补齐。
   `image.missing` 恒为 0（图片按目录枚举，不按消息清点）
-- **依赖是能力级的**：图片解密的密钥纯磁盘推导、不需要 bootstrap；语音要读 `media_*.db`，
-  因此需要 passphrase 缓存（即已跑过 bootstrap）与 pilk（缺失则出原始 `.slk`）；
-  wxgf 图要 ffmpeg（缺失则存 `.wxgf` 原容器）。缺哪项就只退哪项，降级说明走 stderr
+- **依赖的边界要分清**：媒体密钥推导本身不需要特权（图片密钥是纯磁盘推导的）；但与其他
+  命令一样，`media export` 需要 passphrase 缓存——会话消歧要读 `contact.db`。缺缓存时
+  命令**整体失败**（报错指向 bootstrap），不存在「只退图片、语音照常」的部分可用形态。
+  缓存齐备后各能力才独立降级：语音要 pilk（缺失则出原始 `.slk`）、wxgf 图要 ffmpeg
+  （缺失则存 `.wxgf` 原容器）。缺哪项只退哪项，降级说明走 stderr
 
 **`--chat` 消歧**（与 `search` / `recent` 同一套）：命中多个时候选 JSON 打到 stdout、
 一行说明打到 stderr、退出码 1——**不会猜**，用 username 重试即可：

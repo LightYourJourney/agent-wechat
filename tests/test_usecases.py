@@ -294,6 +294,19 @@ def test_media_export_wires_single_chat_and_clamped_limit(stub, monkeypatch):
     assert res.report.image.ok == 1
 
 
+def test_media_export_rejects_bad_months(stub):
+    """`--months` 非法格式（`2026-9` / `2026-13`）→ SearchInputError。
+
+    改前静默 0 命中、exit 0：月份串拿去和目录名比对，格式错的那些永远比不中，用户
+    看到的是「这个月没有媒体」而不是「你的月份写错了」。
+    """
+    _unique(stub)
+    for bad in ("2026-9", "2026-13", "202609", "2026-00", "2026-13-01"):
+        with pytest.raises(errors.SearchInputError) as ei:
+            usecases.media_export("张三", kinds=["image"], months=[bad])
+        assert "月份格式应为 YYYY-MM" in str(ei.value) and bad in str(ei.value)
+
+
 # ---------- CLI recent 上界 500（有意的用户可见变更） ----------
 
 def test_cli_recent_n_1000_is_capped_at_500(stub, capsys):

@@ -252,6 +252,23 @@ def test_export_media_max_files_truncates(tmp_path, monkeypatch):
     assert rep.video.ok == 2 and rep.truncated is True
 
 
+def test_export_media_single_video_at_limit_is_not_truncated(tmp_path, monkeypatch):
+    """truncated 只在**真因上限跳过条目**时置位：单视频 + 它自己的缩略图 + max_files=1。
+
+    改前缩略图循环的 `if full()` 排在 mp4_stems 判重之前——那条本来就不导出的缩略图
+    （本体已导出）也被算成「因上限跳过」，于是 `--limit 1` 且只有一个视频时照样提示
+    「达到上限，已提前收手」，是假话。
+    """
+    root, account = make_tree(tmp_path, monkeypatch)
+    mon = _video_fixture(account, int(datetime.datetime(2026, 9, 15, 12, 0).timestamp()))
+    vdir = paths.XWECHAT_FILES / account / "msg/video" / mon
+    (vdir / "abcd_thumb.jpg").write_bytes(b"t" * 8)   # 本体的缩略图：本体导出后它不再导出
+    rep = media.export_media(account, ["c@chatroom"], kinds=["video"],
+                             months=[mon], out_dir=root / "home" / "media", max_files=1)
+    assert rep.video.ok == 1 and rep.video.thumb == 0
+    assert rep.truncated is False                     # 没有任何条目因上限被跳过
+
+
 def test_report_to_dict_envelope_shape():
     rep = media.MediaReport(image=media.Counts(ok=3, failed=1), voice=media.Counts(raw_only=2),
                             video=media.Counts(ok=1, thumb=4), degraded=["x"])
@@ -544,6 +561,7 @@ def test_export_media_voice_silk_to_wav(tmp_path, monkeypatch):
     rep = media.export_media(account, ["chatA@chatroom"], kinds=["voice"],
                              months=[mon], out_dir=out)
     assert rep.voice.ok == 1 and rep.voice.raw_only == 0
+    assert rep.degraded == []                         # 成功路径不得出现「语音分片打不开」
     cm = hashlib.md5("chatA@chatroom".encode()).hexdigest()
     wavs = list((out / cm / "voice" / mon).iterdir())
     assert len(wavs) == 1 and wavs[0].name == f"{ts}_7.wav"
@@ -954,3 +972,62 @@ def test_export_media_voice_unreadable_shard_is_skipped(tmp_path, monkeypatch):
     assert rep.voice.ok == 1
     cm = hashlib.md5("chatA@chatroom".encode()).hexdigest()
     assert {p.name for p in (out / cm / "voice" / mon).iterdir()} == {f"{ts}_8.wav"}
+
+
+# ---------- 终审 Fix 1：语音分片打不开必须可见 ----------
+
+def test_export_media_voice_broken_shards_are_degraded(tmp_path, monkeypatch):
+    """语音分片全打不开 → voice 计数为 0 **且** degraded 有说明（一次导出一条）。
+
+    改前 `_export_voices` 的 except 只 `continue`：某会话的语音全在打不开/坏钥的分片里时，
+    报表是 voice 全 0 + 空 degraded，与「这个会话没有语音消息」逐字节不可区分——本功能里
+    其它每一种能力级失败都会公告，语音是唯一的静默者。
+    """
+    root, account = make_tree(tmp_path, monkeypatch)
+    ts = int(datetime.datetime(2026, 9, 15, 12, 0).timestamp())
+    mon = media.month_of(ts)
+    _voice_fixture(account, [(1, ts, 7, _silk_blob())], shard=0)
+    _voice_fixture(account, [(1, ts, 8, _silk_blob())], shard=1)   # 两个分片都持有该会话
+
+    import contextlib
+    from agent_wechat import decrypt as dec_mod
+
+    @contextlib.contextmanager
+    def broken(db_path, passphrase, tmpdir=None):
+        raise errors.AgentWeChatError("passphrase 缓存缺失，无法解密 media 分片")
+        yield                                    # 生成器协议需要（永不执行到）
+
+    monkeypatch.setattr(dec_mod, "decrypted", broken)
+    monkeypatch.setattr("agent_wechat.media.decrypt", dec_mod)
+
+    out = root / "home" / "media"
+    rep = media.export_media(account, ["chatA@chatroom"], kinds=["voice"],
+                             months=[mon], out_dir=out)
+    assert rep.voice.ok == 0 and rep.voice.failed == 0
+    voice_notes = [d for d in rep.degraded if "语音" in d]
+    assert len(voice_notes) == 1                 # 两个分片同因失败：只说一次（wxgf_warned 风格）
+    assert "passphrase 缓存缺失" in voice_notes[0]
+
+
+# ---------- 终审 Fix 3：_ensure_tree 的 mkdir 不是裸 OSError ----------
+
+def test_export_media_unwritable_out_dir_raises_media_output_error(tmp_path, monkeypatch):
+    """输出根建不出来（`--out` 只读 / 不可写 HOME / 磁盘满）→ MediaOutputError。
+
+    裸 PermissionError/OSError 会穿透 core 层：CLI 只翻 AgentWeChatError（用户见 traceback），
+    MCP 落到 generic_payload 兜底——与本模块开篇的错误契约相悖。
+    """
+    root, account = make_tree(tmp_path, monkeypatch)
+    bad = root / "ro" / "media"
+    real_mkdir = pathlib.Path.mkdir
+
+    def fake(self, *a, **kw):
+        if self == bad:
+            raise PermissionError(13, "Operation not permitted", str(self))
+        return real_mkdir(self, *a, **kw)
+
+    monkeypatch.setattr(pathlib.Path, "mkdir", fake)
+    with pytest.raises(errors.MediaOutputError) as ei:      # 不是 PermissionError
+        media.export_media(account, ["c@chatroom"], kinds=["video"],
+                           months=["2026-09"], out_dir=bad)
+    assert str(bad) in str(ei.value) and ei.value.hint

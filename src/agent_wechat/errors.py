@@ -136,6 +136,16 @@ class MediaKeyError(AgentWeChatError):
     """
 
 
+class MediaOutputError(AgentWeChatError):
+    """媒体输出目录不可建或不可写（`--out` 指向只读目录、不可写 HOME、磁盘满）。
+
+    与 HomeUnavailable 的区别：那个说的是 agent-wechat 自己的数据目录
+    （`$AGENT_WECHAT_HOME`），这个是**导出目标**（`--out` 或默认的 `HOME/media`）。
+    不包装的话裸 PermissionError/OSError 会穿透适配层（本模块开篇的契约）：CLI 那边
+    是一整个 traceback，MCP 落到 generic_payload 兜底，agent 只拿到「内部错误: …」。
+    """
+
+
 def to_payload(exc: AgentWeChatError) -> dict:
     """异常 → MCP 工具错误信封。形状与旧手写的 {"error"[, "hint"]} 逐字节一致。"""
     payload = {"error": redact(str(exc))}
