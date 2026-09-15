@@ -437,7 +437,7 @@ def moments_export(contact: str | None = None, *, months: list[str] | None = Non
                    account: str | None = None, fetch=None) -> "MomentsExportResult | NeedConfirm":
     """朋友圈导出用例：解析 →（可选）下载解密 → 渲染 HTML。
 
-    `with_media=False`（默认）时**全程零网络**——这是「零网络」红线上唯一例外的开关，
+    `with_media=False`（默认）时**全程零网络**——这是零网络红线上本次新增的例外开关，
     默认必须关闭。`fetch` 仅作测试注入，生产调用方不传。
     """
     from . import media, moments, moments_html, sns_media   # 惰性：moments_html 只在导出时用

@@ -1,7 +1,7 @@
 """真机朋友圈冒烟（默认不跑：`uv run pytest tests/test_moments_real.py -q -m real`）。
 
 只读：解析真 sns.db；第二条用例会向微信 CDN 发起**一次**真实 HTTP 请求（本功能
-用户显式授权的唯一联网例外），不写回微信目录，产物不落盘。
+本次新增的联网例外，由用户显式授权），不写回微信目录，产物不落盘。
 """
 import sqlite3
 
