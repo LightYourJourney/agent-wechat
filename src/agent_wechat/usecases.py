@@ -473,10 +473,23 @@ def moments_export(contact: str | None = None, *, months: list[str] | None = Non
     index = out_root / "index.html"
     try:
         index.write_text(doc, encoding="utf-8")
-        index.chmod(0o600)
     except OSError as exc:
         raise errors.MediaOutputError(f"写产物失败：{index}") from exc
+    try:
+        # 尽力而为（同 media._chmod_quiet / _save 的立场）：权限没收紧只是这一级没收紧，
+        # 不该让「全部媒体都已下载完」之后的一次 chmod 失败把整次导出作废。
+        index.chmod(0o600)
+    except OSError:
+        pass
     return MomentsExportResult(out_dir=str(out_root), report=report)
+
+
+# `url@md5` 是**未经消毒的 XML 属性**（好友发的动态就能携带它），而它会被直接当作产物文件名。
+# `media._dest` 只做 `d / f"{stem}.{ext}"`，不做任何消毒——`md5="../../../../x"` 会把明文写出
+# 产物根之外，`md5="/tmp/x"` 更会因 pathlib 丢弃左操作数而直接落在绝对路径上（已实测复现；
+# 后者还会让 `relative_to` 抛 ValueError 穿透 core 层）。故走白名单：只有 32 位 hex 才认
+# （真实数据 4899/5076 命中），其余一律回落到 URL 的 md5。
+_HEX32 = re.compile(r"^[0-9a-fA-F]{32}$")
 
 
 def _resolve_media(p: "moments.SnsPost", out_root, report, with_media: bool,
@@ -501,7 +514,9 @@ def _resolve_media(p: "moments.SnsPost", out_root, report, with_media: bool,
                 report.degraded.append("有媒体解密后不是已知图片格式")
                 out.append(m)
                 continue
-            stem = m.md5 or hashlib.md5((m.url or "").encode()).hexdigest()
+            raw = m.md5 or ""
+            stem = (raw if _HEX32.match(raw)
+                    else hashlib.md5((m.url or "").encode()).hexdigest())
             saved = media._save(out_root, "media", m.kind,
                                 media.month_of(p.create_time), stem, ext, data)
             if saved is None:

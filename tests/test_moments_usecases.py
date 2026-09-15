@@ -2,11 +2,12 @@
 import contextlib
 import json
 import pathlib
+import re
 import sqlite3
 
 import pytest
 
-from agent_wechat import errors, keys, moments, paths, sns_media, usecases
+from agent_wechat import errors, keys, media, moments, paths, sns_media, usecases
 
 ACCT = "wxid_testacct01_ab12"
 
@@ -23,6 +24,28 @@ XML = """<SnsDataItem><TimelineObject>
 SECOND_XML = """<SnsDataItem><TimelineObject>
  <id>P2</id><username>wxid_friend</username><createTime>1735776000</createTime>
  <contentDesc>第二条</contentDesc>
+</TimelineObject><LocalExtraInfo><nickname>老王</nickname></LocalExtraInfo></SnsDataItem>"""
+
+# 无 token 的媒体（实况照片形态）：build_url → None，不可下载，联网时也不该白发请求。
+NO_TOKEN_XML = """<SnsDataItem><TimelineObject>
+ <id>P3</id><username>wxid_friend</username><createTime>1735776000</createTime>
+ <contentDesc>实况照片</contentDesc>
+ <ContentObject><type>2</type><mediaList><media>
+   <id>m3</id><type>2</type>
+   <url type="1" md5="00112233445566778899aabbccddeeff">http://shmmsns.qpic.cn/sns/u/3</url>
+ </media></mediaList></ContentObject>
+</TimelineObject><LocalExtraInfo><nickname>老王</nickname></LocalExtraInfo></SnsDataItem>"""
+
+
+def _md5_xml(bad_md5: str) -> str:
+    """一条 `url@md5` 可控的动态——该属性来自好友发的动态，属未经消毒的外部输入。"""
+    return f"""<SnsDataItem><TimelineObject>
+ <id>P9</id><username>wxid_friend</username><createTime>1735776000</createTime>
+ <contentDesc>恶意 md5</contentDesc>
+ <ContentObject><type>2</type><mediaList><media>
+   <id>m9</id><type>2</type>
+   <url type="1" md5="{bad_md5}" key="3" enc_idx="1" token="TK">http://shmmsns.qpic.cn/sns/u/9</url>
+ </media></mediaList></ContentObject>
 </TimelineObject><LocalExtraInfo><nickname>老王</nickname></LocalExtraInfo></SnsDataItem>"""
 
 
@@ -55,6 +78,27 @@ def env(tmp_path, monkeypatch):
     con.commit()
     con.close()
     return home
+
+
+def _add_post(xml: str, tid: int = 2) -> None:
+    """往合成库里补插一条动态。共享 `env` 夹具只插一条，需要对照组的测试自行补。"""
+    con = sqlite3.connect(paths.db_storage(ACCT) / "sns" / "sns.db")
+    con.execute("INSERT INTO SnsTimeLine(tid, user_name, content) VALUES (?,'u',?)",
+                (tid, xml))
+    con.commit()
+    con.close()
+
+
+def _jpeg() -> bytes:
+    """`fetch` 的契约是返回**已解密明文**；这是最小可嗅探的 JPEG。"""
+    return b"\xff\xd8\xff" + bytes(64)
+
+
+def _files_outside(ancestor: pathlib.Path, out_root: pathlib.Path) -> list[pathlib.Path]:
+    """ancestor 下落在 out_root 之外的既有文件（产物根越界的物证）。"""
+    root = out_root.resolve()
+    return [p for p in ancestor.rglob("*")
+            if p.is_file() and not p.resolve().is_relative_to(root)]
 
 
 def test_export_offline_writes_html_without_any_network(env, monkeypatch):
@@ -114,11 +158,7 @@ def test_export_limit_sets_truncated(env):
     共享夹具只插一条（另有测试断言 posts == 1 / window），这里直接补插第二条
     （tid 不同、createTime 更晚），再看 limit=1 与不限量两种口径。
     """
-    con = sqlite3.connect(paths.db_storage(ACCT) / "sns" / "sns.db")
-    con.execute("INSERT INTO SnsTimeLine(tid, user_name, content) VALUES (2,'u',?)",
-                (SECOND_XML,))
-    con.commit()
-    con.close()
+    _add_post(SECOND_XML)
 
     capped = usecases.moments_export(account=ACCT, limit=1)
     assert capped.report.truncated is True
@@ -137,3 +177,82 @@ def test_export_rejects_bad_month(env):
 def test_export_window_is_reported(env):
     res = usecases.moments_export(account=ACCT)
     assert res.report.window == (1735689600, 1735689600)
+
+
+# ---------- 媒体名消毒：`url@md5` 是不可信输入，绝不能当路径组件 ----------
+
+def _assert_confined(res, home: pathlib.Path) -> None:
+    """产物全在 out_root 内、文件名是 32 位 hex（而非穿越串）。"""
+    out_root = pathlib.Path(res.out_dir)
+    # 先查越界（这条排在最前：越界时失败信息直接点出那个跑出去的文件）
+    assert [p for p in _files_outside(home, out_root) if p.name != "passphrase.json"] == []
+    saved = sorted(out_root.rglob("*.jpg"))
+    assert len(saved) == 2                              # 夹具那条 + 恶意 md5 那条
+    for p in saved:
+        assert p.resolve().is_relative_to(out_root.resolve())
+        assert re.fullmatch(r"[0-9a-f]{32}\.jpg", p.name), p.name
+
+
+def test_export_relative_md5_traversal_is_confined(env):
+    """`md5="../../../../escape"`：修复前实测写出 `<home>/escape.jpg`（产物根之外），
+    且计数是 downloaded=1 / failed=0——静默越界，没有任何信号。"""
+    home = env
+    _add_post(_md5_xml("../../../../escape"))
+    res = usecases.moments_export(account=ACCT, with_media=True,
+                                  fetch=lambda m, **k: _jpeg())
+    assert not (home / "escape.jpg").exists()           # 越界落点必须为空
+    _assert_confined(res, home)
+
+
+def test_export_absolute_md5_traversal_is_confined(env, tmp_path):
+    """`md5="<绝对路径>/escaped"`：pathlib 的 `d / "/x"` 丢弃左操作数，直接落到绝对路径。
+    修复前实测既写出 `<tmp>/escaped.jpg`，又让 `relative_to` 抛 ValueError 穿透 core 层。"""
+    home = env
+    _add_post(_md5_xml(f"{tmp_path}/escaped"))
+    res = usecases.moments_export(account=ACCT, with_media=True,
+                                  fetch=lambda m, **k: _jpeg())
+    assert not (tmp_path / "escaped.jpg").exists()
+    _assert_confined(res, home)
+
+
+# ---------- 嗅探与落盘失败：`fetch` 的文档把「自行嗅探校验」移交给了本层 ----------
+
+def test_export_garbage_media_is_counted_and_never_written(env):
+    """密钥错时 `decrypt_stream` 静默产出乱码而不抛错（见 sns_media.fetch 文档），
+    故本层必须嗅探。乱码**绝不落盘**——把 _sniff_ext 写死成 "jpg" 会让这条红。"""
+    res = usecases.moments_export(account=ACCT, with_media=True,
+                                  fetch=lambda m, **k: b"\x00" * 64)
+    assert res.report.media_failed == 1
+    assert res.report.media_downloaded == 0
+    assert res.report.degraded                          # 有一条降级说明
+    out_root = pathlib.Path(res.out_dir)
+    assert not (out_root / "media").exists()            # 连目录都没建
+    assert [p for p in out_root.rglob("*")
+            if p.is_file() and p.name != "index.html"] == []
+
+
+def test_export_save_failure_is_counted_and_isolated(env, monkeypatch):
+    """落盘失败（磁盘满/权限）只计数，不中断整批（media._save 返回 None 的路径）。"""
+    monkeypatch.setattr(media, "_save", lambda *a, **k: None)
+    res = usecases.moments_export(account=ACCT, with_media=True,
+                                  fetch=lambda m, **k: _jpeg())
+    assert res.report.media_failed == 1
+    assert res.report.media_downloaded == 0
+    assert res.report.posts == 1                        # 动态仍然导出
+    assert (pathlib.Path(res.out_dir) / "index.html").exists()
+
+
+def test_export_undownloadable_media_is_not_fetched(env):
+    """`with_media=True` 不等于「见媒体就下载」：无 token 的媒体本地不可下载，
+    不该白发一次必然失败的请求（且要如实计入 not_downloaded）。"""
+    _add_post(NO_TOKEN_XML)
+    calls = []
+
+    def fetch(m, **kw):
+        calls.append(m)
+        return _jpeg()
+
+    res = usecases.moments_export(account=ACCT, with_media=True, fetch=fetch)
+    assert res.report.media_not_downloaded == 1         # 无 token 那条
+    assert res.report.media_downloaded == 1             # 有 token 那条
+    assert len(calls) == 1                              # 只发了一次请求
