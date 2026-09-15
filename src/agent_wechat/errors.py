@@ -166,3 +166,7 @@ def generic_payload(exc: BaseException) -> dict:
     它就连服务端日志也没有了，成为唯一不可观测的失败路径。
     """
     return {"error": redact(f"内部错误: {type(exc).__name__}: {exc}")}
+
+
+class SnsMediaError(AgentWeChatError):
+    """朋友圈媒体下载/解密失败。消息不得含 token/key（两者都是鉴权材料）。"""
