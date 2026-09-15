@@ -255,6 +255,30 @@ def cmd_media_rebuild_refs(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_moments_export(args: argparse.Namespace) -> int:
+    """朋友圈导出：默认零网络；--with-media 才下载远程媒体本体。"""
+    from . import media, usecases
+    months = ([m.strip() for m in args.months.split(",") if m.strip()]
+              if args.months else None)
+    res = usecases.moments_export(
+        args.chat, months=months, with_media=args.with_media,
+        limit=args.limit, out_dir=args.out, account=args.account)
+    if isinstance(res, usecases.NeedConfirm):
+        return _need_confirm(args.chat, res)
+    r = res.report
+    print(f"已导出 {r.posts} 条动态（评论 {r.comments} / 点赞 {r.likes}）")
+    if r.window:
+        print("覆盖：" + media.month_of(r.window[0]) + " ~ " + media.month_of(r.window[1])
+              + "（微信本地缓存窗口，非完整历史）")
+    print(f"媒体：已下载 {r.media_downloaded} / 未下载 {r.media_not_downloaded}"
+          f" / 失败 {r.media_failed}")
+    if r.truncated:
+        print("注意：触及 --limit，本次被截断", file=sys.stderr)
+    _render_degradations(r.degraded)
+    print(f"产物：{res.out_dir}/index.html")
+    return 0
+
+
 def _human_size(n: int) -> str:
     """十进制单位。spec §3 的表样就是十进制的：5.30 GB / 12 MB / 182 B。
 
@@ -453,6 +477,18 @@ def main(argv: list[str] | None = None) -> None:
     msp = media_sub.add_parser("rebuild-refs", help="全量重扫微信库回填 media_refs 索引")
     msp.add_argument("--account")
     msp.set_defaults(fn=cmd_media_rebuild_refs)
+
+    sp = sub.add_parser("moments", help="朋友圈读取与导出")
+    msp = sp.add_subparsers(dest="moments_cmd", required=True)
+    esp = msp.add_parser("export", help="导出朋友圈为 HTML 时间线")
+    esp.add_argument("--chat", help="按作者筛选（名字或 wxid；省略=全部好友）")
+    esp.add_argument("--months", help="逗号分隔的 YYYY-MM，限定月份")
+    esp.add_argument("--with-media", action="store_true",
+                     help="联网下载远程媒体本体（默认关闭，不联网）")
+    esp.add_argument("--out", help="输出目录（默认 $AGENT_WECHAT_HOME/moments）")
+    esp.add_argument("--limit", type=int, default=2000, help="最多导出动态数（1-2000）")
+    esp.add_argument("--account", help="账号目录名")
+    esp.set_defaults(fn=cmd_moments_export)
 
     args = p.parse_args(argv)
     if args.cmd == "purge":
