@@ -65,6 +65,27 @@ def test_moments_export_rejects_bad_month(env, capsys):
     assert "YYYY-MM" in capsys.readouterr().err
 
 
+def test_missing_timeline_table_is_a_one_line_error_not_a_traceback(env, capsys):
+    """旧版微信没有 `SnsTimeLine`：修复前裸 `sqlite3.OperationalError` 穿透 `main` 的
+    `except errors.AgentWeChatError`，命令行上是一个 Python traceback。现在是一行中文
+    + 退出码 1，stdout 干净（模块 docstring 的流纪律）。
+
+    变异：删掉 `iter_posts` 里那圈 `except sqlite3.OperationalError` → 抛的是
+    OperationalError、`main` 不认 → 本用例拿不到 SystemExit → 红。
+    """
+    con = sqlite3.connect(paths.db_storage(ACCT) / "sns" / "sns.db")
+    con.execute("DROP TABLE SnsTimeLine")
+    con.commit()
+    con.close()
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["moments", "export", "--account", ACCT])
+    assert ei.value.code == 1
+    cap = capsys.readouterr()
+    assert cap.out == ""                       # 不许有半成品输出
+    assert "结构与预期不符" in cap.err and "SnsTimeLine" in cap.err
+    assert "Traceback" not in cap.err
+
+
 def _sole_row(xml: str) -> None:
     """把合成库换成只有这一条动态（夹具默认已插一条）。"""
     con = sqlite3.connect(paths.db_storage(ACCT) / "sns" / "sns.db")
