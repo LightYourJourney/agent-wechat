@@ -11,6 +11,7 @@
 ├── index.db                # 本地检索库（SQLite, WAL 模式，明文 + FileVault）
 ├── index.db-wal / -shm     # WAL 伴生文件
 ├── tasks.json              # 导出长任务的状态与进度
+├── media/                  # 媒体导出产物（图片/语音 WAV/视频，0700，明文）
 └── tmp/                    # 解密临时目录（单分片明文，用后即焚）
 ```
 
@@ -71,6 +72,27 @@ CREATE VIRTUAL TABLE messages_fts USING fts5(
 `display_names` 与 `roster_meta` 两张表由 `store.SCHEMA` 建
 （`CREATE TABLE IF NOT EXISTS`，每次连接都会跑），无需迁移。
 
+**媒体映射表 `media_refs`**（同一批 DDL 建，无迁移）：
+
+```sql
+CREATE TABLE IF NOT EXISTS media_refs (
+    msg_key    TEXT PRIMARY KEY,   -- = messages.msg_key（account/chat_md5/ts 经 join 取回）
+    media_kind TEXT NOT NULL,      -- 'image' | 'video'
+    file_key   TEXT,               -- 文件名哈希（dat / mp4 的文件名，不含扩展名）
+    xml_md5    TEXT                -- XML 里的 md5（兜底留证，与文件名无关）
+) WITHOUT ROWID;
+```
+
+- **`file_key` 的权威来源是 `Msg_` 表的 `packed_info_data` BLOB**：里面的 32-hex 就是
+  attach / video 目录下的文件名。XML 的 `md5` 属性**实测不等于文件名**（0/19,832 命中），
+  仅当 packed 缺失且它恰好是 32-hex 时充当兜底，同时留证备查。
+- **语音不入此表**：语音文件由 `media_*.db` 的 `VoiceInfo(chat_name_id, create_time, local_id)`
+  三元组直接命中，不需要按消息逐条建映射。
+- 填充两条路径：导出管道与消息写入**同事务**顺带 upsert；本次功能之前的存量历史用
+  `agent-wechat media rebuild-refs` 全量重扫回填（幂等，不重写 `messages`）。
+- **当前只写不读**：`media export` 仍按磁盘目录（attach 树 / `msg/video`）枚举定位文件，
+  不查此表；这张表是为「按消息定位媒体」的后续能力（含视频的会话归属）预留的索引。
+
 ## 4. 去重主键与增量策略
 
 ### msg_key
@@ -113,6 +135,9 @@ CREATE TABLE watermark (
 | 非文本消息（图片/语音/appmsg XML…） | content = `[image]` / `[appmsg: 标题]` 等提示，原始 XML 不入库 |
 | `real_sender_id`（整数） | 经同库 `Name2Id` 表解析为 username |
 | 表 md5 无法反查会话名 | `chat_id = "md5:<hash>"`（数据不丢，展示降级） |
+| 图片 dat（V2：15B 头 + AES-128-ECB 段 + XOR 尾段） | `media export` 解密为明文图片，扩展名按解密后魔数判定（jpg/png/gif/webp/wxgf），落 `media/<会话md5>/image/<月份>/`（按 `msg/attach/<md5(会话)>/<月份>/Img/` 目录枚举定位） |
+| 语音 `VoiceInfo.voice_data`（明文 SILK，`\x02#!SILK_V3` 开头） | pilk 解码 + 自封 44B RIFF 头 → 24kHz 单声道 WAV；pilk 缺失时回退存原始 `.slk`（`\x02` 前缀保留） |
+| 视频（`msg/video/{YYYY-MM}/{file_key}.mp4`，本身是明文，微信按需下载） | 账号级枚举 `msg/video/{月份}/` 后直接复制为 `.mp4`；本体不在时回退缩略图 `{file_key}_thumb.jpg`（多会话导出时无从归属，记 `degraded` 跳过） |
 
 ## 6. 面向 LLM 蒖馏的数据获取
 
@@ -136,7 +161,8 @@ for chat, in con.execute("SELECT DISTINCT chat_id FROM messages"):
 ```
 
 > 📌 按对话窗口自动切片（如 30 分钟静默切段）的蒸馏导出格式为**规划中功能**，
-> 当前需按上述方式自行组织。非文本消息以提示占位，媒体本体不在导出范围。
+> 当前需按上述方式自行组织。非文本消息在 `messages` 里以提示占位，媒体本体不入 `index.db`
+> ——需要本体时走 `agent-wechat media export`（见 USAGE.md §6），产物在 `~/.agent-wechat/media/`。
 
 ## 7. 备份与销毁
 

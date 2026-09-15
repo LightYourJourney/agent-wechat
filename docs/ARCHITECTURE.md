@@ -29,6 +29,7 @@ src/agent_wechat/
 ├── roster.py       显示名规则：ext_buffer 的 protobuf 解析 + 群昵称/备注/昵称优先级（纯逻辑，不碰 IO）
 ├── schema.py       微信库结构声明：能力 × 必需表/列 + 探测（纯数据，不碰 IO）
 ├── reader.py       消息读取：表发现、内容解码、流式产出（按语义**解码消息内容**的唯一模块——`inspect` 也会读库，但它只 dump 结构与样例行；结构与探测声明在 schema.py）
+├── media.py        媒体导出：图片 dat 解密（密钥纯磁盘推导 + 样本验证）、语音 SILK→WAV、视频定位（唯一接触媒体容器与媒体密钥的模块；reader import 它抽 `media_refs`，不反向）
 ├── export.py       导出管道：流式批处理 + 水位线续跑（任务登记归 usecases 层）
 ├── store.py        本地检索库：DDL、幂等 upsert、水位线、FTS 触发器
 ├── search.py       检索路由：trigram FTS / LIKE 兜底
@@ -36,7 +37,7 @@ src/agent_wechat/
 ├── tasks.py        长任务注册表：后台线程 + 进度落盘 + 中断回收（不认识任何具体任务）
 ├── usecases.py     用例层：两个入口共享的入口策略（参数归一化、账号/会话解析、结果形状）
 ├── purge.py        数据销毁：清单 → 计划 → 执行 → 核查（只做 CLI，不进 MCP）
-├── mcp_server.py   MCP 薄适配层（8 工具，只做参数编组与渲染）
+├── mcp_server.py   MCP 薄适配层（9 工具，只做参数编组与渲染）
 └── cli.py          命令行入口（只做参数编组与渲染）
 ```
 
@@ -122,6 +123,24 @@ vector.semantic_search(query, chat_id, limit, account)
 嵌入文本里的「上文」前缀只解决**同一轮运行内**的短消息语义（「好的」「在吗」），
 跨运行的连续性由 `rebuild` 保证（见 §7）。
 
+### 3.7 媒体导出（图片 / 语音 / 视频）
+
+```
+media.export_media(account, chat_ids, kinds, months)
+  → 图片：kvcomm 文件名取 code + md5(code+裸wxid) + 样本 dat 尾部统计 xorKey → 样本 dat 验证
+      → 解密 dat（V2 = AES-128-ECB 段 + XOR 尾）→ 明文图片落 media/<会话md5>/image/<月份>/
+  → 语音：media_*.db 快照解密（HOME/tmp，用后即焚）→ VoiceInfo.voice_data（明文 SILK）
+      → pilk 解 SILK → 自封 44B 头的 24kHz 单声道 WAV
+  → 视频：msg/video/{YYYY-MM}/ 下按 file_key 定位明文 mp4（本体不在则回退缩略图）→ 复制
+  → 产物一律落 ~/.agent-wechat/media/（0700、文件 0600）；微信目录始终只读
+```
+
+媒体密钥的推导不需要任何特权：`code` 来自 kvcomm 目录的文件名、`xorKey` 由样本 dat 尾部
+统计得出，推导结果**必须**用样本 dat 解密验证——验证不过只是图片能力级降级，语音/视频不受影响。
+「消息 → 文件名」映射（`media_refs`）由导出管道与消息同事务顺带写入，存量历史用
+`media rebuild-refs` 全量回填（见 DATA_MODEL.md §3）；导出本身目前仍按磁盘目录枚举定位，
+该表是留给「按消息定位媒体」的索引。
+
 ## 4. 关键设计决策与取舍
 
 | 决策 | 备选 | 理由 |
@@ -154,7 +173,7 @@ vector.semantic_search(query, chat_id, limit, account)
 | 向量语义检索 | 已实现：`vector.py`（fastembed 本地嵌入 + sqlite-vec KNN） | 逐条消息 + 确定性上下文前缀；`vec0` 表按 `account\|chat_md5` partition key 分片、`account` metadata 做账号隔离；水位线按 `messages.id` 续跑；导出与嵌入解耦（手动触发） |
 | 1-2 字高频查询 | LIKE 兜底（限 contact 时够用） | 增加 bigram 影子 FTS 表（存储约 +2×，做成配置项） |
 | 更大规模（千万级） | 单文件 SQLite（百万级实测流畅） | 分库（按账号/年份）或迁移 PostgreSQL + pgvector |
-| 媒体导出 | 仅元数据提示 | 数据层已保留 `msg_type` 与源路径解析点，按需扩展 |
+| 媒体导出 | 已实现：`media.py`（图片 dat 解密 / 语音 SILK→WAV / 视频定位）+ `media_refs` 映射 | 按会话导出与存量回填已就绪；朋友圈远程媒体、按相册批量导出未做 |
 | 群成员显示名 | 已实现：索引库存 `display_names` 名册，查询时 join；实时路径 `recent` 用内存名册 | 群昵称在 `contact.db` 的 `chat_room.ext_buffer`（protobuf，字段 f2，可选），回落 `contact.remark` / `nick_name` |
 | 增量自动同步 | 手动重跑 export（秒级） | export 管道与水位线已就绪，加定时触发即可 |
 

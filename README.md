@@ -18,7 +18,8 @@
 | 📦 历史全量导出 | 流式落库、幂等去重、断点续传；本机实测 84 万条消息约 1.5-2 分钟 |
 | 🔍 本地全文检索 | SQLite + FTS5 trigram（≥3 字精确子串）+ LIKE 兜底（1-2 字） |
 | 🧠 向量语义检索 | 本地嵌入（fastembed + bge-small-zh-v1.5，聊天内容零外发）+ sqlite-vec KNN；关键词记不全时按语义找（`semantic_search`） |
-| 🤖 Agent 集成 | MCP Server（8 个工具）+ Claude Code Skill + 同源 CLI |
+| 🖼️ 媒体导出 | 按会话导出图片（dat 解密）/ 语音（SILK → WAV）/ 视频（定位明文）；产物在 `~/.agent-wechat/media/`（0700） |
+| 🤖 Agent 集成 | MCP Server（9 个工具）+ Claude Code Skill + 同源 CLI |
 
 ## 适用场景
 
@@ -35,7 +36,7 @@
 └──────────┬───────────────────────┬──────────────┬───────────┘
            │      stdio (JSON-RPC) │              │
 ┌──────────▼───────────────────────▼──────────────▼───────────┐
-│ mcp_server.py —— 8 个工具的薄适配层（无业务逻辑）             │
+│ mcp_server.py —— 9 个工具的薄适配层（无业务逻辑）             │
 ├──────────────────────────────────────────────────────────────┤
 │ 核心层（Python，可脱离 MCP 独立使用）                         │
 │  account   登录态/账号发现（pgrep + lsof，只读）              │
@@ -145,7 +146,7 @@ agent-wechat/
 |---|---|
 | [INSTALL.md](docs/INSTALL.md) | 环境要求、依赖、权限、微信适配、MCP 配置 |
 | [USAGE.md](docs/USAGE.md) | 典型场景、工作流、命令示例 |
-| [TOOLS.md](docs/TOOLS.md) | 8 个 MCP 工具的参数/返回/错误 |
+| [TOOLS.md](docs/TOOLS.md) | 9 个 MCP 工具的参数/返回/错误 |
 | [ARCHITECTURE.md](docs/ARCHITECTURE.md) | 模块划分、数据流、设计决策 |
 | [DATA_MODEL.md](docs/DATA_MODEL.md) | 表结构、去重与增量策略 |
 | [SECURITY.md](docs/SECURITY.md) | 隐私、密钥安全、法律风险 |
