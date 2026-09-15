@@ -107,3 +107,108 @@ def test_decrypt_stream_bad_key_raises_without_echoing_key():
         sns_media.decrypt_stream(b"data", "not-a-number")
     assert "not-a-number" not in str(ei.value)
     assert isinstance(ei.value, errors.AgentWeChatError)
+
+
+# ---------- fetch：注入假传输层，全程离线 ----------
+
+class _Resp:
+    def __init__(self, body, headers=None):
+        self._body = body
+        self.headers = headers or {}
+
+    def read(self):
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+class _Opener:
+    """按序返回预置结果（bytes 或 Exception），并记录收到的请求。"""
+
+    def __init__(self, results):
+        self.results = list(results)
+        self.calls = []
+
+    def open(self, req, timeout=None):
+        self.calls.append(req)
+        r = self.results.pop(0)
+        if isinstance(r, Exception):
+            raise r
+        if isinstance(r, tuple):
+            return _Resp(r[0], r[1])
+        return _Resp(r, {"x-enc": "1"})
+
+
+@pytest.fixture(autouse=True)
+def _no_sleep(monkeypatch):
+    monkeypatch.setattr(sns_media.time, "sleep", lambda _s: None)
+
+
+def _enc(plain: bytes, seed: str) -> bytes:
+    ks = sns_media.WxIsaac64(int(seed)).keystream(len(plain))
+    return bytes(a ^ b for a, b in zip(plain, ks))
+
+
+def test_fetch_decrypts_when_x_enc_is_1():
+    plain = b"\xff\xd8\xff" + bytes(200)
+    op = _Opener([_enc(plain, "3")])
+    assert sns_media.fetch(_m(key="3"), opener=op) == plain
+
+
+def test_fetch_returns_plaintext_when_not_encrypted():
+    """x-enc 缺失 → 原样返回（不是所有响应都加密）。"""
+    body = b"\xff\xd8\xffplain"
+    op = _Opener([(body, {})])
+    assert sns_media.fetch(_m(key="3"), opener=op) == body
+
+
+def test_fetch_retries_then_succeeds():
+    plain = b"\xff\xd8\xff" + bytes(50)
+    op = _Opener([TimeoutError("x"), TimeoutError("y"), _enc(plain, "3")])
+    assert sns_media.fetch(_m(key="3"), opener=op) == plain
+    assert len(op.calls) == 3
+
+
+def test_fetch_exhausts_attempts_raises():
+    op = _Opener([TimeoutError()] * 3)
+    with pytest.raises(sns_media.SnsMediaError):
+        sns_media.fetch(_m(key="3"), opener=op)
+
+
+def test_fetch_error_never_echoes_token():
+    op = _Opener([TimeoutError()] * 3)
+    with pytest.raises(sns_media.SnsMediaError) as ei:
+        sns_media.fetch(_m(token="SECRETTOKEN"), opener=op)
+    assert "SECRETTOKEN" not in str(ei.value)
+
+
+def test_fetch_rejects_foreign_host_before_any_request():
+    """恶意 XML 可能把 URL 指向任意主机——白名单必须在发请求之前拦住。"""
+    op = _Opener([])
+    with pytest.raises(sns_media.SnsMediaError) as ei:
+        sns_media.fetch(_m(url="http://evil.example.com/x.jpg", token="T"), opener=op)
+    assert "evil.example.com" in str(ei.value)
+    assert op.calls == []                      # 一个请求都没发
+
+
+def test_fetch_without_token_raises_without_request():
+    op = _Opener([])
+    with pytest.raises(sns_media.SnsMediaError):
+        sns_media.fetch(_m(token=None), opener=op)
+    assert op.calls == []
+
+
+def test_default_opener_ignores_proxies():
+    """实测走本机代理反而超时，设计取直连（环境里确有 http_proxy=127.0.0.1:7897）。
+
+    断言的是**净效果**：只要没有任何带非空 proxies 的 handler，请求就是直连的。
+    （`ProxyHandler({})` 因不暴露 *_open 方法会被 OpenerDirector 丢弃，
+     净效果正是「无代理处理」；不要把它当成写错了。）
+    """
+    import urllib.request
+    op = sns_media._default_opener()
+    assert all(not getattr(h, "proxies", None) for h in op.handlers)

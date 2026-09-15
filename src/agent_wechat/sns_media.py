@@ -148,3 +148,53 @@ def decrypt_stream(data: bytes, key: str, *, video: bool = False) -> bytes:
         return data
     ks = WxIsaac64(seed).keystream(n)
     return bytes(a ^ b for a, b in zip(data[:n], ks)) + data[n:]
+
+
+def _default_opener() -> urllib.request.OpenerDirector:
+    """**强制直连**（不读 `http_proxy` 等环境变量），机制不是「空 ProxyHandler 生效」：
+
+    `ProxyHandler({})` 在 `add_handler` 里走 `handler_order` → 因为 `proxies` 为空，
+    它**不暴露任何 `*_open` 方法**，于是 `OpenerDirector.add_handler` 末尾的 `if added:`
+    为假、这个 handler 被**静默丢弃**；与此同时，传了 handler 又让 `build_opener`
+    **跳过安装默认的 `ProxyHandler(getproxies())`**。净效果 = 完全没有代理处理 = 直连。
+
+    所以：**不要「简化」成 `build_opener()`** —— 那会静默把环境代理装回来。
+    实测本机 `http_proxy=http://127.0.0.1:7897`：直连 6/6 成功（0.2–0.3s），走代理反复超时。
+    """
+    return urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
+def fetch(m: moments.SnsMedia, *, timeout: float = 20.0, attempts: int = 3,
+          sleep: float = 2.0, opener=None) -> bytes:
+    """下载并解密一条媒体，返回明文。失败重试 `attempts` 次后抛 `SnsMediaError`。
+
+    异常消息**只含类型名**，绝不回显 URL / token / key。
+
+    注意 `x-enc: 1` 只说明「响应体是加密的」，**不代表解出来的是有效媒体**：
+    密钥错误或越界时 `decrypt_stream` 会静默产出乱码而非抛错，调用方须自行嗅探校验。
+    """
+    url = build_url(m)
+    if url is None:
+        raise SnsMediaError("该媒体没有 token 或 url，无法下载")
+    if not host_allowed(url):
+        host = urllib.parse.urlsplit(url).hostname or "?"
+        raise SnsMediaError(f"拒绝非微信 CDN 域名：{host}")
+
+    op = opener if opener is not None else _default_opener()
+    last: Exception | None = None
+    for i in range(max(1, attempts)):
+        try:
+            req = urllib.request.Request(
+                url, headers={"User-Agent": USER_AGENT, "Accept": "*/*"})
+            with op.open(req, timeout=timeout) as resp:
+                raw = resp.read()
+                enc = str(resp.headers.get("x-enc") or "").strip()
+            if enc == "1" and m.key:
+                return decrypt_stream(raw, m.key,
+                                      video=(m.kind == moments.KIND_VIDEO))
+            return raw
+        except Exception as exc:                       # 网络异常种类多，统一重试
+            last = exc
+            if i < attempts - 1:
+                time.sleep(sleep)
+    raise SnsMediaError(f"下载失败（重试 {attempts} 次）：{type(last).__name__}")
