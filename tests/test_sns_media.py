@@ -64,6 +64,14 @@ def test_build_url_none_without_token():
     assert sns_media.build_url(_m(url=None)) is None
 
 
+def test_build_url_none_for_other_kind():
+    """未分类类型（type 3/4/0）的语义未实测——不猜 URL 形态，一律标为不可下载。
+    url 与 token 都给全，确保这里的 None 出自 kind 判据，而非缺字段的早退分支。"""
+    m = _m(kind=moments.KIND_OTHER)
+    assert m.url and m.token
+    assert sns_media.build_url(m) is None
+
+
 def test_host_allowed():
     assert sns_media.host_allowed("https://shmmsns.qpic.cn/x")
     assert sns_media.host_allowed("https://shzjwxsns.video.qq.com/x")

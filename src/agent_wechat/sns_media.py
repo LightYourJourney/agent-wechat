@@ -115,6 +115,10 @@ def build_url(m: moments.SnsMedia) -> str | None:
     """
     if not m.url or not m.token:
         return None
+    if m.kind == moments.KIND_OTHER:
+        # type 3/4/0 的语义未实测：图片分支（尺寸段改 /0）与视频分支（token 前置）
+        # 对该类都是猜测。宁可标成不可下载，也不猜 URL 形态（调用方按 None 标 not_downloaded）。
+        return None
     url = m.url.replace("http://", "https://")
     tok = urllib.parse.quote(m.token, safe="")
     if m.kind == moments.KIND_VIDEO:
