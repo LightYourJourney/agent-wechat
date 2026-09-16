@@ -7,6 +7,8 @@
 import asyncio
 import inspect
 import json
+import pathlib
+import re
 import time
 from types import SimpleNamespace
 
@@ -321,10 +323,22 @@ def test_msg_dict_carries_msg_key():
 # ---------- T7：get_message_media 的信封（spec §4.5） ----------
 
 def test_tool_count_is_eleven():
-    """工具数变了，README/TOOLS.md 的数法必须跟着变 —— 这条断言守的就是「别忘改文档」。"""
+    """工具数变了，README/TOOLS.md 的数法必须跟着变 —— 这条断言守的就是「别忘改文档」。
+
+    两条断言各守一件事：注册表里的工具数（拿掉一个即红）与**活文档**里逐条计数
+    （把任一处退回「10 个工具」即红）。只扫活文档：CHANGELOG 的「5 个工具」「7 个工具」
+    是发布历史，永远不该被改成 11；TOOLS.md 末尾的「≤10 个任务」是**任务**数，故模式
+    要求数字后面紧跟「工具」或「MCP 工具」。
+    """
     tools = asyncio.run(mcp_server.server.list_tools())
     assert len(tools) == 11
     assert "get_message_media" in {t.name for t in tools}
+    root = pathlib.Path(__file__).resolve().parent.parent
+    for rel in ("README.md", "docs/TOOLS.md", "docs/ARCHITECTURE.md"):
+        text = (root / rel).read_text(encoding="utf-8")
+        for hit in re.finditer(r"(\d+)\s*(?:个\s*)?(?:MCP\s*)?工具", text):
+            assert hit.group(1) == str(len(tools)), \
+                f"{rel}：「{hit.group(0)}」应随工具数改成 {len(tools)} 个工具"
 
 
 def test_get_message_media_envelope_shape(monkeypatch):
