@@ -29,7 +29,7 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from . import appmsg, messages
+from . import messages
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -112,6 +112,10 @@ def build(chat_id: str, *, title: str, rows: Sequence[dict], parts: Mapping[str,
       **渲染从不依赖回指成功**。
     - `generated_at`：缺省读一次时钟；测试要确定性时显式传值。
     """
+    # 先物化：下面要遍历两遍（先收 in_range 再逐行建 ViewMsg）。上游是 list，这一步不是
+    # 为了接受生成器，而是把「一次性迭代器会让 msgs 静默变空、而 in_range 照旧不空」这个
+    # 失败模式挡在门外——它不会报错，只会静默产出半份时间线。
+    rows = list(rows)
     in_range = {row["msg_key"] for row in rows}
     refs = refs or {}
     media = media or {}

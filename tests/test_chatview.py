@@ -34,19 +34,49 @@ def test_ref_anchor_resolves_when_target_is_in_range():
 
 
 def test_counts_and_flags_are_carried_through():
-    """truncated / unparsed / rejected 必须原样进 ChatView —— 产物顶部要印它们。"""
+    """truncated / unparsed / rejected 必须原样进 ChatView —— 产物顶部要印它们。
+
+    `degraded` 也一并钉住（F48）：它同样是产物顶部要印的东西，此前只在 `degraded=()`
+    下被传过，于是「写死成空元组」全绿。chat_id / title / out_dir 是纯透传、且 T7/T8
+    的用例直接读它们，顺手一起断言，不为此另开用例。
+    """
+    from agent_wechat.usecases import Degradation
+
+    d = (Degradation(capability="msg_parts", db="index.db", table="msg_parts",
+                     missing_columns=(), effect="msg_parts 未回填"),)
     v = chatview.build("c", title="t", rows=[_row("k1", 10)], parts={}, media={},
-                       out_dir="/tmp", truncated=True, unparsed=2, rejected=1, degraded=())
+                       out_dir="/tmp", truncated=True, unparsed=2, rejected=1, degraded=d)
     assert (v.truncated, v.unparsed, v.rejected) == (True, 2, 1)
+    assert v.degraded == d
+    assert (v.chat_id, v.title, v.out_dir) == ("c", "t", "/tmp")
 
 
 # ---------------- 以下是 brief 之外补的夹具（每条 docstring 都写明怎么红）----------------
 
 
+def test_is_self_and_sender_are_true_for_own_messages():
+    """回归：`is_self` / `sender` 的搬运要**两侧**都断言。
+
+    `_row(key, ts)` 的 `is_self = ts % 2`、`sender_name = "我" if ts % 2 else "张三"`。
+    **只断言 `ts` 为偶数的行是没用的**——它的 `is_self` 恰是 `False`，与「写死 False」不可区分。
+    T6 审阅者实测（我也复现了）：把 `is_self` 写死成 `False` → 全量 631 passed 无人红，
+    而后果是**整份导出被判成别人发的**（时间线左右对齐整体翻转）。
+    这条断言 `ts=21`（**奇数**）那一行，删掉 `bool(...)` 或写死即红。
+    """
+    v = chatview.build(
+        "c", title="t", rows=[_row("k1", 10), _row("k2", 21)], parts={}, media={},
+        out_dir="/tmp", truncated=False, unparsed=0, rejected=0, degraded=())
+    by_key = {m.msg_key: m for m in v.msgs}
+    assert by_key["k1"].is_self is False and by_key["k1"].sender == "张三"
+    assert by_key["k2"].is_self is True and by_key["k2"].sender == "我"   # ← 承重的那一侧
+
+
 def test_row_fields_are_wired_into_the_view_msg():
     """行 → ViewMsg 的字段搬运：删掉 `kind=_kind_of(row["msg_type"])` 那行（或改成恒
     `str(row["msg_type"])`）→ 第 1 条断言红；删掉 `anchor=anchor_of(key)` → 第 2 条红；
-    删掉 `text=` / `sender=` / `is_self=` 的搬运 → 第 3 条红。"""
+    删掉 `text=` / `sender=` 的搬运 → 第 3 条红。
+    `is_self` 这里只压在 `ts=10` 这个**偶数**侧（值为 False），奇数侧由
+    `test_is_self_and_sender_are_true_for_own_messages` 承重——别把两半合成一条又只留偶数行。"""
     v = chatview.build("c", title="t", rows=[_row("k1", 10, content="正文")], parts={},
                        media={}, out_dir="/tmp", truncated=False, unparsed=0,
                        rejected=0, degraded=())
