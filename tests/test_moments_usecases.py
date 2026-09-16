@@ -285,6 +285,12 @@ def test_export_garbage_media_is_counted_and_never_written(env):
     assert res.report.media_downloaded == 0
     assert res.report.degraded                          # 有一条降级说明
     assert res.report.media_garbage == 1
+    # 文件系统级证据（本测试名字里的 never_written 指的就是这两条）：
+    # 只断计数的话，「写了盘但不计 media_downloaded」的变异会漏网。
+    out_root = pathlib.Path(res.out_dir)
+    assert not (out_root / "media").exists()            # 连目录都没建
+    assert [f for f in out_root.rglob("*")
+            if f.is_file() and f.name != "index.html"] == []
 
 
 def test_export_repeated_media_failures_share_one_degraded_line(env):
@@ -312,10 +318,9 @@ def test_export_unparseable_window_is_not_1970(env):
     assert res.report.window == (0, 1735689600)          # 0 是「没解析出来」
     doc = (pathlib.Path(res.out_dir) / "index.html").read_text(encoding="utf-8")
     assert "1970" not in doc
-    out_root = pathlib.Path(res.out_dir)
-    assert not (out_root / "media").exists()            # 连目录都没建
-    assert [p for p in out_root.rglob("*")
-            if p.is_file() and p.name != "index.html"] == []
+    # 注：原先此处还有两条「产物树里没有媒体文件」的断言。它们恒真——本用例离线
+    # （不带 with_media），根本不会抓取媒体。已搬回 test_export_garbage_media_…，
+    # 那里 fetch 真的返回了非图片字节，断言才有意义。
 
 
 def test_export_save_failure_is_counted_and_isolated(env, monkeypatch):

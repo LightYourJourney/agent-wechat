@@ -1,5 +1,6 @@
 """HTML 渲染：转义、窗口说明、媒体占位、评论回复。纯函数，无 IO。"""
 import dataclasses
+import datetime
 import html.parser
 
 from agent_wechat import moments, moments_html
@@ -112,9 +113,13 @@ def test_unparseable_window_timestamp_is_not_a_date():
     doc = moments_html.render([_mk()], _rep(window=(0, 0)))
     assert "覆盖 <b>— ~ —</b>" in doc
     assert "1970" not in doc
-    # 一端可解析时只保留那一端，另一端仍是占位符
-    doc2 = moments_html.render([_mk()], _rep(window=(0, 1735689600)))
-    assert "覆盖 <b>— ~ 2025" in doc2
+    # 一端可解析时只保留那一端，另一端仍是占位符。
+    # 年份用与渲染层同一个转换现算：硬编码 "2025" 会在 UTC 负偏移时区假红
+    # （1735689600 = 2025-01-01 00:00 UTC，在 UTC-5 是 2024-12-31）。
+    ts = 1735689600
+    year = datetime.datetime.fromtimestamp(ts).strftime("%Y")
+    doc2 = moments_html.render([_mk()], _rep(window=(0, ts)))
+    assert f"覆盖 <b>— ~ {year}" in doc2
 
 
 def test_degraded_section_lists_reasons():
