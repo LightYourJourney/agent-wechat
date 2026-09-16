@@ -604,10 +604,13 @@ def chat_export(contact: str, *, months: list[str] | None = None, limit: int = 5
                 account: str | None = None) -> ChatExportResult | NeedConfirm:
     """导出会话为可读时间线（HTML / Markdown）。产物落 `{--out}/{chat_md5}/chat/index.*`。
 
-    `months` 复用 `media.month_bounds` 与同一套校验（格式不符抛 `SearchInputError`，
-    不静默 0 命中）；给多个月份时取月份的**包络** `[min(lo), max(hi))`——
-    `messages_in_range` 只有一对边界，非相邻月份（`2026-08,2026-10`）中间的 9 月也会被带进来，
-    而连续月份（`2026-08,2026-09`，最常见的用法）无缝隙：`month_bounds` 是 `[lo, hi)`、首尾相接。
+    `months` 复用 `media.month_bounds` 与同一套校验：格式不符、**非升序**、**不连续**
+    三者一律抛 `SearchInputError`（既不静默 0 命中，也不静默放大或清空窗口）。
+    升序且连续的月份取 `[lo, hi)` 包络，逐月拼起来无缝隙（`month_bounds` 相邻月首尾相接）。
+    两条例外各自的理由：非连续月份只能取包络、会把中间的月份也静默带进来；
+    而反序会让窗口取反——反序两个月退化成空区间 `[feb_lo, feb_lo)`、三个月以上直接倒置
+    （`after > before`），`messages_in_range` 两种情况都返回 **0 行且 `truncated=False`**，
+    即一个**没有任何信号的空产物**。
     `limit` 封顶的是范围内**最近的** N 条（spec §4.4）。
     **`--out` 必须与 `media export` 用同一个根**（spec 裁定 13）：媒体是以
     `../image/…` 的相对引用指向**同级**的既有媒体树，换个根就全是死链。
@@ -626,15 +629,23 @@ def chat_export(contact: str, *, months: list[str] | None = None, limit: int = 5
     after_ts = before_ts = None
     if months:
         bounds = media.month_bounds(months)
-        # **必须连续**：`messages_in_range` 只有一对边界，非连续月份只能取包络——
+        # **必须「升序 + 连续」**：`messages_in_range` 只有一对边界，非连续月份只能取包络——
         # `2026-08,2026-10` 会把 9 月也带进来，而 `limit` / `truncated` 还按放大后的窗口算，
         # 产物上完全看不出多导了。静默放大窗口比报错更坏（同「月份格式不符不静默 0 命中」）。
         # 兄弟命令 `media export` / `message_media` 是逐月 OR，非连续月份能被正确表达 ——
         # 那两处**不动**（同一面 flag 语义不同是刻意的：那里是筛选，这里是单一时间窗）。
+        # **升序与连续是两个必要条件，缺一不可**——校验与取窗口必须用**同一份** `bounds`。
+        # 不能简化成「先排序再判集合是否连续」：窗口取的是 `bounds[0][0]` 与 `bounds[-1][1]`，
+        # 排序只会**掩盖反序**，而反序实测（用 fixture 里的 ts 算过）拿到的是退化/倒置的窗口
+        # ——`['1970-02','1970-01']` 得到 `[feb_lo, feb_lo)`（空区间）、
+        # `['1970-03','1970-01']` 得到 `after > before`——`messages_in_range` 两种情况都返回
+        # **0 行且 truncated=False**，用户拿到的是一个没有任何信号的空产物。
         if any(cur[0] != prev[1] for prev, cur in zip(bounds, bounds[1:])):
             raise errors.SearchInputError(
-                f"--months 必须是一段连续的月份（相邻月首尾相接）：{', '.join(months)}"
-                "；非连续月份只能取包络，会把中间的月份也静默带进来")
+                f"--months 必须是一段**按时间升序**的连续月份（相邻月首尾相接）："
+                f"{', '.join(months)}"
+                "；非连续月份只能取包络、会把中间的月份也静默带进来，而反序会得到倒置"
+                "（或退化成空区间）的窗口——0 行、truncated 还报 False：两者都会静默产出空产物")
         after_ts, before_ts = bounds[0][0], bounds[-1][1]
     # 输出根绝对化：`--out 相对路径` 时 `view.out_dir` 是相对的，而媒体状态的路径是绝对的
     # （`message_media` 自己 resolve 过），`chat_text.media_src` 用 `os.path.relpath` 算

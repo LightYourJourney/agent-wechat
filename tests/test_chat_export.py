@@ -470,13 +470,34 @@ def test_chat_export_rejects_non_contiguous_months(con, chat_env):
     with pytest.raises(errors.SearchInputError):
         usecases.chat_export("wxid_testacct02", months=["2026-08", "2026-10"],
                              out_dir=str(chat_env), account="acct")
-    # 反序也是非连续（包络会把中间的月份吞进来）
-    with pytest.raises(errors.SearchInputError):
-        usecases.chat_export("wxid_testacct02", months=["1970-02", "1970-01"],
-                             out_dir=str(chat_env), account="acct")
     ok = usecases.chat_export("wxid_testacct02", months=["1970-01", "1970-02"],
                               out_dir=str(chat_env), account="acct")
     assert "第3条" in _html(ok) and len(ok.files) == 2
+
+
+def test_chat_export_rejects_descending_months(con, chat_env):
+    """反序月份必须拒 —— **理由不是「不连续」**：`["1970-02","1970-01"]` 这两个月本身首尾相接。
+
+    真实的理由是**顺序**：实现用 `bounds[0][0]` 与 `bounds[-1][1]` 取窗口，反序会取到
+    退化/倒置的窗口（算过：`["1970-02","1970-01"]` → `[feb_lo, feb_lo)` 空区间；
+    `["1970-03","1970-01"]` → `after > before`），`messages_in_range` 两种情况都返回
+    **0 行且 `truncated=False`** —— 一个没有任何信号的空产物。
+
+    这条单独立着，是因为下一个人很可能把校验「简化」成**先排序再判集合是否连续**：
+    那样反序会被放行、窗口照样坏，而 `test_..._non_contiguous_months` 那条（只测缺口）
+    照样全绿。删掉顺序要求 / 改成排序后判连续 → 这条红；把错误信息里的「按时间升序」
+    改成只说「连续」→ 第二条断言红（诊断说错了原因，下一个人就会照着它去「简化」）。
+    """
+    _seed(con, n=3)
+    with pytest.raises(errors.SearchInputError) as ei:
+        usecases.chat_export("wxid_testacct02", months=["1970-02", "1970-01"],
+                             out_dir=str(chat_env), account="acct")
+    # 诊断必须点名「升序」，否则「连续」这个说法会把人引向排序式简化
+    assert "升序" in str(ei.value), str(ei.value)
+    # 三个月反序（真·倒置窗口）同样拒
+    with pytest.raises(errors.SearchInputError):
+        usecases.chat_export("wxid_testacct02", months=["1970-03", "1970-01"],
+                             out_dir=str(chat_env), account="acct")
 
 
 def test_chat_export_rejects_an_empty_format_list(con, chat_env):
