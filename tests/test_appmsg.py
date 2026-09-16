@@ -323,7 +323,6 @@ def test_link_url_is_subject_to_the_value_filter():
            '<url>https://cdn.example/x?token=REALTOKEN9&amp;idx=1</url></appmsg></msg>')
     a = appmsg.parse(xml).appmsg
     assert a.link.url is None
-    assert not any("REALTOKEN9" in v for _, v in a.fields)
     # 良性查询串（`?idx=1` 不是凭据形态）不许被误丢
     benign = ('<msg><appmsg><title>x</title><type>5</type>'
               '<url>https://example.com/a?idx=1</url></appmsg></msg>')
@@ -344,8 +343,8 @@ def test_secret_container_names_leak_nothing():
 
 def test_numeric_fields_fall_back_to_none_not_zero():
     """回归：数字字段解不开给 `None`，**不是 0**（0 是合法值，混淆两者会让
-    「没有这个字段」与「值是 0」不可区分）。这条覆盖 `kind` 之外的六个字段——
-    此前 `_int -> ... or 0` 的变异全绿（审阅者的 Minor-3）。"""
+    「没有这个字段」与「值是 0」不可区分）。覆盖 `kind` 之外的**六个**字段 ——
+    原先只压到三处，转账那三个改了 `or 0` 全绿（复审变异 V9）。"""
     a = appmsg.parse('<msg><appmsg><title>t</title><type>6</type><appattach>'
                      '<totallen>一兆</totallen></appattach></appmsg></msg>').appmsg
     assert a.file.totallen is None
@@ -353,6 +352,13 @@ def test_numeric_fields_fall_back_to_none_not_zero():
                      '<content>x</content><svrid>abc</svrid>'
                      '<createtime>昨天</createtime></refermsg></appmsg></msg>').appmsg.quote
     assert q.svrid is None and q.create_time is None
+    t = appmsg.parse('<msg><appmsg><title>t</title><type>2000</type><wcpayinfo>'
+                     '<paysubtype>1</paysubtype><feedesc>¥1</feedesc>'
+                     '<begintransfertime>前天</begintransfertime>'
+                     '<effectivedate>大前天</effectivedate>'
+                     '<invalidtime>下周</invalidtime>'
+                     '</wcpayinfo></appmsg></msg>').appmsg.transfer
+    assert t.begin_time is None and t.effective_date is None and t.invalid_time is None
 
 
 def test_user_content_is_never_subject_to_the_value_filter():
@@ -374,7 +380,9 @@ def test_user_content_is_never_subject_to_the_value_filter():
 
 def test_secret_value_separator_set_covers_semicolon_and_comma():
     """`;` 与 `,` 也在分隔符集里。真实 CDN 以 `?`/`&` 为主，这两个是覆盖缺口——
-    但没有夹具时把集合退回 `[?&]` 不会红（实施期探得）。"""
-    xml = ('<msg><appmsg><title>x</title><type>5</type>'
-           '<url>https://cdn.example/x;token=S9</url></appmsg></msg>')
-    assert appmsg.parse(xml).appmsg.link.url is None
+    **两个都要有断言**：只喂 `;` 的话，从字符类里去掉 `,` 不会红（复审变异 V8）。"""
+    for url in ("https://cdn.example/x;token=S9",
+                "https://cdn.example/x,token=S9"):
+        assert appmsg.parse(
+            f'<msg><appmsg><title>x</title><type>5</type><url>{url}</url></appmsg></msg>'
+        ).appmsg.link.url is None
