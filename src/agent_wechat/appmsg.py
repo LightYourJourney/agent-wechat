@@ -196,6 +196,10 @@ class ParseResult:
 
     appmsg: AppMsg | None
     reason: str | None
+    # 交给 `ET` 的那份规范化文本（成功时必然有，`rejected` 时没算过、为 None）。
+    # 存在的理由：别让调用方再 `normalize` 一遍——回填要把正文存盘，重算一次既多跑一遍，
+    # 又把「存盘形态」耦合到「`normalize` 幂等」这个隐含前提上。
+    normalized: str | None = None
 
 
 def kind_name(kind: int) -> str:
@@ -310,8 +314,9 @@ def parse(raw: str) -> ParseResult:
     """
     if is_dangerous(raw):
         return ParseResult(None, "rejected")
+    norm = normalize(raw)
     try:
-        root = ET.fromstring(normalize(raw))
+        root = ET.fromstring(norm)
     except (ET.ParseError, ValueError):
         # `ValueError` 这一支是**防御性**的，而且**它的前提本身未经证实**：本文作者与审阅者
         # 都**未能构造出 repro**（stdlib 3.12/expat 对 `encoding="utf-8"` / `"gbk"` /
@@ -341,4 +346,5 @@ def parse(raw: str) -> ParseResult:
             transfer=_transfer(appmsg_el) if kind == KIND_TRANSFER else None,
         ),
         None,
+        norm,
     )

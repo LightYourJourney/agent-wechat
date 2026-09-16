@@ -262,8 +262,11 @@ def cmd_appmsg_rebuild(args: argparse.Namespace) -> int:
         print(f"  已回填 {n} 条 appmsg…", flush=True)
 
     res = usecases.appmsg_rebuild_parts(account=args.account, progress=progress)
-    print(f"完成：msg_parts {res['parts']} 条；回指解析 {res['resolved']} / "
-          f"未解析 {res['unresolved']}；拒绝 {res['rejected']}；解不开 {res['malformed']}")
+    # 两组计数分母不同（见 usecases.appmsg_rebuild_parts 的 docstring）：`parts` 是本轮写入，
+    # `resolved` / `unresolved` 是该账号整表。印出来时各自标清，免得被当同一个分母读。
+    print(f"完成：本轮写入 msg_parts {res['parts']} 条；"
+          f"该账号回指解析 {res['resolved']} / 未解析 {res['unresolved']}；"
+          f"拒绝 {res['rejected']}；解不开 {res['malformed']}")
     return 0
 
 

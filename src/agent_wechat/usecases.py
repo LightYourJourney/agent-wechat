@@ -603,9 +603,12 @@ def appmsg_rebuild_parts(account: str | None = None, progress=None) -> dict:
 
     实测整次约 40 s（读取 38 s + 写入 2 s）。
 
-    计数口径：`parts` = 成功解析并落库的条数（**解析失败的不落库**，所以它不等于
-    「扫到的 appmsg 条数」）；`resolved` / `unresolved` = 有 `ref_svrid` 的行里
-    回指解出来 / 没解出来的条数，两者之和就是引用总数。
+    计数口径（**两组不同的分母**，别并排当同一个读）：
+      - `parts` / `rejected` / `malformed` = **本轮扫描**的条数（`parts` 是成功解析并落库
+        的条数，解析失败的不落库，所以它不等于「扫到的 appmsg 条数」）；
+      - `resolved` / `unresolved` = 跑完后**该账号整张 `msg_parts` 表**里 `ref_svrid`
+        非空的行中，回指解出来 / 没解出来的条数（同一个谓词 ⇒ 两者之和恒等于该谓词下的
+        引用行数）。删改后再跑一次，这组随整表变化，而 `parts` 只反映本轮。
     """
     ctx = ChatContext(account)
     prefix = f"{ctx.account}|"
@@ -621,8 +624,10 @@ def appmsg_rebuild_parts(account: str | None = None, progress=None) -> dict:
             缓冲，谁先落都不影响结果（阶段 2 在全部扫完之后才跑）。"""
             if sid_buf:
                 # `OR IGNORE`：`server_id` 实测全局唯一（846,785 个、重复 0 次），但那是
-                # 上一次测量的结论，而消息还在不断进来。真撞上重复时该丢的是这一条映射
-                # （引用仍能解到先出现的那条），而不是让整次回填以裸 IntegrityError 崩掉。
+                # 上一次测量的结论，而消息还在不断进来。真撞上重复时**静默保留第一条映射**
+                # ——即退化成一个错引用（引用解到先出现的那条），而**不是**以裸
+                # IntegrityError 崩掉整次回填。这正是它被判 Minor 而非 Important 的原因：
+                # 错的是稀有情形下的一个引用，不是进程的存亡。
                 con.executemany("INSERT OR IGNORE INTO sid_map VALUES (?,?)", sid_buf)
                 sid_buf.clear()
             if part_buf:
@@ -647,8 +652,11 @@ def appmsg_rebuild_parts(account: str | None = None, progress=None) -> dict:
                     # 时 `_to_int` 已经给了 None（**不抛**）。给 None 的那条**照样落库**，
                     # 否则它的正文也跟着没了。
                     svrid = res.appmsg.quote.svrid if res.appmsg.quote else None
+                    # 正文用 `parse` 已经算出的规范化文本（`res.normalized`），**不再**
+                    # 调一次 `normalize`——那样既白跑一遍，又把存盘形态耦合到「`normalize`
+                    # 幂等」这个隐含前提上。
                     part_buf.append((key, res.appmsg.kind, svrid, None,
-                                     zlib.compress(appmsg.normalize(raw).encode(), 6)))
+                                     zlib.compress(res.normalized.encode(), 6)))
                     parts += 1
             if len(sid_buf) >= store.BATCH or len(part_buf) >= store.BATCH:
                 flush(bool(part_buf))
@@ -663,8 +671,10 @@ def appmsg_rebuild_parts(account: str | None = None, progress=None) -> dict:
             "WHERE server_id = msg_parts.ref_svrid) "
             "WHERE ref_svrid IS NOT NULL AND substr(msg_key, 1, ?) = ?",
             (len(prefix), prefix))
-        # 计数从**表的状态**算（而不是 UPDATE 的 changes）：两条查询同源，和必等于引用
-        # 总数，也不会把上一次回填留下的行算进来或漏掉。
+        # 计数从**表的状态**算（而不是 UPDATE 的 changes）：与上面那条 UPDATE 同谓词，
+        # 所以 `resolved + unresolved` 恒等于该谓词下 `ref_svrid` 非空的行数（和不变）。
+        # **但它是整表的**：上一次回填留下的行照样被算进来——这正是它与 `parts` 分母不同的
+        # 地方，别把两者当成同一次扫描的两个视角。
         refs, resolved = (
             con.execute("SELECT count(*), count(ref_msg_key) FROM msg_parts "
                         "WHERE ref_svrid IS NOT NULL AND substr(msg_key, 1, ?) = ?",

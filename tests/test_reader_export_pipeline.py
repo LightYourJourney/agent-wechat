@@ -86,14 +86,15 @@ def build_shard(wx, acct: str, shard: str, msg_tables: dict, users: list[str]) -
     真实 `Msg_` 表还有 packed_info_data（docs/schema-4.1.13.md）——T5 把它加进 messages
     能力声明（Ruling 24）后，夹具必须跟着有这一列，否则健康夹具全体误报漂移。
     既有 6 元组行补 None；图片/视频消息直接传第 7 个元素（packed 的 32-hex bytes）。
+    `server_id` 同在声明里（`reader.iter_parts_input` 读它）——夹具补上这一列，既有行补 None。
     """
     tables = {"Name2Id": ("CREATE TABLE Name2Id (user_name TEXT)", [(u,) for u in users])}
     for chat, rows in msg_tables.items():
         tables[f"Msg_{md5(chat)}"] = (
             f"CREATE TABLE Msg_{md5(chat)} (local_id INTEGER, local_type INTEGER, "
             "real_sender_id INTEGER, create_time INTEGER, message_content, "
-            "WCDB_CT_message_content INTEGER, packed_info_data BLOB)",
-            [tuple(r) + (None,) * (7 - len(r)) for r in rows])
+            "WCDB_CT_message_content INTEGER, packed_info_data BLOB, server_id INTEGER)",
+            [tuple(r) + (None,) * (8 - len(r)) for r in rows])
     enc_db(wx / acct / "db_storage" / "message" / shard, tables)
 
 
@@ -693,8 +694,9 @@ def test_recent_raises_schema_drift_when_message_columns_change(env, tmp_path, m
         f"Msg_{md5(FRIEND)}": (
             # 故意缺 WCDB_CT_message_content
             f"CREATE TABLE Msg_{md5(FRIEND)} (local_id INTEGER, local_type INTEGER, "
-            "real_sender_id INTEGER, create_time INTEGER, message_content BLOB)",
-            [(1, 1, 1, T0, "hi")]),
+            "real_sender_id INTEGER, create_time INTEGER, message_content BLOB, "
+            "server_id INTEGER)",
+            [(1, 1, 1, T0, "hi", 9001)]),
     })
     monkeypatch.setattr(paths, "XWECHAT_FILES", root)
     with pytest.raises(errors.SchemaDrift) as ei:
@@ -712,8 +714,9 @@ def test_export_raises_schema_drift_when_message_columns_change(env, tmp_path, m
         f"Msg_{md5(FRIEND)}": (
             # 故意缺 WCDB_CT_message_content
             f"CREATE TABLE Msg_{md5(FRIEND)} (local_id INTEGER, local_type INTEGER, "
-            "real_sender_id INTEGER, create_time INTEGER, message_content BLOB)",
-            [(1, 1, 1, T0, "hi")]),
+            "real_sender_id INTEGER, create_time INTEGER, message_content BLOB, "
+            "server_id INTEGER)",
+            [(1, 1, 1, T0, "hi", 9001)]),
     })
     monkeypatch.setattr(paths, "XWECHAT_FILES", root)
     with pytest.raises(errors.SchemaDrift) as ei:
@@ -732,8 +735,8 @@ def test_iter_all_raises_schema_drift_when_packed_info_data_missing(env, tmp_pat
         f"Msg_{md5(FRIEND)}": (
             f"CREATE TABLE Msg_{md5(FRIEND)} (local_id INTEGER, local_type INTEGER, "
             "real_sender_id INTEGER, create_time INTEGER, message_content BLOB, "
-            "WCDB_CT_message_content INTEGER)",     # 其余声明列齐全，唯独缺 packed_info_data
-            [(1, 1, 1, T0, "hi", 0)]),
+            "WCDB_CT_message_content INTEGER, server_id INTEGER)",  # 其余声明列齐全，唯独缺 packed_info_data
+            [(1, 1, 1, T0, "hi", 0, 9001)]),
     })
     monkeypatch.setattr(paths, "XWECHAT_FILES", root)
     with pytest.raises(errors.SchemaDrift) as ei:
@@ -769,7 +772,7 @@ def test_drift_names_the_table_that_actually_drifted(env, tmp_path, monkeypatch)
         f"Msg_{md5(FRIEND)}": (
             f"CREATE TABLE Msg_{md5(FRIEND)} (local_id INTEGER, local_type INTEGER, "
             "real_sender_id INTEGER, create_time INTEGER, message_content BLOB, "
-            "WCDB_CT_message_content INTEGER)", [(1, 1, 1, T0, "hi", 0)]),
+            "WCDB_CT_message_content INTEGER, server_id INTEGER)", [(1, 1, 1, T0, "hi", 0, 9001)]),
     })
     monkeypatch.setattr(paths, "XWECHAT_FILES", root)
     with pytest.raises(errors.SchemaDrift) as ei:
