@@ -216,12 +216,16 @@ def get_message_media(contact: str, keys: str | None = None, months: str | None 
                       account: str | None = None) -> dict:
     """查消息的媒体：有没有、什么类型、在不在本机、在哪。
 
+    需先运行 export_full_history：判定读的是本地检索库（`messages` + `media_refs`），
+    索引为空时每个会话都答「零条」，信封另带 hint 说明。
+
     keys 为逗号分隔的 msg_key（取自 get_recent_messages / search_history / semantic_search
     返回的 msg_key 字段）；省略则回答该会话全部媒体类型的消息。out_dir 省略时按
     ~/.agent-wechat/media——若导出时用过 --out，这里也要给同一个，否则已导出的产物会被
     判成 exportable 而非 exported。
 
-    status 四态：none(没有媒体) / exported(已导出，path 是产物路径) /
+    status 四态：none(不属于本功能覆盖的三类媒体——图片/视频/语音；贴纸、文件、位置、
+    appmsg 等都归这里，**不是**「这条消息没有媒体」) / exported(已导出，path 是产物路径) /
     exportable(有媒体、本体还在微信里，但你还没导出) / gone(有媒体但本机找不到)。
     **图片与视频以 gone 为主是常态，不是错误**：微信只为**近期（尚未导出）**的消息保留
     本机媒体本体，所以能对上的极少（实测对索引内已有的消息：图片约 0.005%、视频 0）——
@@ -235,9 +239,13 @@ def get_message_media(contact: str, keys: str | None = None, months: str | None 
     **exportable 只保证本机有可定位的产物**：video 命中缩略图时也算 exportable，
     此时本机只有一张 jpg，mp4 本体并不在。
 
+    **没有引用的媒体消息（拿不到 file_key）只能答 gone**：那可能是「定位不了」而不是
+    「本机没有」——已导出产物的探测拒绝在缺 file_key 时猜文件名。
+
     truncated=true 表示触及 limit 提前收手：counts/by_kind 是**答完的这些**，不是全量。
 
-    语音库读不到时会降级：degraded 非空，且语音一律按 gone 呈现（不会假装成 exportable）。
+    语音库读不到时会降级：degraded 非空，且**尚未导出**的语音一律按 gone 呈现
+    （已导出的仍照实报 exported，不会假装成 exportable）。
     """
     res = usecases.message_media(
         contact,
@@ -248,12 +256,19 @@ def get_message_media(contact: str, keys: str | None = None, months: str | None 
         return _need_confirm(res)
     # by_kind 由用例层从 states 派生（cli.py 读的是同一份）：两个入口逐字重复过这段推导，
     # 而 TOOLS.md / USAGE.md 承诺两边暴露同一套 by_kind。
-    return {"chat_id": res.chat_id, "out_dir": res.out_dir,
-            "counts": res.counts, "by_kind": res.by_kind, "truncated": res.truncated,
-            "messages": [{"msg_key": s.msg_key, "time": s.ts, "kind": s.kind,
-                          "status": s.status, "path": s.path} for s in res.states],
-            "degraded": [{"capability": d.capability, "effect": d.effect}
-                         for d in res.degraded]}
+    payload = {"chat_id": res.chat_id, "out_dir": res.out_dir,
+               "counts": res.counts, "by_kind": res.by_kind, "truncated": res.truncated,
+               "messages": [{"msg_key": s.msg_key, "time": s.ts, "kind": s.kind,
+                             "status": s.status, "path": s.path} for s in res.states],
+               "degraded": [{"capability": d.capability, "effect": d.effect}
+                            for d in res.degraded]}
+    if not res.states and not usecases.index_ready():
+        # 与 search_history 同一个道理（文案是 MCP 专属渲染，故留在这里）：索引里一条消息
+        # 都没有时，上面那份信封（counts 全 0、messages 为空、degraded 为空）与「这个会话
+        # 没有媒体消息」逐字节相同，不给 hint 就无从区分。`not res.states` 是**便宜的前置
+        # 条件**——非空答案不必再去开一次索引库。
+        payload["hint"] = "本地索引为空：请先运行 export_full_history"
+    return payload
 
 
 @server.tool()

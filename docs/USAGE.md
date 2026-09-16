@@ -299,7 +299,15 @@ agent-wechat media export --chat 小李
 ### media locate（按消息列出媒体归属）
 
 `media export` 是「按会话批量导出」；`media locate` 是反向的按需查询——**某条消息的媒体
-在不在本机、在哪**。它只做路径探测与索引只读查询：不写盘、不联网。
+在不在本机、在哪**。
+
+**前提**：先跑过一次 `export`（见场景三）——它读的是本地检索库（`messages` + `media_refs`）。
+索引里一条消息都没有时，答案是一份零（`汇总：exported=0 exportable=0 gone=0 none=0`），
+MCP 侧的信封另带 `hint` 说明「本地索引为空」——别把它当成「这个会话没有媒体」。
+
+它只做路径探测与索引只读查询：**不写微信目录、不写 `--out`、不联网**。唯一的例外是
+**语音本体的判定**——要解密 `media_*.db`，明文只在 `~/.agent-wechat/tmp/`（0700）短暂
+存在、用后即焚（见 SECURITY.md §4）。
 
 ```bash
 agent-wechat media locate --chat 小李
@@ -311,20 +319,26 @@ agent-wechat media locate --chat 小李
 #   按类型 image exported=1 exportable=0 gone=22
 #   按类型 video exported=0 exportable=0 gone=8
 #   按类型 voice exported=0 exportable=19 gone=0
-# 提示：gone 表示消息引用了媒体但本机找不到（未导出，或微信已清理本体）。
+# 提示：gone 表示消息引用了媒体但本机找不到——微信只为近期（尚未导出）的消息保留本体，所以导出更多历史比「修复」有用。
 
-# 只看指定几条：--keys 是 msg_key 的逗号分隔列表（取自 recent / search 的输出）
+# 只看指定几条：--keys 是 msg_key 的逗号分隔列表
+# （msg_key 只在 MCP 工具的返回信封里给出，见下）
 agent-wechat media locate --chat 小李 --keys 'wxid_abc123def456|9f2c1a…|message_0.db|81234'
 
 # 限定月份，或调高条数上限（1-500，默认 200）
 agent-wechat media locate --chat 小李 --months 2026-08,2026-09 --limit 500
 ```
 
+> **`--keys` 的 msg_key 从哪来**：只来自 MCP 工具的返回信封——`get_recent_messages` /
+> `search_history` / `semantic_search` 每条消息都带 `msg_key`。**CLI 自己的 `recent` /
+> `search` / `semantic` 不打印它**，所以从命令行拿不到 key；只用 `--chat` 时不需要 key
+> （它答该会话全部媒体类型的消息）。
+
 **四态**（判定顺序严格按此序）：
 
 | 状态 | 含义 |
 |---|---|
-| `none` | 这条消息没有媒体（按消息类型判，不依赖引用表） |
+| `none` | 不属于本功能覆盖的三类媒体（图片/视频/语音）——贴纸、文件、位置、appmsg 等都归这里（按消息类型判，不依赖引用表）。**它不是「没有媒体」** |
 | `exported` | 产物已在产物根下，行尾给出**绝对路径** |
 | `exportable` | 有媒体、本体还在微信里，但还没导出到产物根 |
 | `gone` | 有媒体，但本机找不到（未导出，或微信已清理本体） |
@@ -346,7 +360,7 @@ agent-wechat media locate --chat 小李 --months 2026-08,2026-09 --limit 500
   全量，可按 `--months` 分批重跑。
 - 与其它 `media` 子命令一样需要 passphrase 缓存（会话消歧要读 `contact.db`）；`--chat`
   消歧同形（多命中时候选 JSON 打到 stdout、一行说明打到 stderr、退出码 1）。降级说明
-  （如语音库读不到，此时语音一律按 `gone` 呈现）走 stderr。
+  （如语音库读不到，此时**尚未导出**的语音一律按 `gone` 呈现）走 stderr。
 
 Agent 侧对应 MCP 工具 `get_message_media`——同一个用例、同一套四态与 `by_kind`，
 信封见 TOOLS.md §11。

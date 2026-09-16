@@ -1344,8 +1344,12 @@ def test_exported_path_missing_args_are_guarded_not_lucky(tmp_path):
 
 # ---------- 语音本体存在集合（spec: 2026-09-16-media-message-link §2.3） ----------
 
-def test_voice_body_keys_none_when_no_shards(tmp_path, monkeypatch):
-    """一条语音分片都没有 → 空集合（不是 None）：「确定没有」与「读不到」是两回事。"""
+def test_voice_body_keys_empty_set_when_no_shards(tmp_path, monkeypatch):
+    """一条语音分片都没有 → 空集合（不是 None）：「确定没有」与「读不到」是两回事。
+
+    名字必须与断言同向（原名 `..._none_when_no_shards` 是反的）：这个 `None` 与空集合的
+    区分是整个语音设计的立足点，而名字反了之后最省事的「修法」是把断言改成 `is None`。
+    """
     root, account = make_tree(tmp_path, monkeypatch)
     got = media.voice_body_keys(account)
     assert got == frozenset()

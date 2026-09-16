@@ -63,6 +63,9 @@ def idx(tmp_path, monkeypatch):
 
     必须隔离 `HOME_DIR`：`store.connect` 会调 `paths.ensure_home_dirs()`，不隔离就会在
     真实 `~/.agent-wechat` 下建目录（本仓库有夹具写到真实数据上的前科）。
+
+    连接的生命周期由本夹具持有（与 test_store.py 的 `con` 夹具同一个口径）：不 close 会把
+    文件句柄与 `-wal`/`-shm` 留给下一个测试。
     """
     monkeypatch.setattr(paths, "HOME_DIR", tmp_path / "home")
     con = store.connect(tmp_path / "index.db")
@@ -78,7 +81,8 @@ def idx(tmp_path, monkeypatch):
         (rows[3]["msg_key"], "image", "c" * 32, None),
     ])
     con.commit()
-    return con, rows
+    yield con, rows
+    con.close()
 
 
 def test_four_states_are_all_reachable(tmp_path, monkeypatch, idx):
@@ -328,3 +332,47 @@ def test_empty_keys_answers_zero_states(tmp_path, idx):
         _ctx=_FakeCtx(), _con=con)
     assert res.states == []
     assert res.counts == {"none": 0, "exported": 0, "exportable": 0, "gone": 0}
+
+
+def test_corrupt_index_is_a_project_error_not_a_bare_sqlite_one(tmp_path, monkeypatch):
+    """损坏的 index.db → `errors.IndexUnavailable`，**不是**裸 sqlite3 异常。
+
+    core 的契约（errors.py 开篇）是只抛项目异常，适配层才做翻译：裸 `sqlite3.DatabaseError`
+    逃到 CLI 是一整个 traceback、逃到 MCP 只剩「内部错误: …」。这里**必须**走生产路径
+    （不注入 `_con`）——畸形文件是在 `store.connect` 的 `executescript(SCHEMA)` 里炸的。
+    """
+    monkeypatch.setattr(paths, "HOME_DIR", tmp_path / "home")
+    monkeypatch.setattr(store, "DB_PATH", tmp_path / "index.db")
+    (tmp_path / "index.db").write_bytes(b"not a sqlite database at all")
+    with pytest.raises(errors.IndexUnavailable) as ei:
+        usecases.message_media("wxid_x", out_dir=str(tmp_path / "media"),
+                               account=ACCT, _ctx=_FakeCtx())
+    assert isinstance(ei.value, errors.AgentWeChatError)
+    assert "本地检索库不可用" in str(ei.value)
+    assert ei.value.hint          # 单行中文 + 可执行动作，正是适配层要渲染的东西
+
+
+def test_many_keys_are_queried_in_batches(tmp_path, monkeypatch, idx):
+    """一次问几万个 key 必须分批：一条 `IN (?,…)` 塞下全部 key 时 SQLite 抛
+    `too many SQL variables`（实测本机上限 32766），经上面那条包装就变成「检索库不可用」
+    ——用户拿不到答案，只拿到一句误导的错误。
+
+    规模刻意超过该上限：不分批时这条**必红**（而不是「恰好也能过」）。
+    """
+    con, rows = idx
+    monkeypatch.setattr(paths, "XWECHAT_FILES", tmp_path / "wx")   # 空微信树：本体一律不在
+    monkeypatch.setattr(usecases, "_voice_keys_for", lambda acct: frozenset())
+    n = 32766 + 4                                   # 单条语句装不下的规模
+    keys = ([r["msg_key"] for r in rows]
+            + [messages.row_key(ACCT, CM, "message_9.db", i) for i in range(n)])
+    res = usecases.message_media(
+        "wxid_x", keys=keys, limit=500, out_dir=str(tmp_path / "media"), account=ACCT,
+        _ctx=_FakeCtx(), _con=con)
+    # 只答索引里真有的那几条；不存在的 key 静默略过（与 TOOLS.md §11 的承诺一致）
+    assert len(res.states) == len(rows)
+    assert {s.msg_key for s in res.states} == {r["msg_key"] for r in rows}
+    # 去重：同一个 key 落在两个批里不该答出两行（夹具里 rows[0] 的 key 再出现一次）
+    dup = usecases.message_media(
+        "wxid_x", keys=[rows[0]["msg_key"]] * (store.KEYS_BATCH + 1), limit=500,
+        out_dir=str(tmp_path / "media"), account=ACCT, _ctx=_FakeCtx(), _con=con)
+    assert len(dup.states) == 1

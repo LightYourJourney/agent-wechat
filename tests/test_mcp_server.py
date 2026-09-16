@@ -402,15 +402,19 @@ def test_get_message_media_degraded_is_converted_to_dict(monkeypatch):
     """`degraded` 的 dict 转换归适配层（用例层给的元素是 `Degradation` 对象而不是 dict），
     对外形状与 get_recent_messages 同一个键、同一个形状。"""
     from agent_wechat import usecases
+    # 空 states 会走到 index_ready()（索引为空的 hint 那一步）——不桩就会去开真实
+    # ~/.agent-wechat/index.db。这条测的是 degraded 的转换，索引状态与它无关。
+    monkeypatch.setattr(usecases, "index_ready", lambda: True)
     monkeypatch.setattr(usecases, "message_media", lambda *a, **k: usecases.MessageMediaResult(
         chat_id="wxid_x", out_dir="/tmp/m", states=[],
         counts={"none": 0, "exported": 0, "exportable": 0, "gone": 0},
         degraded=(usecases.Degradation("msg_media", "message/media_*.db", "VoiceInfo", (),
-                                       "语音库读不到：语音消息一律按「本体不在本机」呈现"),)))
+                                       "语音库读不到：尚未导出的语音消息一律按「本体不在本机」呈现"
+                                       "（已导出的不受影响）"),)))
     res = mcp_server.get_message_media(contact="张三")
     assert res["degraded"] == [
         {"capability": "msg_media",
-         "effect": "语音库读不到：语音消息一律按「本体不在本机」呈现"}]
+         "effect": "语音库读不到：尚未导出的语音消息一律按「本体不在本机」呈现（已导出的不受影响）"}]
 
 
 def test_get_message_media_parses_comma_separated_keys(monkeypatch):
@@ -424,5 +428,25 @@ def test_get_message_media_parses_comma_separated_keys(monkeypatch):
                                            states=[], counts={"none": 0, "exported": 0,
                                                               "exportable": 0, "gone": 0})
     monkeypatch.setattr(usecases, "message_media", _fake)
+    monkeypatch.setattr(usecases, "index_ready", lambda: True)   # 空 states：不桩会开真实索引
     mcp_server.get_message_media(contact="张三", keys="a|b|c|1, a|b|c|2")
     assert seen["keys"] == ["a|b|c|1", "a|b|c|2"]
+
+
+def test_get_message_media_empty_index_carries_hint(env, monkeypatch):
+    """索引为空时信封必须带 hint：否则那份「counts 全 0 + messages: []」与「这个会话没有
+    媒体消息」逐字节相同（`store.connect` 还会按需建表，连报错都没有）。
+
+    与 search_history 同一个约定、同一句文案；文案里是工具名 export_full_history，属于
+    MCP 专属渲染，所以放在适配层。`env` 把 `store.DB_PATH` 指到一个全新的空索引库：
+    这里走**真实**的 `usecases.index_ready()`，不碰真实数据。
+    """
+    from agent_wechat import usecases
+    monkeypatch.setattr(usecases, "message_media", lambda *a, **k: usecases.MessageMediaResult(
+        chat_id="wxid_x", out_dir="/tmp/m", states=[],
+        counts={"none": 0, "exported": 0, "exportable": 0, "gone": 0}))
+    res = mcp_server.get_message_media(contact="张三")
+    assert res["hint"] == "本地索引为空：请先运行 export_full_history"
+    # 答案本身不变：hint 是附加说明，不是错误信封
+    assert res["counts"] == {"none": 0, "exported": 0, "exportable": 0, "gone": 0}
+    assert "error" not in res

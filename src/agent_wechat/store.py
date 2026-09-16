@@ -32,6 +32,12 @@ def db_paths() -> tuple[pathlib.Path, ...]:
 
 BATCH = 2000
 
+# `IN (?,…)` 的分批大小。**批大小与 SQLite 的变量上限无关**：旧注释写的「上限 999」
+# 早已过时（`SQLITE_MAX_VARIABLE_NUMBER` 自 3.32（2020）起默认 32766）。留着的理由
+# 是别的：单条语句的参数个数与 SQL 文本长度都有实际代价，而这类列表是调用方给的
+# （`msg_key` 的规模可以到几千），不该让一次调用生成一条几千占位符的语句。
+KEYS_BATCH = 500
+
 SCHEMA = """
 PRAGMA journal_mode=WAL;
 CREATE TABLE IF NOT EXISTS messages (
@@ -224,8 +230,7 @@ def media_refs_by_keys(con: sqlite3.Connection,
     if not keys:
         return {}
     out: dict[str, tuple[str, str | None]] = {}
-    # SQLite 的变量上限是 999，分批查；单条语句塞几百个 key 是常态，不能不设防。
-    batch = 500
+    batch = KEYS_BATCH
     uniq = list(dict.fromkeys(keys))
     for i in range(0, len(uniq), batch):
         chunk = uniq[i:i + batch]
@@ -253,9 +258,9 @@ def media_refs_by_chat(con: sqlite3.Connection, account: str,
     if not chat_ids:
         return {}
     out: dict[str, list[tuple[int, str]]] = {}
-    # 与 media_refs_by_keys 同款分批（SQLite 变量上限 999）。按**会话**分批不会打乱每条
-    # 会话内部的顺序：一个会话只落在一批里，各批的 ORDER BY 结果可以直接拼接。
-    batch = 500
+    # 与 media_refs_by_keys 同款分批（批大小见 KEYS_BATCH 的注释）。按**会话**分批不会
+    # 打乱每条会话内部的顺序：一个会话只落在一批里，各批的 ORDER BY 结果可以直接拼接。
+    batch = KEYS_BATCH
     for i in range(0, len(chat_ids), batch):
         chunk = chat_ids[i:i + batch]
         sql = ("SELECT m.chat_id, m.ts, r.file_key FROM media_refs r "

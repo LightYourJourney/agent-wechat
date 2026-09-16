@@ -258,7 +258,9 @@ def cmd_media_rebuild_refs(args: argparse.Namespace) -> int:
 def cmd_media_locate(args: argparse.Namespace) -> int:
     """按消息列出媒体归属。与 MCP get_message_media 同一个用例，只是渲染成人类可读。
 
-    `--out` 只参与 `exported` 的判定（要与导出时用的那个一致），本命令不写盘、不联网。
+    `--out` 只参与 `exported` 的判定（要与导出时用的那个一致）。**不写微信目录、不写
+    `--out`、不联网**；但语音本体的判定要解密 `media_*.db`，明文只在 `~/.agent-wechat/tmp/`
+    短暂存在（用后即焚，见 SECURITY.md）。
     """
     from . import usecases
     keys = [s.strip() for s in args.keys.split(",") if s.strip()] if args.keys else None
@@ -290,7 +292,10 @@ def cmd_media_locate(args: argparse.Namespace) -> int:
         # 没有这行，「就这些」与「我在 --limit 处停了」分不出来：明细与计数只是答完的这些
         print("（达到 --limit 上限，已提前收手；以上计数只是答完的这些）")
     if c["gone"]:
-        print("提示：gone 表示消息引用了媒体但本机找不到（未导出，或微信已清理本体）。")
+        # 主因先写：微信只为**近期（尚未导出）**的消息保留本体（MCP 工具描述与 TOOLS.md §11
+        # 是同一套措辞）。先写次因（「微信已清理本体」）会把用户支去「修复」而不是去导历史。
+        print("提示：gone 表示消息引用了媒体但本机找不到——微信只为近期（尚未导出）的消息"
+              "保留本体，所以导出更多历史比「修复」有用。")
     _render_degradations(res.degraded)       # stderr：成功但有保留，不污染 stdout（spec §7）
     return 0
 
@@ -517,7 +522,7 @@ def main(argv: list[str] | None = None) -> None:
     msp.add_argument("--limit", type=int, default=2000, help="最多导出文件数（1-2000）")
     msp.add_argument("--account")
     msp.set_defaults(fn=cmd_media_export)
-    msp = media_sub.add_parser("locate", help="按消息列出媒体归属（不写盘、不联网）")
+    msp = media_sub.add_parser("locate", help="按消息列出媒体归属（不写微信目录、不写 --out、不联网）")
     msp.add_argument("--chat", required=True, help="会话（名字或 username）")
     msp.add_argument("--keys", default=None, help="逗号分隔的 msg_key（默认整个会话）")
     msp.add_argument("--months", default=None, help="逗号分隔的 YYYY-MM")

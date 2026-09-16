@@ -12,7 +12,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent_wechat import account, bootstrap, cli, errors, keys, media, reader, search, usecases, vector
+from agent_wechat import (account, bootstrap, cli, errors, keys, media, paths, reader,
+                          search, store, usecases, vector)
 # 合成微信目录（真实 sqlcipher 解密链路；路径全部指向 tmp_path，绝不碰真实数据）。
 # 跨模块复用夹具与 test_usecases 同法：`env` 依赖它**自己模块**里的 module 级 `wechat`。
 from test_reader_export_pipeline import (ACCT, FRIEND, T0, build_shard, drift_tree,  # noqa: F401
@@ -796,7 +797,10 @@ def test_media_locate_renders_states_and_counts(capsys, monkeypatch):
     assert "  [exported  ] image 1  /tmp/m/x.jpg" in out
     assert "  [gone      ] voice 2  " in out
     assert "汇总：exported=1 exportable=0 gone=1 none=0" in out
-    assert "gone 表示消息引用了媒体但本机找不到" in out
+    # 提示的主因是「微信只为近期（尚未导出）的消息保留本体」（与 MCP 工具描述同一套措辞，
+    # 两个入口文档承诺「同一套四态」）——只写「微信已清理本体」会把用户支去「修复」而不是
+    # 去导历史。断言落在主因那句话上，退回旧措辞即红。
+    assert "微信只为近期（尚未导出）的消息保留本体" in out
 
 
 def test_media_locate_wires_args_and_defaults(monkeypatch, capsys):
@@ -842,6 +846,10 @@ def test_media_locate_breaks_counts_down_by_kind(monkeypatch, capsys):
     # 只有这三个媒体类型：顺序由固定表决定（夹具里 voice 排在最前，印出来仍在最后），
     # `none` 态不进这一节
     assert out.count("  按类型 ") == 3
+    # 夹具里那条 none 态（kind=None）**必须被断言到**：否则它是一条对该测试恒定无效的条目
+    # ——删掉它、或让它混进 kind 桶，上面三条断言照样绿（那是本仓库定义里的假护栏）。
+    # 它证明的是「none 态有逐条明细（kind 印成 `-`），但没有 kind 桶」。
+    assert "  [none      ] -     4  " in out
 
 
 def test_media_locate_prints_truncation_notice_only_when_truncated(monkeypatch, capsys):
@@ -888,10 +896,18 @@ def test_media_locate_prints_absolute_paths_for_relative_out(tmp_path, monkeypat
     assert f"  [exported  ] image {TS}  {(d / ('c' * 32 + '.jpg')).resolve()}" in out
 
 
-def test_media_locate_rejects_bad_months_with_search_input_error(captured, capsys):
+def test_media_locate_rejects_bad_months_with_search_input_error(captured, tmp_path,
+                                                                monkeypatch, capsys):
     """`--months 2026-9` → SearchInputError 经 main() 既有翻译：单行中文 + 退出码 1，
     不是静默 0 命中、exit 0。校验在用例层，CLI 不另写一套（这条走**真实**
-    usecases.message_media，`captured` 只桩掉账号与 reader）。"""
+    usecases.message_media，`captured` 只桩掉账号与 reader）。
+
+    索引库必须隔离：它今天安全**只是因为**月份校验排在 `store.open()` 之前——把那道校验
+    删掉或挪后（正是本用例要抓的变异），真实 `~/.agent-wechat/index.db` 就会被打开并跑一遍
+    DDL。夹具不许依赖「被测代码的执行顺序恰好没走到那一步」。
+    """
+    monkeypatch.setattr(paths, "HOME_DIR", tmp_path / "home")
+    monkeypatch.setattr(store, "DB_PATH", tmp_path / "index.db")
     with pytest.raises(SystemExit) as ei:
         cli.main(["media", "locate", "--chat", "张三", "--months", "2026-9"])
     assert ei.value.code == 1
@@ -907,7 +923,8 @@ def test_media_locate_renders_degraded_to_stderr(monkeypatch, capsys):
         _media_states(("voice", "gone")),
         {"none": 0, "exported": 0, "exportable": 0, "gone": 1},
         degraded=(usecases.Degradation("msg_media", "message/media_0.db", "VoiceInfo", (),
-                                       "语音库读不到：语音消息一律按「本体不在本机」呈现"),)))
+                                       "语音库读不到：尚未导出的语音消息一律按「本体不在本机」"
+                                       "呈现（已导出的不受影响）"),)))
     assert cli.cmd_media_locate(SimpleNamespace(chat="wxid_x", keys=None, months=None,
                                                 limit=200, out=None, account=None)) == 0
     out, err = capsys.readouterr()
@@ -926,3 +943,41 @@ def test_media_locate_needs_confirm_on_ambiguous_contact(monkeypatch, capsys):
     out, err = capsys.readouterr()
     assert [c["username"] for c in json.loads(out)] == ["wxid_a", "wxid_b"]
     assert "无法唯一解析「张三」" in err
+
+
+def test_cli_query_commands_do_not_print_msg_key(monkeypatch, capsys):
+    """`--keys` 的 msg_key **只来自 MCP 信封**（USAGE.md §7 写的就是这句），CLI 自己的
+    `recent` / `search` / `semantic` 不打印它。
+
+    这条钉住 USAGE 那句能力宣称：给 CLI 任何一行加上 msg_key，那句「CLI 不打印」就变成假话。
+    （行格式本身是刻意冻结的契约，本测试不锁整行，只锁「key 不出现在输出里」。）
+    """
+    key = "acct|" + "d" * 32 + "|message_0.db|1"
+    msg = reader.Message(chat_id="wxid_x", shard="message_0.db", local_id=1, ts=1,
+                         msg_type=1, type_name="text", sender_id="wxid_x",
+                         sender_name="张三", is_self=False, content="你好",
+                         media_hint=None, msg_key=key)
+    monkeypatch.setattr(usecases, "recent_messages",
+                        lambda *a, **k: usecases.RecentMessages("wxid_x", "张三", [msg]))
+    assert cli.cmd_recent(SimpleNamespace(account=None, contact="张三", n=5)) == 0
+    out = capsys.readouterr().out
+    assert "你好" in out and key not in out and "msg_key" not in out
+
+    hit = {"msg_key": key, "ts": 1, "chat_id": "wxid_x", "is_self": 0,
+           "sender_id": "wxid_x", "sender_name": "张三", "content": "你好"}
+    monkeypatch.setattr(usecases, "search_history",
+                        lambda *a, **k: {"mode": "fts", "total": 1, "hits": [hit],
+                                         "degraded": []})
+    assert cli.cmd_search(SimpleNamespace(query="你好", contact=None, n=5,
+                                          account=None)) == 0
+    out = capsys.readouterr().out
+    assert "你好" in out and key not in out and "msg_key" not in out
+
+    monkeypatch.setattr(usecases, "semantic_search",
+                        lambda *a, **k: {"mode": "semantic", "total": 1, "degraded": [],
+                                         "hits": [{**hit, "sender": "张三",
+                                                   "distance": 0.1}]})
+    assert cli.cmd_semantic(SimpleNamespace(query="你好", contact=None, n=5,
+                                            account=None)) == 0
+    out = capsys.readouterr().out
+    assert "你好" in out and key not in out and "msg_key" not in out

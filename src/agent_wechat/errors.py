@@ -136,6 +136,17 @@ class MediaKeyError(AgentWeChatError):
     """
 
 
+class IndexUnavailable(AgentWeChatError):
+    """本地检索库（`index.db`）打不开或读不了：文件损坏、半拷贝的 WAL、权限/目录问题。
+
+    与 SchemaDrift 的区别：那个说的是**微信的库**结构与声明不符（降级后仍有别的路可走）；
+    这个是**自己的索引库**根本进不去。读路径（`message_media`）没有降级可言——没有索引就
+    没有消息可判，答案只可能是一个零，而那个零会把「库坏了」谎报成「这个会话没有媒体」。
+    不包装的话裸 sqlite3.Error / OSError 会穿透适配层（本模块开篇的契约）：CLI 那边是一整个
+    traceback，MCP 落到 generic_payload 兜底，agent 只拿到「内部错误: …」。
+    """
+
+
 class MediaOutputError(AgentWeChatError):
     """媒体输出目录不可建或不可写（`--out` 指向只读目录、不可写 HOME、磁盘满）。
 

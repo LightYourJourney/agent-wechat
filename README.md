@@ -20,6 +20,7 @@
 | 🔍 本地全文检索 | SQLite + FTS5 trigram（≥3 字精确子串）+ LIKE 兜底（1-2 字） |
 | 🧠 向量语义检索 | 本地嵌入（fastembed + bge-small-zh-v1.5，聊天内容零外发）+ sqlite-vec KNN；关键词记不全时按语义找（`semantic_search`） |
 | 🖼️ 媒体导出 | 按会话导出图片（dat 解密）/ 语音（SILK → WAV）/ 视频（定位明文）；产物在 `~/.agent-wechat/media/`（0700） |
+| 🧩 媒体与消息关联 | 按消息回答「有没有媒体、什么类型、本机在不在、在哪」：MCP `get_message_media` / CLI `media locate` 同一套四态（`none` / `exported` / `exportable` / `gone`），检索命中用稳定标识 `msg_key` 指名 |
 | 📱 朋友圈导出 | 读取本账号可见的动态 / 评论 / 点赞，渲染成单文件 HTML 时间线；**默认零网络**，`--with-media` 才下载远程媒体本体 |
 | 🤖 Agent 集成 | MCP Server（11 个工具）+ Claude Code Skill + 同源 CLI |
 

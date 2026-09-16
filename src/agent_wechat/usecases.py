@@ -492,33 +492,54 @@ def message_media(contact: str, *, keys: Sequence[str] | None = None,
     degraded: list[Degradation] = []
 
     with contextlib.ExitStack() as stack:
-        con = _con if _con is not None else stack.enter_context(store.open())
-        if keys is not None:
-            placeholders = ",".join("?" * len(keys))
-            # `chat_md5` 一滤不能少：keys 是调用方给的，可能来自别的会话——不加就会把
-            # 别人的媒体冠上本次解析出的 chat_id 报出去。
-            sql = (f"SELECT {messages.column_list(*messages.COLUMNS, prefix='m.')} "
-                   f"FROM messages m WHERE m.msg_key IN ({placeholders}) "
-                   f"AND m.chat_md5 = ?{month_sql} ORDER BY m.ts DESC")
-            rows = [dict(zip(messages.COLUMNS, r))
-                    for r in con.execute(sql, [*keys, cm, *month_args])]
-            rows = [r for r in rows if r["account"] == ctx.account]
-            truncated = len(rows) >= lim
-            rows = rows[:lim]
-        else:
-            type_ph = ",".join("?" * len(_MEDIA_TYPES))
-            sql = (f"SELECT {messages.column_list(*messages.COLUMNS, prefix='m.')} "
-                   f"FROM messages m WHERE m.account=? AND m.chat_md5=? "
-                   f"AND m.msg_type IN ({type_ph}){month_sql} "
-                   f"ORDER BY m.ts DESC LIMIT ?")
-            rows = [dict(zip(messages.COLUMNS, r))
-                    for r in con.execute(sql,
-                                         [ctx.account, cm, *_MEDIA_TYPES, *month_args, lim])]
-            # 取回条数正好等于 limit ⇒ 库里可能还有更多。这里偏保守（恰好等于总数时也报
-            # True），与 media.MediaReport 的 `produced >= max_files` 同一取舍：宁可多报
-            # 「可能被截断」，也不能漏报一条真的没答完。
-            truncated = len(rows) >= lim
-        refs = store.media_refs_by_keys(con, [r["msg_key"] for r in rows])
+        try:
+            con = _con if _con is not None else stack.enter_context(store.open())
+            if keys is not None:
+                # 分批查（与 store.media_refs_by_keys 同一批大小）：`keys` 是调用方给的，
+                # 一条 `IN (?,…)` 塞下几千个 key 时抛的 OperationalError 会以裸 sqlite3
+                # 异常逃出 core 层（错误契约见 errors.py 开篇）。批内先去重——同一个 key
+                # 落在两个块里会答出两行，而单条语句的 `IN` 天然只答一行。
+                # `chat_md5` 一滤不能少：keys 可能来自别的会话——不加就会把别人的媒体
+                # 冠上本次解析出的 chat_id 报出去。
+                uniq = list(dict.fromkeys(keys))
+                rows = []
+                for i in range(0, len(uniq), store.KEYS_BATCH):
+                    chunk = uniq[i:i + store.KEYS_BATCH]
+                    placeholders = ",".join("?" * len(chunk))
+                    sql = (f"SELECT {messages.column_list(*messages.COLUMNS, prefix='m.')} "
+                           f"FROM messages m WHERE m.msg_key IN ({placeholders}) "
+                           f"AND m.chat_md5 = ?{month_sql} ORDER BY m.ts DESC")
+                    rows += [dict(zip(messages.COLUMNS, r))
+                             for r in con.execute(sql, [*chunk, cm, *month_args])]
+                # 各块各自有序，拼起来不是全局有序：这里补一次排序，与单条语句的
+                # `ORDER BY m.ts DESC` 等价（limit 截断取的必须是**最新**的那些）。
+                rows.sort(key=lambda r: r["ts"], reverse=True)
+                rows = [r for r in rows if r["account"] == ctx.account]
+                truncated = len(rows) >= lim
+                rows = rows[:lim]
+            else:
+                type_ph = ",".join("?" * len(_MEDIA_TYPES))
+                sql = (f"SELECT {messages.column_list(*messages.COLUMNS, prefix='m.')} "
+                       f"FROM messages m WHERE m.account=? AND m.chat_md5=? "
+                       f"AND m.msg_type IN ({type_ph}){month_sql} "
+                       f"ORDER BY m.ts DESC LIMIT ?")
+                rows = [dict(zip(messages.COLUMNS, r))
+                        for r in con.execute(sql,
+                                             [ctx.account, cm, *_MEDIA_TYPES, *month_args, lim])]
+                # 取回条数正好等于 limit ⇒ 库里可能还有更多。这里偏保守（恰好等于总数时也报
+                # True），与 media.MediaReport 的 `produced >= max_files` 同一取舍：宁可多报
+                # 「可能被截断」，也不能漏报一条真的没答完。
+                truncated = len(rows) >= lim
+            refs = store.media_refs_by_keys(con, [r["msg_key"] for r in rows])
+        except (sqlite3.Error, OSError) as exc:
+            # 索引库打不开/读不了（损坏、半拷贝的 WAL、权限）：**不照抄 media_export 的降级**
+            # ——那条路降级成「本次不导视频」还有意义，这里没有索引就什么都答不了，一个零
+            # 只会把「库坏了」谎报成「这个会话没有媒体」。重新抛成项目异常，让入口层按既有
+            # 的翻译路径给出单行中文（CLI）/ 错误信封（MCP），而不是一整个 traceback。
+            raise errors.IndexUnavailable(
+                f"本地检索库不可用：{errors.redact(str(exc))}",
+                hint="索引库可能损坏；删除 index.db 后重跑 export_full_history 可重建"
+            ) from exc
 
     # 语音本体集合**按需**取：这个会话一条语音都没有时，不值得去开 media_*.db
     voice_keys = None
@@ -528,7 +549,10 @@ def message_media(contact: str, *, keys: Sequence[str] | None = None,
             degraded.append(Degradation(
                 capability="msg_media", db="message/media_*.db", table="VoiceInfo",
                 missing_columns=(),
-                effect="语音库读不到：语音消息一律按「本体不在本机」呈现"))
+                # 措辞必须限定在「尚未导出」的那些：导出判定排在语音判定**之前**，已经
+                # 落盘的语音仍会照实报 exported——写「一律」会被同一份结果当场反驳。
+                effect="语音库读不到：尚未导出的语音消息一律按「本体不在本机」呈现"
+                       "（已导出的不受影响）"))
 
     states = [_state_of(r, refs.get(r["msg_key"]), out_root=out_root,
                         account=ctx.account, voice_keys=voice_keys) for r in rows]
