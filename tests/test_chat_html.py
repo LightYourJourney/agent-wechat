@@ -21,9 +21,16 @@ def test_truncated_is_printed_at_the_top(monkeypatch):
 
 
 def test_unparsed_and_rejected_are_reported_distinctly():
+    """回归：删掉 `unparsed` 或 `rejected` 的整行，这条会红。
+
+    **初稿这条是空断言，值得记下来**：原写 `assert "2" in out and "1" in out` ——
+    而产物里**必然有** `"2"` 与 `"1"`（CSS 的 `initial-scale=1`、markup 里的各种数字），
+    实测 `unparsed=0, rejected=0` 时两个字符**照样在**，把两整行删掉它也绿。
+    （T7 实施者发现，控制器复现。）所以要断言**完整的措辞串**，不是孤立的数字。
+    """
     out = chat_html.render(_view(unparsed=2, rejected=1))
-    assert "2" in out and "1" in out
-    assert "拒绝" in out and ("解不开" in out or "解析失败" in out)
+    assert "2 条 appmsg 解不开" in out, "解不开那一行没印出来"
+    assert "1 条 appmsg 被主动拒绝" in out, "拒绝那一行没印出来"
 
 
 def test_media_exported_renders_an_element_others_render_distinct_placeholders():
@@ -57,6 +64,17 @@ def test_quote_renders_as_a_jump_link_when_target_in_range():
         parts={"k2": quote}, refs={"k2": "k1"}, media={}, out_dir="/tmp",
         truncated=False, unparsed=0, rejected=0, degraded=()))
     assert f'href="#{a}"' in out and "明天开会" in out
+
+    # 反向（同一条用例内）：目标**不在**本次范围内时既不能给死锚点，也不能只留一个
+    # 没有解释的块 —— brief 要求配一句「原消息不在本次范围内」。
+    # 删掉 `_quote_block` 里那句话 → 第 1 条断言红；原文两种情况都照常出现。
+    outside = chat_html.render(chatview.build(
+        "c", title="t", rows=[{"msg_key": "k2", "ts": 2, "msg_type": 49, "content": "",
+                               "sender_name": "我", "is_self": True}],
+        parts={"k2": quote}, media={}, out_dir="/tmp",
+        truncated=False, unparsed=0, rejected=0, degraded=()))
+    assert "原消息不在本次范围内" in outside and "明天开会" in outside
+    assert 'href="#' not in outside, "目标不在范围内时不许给锚点（那是死锚点）"
 
 
 def test_escapes_message_content():

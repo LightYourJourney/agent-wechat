@@ -20,23 +20,29 @@
 **所有文本一律走 `_esc`**：消息正文、昵称、字段值都是对手可控的（任何人能给你发一条
 appmsg），`<script>` 不许原样进产物。
 
-**不 import `usecases`**：`appmsg` 之外只 import 标准库；`MediaRefState` / `Degradation`
-只在 `if TYPE_CHECKING:` 下取类型、运行期按结构读属性（`.status` / `.kind` / `.path`）。
-理由与 `chatview` 对同一类型的处理相同：模板层不能把 usecases 拉进运行期依赖。
+**与 `chat_md` 共用的措辞/纯函数全在 `chat_text`**（时间格式化、媒体相对路径、四态文案、
+顶部提示的三句措辞）。spec §4.3 的「语义一致」靠的是**单一来源**，不是两份互校的副本
+（丙 R21 的教训）——改文案只改 `chat_text` 一处，两个产物同时变。
+
+**不 import `usecases`**：`appmsg` / `chat_text` 之外只 import 标准库；`MediaRefState` /
+`Degradation` 只在 `if TYPE_CHECKING:` 下取类型、运行期按结构读属性
+（`.status` / `.kind` / `.path`）。理由与 `chatview` 对同一类型的处理相同：模板层不能把
+usecases 拉进运行期依赖。
 """
 from __future__ import annotations
 
-import datetime
 import html
-import os
 from typing import TYPE_CHECKING
 
 from . import appmsg
+from .chat_text import (EXPORTABLE, EXPORTABLE_OTHER, GONE, KIND_LABEL,
+                        TRUNCATED_NOTE, degradation_text, media_src, rejected_note,
+                        unparsed_note, when)
 
 if TYPE_CHECKING:
     from .appmsg import AppMsg
     from .chatview import ChatView, ViewMsg
-    from .usecases import Degradation, MediaRefState
+    from .usecases import MediaRefState
 
 _CSS = """body{font-family:-apple-system,"PingFang SC",sans-serif;max-width:820px;
 margin:0 auto;padding:16px;background:#f7f7f7;color:#1a1a1a;line-height:1.6}
@@ -61,64 +67,26 @@ margin:6px 0;font-size:13px}
 .q .src{color:#999;font-size:12px}
 .empty{color:#999}"""
 
-# 媒体类型的中文名。未确认的 kind 兜底成 kind 本身（**不猜**，spec §2.9 的规矩）。
-_KIND_LABEL = {"image": "图片", "voice": "语音", "video": "视频"}
 
-# `exportable` / `gone` 的占位**分开措辞**：丙 R17 —— 池化这两个状态会制造误读
-# （「本机有但你没导出」与「本机找不到」是两件事，前者可挽回、后者不能）。
-# video 的那一条不得让人以为 mp4 本体还在：丙实测 `resolve_video` 命中缩略图时也返回成功。
-_EXPORTABLE = {
-    "image": "本机有原图，尚未导出（跑一次 agent-wechat media export 就能看）",
-    "voice": "本机有语音原文件，尚未导出（跑一次 agent-wechat media export 就能听）",
-    "video": "本机有转码源，尚未导出成 mp4 —— 它可能只是缩略图，不等于 mp4 本体还在",
-}
-_EXPORTABLE_OTHER = "本机有原文件，尚未导出"
-_GONE = "本机找不到该媒体的本体（已被清理，或从未下载到本机）"
+def _b(head: str, tail: str) -> str:
+    """`chat_text` 的共享措辞 + **本模板的**加粗标记（措辞共享、标记不共享）。"""
+    return f"<b>{head}</b>{tail}"
 
 
 def _esc(v: str | None) -> str:
     return html.escape(v or "", quote=True)
 
 
-def _when(ts: int | None) -> str:
-    """`ts == 0` 是「时间戳没解析出来」，不是 1970 年 —— 返回空串，不编一个日期。"""
-    return datetime.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M") if ts else ""
-
-
-def _media_src(path: str, out_dir: str, prefix: str) -> str:
-    """媒体绝对路径 → 产物里的相对引用。契约见模块头。
-
-    裁剪用 `os.path.relpath`（纯词法，**不解析符号链接**：媒体目录可能是软链，
-    解析后算出来的 `../../..` 会随挂载点变化）。跨盘符（Windows）抛 `ValueError`
-    —— 没有相对路径可算，退回原样字符串而不是让异常穿透模板层。
-    """
-    rel = path
-    if out_dir:
-        try:
-            rel = os.path.relpath(path, out_dir)
-        except ValueError:
-            rel = path
-    rel = rel.replace(os.sep, "/")
-    return f"{prefix}/{rel}" if prefix else rel
-
-
-def _degradation_text(d: Degradation) -> str:
-    """`usecases.Degradation` 的结构化读取（不在运行期 import usecases，见模块头）。"""
-    cap = getattr(d, "capability", "") or ""
-    effect = getattr(d, "effect", "") or ""
-    return f"{cap}：{effect}" if cap else effect
-
-
 def _media_block(m: MediaRefState, prefix: str, out_dir: str) -> str:
     """`MediaRefState` 四态 → HTML。`none` 不印任何东西（那条消息本来就没有媒体）。"""
     kind = m.kind or ""
-    label = _KIND_LABEL.get(kind, kind)
+    label = KIND_LABEL.get(kind, kind)
     if m.status == "exported":
         if not m.path:
             # 状态说「导出了」却没有路径：这是上游的不一致，**不能静默成空白**
             # （空白看起来与「这条消息没有媒体」一模一样）。
             return '<div class="ph">[已导出，但拿不到产物路径 —— 状态与路径不一致]</div>'
-        src = _esc(_media_src(m.path, out_dir, prefix))
+        src = _esc(media_src(m.path, out_dir, prefix))
         if kind == "image":
             return f'<div class="media"><img loading="lazy" src="{src}" alt="{_esc(label)}"></div>'
         if kind == "voice":
@@ -127,10 +95,10 @@ def _media_block(m: MediaRefState, prefix: str, out_dir: str) -> str:
             return f'<div class="media"><video controls src="{src}"></video></div>'
         return f'<div class="media"><a href="{src}">{_esc(label or "媒体")}</a></div>'
     if m.status == "exportable":
-        why = _EXPORTABLE.get(kind, _EXPORTABLE_OTHER)
+        why = EXPORTABLE.get(kind, EXPORTABLE_OTHER)
         return f'<div class="ph">[{_esc(label)} · {_esc(why)}]</div>'
     if m.status == "gone":
-        return f'<div class="ph">[{_esc(label)} · {_esc(_GONE)}]</div>'
+        return f'<div class="ph">[{_esc(label)} · {_esc(GONE)}]</div>'
     if m.status == "none":
         return ""
     # 四态之外的取值（上游将来加枚举值）：照实印出来，不猜也不吞。
@@ -176,7 +144,7 @@ def _transfer_block(t: appmsg.Transfer) -> str:
     for label, value in (("发起时间", t.begin_time), ("生效日期", t.effective_date),
                          ("失效时间", t.invalid_time)):
         if value:
-            rows.append(f"{label}：{_when(value)}")
+            rows.append(f"{label}：{when(value)}")
     return " · ".join(_esc(r) for r in rows)
 
 
@@ -214,7 +182,7 @@ def _msg_block(m: ViewMsg, prefix: str, out_dir: str) -> str:
     who = "我" if m.is_self else (m.sender or "（未知发送者）")
     cls = "self" if m.is_self else "other"
     inner = [f'<div class="meta"><span class="who">{_esc(who)}</span>'
-             f'<span class="when">{_when(m.ts)}</span>'
+             f'<span class="when">{when(m.ts)}</span>'
              f'<span class="kind">{_esc(m.kind)}</span></div>']
     # appmsg 的 `text` 是 `[appmsg: 标题]` 形态的提示（`content` 语义不变，见 spec §2.4），
     # 解析成功时它与下面的结构化块逐字重复，故只在没有结构化块时才印它。
@@ -228,27 +196,24 @@ def _msg_block(m: ViewMsg, prefix: str, out_dir: str) -> str:
 
 
 def _notice(view: ChatView) -> str:
-    """页首说明区：条数、类型分布、以及**必须印在产物顶部**的三个计数（spec §4.5）。"""
+    """页首说明区：条数、类型分布、以及**必须印在产物顶部**的三个计数（spec §4.5）。
+
+    三个计数的措辞全部来自 `chat_text`（与 `chat_md` 同源）：改一处，两个产物同时变。
+    """
     rows = [f"会话 <b>{_esc(view.title or view.chat_id)}</b> · 共 <b>{len(view.msgs)}</b> 条"
-            f" · 导出时间 {_when(view.generated_at)}"]
+            f" · 导出时间 {when(view.generated_at)}"]
     if view.counts:
         rows.append("类型：" + " · ".join(f"{_esc(k)} {v}"
                                         for k, v in sorted(view.counts.items())))
     if view.truncated:
-        # 「可能还有」而不是「还有」：`truncated` 由 `len(rows) == limit` 派生，在
-        # 「范围内恰好 limit 条」时是**假阳性**（chatview 的注释已钉这条，本模块不重算）。
-        rows.append("<b>本次导出被 limit 截断</b>：范围内可能还有更早的消息没进来，"
-                    "可调大 limit 重跑。")
+        rows.append(_b(*TRUNCATED_NOTE))
     if view.unparsed:
-        rows.append(f"<b>{view.unparsed} 条 appmsg 解不开</b>（XML 结构不符，已跳过）——"
-                    "这些条只显示原始提示文字。")
+        rows.append(_b(*unparsed_note(view.unparsed)))
     if view.rejected:
-        # 与「解不开」**分开印**：那是我们主动拒绝（载荷含 DTD/实体声明，展开会危及进程），
-        # 池化这两条会让用户以为数据坏了（spec §5）。
-        rows.append(f"<b>{view.rejected} 条 appmsg 被主动拒绝</b>"
-                    "（载荷含 DTD / 实体声明，展开有进程被打挂的风险），已跳过。")
+        # 与「解不开」**分开印**：那是我们主动拒绝，池化会让用户以为数据坏了（spec §5）。
+        rows.append(_b(*rejected_note(view.rejected)))
     for d in view.degraded:
-        rows.append("降级：" + _esc(_degradation_text(d)))
+        rows.append("降级：" + _esc(degradation_text(d)))
     return '<div class="notice">' + "<br>".join(rows) + "</div>"
 
 
