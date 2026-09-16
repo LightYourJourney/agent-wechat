@@ -542,7 +542,8 @@ def test_chat_export_reports_only_the_files_it_actually_wrote(con, chat_env, mon
 # ---------------- T10：索引页（chat index）----------------
 
 def test_chat_index_links_to_each_exported_chat(con, chat_env):
-    """回归：索引页必须**链到产物**（相对路径）—— 只列名字不给链接，第一条断言会红。"""
+    """回归：索引页必须**链到产物**（相对路径）—— 只列名字不给链接，**读产物那条**会红
+    （不是 `res.chats`：它只数条目，与链不链无关。T10 实施者指出原 docstring 指错了断言）。"""
     _seed(con)
     usecases.chat_export("wxid_testacct02", out_dir=str(chat_env), account="acct")
     res = usecases.chat_index(out_dir=str(chat_env), account="acct")
@@ -687,5 +688,5 @@ def test_chat_index_cli_prints_the_artifact_path(con, chat_env, capsys):
         cli.main(["chat", "index", "--out", str(chat_env), "--account", "acct"])
     assert ei.value.code == 0
     out = capsys.readouterr().out
-    assert "1 个会话" in out
+    assert "已导出的会话：1 个" in out
     assert f"产物：{chat_env}/index.html" in out

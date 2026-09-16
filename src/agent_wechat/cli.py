@@ -379,7 +379,9 @@ def cmd_chat_index(args: argparse.Namespace) -> int:
     if res.file is None:
         print("没有已导出的会话；先运行 `chat export`")
         return 0
-    print(f"已索引 {res.chats} 个会话")
+    # 措辞刻意不用「已索引」：`chats` 数的是**磁盘上的产物**（含索引里查不到的那些，
+    # 页面那一行自己写着「索引里没有这个会话」）——同一屏两句话的「索引」不能是两个意思。
+    print(f"已导出的会话：{res.chats} 个")
     print(f"产物：{res.file}")
     _render_degradations(res.degraded)
     return 0

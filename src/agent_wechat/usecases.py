@@ -752,6 +752,10 @@ class ChatIndexResult:
     `file is None` = **一个文件都没写**：`{--out}` 下一个已导出的会话都没有。这不是错误
     （用户还没导过），但**也不写一张空壳页面**——「共 0 个会话」的页面与「索引页坏了」
     在用户眼里一模一样，空产物比没有产物更难分辨。
+
+    `degraded` **今天没有生产者，恒为 `()`**：本用例没有任何降级来源（不构造 reader，索引
+    读不了是抛 `IndexUnavailable` 而不是降级；「索引里查不到某个会话」是逐行呈现）。保留它是
+    因为它是四个结果 dataclass 的**统一信封形状**——CLI/MCP 对所有结果一视同仁地读它。
     """
 
     out_dir: str
@@ -804,7 +808,7 @@ def chat_index(out_dir: str | None = None, account: str | None = None) -> ChatIn
             chat_md5=chat_md5,
             chat_id=row["chat_id"] if row else "",
             label=row["chat_id"] if row else messages.degraded_chat_id(chat_md5),
-            messages=row["n"] if row else 0,    # 查不到时 `chat_id` 为空 → 模板印「条数未知」
+            messages=row["n"] if row else None,  # 查不到时**未知**：`None`，不是 0 条
             has_md=(p.parent / "index.md").exists()))
     from . import media                       # 惰性：media 顶层拉起 cryptography
     target = media.ensure_tree(out_root) / "index.html"

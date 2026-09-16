@@ -12,10 +12,11 @@
 **所有文本走 `_esc`**：`label` 来自索引库的 `chat_id` 列、`chat_md5` 来自目录名 —— 与
 `chat_html` 同一立场（名字也可能是对手可控的），`<script>` 不许原样进产物。
 
-**`ChatIndexEntry.chat_id` 为空串 = 索引库里查不到这个会话**（导出之后重建过索引 /
-`purge --index` 过）。那时条数是**未知**，模板印「条数未知」而**不是 `0 条`**：0 是一条
-确定的信息（这个会话确实一条都没有），而这里我们只是不知道。该情况下 `label` 是
-`md5:{chat_md5}`（`messages.degraded_chat_id` 的形态）。
+**`ChatIndexEntry.messages is None` = 索引库里查不到这个会话**（导出之后重建过索引 /
+`purge --index` 过；那时 `chat_id` 也是空串，但**判据是 `messages`**）。那时条数**未知**，
+模板印「条数未知」而**不是 `0 条`**：0 是一条确定的信息（这个会话确实一条都没有），而这里我们
+只是不知道——把它存成 0 就是把「不知道」伪装成事实（T11 的 MCP 读 `.messages` 就会这么报）。
+该情况下 `label` 是 `md5:{chat_md5}`（`messages.degraded_chat_id` 的形态）。
 """
 from __future__ import annotations
 
@@ -42,9 +43,9 @@ class ChatIndexEntry:
     """一行：一个**已导出**的会话。`chat_md5` 是产物目录名（`{out}/{chat_md5}/chat/`）。"""
 
     chat_md5: str
-    chat_id: str            # 索引库里的会话 id；`""` = 索引里没有它（条数同样未知）
+    chat_id: str            # 索引库里的会话 id；`""` = 索引里没有它（`messages` 那时为 None）
     label: str              # 展示名：`chat_id`，查不到时是 `md5:{chat_md5}`
-    messages: int           # `chat_id` 为空时无意义（模板会印「条数未知」）
+    messages: int | None    # **`None` = 索引里没有这个会话 → 条数未知，不是 `0 条`**
     has_md: bool            # 同级真的存在 `index.md`（写失败过就只有 HTML）
 
 
@@ -61,8 +62,9 @@ def render(entries: Sequence[ChatIndexEntry]) -> str:
     rows = []
     for e in sorted(entries, key=lambda e: (e.label, e.chat_md5)):
         base = _esc(e.chat_md5)
-        # 查不到索引时条数未知：印 0 条是**编**一条信息（那个会话的产物里显然有消息）
-        meta = f"{e.messages} 条" if e.chat_id else "条数未知（索引里没有这个会话）"
+        # 查不到索引时条数未知（`None`）：印 0 条是**编**一条信息（那个会话的产物里显然有消息）
+        meta = (f"{e.messages} 条" if e.messages is not None
+                else "条数未知（索引里没有这个会话）")
         # `index.md` 只在真的写出来了才链：`chatview.write` 单文件失败时目录里只有 HTML，
         # 无条件印就是一条死链（`has_md` 的全部意义）。
         md = f'<a class="md" href="{base}/chat/index.md">Markdown</a>' if e.has_md else ""
