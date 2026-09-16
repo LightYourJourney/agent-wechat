@@ -97,6 +97,12 @@ _NAMED_SUBTREES = {
 # 这两个名字：更深处的同名叶子（如某个未具名子树里的 `<type>`）是该子树自己的数据。
 _SELF_NAMES = ("type", "title")
 
+# 已具名建模的**兄弟叶子**。跳子树挡不住它们：`url` / `des` 是 `appmsg` 的顶层叶子，
+# 不在任何具名子树里，于是 kind=5 时 `Link(url=…, des=…)` 与 `fields` 里的
+# `('url', …)` / `('des', …)` **逐字重复**（实测）。另三个具名块的字段都在各自子树内
+# （`refermsg` / `appattach` / `wcpayinfo`），故只有 KIND_LINK 需要这张表。
+_NAMED_LEAVES = {KIND_LINK: ("url", "des")}
+
 # 实测 type 5 的 `aeskey` 91%、type 6 的 `aeskey` 100% 与 `fileuploadtoken` 90% —— 密钥与上传凭据。
 # `fields` 会进 get_message_parts 的 MCP 信封，而 spec §7 与 Global Constraints 都明令
 # token / key 不进信封。名字过滤之外再加一道**值**过滤：凭据也可能挂在名字干净的字段上
@@ -215,7 +221,8 @@ def _leaf_fields(appmsg_el: ET.Element, kind: int) -> list[tuple[str, str]]:
     **只收叶子**（无子元素）：非叶子的 `text` 只是标签间的空白，收进来是噪声。
     密材过滤不在这里做 —— 它还要看**值**，由 `parse` 统一过一道。
     """
-    skip = set(_NAMED_SUBTREES.get(kind, ())) | {"refermsg"}
+    skip = (set(_NAMED_SUBTREES.get(kind, ())) | {"refermsg"}
+            | set(_NAMED_LEAVES.get(kind, ())))
     out: list[tuple[str, str]] = []
     # 显式栈而不是递归：载荷对手可控，`<a><a><a>…` 一万层会把递归爆成 RecursionError，
     # 而 `parse` 的契约是「对任意 str 全定义、不抛」。push 时反序，pop 出来就是文档序。
@@ -286,8 +293,11 @@ def parse(raw: str) -> ParseResult:
     try:
         root = ET.fromstring(normalize(raw))
     except (ET.ParseError, ValueError):
-        # ValueError：`ET.fromstring` 对带编码声明的 str 会抛它。`normalize` 已剥掉声明，
-        # 这条路按说不通，但「裸异常不得逃出」是硬约束，多兜一个类型比漏一个便宜得多。
+        # ValueError 这一支是**防御性**的：`ET.fromstring` 对带编码声明的 str 会抛它，
+        # 而 `normalize` 已剥掉全部声明，**作者试了四种「声明可能活过 normalize」的写法，
+        # 全部走 ParseError，没构造出能走到这里的载荷**。保留它的理由是失败方向——
+        # 「裸异常逃出 core 层」是本仓库明令禁止的，多兜一个类型比漏一个便宜得多。
+        # **不要把它当成「已知有洞已补」的证据。**
         return ParseResult(None, "malformed")
     appmsg_el = root.find("appmsg")
     if appmsg_el is None:

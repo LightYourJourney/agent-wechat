@@ -225,3 +225,79 @@ def test_no_content_leaks_into_fields():
     a = appmsg.parse(QUOTE_XML).appmsg
     joined = " ".join(v for _, v in a.fields)
     assert "<refermsg>" not in joined and "<content>" not in joined
+
+
+def test_malformed_numeric_fields_do_not_crash_or_escape():
+    """**契约**：`parse` 对任意 `str` 全定义、不抛——数字字段解不开就给兜底值。
+
+    回归：brief 字面写法 `int(appmsg.findtext("type") or -1)` 在 `<type>五十七</type>` 上
+    抛**裸 ValueError**（与 T1 的 `&#abc;` 同形，同一个成因：对手可控的载荷 + 没兜底的 int）。
+    删掉 `_to_int` 那道闸，这条会红。**控制器已复现 brief 字面写法确实抛。**
+    """
+    cases = [
+        ('<msg><appmsg><title>t</title><type>57</type><refermsg><content>x</content>'
+         '<svrid>abc</svrid></refermsg></appmsg></msg>', 57),
+        ('<msg><appmsg><title>t</title><type>五十七</type></appmsg></msg>', -1),
+        ('<msg><appmsg><title>t</title><type></type></appmsg></msg>', -1),
+        ('<msg><appmsg><title>t</title><type>6</type><appattach>'
+         '<totallen>一兆</totallen></appattach></appmsg></msg>', 6),
+    ]
+    for xml, want in cases:
+        r = appmsg.parse(xml)                     # 不抛即通过
+        assert r.reason is None and r.appmsg.kind == want
+
+
+def test_quote_is_none_for_non_quote_kinds():
+    """回归：`test_parse_quote` 断言了 `link/file/transfer is None`，**偏偏没断言 `quote`**
+    ——「quote 恒建」这个 bug 原来没有任何用例会红（实施期的变异 M15）。"""
+    for xml in (LINK_XML, FILE_XML, TRANSFER_XML):
+        a = appmsg.parse(xml).appmsg
+        assert a.quote is None, f"kind={a.kind} 不该有 quote"
+
+
+def test_refermsg_is_skipped_under_non_quote_kinds():
+    """回归：`refermsg` 要在**所有** kind 下跳，不只是 57。
+    原来「非 57 的 kind 下出现 refermsg」无人守（变异 M2）。"""
+    xml = ('<msg><appmsg><title>t</title><type>33</type>'
+           '<refermsg><content>被引用的原文</content></refermsg>'
+           '<weappinfo><appid>a</appid></weappinfo></appmsg></msg>')
+    a = appmsg.parse(xml).appmsg
+    assert ("weappinfo.appid", "a") in a.fields
+    assert not any(p.startswith("refermsg") for p, _ in a.fields)
+
+
+def test_top_level_type_and_title_are_not_repeated_in_fields():
+    """回归：`type`/`title` 已由 `AppMsg.kind` / `AppMsg.title` 承载，不在 `fields` 里再来一份。
+    （这条替代了初稿里那条**映射写错**的守卫——你指出的 M3：`test_no_content_leaks_into_fields`
+    的 `fields` 恒为空，跳不跳都绿。）"""
+    a = appmsg.parse(LINK_XML).appmsg
+    assert not any(p in ("type", "title") for p, _ in a.fields)
+
+
+def test_fields_contains_only_leaves():
+    """回归：`fields` 只收**叶子**。把有子元素的节点也塞进去，这条会红（变异 M11）。"""
+    a = appmsg.parse(WEAPP_XML).appmsg
+    assert ("weappinfo.appid", "wx0123456789abcdef") in a.fields
+    assert not any(p == "weappinfo" for p, _ in a.fields)
+
+
+def test_named_leaves_are_not_repeated_in_fields():
+    """回归：只跳子树挡不住 `url`/`des`——它们是 `appmsg` 的**兄弟叶子**。
+    实测 kind=5 的 `fields` 里它们与 `Link` 逐字重复。删掉 `_NAMED_LEAVES` 那行会红。"""
+    a = appmsg.parse(LINK_XML).appmsg
+    assert a.link.url == "https://example.com/a"               # 具名块里有
+    assert not any(p in ("url", "des") for p, _ in a.fields)   # 字段表里不该再有
+
+
+def test_deeply_nested_payload_does_not_blow_the_stack():
+    """回归：`_leaf_fields` 必须**迭代**遍历，不能用递归。
+
+    载荷是对手可控的，而 `is_dangerous` 只挡 DTD/实体、**不挡深嵌套**。实测 5 万层嵌套下
+    递归版抛 `RecursionError`（裸异常逃出 core 层，违反错误契约），迭代版正常。
+    （实施期 T2 实现者发现。）
+    """
+    depth = 50_000
+    xml = "<msg><appmsg><title>t</title><type>33</type>" + "<a>" * depth + "</a>" * depth \
+          + "</appmsg></msg>"
+    r = appmsg.parse(xml)                       # 不抛即通过
+    assert r.reason is None
