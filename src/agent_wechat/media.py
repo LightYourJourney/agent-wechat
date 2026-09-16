@@ -450,9 +450,11 @@ def exported_path(out_root: pathlib.Path, *, chat_md5: str, kind: str, ts: int,
                   local_id: int | None = None) -> pathlib.Path | None:
     """已导出产物的路径；没导出过返回 None。**纯探测，不建目录、不写盘。**
 
-    布局与 `_dest` 同源：`{out_root}/{chat_md5}/{kind}/{YYYY-MM}/{stem}.{ext}`
-    - image: stem=file_key，扩展名不定 → 按 `_EXPORT_EXTS` 逐个试
-    - video: stem=file_key，扩展名恒 mp4
+    布局与 `_dest` 同源：`{out_root}/{chat_md5}/{kind}/{YYYY-MM}/{stem}.{ext}`，
+    而 (stem, ext) 按**写盘方的原样**逐个枚举（导出从不改名：写盘用的就是源文件的 stem），
+    首个命中即返回：
+    - image: `file_key` + `_SUFFIX_PRIORITY`（与 `resolve_image` 同序），扩展名逐个试 `_EXPORT_EXTS`
+    - video: `{K}.mp4` > `{K}_raw.mp4`（真实语料里的变体）> `{K}_thumb.jpg`（无缝体时落的就是它）
     - voice: stem=f"{ts}_{local_id}"，.wav 优先（pilk 缺失时落的是 .slk）
 
     参数不全（image 无 file_key / voice 无 local_id）→ None。
@@ -460,21 +462,28 @@ def exported_path(out_root: pathlib.Path, *, chat_md5: str, kind: str, ts: int,
     if kind == "voice":
         if local_id is None:
             return None
-        stems, exts = (f"{ts}_{local_id}",), ("wav", "slk")
-    elif file_key is None:
-        return None
-    elif kind == "video":
-        stems, exts = (file_key,), ("mp4",)
+        cands = [(f"{ts}_{local_id}", "wav"), (f"{ts}_{local_id}", "slk")]
     elif kind == "image":
-        stems, exts = (file_key,), _EXPORT_EXTS
+        if file_key is None:
+            return None
+        # 与 resolve_image 的后缀优先级一致：写盘用的是**源文件**的 stem（`_save(..., dat.stem, ...)`），
+        # 而源文件可能是 K_hd.dat —— 只探裸 K 会漏掉真正存在的那份产物。
+        cands = [(f"{file_key}{suf}", ext)
+                 for suf in _SUFFIX_PRIORITY for ext in _EXPORT_EXTS]
+    elif kind == "video":
+        if file_key is None:
+            return None
+        # 与 resolve_video / 视频导出分支一致：mp4 优先，_raw 变体次之，
+        # 最后才是同一目录里的 _thumb.jpg（无缝体时导出写下的就是它）。
+        cands = [(file_key, "mp4"), (f"{file_key}_raw", "mp4"),
+                 (f"{file_key}_thumb", "jpg")]
     else:
         return None
     d = out_root / chat_md5 / kind / month_of(ts)
-    for stem in stems:
-        for ext in exts:
-            p = d / f"{stem}.{ext}"
-            if p.exists():
-                return p
+    for stem, ext in cands:
+        p = d / f"{stem}.{ext}"
+        if p.exists():
+            return p
     return None
 
 

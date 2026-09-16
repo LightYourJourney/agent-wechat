@@ -1058,14 +1058,62 @@ def test_exported_path_image_ignores_unlisted_ext(tmp_path):
                                file_key="beef") is None
 
 
+def test_exported_path_image_suffixed_source_stem(tmp_path):
+    """写盘用的是**源 dat 的 stem**（导出不改名，见 `_save(..., dat.stem, ext, ...)`）：
+    `K` 的产物可能是 `K_hd.png`，而 `resolve_image` 的优先级又把 `_hd` 排在裸名之前
+    —— 两者同时存在时同样以 `_hd` 胜（只探裸 K 会返回错的那份，甚至返回 None）。"""
+    root = tmp_path / "out"
+    d = root / ("e" * 32) / "image" / "2026-09"
+    d.mkdir(parents=True)
+    ts = int(datetime.datetime(2026, 9, 15, 12, 0).timestamp())
+    (d / "beef.jpg").write_bytes(b"x")
+    (d / "beef_hd.png").write_bytes(b"x")
+    assert media.exported_path(root, chat_md5="e" * 32, kind="image", ts=ts,
+                               file_key="beef").name == "beef_hd.png"
+
+
 def test_exported_path_video_is_mp4_only(tmp_path):
+    """video 只认 mp4：同目录里只有 jpg 时必须是 None，不能被当成产物。
+
+    诱饵是必需的 —— 只造 mp4 再断言拿到 mp4，改成分支回退 jpg 也照样绿。
+    """
     root = tmp_path / "out"
     d = root / ("b" * 32) / "video" / "2026-09"
     d.mkdir(parents=True)
-    (d / "cafe.mp4").write_bytes(b"x")
     ts = int(datetime.datetime(2026, 9, 15, 12, 0).timestamp())
+    (d / "cafe.jpg").write_bytes(b"x")
+    assert media.exported_path(root, chat_md5="b" * 32, kind="video", ts=ts,
+                               file_key="cafe") is None
+    (d / "cafe.mp4").write_bytes(b"x")
     assert media.exported_path(root, chat_md5="b" * 32, kind="video", ts=ts,
                                file_key="cafe").name == "cafe.mp4"
+
+
+def test_exported_path_video_thumb_is_fallback_and_mp4_wins(tmp_path):
+    """缩略图是**最后**的候选：只有它时返回它（无缝体时导出写下的就是它），
+    本体与它同在时必须是本体。"""
+    root = tmp_path / "out"
+    d = root / ("g" * 32) / "video" / "2026-09"
+    d.mkdir(parents=True)
+    ts = int(datetime.datetime(2026, 9, 15, 12, 0).timestamp())
+    (d / "cafe_thumb.jpg").write_bytes(b"x")
+    assert media.exported_path(root, chat_md5="g" * 32, kind="video", ts=ts,
+                               file_key="cafe").name == "cafe_thumb.jpg"
+    (d / "cafe.mp4").write_bytes(b"x")
+    assert media.exported_path(root, chat_md5="g" * 32, kind="video", ts=ts,
+                               file_key="cafe").name == "cafe.mp4"
+
+
+def test_exported_path_video_raw_variant(tmp_path):
+    """`_raw.mp4` 是真实语料里的变体（`resolve_video` 也认它）；导出不改名，
+    所以它的产物就叫 `K_raw.mp4` —— 只探裸 K 会漏掉真正存在的那份。"""
+    root = tmp_path / "out"
+    d = root / ("f" * 32) / "video" / "2026-09"
+    d.mkdir(parents=True)
+    ts = int(datetime.datetime(2026, 9, 15, 12, 0).timestamp())
+    (d / "cafe_raw.mp4").write_bytes(b"x")
+    assert media.exported_path(root, chat_md5="f" * 32, kind="video", ts=ts,
+                               file_key="cafe").name == "cafe_raw.mp4"
 
 
 def test_exported_path_voice_wav_wins_over_slk(tmp_path):
@@ -1083,13 +1131,24 @@ def test_exported_path_voice_wav_wins_over_slk(tmp_path):
 
 
 def test_exported_path_missing_returns_none(tmp_path):
-    """目录不存在、文件不存在、参数不全 —— 一律 None，不抛。"""
+    """目录不存在、文件不存在 —— 一律 None，不抛。"""
     root = tmp_path / "nowhere"
     ts = int(datetime.datetime(2026, 9, 15, 12, 0).timestamp())
     assert media.exported_path(root, chat_md5="d" * 32, kind="image", ts=ts,
                                file_key="dead") is None
     assert media.exported_path(root, chat_md5="d" * 32, kind="voice", ts=ts,
                                local_id=1) is None
-    # image 缺 file_key / voice 缺 local_id：参数不全，不是「没导出」，但结果同为 None
-    assert media.exported_path(root, chat_md5="d" * 32, kind="image", ts=ts) is None
-    assert media.exported_path(root, chat_md5="d" * 32, kind="voice", ts=ts) is None
+
+
+def test_exported_path_missing_args_are_guarded_not_lucky(tmp_path):
+    """参数不全 → None。**诱饵文件真实存在**，所以这条断言真在测 guard：
+    去掉 file_key/local_id 的判空，函数就会去匹配 `None.jpg` / `{ts}_None.wav` 并命中。"""
+    root = tmp_path / "out"
+    cm = "d" * 32
+    ts = int(datetime.datetime(2026, 9, 15, 12, 0).timestamp())
+    (root / cm / "image" / "2026-09").mkdir(parents=True)
+    (root / cm / "voice" / "2026-09").mkdir(parents=True)
+    (root / cm / "image" / "2026-09" / "None.jpg").write_bytes(b"x")
+    (root / cm / "voice" / "2026-09" / f"{ts}_None.wav").write_bytes(b"x")
+    assert media.exported_path(root, chat_md5=cm, kind="image", ts=ts) is None
+    assert media.exported_path(root, chat_md5=cm, kind="voice", ts=ts) is None
