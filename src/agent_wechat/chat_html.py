@@ -139,7 +139,9 @@ def _media_block(m: MediaRefState, prefix: str, out_dir: str) -> str:
 
 def _quote_block(q: appmsg.Quote, ref_anchor: str | None) -> str:
     """引用：`ref_anchor` 有值整块可点跳，没有则内联显示原文。**原文两种情况都印。**"""
-    who = _esc(q.displayname)          # displayname 为空是 0.81% 的常态，不补默认名
+    # displayname 为空是 0.81% 的常态：补一个**显式的**「未署名」—— 不猜名字，也不留空
+    # （留空渲染成「引用 ：」，看起来像坏了）。正文为空（0.56%）则照原样留空。
+    who = _esc(q.displayname) or "（未署名）"
     body = _esc(q.content)             # 为空是 0.56% 的常态，不编占位文案
     inner = f'<div class="src">引用 {who}：</div>{body}'
     if not ref_anchor:

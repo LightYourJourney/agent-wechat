@@ -148,3 +148,20 @@ def test_transfer_envelope_renders_as_a_readable_list():
         "content": "", "sender_name": "张三", "is_self": False}], parts={"k1": a}))
     assert "¥100.00" in out and "还款" in out and "TXN1" in out
     assert "paysubtype" in out
+
+
+def test_quote_without_a_displayname_prints_an_explicit_placeholder():
+    """实测 `refermsg.displayname` 有 **0.81% 为空**（spec §2.6）—— 空是常态不是异常。
+
+    照原样印会长成「引用 ：」，看起来像渲染坏了；故补一个**显式的**「未署名」，
+    **不猜名字**（与「`payer` 为空不写『（空）』」同一条规矩的反面：这里留空会造成歧义，
+    那里留空只是少一行信息）。删掉 `or "（未署名）"` → 第 1 条断言红。
+    """
+    quote = appmsg.AppMsg(kind=57, title="同意", fields=(), link=None, file=None,
+                          transfer=None, quote=appmsg.Quote(
+                              svrid=1, displayname=None, content="明天开会",
+                              create_time=None, from_usr=None))
+    out = chat_html.render(_view(rows=[{"msg_key": "k1", "ts": 1, "msg_type": 49,
+        "content": "", "sender_name": "张三", "is_self": False}], parts={"k1": quote}))
+    assert "（未署名）" in out and "引用 ：" not in out
+    assert "明天开会" in out          # 原文照常出现，不依赖署名
