@@ -313,12 +313,21 @@ def test_deeply_nested_payload_does_not_blow_the_stack():
 
 def test_link_url_is_subject_to_the_value_filter():
     """回归：`_link` 直接 findtext("url") 会绕过值过滤——同一个值走 `fields` 就丢、
-    走 `Link` 就进信封（spec §4.5 明列信封含 link）。删掉 `_link` 里那道过滤会红。"""
+    走 `Link` 就进信封（spec §4.5 明列信封含 link）。删掉 `_link` 里那道过滤会红。
+
+    **末一条是反假护栏（F19 要求 3）**：过滤**收紧过头**换个方向同样有害——
+    良性带查询串的 url 必须原样保留。此前没有任何夹具带良性查询串，
+    所以「有 `?` 就丢」这种收得过紧的写法不会红（实施期探得）。
+    """
     xml = ('<msg><appmsg><title>x</title><type>5</type>'
            '<url>https://cdn.example/x?token=REALTOKEN9&amp;idx=1</url></appmsg></msg>')
     a = appmsg.parse(xml).appmsg
     assert a.link.url is None
     assert not any("REALTOKEN9" in v for _, v in a.fields)
+    # 良性查询串（`?idx=1` 不是凭据形态）不许被误丢
+    benign = ('<msg><appmsg><title>x</title><type>5</type>'
+              '<url>https://example.com/a?idx=1</url></appmsg></msg>')
+    assert appmsg.parse(benign).appmsg.link.url is not None
 
 
 def test_secret_container_names_leak_nothing():
@@ -344,3 +353,28 @@ def test_numeric_fields_fall_back_to_none_not_zero():
                      '<content>x</content><svrid>abc</svrid>'
                      '<createtime>昨天</createtime></refermsg></appmsg></msg>').appmsg.quote
     assert q.svrid is None and q.create_time is None
+
+
+def test_user_content_is_never_subject_to_the_value_filter():
+    """**边界的另一侧**：值过滤只针对**载荷自身的凭据字段**，绝不碰用户正文。
+
+    回归：把 `_is_secret` 顺手扩到 `Quote.content` / `displayname` / `from_usr`
+    （「看起来更安全」），或对 `fields` 的所有值一律过滤 —— **这条会红**。
+    真发生时的症状是**用户内容静默消失**，方向与泄漏相反、且比泄漏更难被发现
+    （实施期探得：把值过滤扩到 Quote 三个字段后 30 条全绿）。
+    """
+    xml = ('<msg><appmsg><title>看这个</title><type>57</type><refermsg>'
+           '<displayname>张三</displayname>'
+           '<content>你发的 https://cdn.example/x?token=SECRET9&amp;idx=1 打不开</content>'
+           '<svrid>1</svrid></refermsg></appmsg></msg>')
+    q = appmsg.parse(xml).appmsg.quote
+    assert "token=SECRET9" in q.content, "被引用的用户正文必须原样保留"
+    assert q.displayname == "张三"
+
+
+def test_secret_value_separator_set_covers_semicolon_and_comma():
+    """`;` 与 `,` 也在分隔符集里。真实 CDN 以 `?`/`&` 为主，这两个是覆盖缺口——
+    但没有夹具时把集合退回 `[?&]` 不会红（实施期探得）。"""
+    xml = ('<msg><appmsg><title>x</title><type>5</type>'
+           '<url>https://cdn.example/x;token=S9</url></appmsg></msg>')
+    assert appmsg.parse(xml).appmsg.link.url is None
