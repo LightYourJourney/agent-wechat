@@ -79,3 +79,28 @@ def recent_from_store(chat_id: str, limit: int = 50) -> list[dict]:
             "WHERE m.chat_id=? ORDER BY m.ts DESC, m.local_id DESC LIMIT ?",
             (chat_id, limit)).fetchall()
     return [dict(r) for r in reversed(rows)]  # 时间正序
+
+
+def messages_in_range(chat_id: str, *, account: str,
+                      after_ts: int | None = None, before_ts: int | None = None,
+                      limit: int = 500) -> tuple[list[dict], bool]:
+    """范围内**最近的** limit 条（时间正序返回），以及 truncated。
+
+    `truncated` 的含义是「范围内还有更早的没进来」——取的是最近的一端，不是最早的一端，
+    取向写反会让产物看起来「从很久以前开始」，而用户以为自己拿到了最近的消息（spec §4.4）。
+    `after_ts` 含下界、`before_ts` 不含上界（与 `search` / `media.month_bounds` 的 [lo, hi) 一致）。
+    """
+    where, args = ["m.account = ?", "m.chat_id = ?"], [account, chat_id]
+    if after_ts is not None:
+        where.append("m.ts >= ?")
+        args.append(after_ts)
+    if before_ts is not None:
+        where.append("m.ts < ?")
+        args.append(before_ts)
+    with store.open() as con:
+        rows = con.execute(
+            f"SELECT {_RECENT_COLUMNS} FROM messages m {store._SENDER_JOIN} "
+            f"WHERE {' AND '.join(where)} "
+            "ORDER BY m.ts DESC, m.local_id DESC LIMIT ?",
+            (*args, limit)).fetchall()
+    return [dict(r) for r in reversed(rows)], len(rows) == limit  # 时间正序

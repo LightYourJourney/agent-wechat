@@ -105,3 +105,73 @@ def test_rebuild_is_idempotent(con, monkeypatch):
     usecases.appmsg_rebuild_parts(account="acct")
     usecases.appmsg_rebuild_parts(account="acct")
     assert store.count_msg_parts(con, "acct") == 1
+
+
+def test_messages_in_range_takes_the_most_recent_n_not_the_oldest(con, monkeypatch):
+    """**取向**是这个函数唯一容易写错的地方（spec §4.4）。
+    范围里有 10 条、limit=3，必须是**最近 3 条**，且 truncated=True。
+    回归：把 ORDER BY 改成 ASC 再取前 3，这条断言会红。"""
+    con.executemany(
+        "INSERT INTO messages (msg_key, account, chat_md5, chat_id, shard, local_id,"
+        " ts, msg_type, is_self, content, exported_at)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        [(f"acct|aaa|message_0.db|{i}", "acct", "aaa", "wxid_testacct02", "message_0.db",
+          i, 1000 + i, 1, 0, f"m{i}", 0) for i in range(1, 11)])
+    con.commit()
+    from agent_wechat import search
+    rows, truncated = search.messages_in_range(
+        "wxid_testacct02", account="acct", limit=3)
+    assert truncated is True
+    assert [r["content"] for r in rows] == ["m8", "m9", "m10"]     # 正序，且是最新的三条
+
+
+@pytest.mark.xfail(strict=True, reason=(
+    "brief 的期望值只在下界**独占**（m.ts > after_ts）时成立："
+    "after_ts=1004 含下界会多带回 m4。但独占下界与本仓已落地的三条事实矛盾："
+    "(1) search.py:39 同模块同名的 after_ts 是 m.ts >= ?；"
+    "(2) usecases.py:460 _month_clause 是 (m.ts >= ? AND m.ts < ?)；"
+    "(3) tests/test_media.py:139 钉死 month_bounds 的 [lo, hi)「下界含」，"
+    "而 plan task-6 把 month_bounds 的值直接喂给 after_ts/before_ts。"
+    "独占下界会在 chat export --months 的每月第一秒上开一个缝。"
+    "本 xfail 已在两个方向钉住：实现改成 > 时这条会 XPASS 而 strict 转红。"
+    "裁定见 task-5-report.md §4 缺陷 2。"))
+def test_messages_in_range_filters_and_reports_not_truncated(con):
+    con.executemany(
+        "INSERT INTO messages (msg_key, account, chat_md5, chat_id, shard, local_id,"
+        " ts, msg_type, is_self, content, exported_at)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        [(f"acct|aaa|message_0.db|{i}", "acct", "aaa", "wxid_testacct02", "message_0.db",
+          i, 1000 + i, 1, 0, f"m{i}", 0) for i in range(1, 11)])
+    con.commit()
+    from agent_wechat import search
+    rows, truncated = search.messages_in_range(
+        "wxid_testacct02", account="acct", after_ts=1004, before_ts=1008)
+    assert [r["content"] for r in rows] == ["m5", "m6", "m7"]
+    assert truncated is False
+
+
+def test_messages_in_range_is_scoped_to_one_account_and_one_chat(con):
+    """回归：删掉 `m.account = ?` 或 `m.chat_id = ?` 中**任一个**谓词，这条会红。
+
+    （T5 交付时这两个谓词**都没有**夹具钉住：E1/E2 两个变异各自删掉一个，
+    全套用例仍然全绿。见 task-5-report.md §3。）
+
+    两条都必须钉：`messages` 是**多账号共用**的表（T4b 的跨账号错接就出在这上面），
+    且同一账号下各会话也各是各的。夹具让三条行 **ts 全相同**，于是「谁被带回来」
+    只由谓词决定，与 limit、与排序都无关。
+    """
+    con.executemany(
+        "INSERT INTO messages (msg_key, account, chat_md5, chat_id, shard, local_id,"
+        " ts, msg_type, is_self, content, exported_at)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        [("acct|aaa|message_0.db|1", "acct", "aaa", "wxid_testacct02",
+          "message_0.db", 1, 5000, 1, 0, "本会话", 0),
+         ("other|aaa|message_0.db|1", "other", "aaa", "wxid_testacct02",
+          "message_0.db", 1, 5000, 1, 0, "异账号同会话", 0),
+         ("acct|bbb|message_0.db|1", "acct", "bbb", "wxid_otherchat",
+          "message_0.db", 1, 5000, 1, 0, "同账号异会话", 0)])
+    con.commit()
+    from agent_wechat import search
+    rows, truncated = search.messages_in_range("wxid_testacct02", account="acct")
+    assert [r["content"] for r in rows] == ["本会话"]
+    assert truncated is False   # 独立钉住 truncated 的「假」这一半（探针 D：此前无人钉）
