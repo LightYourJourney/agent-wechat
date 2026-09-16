@@ -616,8 +616,8 @@ def export_media(account: str, chat_ids: list[str], *, kinds: list[str],
         #   `out_root/{chat_md5}/video/{月}/`。
         # - 没给（`con=None`）→ 退回**账号级枚举**（下面的实现，本任务之前唯一的路）：整个调用
         #   只枚举一次，恰好一个会话时才归属；多会话无从归属——按会话循环会把同一批文件重复
-        #   写进 N 个目录、计数翻 N 倍。这条路由用例层之外的直接调用方使用（tests/test_media.py
-        #   的 15 处调用就是它的回归网）。
+        #   写进 N 个目录、计数翻 N 倍。用例层只在**索引打不开**时走到这里（并带一条 degraded
+        #   公告）；tests/test_media.py 的 15 处直接调用是这条路的回归网。
         if con is not None:
             refs_by_chat: dict[str, list[tuple[int, str]]] = {}
             note: str | None = None
