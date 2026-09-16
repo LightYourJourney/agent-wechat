@@ -322,6 +322,10 @@ def media_export(contact: str, *, kinds: list[str], months: list[str] | None = N
 
     chat_ids 恒为单元素——当前调用方一次只导一个会话，重复无从发生，故**不去重**；
     若未来放开多会话，调用方须自行保证无重复（重复 chat_id 会使图片/语音计数翻倍）。
+
+    视频归属要索引库：本层打开 `store` 并把连接交给 `export_media`（按消息的 `media_refs`
+    定位本体——视频树本身没有会话维度）。索引打不开时**如实降级**，不静默退回账号级枚举：
+    那会把「索引不可用」藏起来，而用户对它是能动手修的。
     """
     from . import media                       # 惰性：media 顶层拉起 cryptography
     ctx = ChatContext(account)
@@ -336,8 +340,23 @@ def media_export(contact: str, *, kinds: list[str], months: list[str] | None = N
     bad_months = [m for m in (months or []) if not MONTH_RE.fullmatch(m)]
     if bad_months:
         raise errors.SearchInputError(f"月份格式应为 YYYY-MM：{', '.join(bad_months)}")
-    report = media.export_media(ctx.account, [chat_id], kinds=kinds, months=months,
-                                out_dir=out_dir, max_files=clamp_limit(limit, (1, 2000)))
+    index_note = None
+    with contextlib.ExitStack() as stack:
+        con = None
+        if "video" in kinds:
+            # 只有视频归属需要索引（图片按目录枚举、语音走 media_*.db）：不导视频的调用
+            # 不该多背一条失败路径。
+            try:
+                con = stack.enter_context(store.open())
+            except (errors.AgentWeChatError, sqlite3.Error, OSError) as exc:
+                index_note = errors.redact(str(exc))
+        report = media.export_media(ctx.account, [chat_id], kinds=kinds, months=months,
+                                    out_dir=out_dir, max_files=clamp_limit(limit, (1, 2000)),
+                                    con=con)
+    if index_note is not None:
+        report.degraded.append(
+            f"视频索引库不可用（{index_note}）：视频退回账号级枚举，多会话时无从归属；"
+            "请修复后重跑（`media rebuild-refs`）")
     return MediaExportResult(chat_id=chat_id, out_dir=report.out_dir, report=report)
 
 

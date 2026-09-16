@@ -8,7 +8,7 @@ import stat
 import pytest
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
-from agent_wechat import errors, media, paths
+from agent_wechat import errors, media, messages, paths, store
 
 
 FAKE_KEY = b"0123456789abcdef"          # 16 ASCII 字节（aesKey 的形态，非真实密钥）
@@ -360,6 +360,111 @@ def test_export_media_multi_chat_skips_video(tmp_path, monkeypatch):
     assert rep.video.ok == 0 and rep.video.thumb == 0
     assert "视频为账号级枚举，无法归属具体会话；请逐个会话导出" in rep.degraded
     assert list(out.iterdir()) == []              # 一个会话目录都不建（更别说两份视频）
+
+
+# ---------- 视频的 refs 驱动归属（spec §4.7） ----------
+
+def _video_index(tmp_path, account, rows):
+    """建一个小索引。rows = [(chat_id, local_id, ts, file_key), …]。
+
+    走 make_tree 隔离后的 HOME_DIR：`store.connect()` 会经 `paths.ensure_home_dirs()`
+    建目录，不隔离就会在真实 `~/.agent-wechat` 下动土。
+    """
+    con = store.connect(tmp_path / "index.db")
+    store.upsert_batch(con, [
+        {"msg_key": messages.row_key(account, messages.md5_of(c), "message_0.db", lid),
+         "account": account, "chat_md5": messages.md5_of(c), "chat_id": c,
+         "shard": "message_0.db", "local_id": lid, "server_id": None, "ts": ts,
+         "msg_type": messages.TYPE_VIDEO, "sender_id": c, "sender_name": None,
+         "is_self": 0, "content": None, "media_hint": "[video]"}
+        for c, lid, ts, _ in rows])
+    store.upsert_media_refs(con, [
+        (messages.row_key(account, messages.md5_of(c), "message_0.db", lid), "video", fk, None)
+        for c, lid, ts, fk in rows])
+    con.commit()
+    return con
+
+
+def test_video_export_attributes_across_two_chats(tmp_path, monkeypatch):
+    """多会话也能归属——本任务修的就是这个：改前 ok=0 且 degraded 里有归属说明。"""
+    root, account = make_tree(tmp_path, monkeypatch)
+    ts = int(datetime.datetime(2026, 9, 15, 12, 0).timestamp())
+    fk = "aa" * 16
+    vdir = paths.XWECHAT_FILES / account / "msg/video" / media.month_of(ts)
+    vdir.mkdir(parents=True)
+    (vdir / f"{fk}.mp4").write_bytes(b"video-bytes")
+    con = _video_index(tmp_path, account, [("wxid_a", 1, ts, fk)])
+    rep = media.export_media(account, ["wxid_a", "wxid_b"], kinds=["video"], con=con)
+    assert rep.video.ok == 1                 # 不再因为「多会话」而跳过
+    assert not any("归属" in d for d in rep.degraded)
+    assert (pathlib.Path(rep.out_dir) / messages.md5_of("wxid_a") / "video"
+            / media.month_of(ts) / f"{fk}.mp4").read_bytes() == b"video-bytes"
+
+
+def test_video_export_degrades_when_no_refs(tmp_path, monkeypatch):
+    """索引为空 → 明确降级，不静默产出 0 条（否则「没建索引」与「本机没有视频」不可区分）。"""
+    root, account = make_tree(tmp_path, monkeypatch)
+    con = store.connect(tmp_path / "empty.db")
+    rep = media.export_media(account, ["wxid_a"], kinds=["video"], con=con)
+    assert rep.video.ok == 0
+    assert any("rebuild-refs" in d for d in rep.degraded), rep.degraded
+
+
+def test_video_export_distinguishes_empty_index_from_chat_without_videos(tmp_path, monkeypatch):
+    """「索引里一条视频引用都没有」与「这个会话没有视频消息」是两回事：前者用户能动手修。
+
+    只报「本次没导出视频」会让这两种情形混在一起——正是 spec §4.7 要求分开的那对事实。
+    """
+    root, account = make_tree(tmp_path, monkeypatch)
+    ts = int(datetime.datetime(2026, 9, 15, 12, 0).timestamp())
+    con = _video_index(tmp_path, account, [("wxid_a", 1, ts, "aa" * 16)])
+    rep = media.export_media(account, ["wxid_b"], kinds=["video"], con=con)
+    assert rep.video.ok == 0
+    assert any("本次请求的会话" in d for d in rep.degraded), rep.degraded
+    assert not any("一条视频引用都没有" in d for d in rep.degraded), rep.degraded
+
+
+def test_video_export_thumb_keeps_source_stem(tmp_path, monkeypatch):
+    """缩略图回退时产物名与账号级枚举那条路逐字一致（`{K}_thumb.jpg`）。
+
+    名字取自**源文件**的 stem：改成 `{K}.jpg` 会让 `media.exported_path`（它按
+    `K.mp4` / `K_raw.mp4` / `K_thumb.jpg` 探测）找不到这份产物，机器上既有的缩略图
+    也会被误报成「未导出」——与图片那条线上刚修掉的是同一类缺陷。
+    """
+    root, account = make_tree(tmp_path, monkeypatch)
+    ts = int(datetime.datetime(2026, 9, 15, 12, 0).timestamp())
+    fk = "bb" * 16
+    vdir = paths.XWECHAT_FILES / account / "msg/video" / media.month_of(ts)
+    vdir.mkdir(parents=True)
+    (vdir / f"{fk}_thumb.jpg").write_bytes(b"thumb-bytes")   # 本体不在，只剩缩略图
+    con = _video_index(tmp_path, account, [("wxid_a", 1, ts, fk)])
+    rep = media.export_media(account, ["wxid_a"], kinds=["video"], con=con)
+    assert rep.video.thumb == 1 and rep.video.ok == 0
+    out = pathlib.Path(rep.out_dir)
+    cm = messages.md5_of("wxid_a")
+    assert (out / cm / "video" / media.month_of(ts)
+            / f"{fk}_thumb.jpg").read_bytes() == b"thumb-bytes"
+    assert media.exported_path(out, chat_md5=cm, kind="video", ts=ts,
+                               file_key=fk) is not None
+
+
+def test_video_export_refs_at_limit_do_not_fake_truncation(tmp_path, monkeypatch):
+    """refs 路径的 `truncated` 同样不许撒谎：`--limit` 用尽后，落在**月份之外**的引用不算
+    「因上限跳过」（与缩略图循环那条既有裁决同一口径）。
+
+    先判上限、后判月份就会红：那条 9 月的引用本来就不导出，却会把 truncated 置成 True。
+    """
+    root, account = make_tree(tmp_path, monkeypatch)
+    aug = int(datetime.datetime(2026, 8, 15, 12, 0).timestamp())     # 命中月份（且更早）
+    sep = int(datetime.datetime(2026, 9, 15, 12, 0).timestamp())     # 月份之外
+    fk_a, fk_b = "cc" * 16, "dd" * 16
+    vdir = paths.XWECHAT_FILES / account / "msg/video" / media.month_of(aug)
+    vdir.mkdir(parents=True)
+    (vdir / f"{fk_a}.mp4").write_bytes(b"m" * 8)      # 9 月那条不必落盘：它在过滤阶段就出局
+    con = _video_index(tmp_path, account, [("wxid_a", 1, aug, fk_a), ("wxid_a", 2, sep, fk_b)])
+    rep = media.export_media(account, ["wxid_a"], kinds=["video"], months=[media.month_of(aug)],
+                             max_files=1, con=con)
+    assert rep.video.ok == 1 and rep.truncated is False
 
 
 # ---------- Ruling 9：export_media 内的 OSError 归口 ----------

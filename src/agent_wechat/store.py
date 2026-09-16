@@ -236,6 +236,54 @@ def media_refs_by_keys(con: sqlite3.Connection,
     return out
 
 
+def media_refs_by_chat(con: sqlite3.Connection, account: str,
+                       chat_ids: Sequence[str], *, kind: str | None = None
+                       ) -> dict[str, list[tuple[int, str]]]:
+    """按会话批量取媒体引用：{chat_id: [(ts, file_key), …]}（会话内按 ts、local_id 升序）。
+
+    `media_refs` 只有 msg_key（没有 account / chat 维度），所以必须 join `messages` 取回
+    会话与时间。**只出现在结果里的会话是有引用的那些**——调用方用 `.get(chat, ())` 取，
+    据此区分「这个会话没有媒体消息」与「查不到」。file_key 为 NULL 的行跳过：没有文件名
+    就无从定位本体，带出去只会让调用方逐条判空。
+    """
+    if not chat_ids:
+        return {}
+    out: dict[str, list[tuple[int, str]]] = {}
+    # 与 media_refs_by_keys 同款分批（SQLite 变量上限 999）。按**会话**分批不会打乱每条
+    # 会话内部的顺序：一个会话只落在一批里，各批的 ORDER BY 结果可以直接拼接。
+    batch = 500
+    for i in range(0, len(chat_ids), batch):
+        chunk = chat_ids[i:i + batch]
+        sql = ("SELECT m.chat_id, m.ts, r.file_key FROM media_refs r "
+               "JOIN messages m ON m.msg_key = r.msg_key "
+               f"WHERE m.account = ? AND m.chat_id IN ({','.join('?' * len(chunk))}) "
+               "AND r.file_key IS NOT NULL")
+        args: list[str] = [account, *chunk]
+        if kind is not None:
+            sql += " AND r.media_kind = ?"
+            args.append(kind)
+        for chat_id, ts, file_key in con.execute(sql + " ORDER BY m.ts, m.local_id", args):
+            out.setdefault(chat_id, []).append((ts, file_key))
+    return out
+
+
+def count_media_refs(con: sqlite3.Connection, account: str, *,
+                     kind: str | None = None) -> int:
+    """该账号媒体引用的条数（可按 kind 过滤）。
+
+    单独存在是为了把「索引里一条此类引用都没有（没建过索引 / 建时本机没有）」与「这个
+    会话没有这类媒体消息」分开：两者都导出 0 条，但只有前者用户能动手修（重建索引）。
+    `media_refs` 没有 account 列，同 media_refs_by_chat 一样 join `messages` 取回。
+    """
+    sql = ("SELECT count(*) FROM media_refs r JOIN messages m ON m.msg_key = r.msg_key "
+           "WHERE m.account = ?")
+    args: list[str] = [account]
+    if kind is not None:
+        sql += " AND r.media_kind = ?"
+        args.append(kind)
+    return con.execute(sql, args).fetchone()[0]
+
+
 def get_watermark(con: sqlite3.Connection, account: str, shard: str, chat_md5: str) -> int:
     row = con.execute("SELECT max_local_id FROM watermark WHERE account=? AND shard=? AND chat_md5=?",
                       (account, shard, chat_md5)).fetchone()

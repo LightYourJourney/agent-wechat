@@ -5,7 +5,9 @@
 + dat 尾部统计 xorKey；**推导后必须用样本验证，不验证不交付**。
 
 红线：code/aesKey/xorKey 是推导材料，视同密钥——不进日志、错误消息、repr。
-依赖方向：本模块不 import store/reader（reader 可以 import 本模块）。
+依赖方向：本模块不 import reader（reader 可以 import 本模块）；**唯一** import store 的地方是
+视频导出的 refs 驱动归属（`store.media_refs_by_chat`）——视频树是账号级的，没有索引就无从
+知道某条视频属于哪个会话（spec §4.7）。
 """
 from __future__ import annotations
 
@@ -21,7 +23,7 @@ from dataclasses import dataclass, field
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
-from . import decrypt, errors, messages, paths
+from . import decrypt, errors, messages, paths, store
 from . import keys as keys_mod
 
 # 可选依赖：缺 pilk 只意味着语音出原始 .slk（能力级降级），不是导入失败。
@@ -519,9 +521,11 @@ def exported_path(out_root: pathlib.Path, *, chat_md5: str, kind: str, ts: int,
 
 def export_media(account: str, chat_ids: list[str], *, kinds: list[str],
                  months: list[str] | None = None, out_dir: pathlib.Path | None = None,
-                 max_files: int = 2000, progress=None) -> MediaReport:
+                 max_files: int = 2000, progress=None,
+                 con: sqlite3.Connection | None = None) -> MediaReport:
     """按会话导出媒体。图片解密（MediaKeyError → 能力级降级不抛）；语音见 Task 3；视频明文复制
-    （账号级枚举：只有恰好一个会话时可归属，多会话跳过并记 degraded）。"""
+    （refs 驱动：给 `con` 时按 media_refs 归属，任意会话数都成立；`con=None` 时退回账号级枚举，
+    只有恰好一个会话时可归属）。"""
     report = MediaReport()
     out_root = _ensure_tree(pathlib.Path(out_dir) if out_dir else paths.HOME_DIR / "media")
     report.out_dir = str(out_root)
@@ -605,11 +609,74 @@ def export_media(account: str, chat_ids: list[str], *, kinds: list[str],
                         if progress:
                             progress(produced)
     if "video" in kinds:
-        # 视频树是**账号级**的（`msg/video/{月}`，没有会话维度）：整个调用只枚举一次。
-        # 唯一会话时才能归属（输出仍落在 out_root/{chat_md5}/video/{月}/）；多会话无从归属
-        # ——按会话循环会把同一批文件重复写进 N 个目录、计数翻 N 倍。按消息级归属需要
-        # media_refs（后续任务能力），本期不做。
-        if len(chat_ids) == 1:
+        # 两条路（spec §4.7）：
+        # - 给了索引连接（`con`）→ **refs 驱动**：按每个会话的 video 消息取其 file_key，再用
+        #   resolve_video 逐个定位本体。视频树是账号级的（`msg/video/{月}`，没有会话维度），
+        #   只有经索引才知道某条视频属于哪个会话——多会话归属由此成立，产物落
+        #   `out_root/{chat_md5}/video/{月}/`。
+        # - 没给（`con=None`）→ 退回**账号级枚举**（下面的实现，本任务之前唯一的路）：整个调用
+        #   只枚举一次，恰好一个会话时才归属；多会话无从归属——按会话循环会把同一批文件重复
+        #   写进 N 个目录、计数翻 N 倍。这条路由用例层之外的直接调用方使用（tests/test_media.py
+        #   的 15 处调用就是它的回归网）。
+        if con is not None:
+            refs_by_chat: dict[str, list[tuple[int, str]]] = {}
+            note: str | None = None
+            try:
+                refs_by_chat = store.media_refs_by_chat(con, account, chat_ids, kind="video")
+                if not refs_by_chat:
+                    # 索引里一条视频引用都没有 vs 这些会话确实没有视频消息：都产出 0 条，但只有
+                    # 前者用户能动手修（重建索引），所以两种情形分开说（spec §4.7）。
+                    if store.count_media_refs(con, account, kind="video"):
+                        note = ("视频导出按 media_refs 索引归属：本次请求的会话在索引里没有视频消息，"
+                                "本次未导出任何视频。若确信它们有视频，请运行 `media rebuild-refs` 重建索引。")
+                    else:
+                        note = ("视频导出按 media_refs 索引归属：索引里一条视频引用都没有"
+                                "（没建过索引，或建索引时本机没有视频消息），本次未导出任何视频。"
+                                "请先运行 `media rebuild-refs`。")
+            except (sqlite3.Error, OSError) as exc:
+                # 索引读不了 = 归属无从谈起：**如实降级**产出 0 条。裸 sqlite3.Error 逃出 core
+                # 层会击穿错误契约，而静默返回 0 会把「索引坏了」说成「本机没有视频」。
+                note = (f"视频索引读不了（{errors.redact(str(exc))}），本次未导出任何视频"
+                        "（视频按 media_refs 索引归属）")
+            if note:
+                report.degraded.append(note)
+            for chat in chat_ids:
+                cm = messages.md5_of(chat)
+                for ts, file_key in refs_by_chat.get(chat, ()):
+                    if want is not None and month_of(ts) not in want:
+                        continue                     # 月份外的条目本来就不导出，不算「因上限收手」
+                    # 上限检查排在月份过滤之后（与语音同一个口径）：只有**本会导出**的条目
+                    # 被上限挡下，truncated 才成立；反过来的话 `--limit` 恰好用尽时会把一条
+                    # 本来就跳过的条目当成「已提前收手」，那是假话。
+                    if full():
+                        report.truncated = True
+                        break
+                    got = resolve_video(account, ts, file_key)
+                    if got is None:
+                        report.video.missing += 1        # 有 ref 但本体不在磁盘（被清理）
+                        continue
+                    src, is_thumb = got
+                    try:
+                        buf = src.read_bytes()
+                    except OSError:
+                        report.video.missing += 1        # 文件在、拿不到本体（Ruling 9）
+                        continue
+                    # 名字逐字取自**源文件**（`{K}.mp4` / `{K}_raw.mp4` / `{K}_thumb.jpg`），与
+                    # 账号级枚举那条路一致：`media.exported_path` 正是按这三个名字探测的，改成
+                    # `{K}.jpg` 会让它找不到缩略图，机器上既有的产物也会被误报成「未导出」。
+                    if _save(out_root, cm, "video", month_of(ts),
+                             src.stem, src.suffix[1:], buf) is None:
+                        report.video.missing += 1        # 落盘失败 → 同归口（Ruling 20）
+                        continue
+                    if is_thumb:
+                        report.video.thumb += 1
+                    else:
+                        report.video.ok += 1
+                    done = bump()
+                    if progress:
+                        progress(done)
+        # 两处的 `con is None` 不可省：refs 路径已经处理过的调用不该再落进账号级枚举。
+        if con is None and len(chat_ids) == 1:
             cm = messages.md5_of(chat_ids[0])
             vbase = paths.XWECHAT_FILES / account / "msg/video"
             # 不在入口判 full()：此刻只是「上限已到」，还没看见任何条目——真要有视频被跳过，
@@ -659,7 +726,7 @@ def export_media(account: str, chat_ids: list[str], *, kinds: list[str],
                             continue
                         report.video.thumb += 1
                         produced += 1
-        elif len(chat_ids) > 1:
+        elif con is None and len(chat_ids) > 1:
             report.degraded.append("视频为账号级枚举，无法归属具体会话；请逐个会话导出")
     if "voice" in kinds:
         if _PILK is None:

@@ -4,6 +4,7 @@ C2 的核心断言在这里：**同一个 contact + 同一个 limit，两个入�
 用例函数、拿到同一个解析结果**——归一化、消歧、未命中三件事只实现一次。
 """
 import json
+import sqlite3
 from types import SimpleNamespace
 
 import pytest
@@ -274,24 +275,76 @@ def test_export_without_contact_keeps_full_scope(stub):
 
 def test_media_export_wires_single_chat_and_clamped_limit(stub, monkeypatch):
     """media_export：消歧后以**单元素** chat_ids 交 export_media，limit 夹到 1-2000，
-    结果 out_dir 直取 report.out_dir（media.py 赋的实际输出根，入口不重算）。"""
+    结果 out_dir 直取 report.out_dir（media.py 赋的实际输出根，入口不重算）。
+
+    不导视频时**不开索引库**（`con=None`）——索引只有视频归属用得上，不给图片/语音
+    多背一条失败路径。
+    """
     from agent_wechat import media
     _unique(stub)
     seen: dict = {}
 
     def fake_export_media(account, chat_ids, *, kinds, months, out_dir, max_files,
-                          progress=None):
+                          progress=None, con=None):
         seen.update(account=account, chat_ids=chat_ids, kinds=kinds, months=months,
-                    out_dir=out_dir, max_files=max_files)
+                    out_dir=out_dir, max_files=max_files, con=con)
         return media.MediaReport(image=media.Counts(ok=1), out_dir="/default/media")
 
     monkeypatch.setattr(media, "export_media", fake_export_media)
     res = usecases.media_export("张三", kinds=["image"], months=["2026-09"],
                                 out_dir=None, limit=99999)
     assert seen == {"account": "acct", "chat_ids": ["wxid_target"], "kinds": ["image"],
-                    "months": ["2026-09"], "out_dir": None, "max_files": 2000}
+                    "months": ["2026-09"], "out_dir": None, "max_files": 2000, "con": None}
     assert res.chat_id == "wxid_target" and res.out_dir == "/default/media"
     assert res.report.image.ok == 1
+
+
+def test_media_export_opens_index_for_video(stub, monkeypatch):
+    """视频归属要索引：用例层自己开 `store` 并把**可用的连接**交给 export_media。
+
+    改前 `usecases.media_export` 根本没有 store 访问——`export_media` 只能按账号级枚举，
+    多会话无从归属。忘了传 con 这条必红（`None.execute` 直接 AttributeError）。
+    连接的生命周期归用例层：只在调用期间有效，出栈即关（下面在假函数**内部**查库）。
+    """
+    from agent_wechat import media
+    _unique(stub)
+    seen: dict = {}
+
+    def fake_export_media(account, chat_ids, *, kinds, months, out_dir, max_files,
+                          progress=None, con=None):
+        seen["con"] = con
+        seen["refs"] = con.execute("SELECT count(*) FROM media_refs").fetchone()[0]
+        return media.MediaReport(out_dir="/default/media")
+
+    monkeypatch.setattr(media, "export_media", fake_export_media)
+    usecases.media_export("张三", kinds=["video"])
+    assert isinstance(seen["con"], sqlite3.Connection)
+    assert seen["refs"] == 0            # 真查到了隔离后的索引库（stub 夹具把 DB_PATH 指到 tmp_path）
+
+
+def test_media_export_unavailable_index_degrades_loudly(stub, monkeypatch):
+    """索引库打不开 → **如实降级**（不在 degraded 里出现「不可用」就是静默退回账号级枚举）。
+
+    退回账号级枚举本身是既有行为（单会话时归属仍正确），但必须说出来：用户对索引可修，
+    对「本机没有视频」不可修。
+    """
+    from agent_wechat import media
+    _unique(stub)
+    seen: dict = {}
+
+    def fake_export_media(account, chat_ids, *, kinds, months, out_dir, max_files,
+                          progress=None, con=None):
+        seen["con"] = con
+        return media.MediaReport(out_dir="/default/media")
+
+    def boom(*a, **kw):
+        raise errors.HomeUnavailable("数据目录不可用：/tmp/x")
+
+    monkeypatch.setattr(media, "export_media", fake_export_media)
+    monkeypatch.setattr(store, "open", boom)
+    res = usecases.media_export("张三", kinds=["video"])
+    assert seen["con"] is None                          # 没连接 → 走账号级枚举
+    assert len(res.report.degraded) == 1 and "索引库不可用" in res.report.degraded[0]
 
 
 def test_media_export_rejects_bad_months(stub):

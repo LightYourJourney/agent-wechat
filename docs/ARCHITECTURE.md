@@ -129,20 +129,23 @@ vector.semantic_search(query, chat_id, limit, account)
 ### 3.7 媒体导出（图片 / 语音 / 视频）
 
 ```
-media.export_media(account, chat_ids, kinds, months)
+media.export_media(account, chat_ids, kinds, months, con)
   → 图片：kvcomm 文件名取 code + md5(code+裸wxid) + 样本 dat 尾部统计 xorKey → 样本 dat 验证
       → 解密 dat（V2 = AES-128-ECB 段 + XOR 尾）→ 明文图片落 media/<会话md5>/image/<月份>/
   → 语音：media_*.db 快照解密（HOME/tmp，用后即焚）→ VoiceInfo.voice_data（明文 SILK）
       → pilk 解 SILK → 自封 44B 头的 24kHz 单声道 WAV
-  → 视频：枚举 msg/video/{月份}/ 下的明文 mp4 与 {file_key}_thumb.jpg（本体不在则回退缩略图）→ 复制
+  → 视频：查 media_refs 取该会话的 file_key → 定位 msg/video/{月份}/ 下的明文 mp4
+      （本体不在则回退缩略图 {file_key}_thumb.jpg）→ 复制
   → 产物一律落 ~/.agent-wechat/media/（0700、文件 0600）；微信目录始终只读
 ```
 
 媒体密钥的推导不需要任何特权：`code` 来自 kvcomm 目录的文件名、`xorKey` 由样本 dat 尾部
 统计得出，推导结果**必须**用样本 dat 解密验证——验证不过只是图片能力级降级，语音/视频不受影响。
 「消息 → 文件名」映射（`media_refs`）由导出管道与消息同事务顺带写入，存量历史用
-`media rebuild-refs` 全量回填（见 DATA_MODEL.md §3）；导出本身目前仍按磁盘目录枚举定位，
-该表是留给「按消息定位媒体」的索引。
+`media rebuild-refs` 全量回填（见 DATA_MODEL.md §3）。该表既供「按消息定位媒体」
+（`media locate` / `get_message_media`）读，也供**视频导出的会话归属**读——视频树
+`msg/video/{月份}/` 没有会话维度，多会话归属只能经此表成立；图片与语音的导出仍按磁盘
+目录（attach 树 / `media_*.db`）枚举定位。
 
 ### 3.8 朋友圈读取与导出（离线默认，联网需显式开启）
 

@@ -91,8 +91,13 @@ CREATE TABLE IF NOT EXISTS media_refs (
   三元组直接命中，不需要按消息逐条建映射。
 - 填充两条路径：导出管道与消息写入**同事务**顺带 upsert；本次功能之前的存量历史用
   `agent-wechat media rebuild-refs` 全量重扫回填（幂等，不重写 `messages`）。
-- **当前只写不读**：`media export` 仍按磁盘目录（attach 树 / `msg/video`）枚举定位文件，
-  不查此表；这张表是为「按消息定位媒体」的后续能力（含视频的会话归属）预留的索引。
+- **读路径有三条**（`store.media_refs_by_keys` / `media_refs_by_chat` / `count_media_refs`）：
+  「按消息定位媒体」（`media locate` / `get_message_media` 的四态判定）按 msg_key 批量查；
+  **视频导出的会话归属**按会话查——视频树 `msg/video/{月份}/` 没有会话维度，只有经此表
+  才知道某条视频属于哪个会话（多会话归属由此成立）；`count_media_refs` 只用来把「索引里
+  没有视频引用」与「这个会话没有视频消息」分开报（两者都产出 0 条，但只有前者可修）。
+- 图片与语音的导出**不查此表**：图片按 attach 树目录枚举、语音按 `media_*.db` 的
+  `VoiceInfo` 三元组直接命中。
 
 ## 4. 去重主键与增量策略
 
@@ -138,7 +143,7 @@ CREATE TABLE watermark (
 | 表 md5 无法反查会话名 | `chat_id = "md5:<hash>"`（数据不丢，展示降级） |
 | 图片 dat（V2：15B 头 + AES-128-ECB 段 + XOR 尾段） | `media export` 解密为明文图片，扩展名按解密后魔数判定（jpg/png/gif/webp/wxgf），落 `media/<会话md5>/image/<月份>/`（按 `msg/attach/<md5(会话)>/<月份>/Img/` 目录枚举定位） |
 | 语音 `VoiceInfo.voice_data`（明文 SILK，`\x02#!SILK_V3` 开头） | pilk 解码 + 自封 44B RIFF 头 → 24kHz 单声道 WAV；pilk 缺失时回退存原始 `.slk`（`\x02` 前缀保留） |
-| 视频（`msg/video/{YYYY-MM}/{file_key}.mp4`，本身是明文，微信按需下载） | 账号级枚举 `msg/video/{月份}/` 后直接复制为 `.mp4`；本体不在时回退缩略图 `{file_key}_thumb.jpg`（多会话导出时无从归属，记 `degraded` 跳过） |
+| 视频（`msg/video/{YYYY-MM}/{file_key}.mp4`，本身是明文，微信按需下载） | 按 `media_refs` 的 `file_key` 定位后复制为 `.mp4`；本体不在时回退缩略图 `{file_key}_thumb.jpg`（视频树是账号级的，没有索引连接时退回账号级枚举——那条路只有单会话可归属） |
 
 ## 6. 朋友圈数据源（sns.db）
 
