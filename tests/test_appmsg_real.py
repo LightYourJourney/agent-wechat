@@ -12,7 +12,7 @@ import xml.etree.ElementTree as ET
 import pytest
 
 from agent_wechat import account as account_mod
-from agent_wechat import appmsg, reader
+from agent_wechat import appmsg, errors, reader
 
 # slow：默认 deselect 由 addopts 的 -m 'not slow' 负责（与 test_media_real 同一机制）；
 # real：真机冒烟的统一入口标记，`-m real` 只跑真实数据路径的用例。
@@ -27,7 +27,9 @@ def _account() -> str:
     """
     try:
         return account_mod.resolve_account(None)
-    except Exception:
+    except errors.AgentWeChatError:
+        # **只吞项目异常**：`resolve_account` 因真 bug 抛别的东西时必须炸出来，
+        # 否则这条唯一守 `_GROUP_PREFIX` 的真机护栏会被一行 skip 悄悄绕过。
         pytest.skip("本机没有可解析的登录账号")
 
 

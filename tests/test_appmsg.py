@@ -18,7 +18,11 @@ def test_strips_group_prefix_for_all_three_sender_shapes():
 
 
 def test_plain_single_chat_payload_untouched():
-    """单聊没有前缀。禁止把合法载荷的首行误当成前缀。"""
+    """单聊载荷以 `<?xml …?>` 开头、**没有群前缀**，规范化后应以 `<msg>` 起头。
+
+    注意这条**同时**压在 `_XML_DECL` 上（首行含 `<`/`>`，`_GROUP_PREFIX` 本就匹配不了它）：
+    删掉剥声明的规则，它会红。
+    """
     raw = "<?xml version=\"1.0\"?>\n<msg><appmsg><type>5</type></appmsg></msg>"
     assert appmsg.normalize(raw).startswith("<msg>")
 
@@ -51,11 +55,26 @@ def test_drops_illegal_character_references():
         assert good in appmsg.normalize(f"<msg>a{good}b</msg>"), f"{good} 合法，不许动"
 
 
+def test_malformed_character_reference_shapes_do_not_crash():
+    """回归：`&#abc;` 这类**形状不合法**的引用不是数值引用。
+
+    早先的正则 `&#(x?)([0-9a-fA-F]+);` 配 `re.I` 会把它匹配成十进制、`int('abc', 10)`
+    抛裸 ValueError（评审发现，控制器复现）。载荷是对手可控的，所以这条要守的是
+    **「不崩」**而不是「恰好没遇到」——退回 `(x?)([0-9a-fA-F]+)` 的写法它立刻红。
+    """
+    for weird in ("&#abc;", "&#e;", "&#1a;", "&#;", "&#x;", "&#xg;"):
+        out = appmsg.normalize(f"<msg>a{weird}b</msg>")     # 不抛即通过
+        assert isinstance(out, str)
+    # 形状不合法的不做越权删除：原样留着，由 ET 判成 malformed 更诚实
+    assert "&#abc;" in appmsg.normalize("<msg>a&#abc;b</msg>")
+
+
 def test_group_prefix_has_a_length_bound():
-    """超过 64 字符的首行不是用户名，不剥。"""
+    """判据的 `{1,64}` 上限：64 仍是用户名，65 不是。两端都钉住。"""
+    ok_head = "x" * 64
+    assert appmsg.normalize(f"{ok_head}:\n<msg/>") == "<msg/>"
     long_head = "x" * 65
-    raw = f"{long_head}:\n<msg/>"
-    assert appmsg.normalize(raw).startswith(long_head)
+    assert appmsg.normalize(f"{long_head}:\n<msg/>").startswith(long_head)
 
 
 def test_is_dangerous_rejects_doctype_and_entity():

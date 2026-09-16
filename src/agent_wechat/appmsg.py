@@ -27,11 +27,17 @@ _XML_DECL = re.compile(r"<\?xml[^>]*\?>")
 # 或者随写法变化悄悄漏掉某个区间。XML 1.0 的合法码位是：
 #   #x9 | #xA | #xD | [#x20-#xD7FF] | [#xE000-#xFFFD] | [#x10000-#x10FFFF]
 # 落在区间外的一律剔除。实测全库只有 1 条命中此规则。
-_CHARREF = re.compile(r"&#(x?)([0-9a-fA-F]+);", re.I)
+#
+# 两个分组各自是一种**合法形状**，不要写成 `(x?)([0-9a-fA-F]+)`：那种写法配 `re.I` 会让
+# `&#abc;` 匹配成「无 x 前缀 → 十进制」，`int('abc', 10)` 抛**裸 ValueError**。消息内容是对手
+# 可控的（见 `is_dangerous` 的注释），任何人发一条就能让导出崩掉。形状不合法的引用
+# （`&#abc;` / `&#;` / `&#xg;`）**既不匹配也不删除**——它们不是数值引用，删它们是越权，
+# 留给 ET 判成 `malformed` 更诚实。
+_CHARREF = re.compile(r"&#(?:[xX]([0-9a-fA-F]+)|([0-9]+));")
 
 
 def _keep_charref(m: re.Match) -> str:
-    cp = int(m.group(2), 16 if m.group(1) else 10)
+    cp = int(m.group(1), 16) if m.group(1) else int(m.group(2), 10)
     ok = (cp in (9, 10, 13) or 0x20 <= cp <= 0xD7FF
           or 0xE000 <= cp <= 0xFFFD or 0x10000 <= cp <= 0x10FFFF)
     return m.group(0) if ok else ""
