@@ -13,7 +13,7 @@ import contextlib
 import pathlib
 import sqlite3
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 
 from . import messages, paths
 
@@ -212,6 +212,28 @@ def upsert_media_refs(con: sqlite3.Connection,
         "INSERT INTO media_refs (msg_key, media_kind, file_key, xml_md5) VALUES (?,?,?,?) "
         "ON CONFLICT(msg_key) DO UPDATE SET media_kind=excluded.media_kind, "
         "file_key=excluded.file_key, xml_md5=excluded.xml_md5", rows)
+
+
+def media_refs_by_keys(con: sqlite3.Connection,
+                       keys: Sequence[str]) -> dict[str, tuple[str, str | None]]:
+    """按 msg_key 批量取媒体引用：{msg_key: (media_kind, file_key)}。
+
+    查不到的 key **不出现在结果里**——上层靠「在不在字典里」区分「这条消息没有媒体引用」
+    与「有引用但没查到」。file_key 可以是 None（packed 与 xml md5 都没命中），照实带出。
+    """
+    if not keys:
+        return {}
+    out: dict[str, tuple[str, str | None]] = {}
+    # SQLite 的变量上限是 999，分批查；单条语句塞几百个 key 是常态，不能不设防。
+    batch = 500
+    uniq = list(dict.fromkeys(keys))
+    for i in range(0, len(uniq), batch):
+        chunk = uniq[i:i + batch]
+        sql = ("SELECT msg_key, media_kind, file_key FROM media_refs WHERE msg_key IN "
+               f"({','.join('?' * len(chunk))})")
+        for k, kind, fk in con.execute(sql, chunk):
+            out[k] = (kind, fk)
+    return out
 
 
 def get_watermark(con: sqlite3.Connection, account: str, shard: str, chat_md5: str) -> int:
