@@ -35,9 +35,16 @@ def test_media_refs_by_keys_keeps_null_file_key(con):
     assert store.media_refs_by_keys(con, ["k9"]) == {"k9": ("image", None)}
 
 
-def test_media_refs_by_keys_dedups_and_spans_batches(con):
-    """去重 + 跨批次都覆盖：900 个 key 会分成两批（批大小 500），批次边界不能丢行。"""
+def test_media_refs_by_keys_spans_batches_and_tolerates_duplicate_keys(con):
+    """跨批次不丢行 + 重复输入 key 不出乱子。
+
+    承重的是前半句：900 个 key 按批大小 500 切成两批，批次边界（第 500/501 个）丢一行
+    就会红 —— 变异成 `uniq[i:i + batch - 1]` 时确实 red（len(got) == 899）。
+    后半句只保证「重复 key 不会把结果搞坏」：`dict.fromkeys` 那步去重是纯优化，
+    去掉它返回的字典逐字节相同（结果按 msg_key 键控），从公开契约上不可观测，
+    故**故意不为其设断言**——断言查询次数就是在测实现细节。
+    """
     store.upsert_media_refs(con, [(f"k{i}", "image", "dd" * 16, None) for i in range(900)])
-    keys = [f"k{i}" for i in range(900)] + ["k0"]        # 重复 key 只算一次
+    keys = [f"k{i}" for i in range(900)] + ["k0"]        # 重复的 key 只是输入噪声：结果按 msg_key 键控，重复不会导致重复计数
     got = store.media_refs_by_keys(con, keys)
     assert len(got) == 900 and got["k899"] == ("image", "dd" * 16)
