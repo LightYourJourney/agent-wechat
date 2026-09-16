@@ -54,7 +54,7 @@ CREATE TABLE IF NOT EXISTS messages (
     sender_id   TEXT,                      -- 发送者 username（Name2Id 解析）
     sender_name TEXT,                      -- 群聊时从 content 前缀解析的显示名
     is_self     INTEGER NOT NULL DEFAULT 0,
-    content     TEXT,                      -- 解压后的正文（appmsg 保留 XML）
+    content     TEXT,                      -- 展示用正文：文本是真文本，appmsg 是 "[appmsg: 标题]"（原始 XML 在 msg_parts.raw_xml）
     media_hint  TEXT,                      -- 非文本类型的简述
     exported_at INTEGER NOT NULL
 );
@@ -107,6 +107,16 @@ CREATE TABLE IF NOT EXISTS media_refs (
     file_key   TEXT,                      -- packed_info_data 的 32-hex（dat/mp4 文件名权威）
     xml_md5    TEXT                       -- XML md5（兜底留证，与文件名无关）
 ) WITHOUT ROWID;
+
+CREATE TABLE IF NOT EXISTS msg_parts (
+    msg_key     TEXT PRIMARY KEY,      -- = messages.msg_key
+    appmsg_type INTEGER NOT NULL,      -- <appmsg><type>
+    ref_svrid   INTEGER,               -- 引用类（57）的 <refermsg><svrid>
+    ref_msg_key TEXT,                  -- 解析出的目标消息；解不到为 NULL
+    raw_xml     BLOB NOT NULL          -- 规范化后的 appmsg XML，zlib 压缩
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS idx_parts_ref ON msg_parts(ref_msg_key)
+    WHERE ref_msg_key IS NOT NULL;
 """
 
 # ---------- 向量索引（sqlite-vec；由 vector.py 在加载扩展后建表） ----------
@@ -305,6 +315,62 @@ def count_media_refs(con: sqlite3.Connection, account: str, *,
         args.append(kind)
     return con.execute("SELECT count(*) FROM media_refs WHERE " + " AND ".join(where),
                        args).fetchone()[0]
+
+
+# ---------- appmsg 原始载荷（msg_parts） ----------
+# `raw_xml` 是 appmsg 正文的**权威**；appmsg_type / ref_svrid / ref_msg_key 是它的**投影**，
+# 存在的唯一理由是「不必解压就能筛选与重解析」。与「content 是消息的检索投影」同构。
+
+
+def upsert_msg_parts(con: sqlite3.Connection,
+                     rows: list[tuple[str, int, int | None, str | None, bytes]]) -> None:
+    """批量幂等写 msg_parts。不 commit：与 upsert_media_refs 同约定，由调用方收口。"""
+    if not rows:
+        return
+    con.executemany(
+        "INSERT INTO msg_parts (msg_key, appmsg_type, ref_svrid, ref_msg_key, raw_xml) "
+        "VALUES (?,?,?,?,?) "
+        "ON CONFLICT(msg_key) DO UPDATE SET appmsg_type=excluded.appmsg_type, "
+        "ref_svrid=excluded.ref_svrid, ref_msg_key=excluded.ref_msg_key, "
+        "raw_xml=excluded.raw_xml", rows)
+
+
+def msg_parts_by_keys(con: sqlite3.Connection, keys: Sequence[str]
+                      ) -> dict[str, tuple[int, int | None, str | None, bytes]]:
+    """按 msg_key 批量取 appmsg 部件：{msg_key: (appmsg_type, ref_svrid, ref_msg_key, raw_xml)}。
+
+    查不到的 key **不出现在结果里**（与 media_refs_by_keys 同约定）——上层靠「在不在
+    字典里」区分「这条消息没有 appmsg」与「有 appmsg 但没查到」。ref_svrid / ref_msg_key
+    可以是 None（非引用类，或引用目标解不到），照实带出。
+    """
+    if not keys:
+        return {}
+    out: dict[str, tuple[int, int | None, str | None, bytes]] = {}
+    batch = KEYS_BATCH
+    uniq = list(dict.fromkeys(keys))
+    for i in range(0, len(uniq), batch):
+        chunk = uniq[i:i + batch]
+        sql = ("SELECT msg_key, appmsg_type, ref_svrid, ref_msg_key, raw_xml FROM msg_parts "
+               f"WHERE msg_key IN ({','.join('?' * len(chunk))})")
+        for k, kind, svrid, ref, blob in con.execute(sql, chunk):
+            out[k] = (kind, svrid, ref, blob)
+    return out
+
+
+def count_msg_parts(con: sqlite3.Connection, account: str) -> int:
+    """msg_parts 里该账号的条目数。**不 join `messages`。**
+
+    为什么必须与 join 无关：`appmsg rebuild` **只写 msg_parts、不写 messages**，所以
+    「账号里一条都没有」与「有、但那些消息没进索引」是两种不同的病，join 出来的 0 把
+    它们混成一种。空表返回 0——上层靠这个 0 判「未回填」并降级。
+
+    **前缀比对而非 LIKE**：`msg_key = account|chat_md5|shard|local_id`，而 account（wxid）
+    里**含下划线**，LIKE 的 `_` 是单字符通配符，会把 `wxid_aXb` 的条目算进 `wxid_a_b`；
+    substr 逐字符比对，没有这个问题。
+    """
+    prefix = f"{account}|"
+    return con.execute("SELECT count(*) FROM msg_parts WHERE substr(msg_key, 1, ?) = ?",
+                       (len(prefix), prefix)).fetchone()[0]
 
 
 def get_watermark(con: sqlite3.Connection, account: str, shard: str, chat_md5: str) -> int:
