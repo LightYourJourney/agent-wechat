@@ -221,10 +221,18 @@ def test_kind_name_falls_back_without_guessing():
 
 
 def test_no_content_leaks_into_fields():
-    """groups 里除 title 外不得把 XML 片段当值带出。"""
-    a = appmsg.parse(QUOTE_XML).appmsg
-    joined = " ".join(v for _, v in a.fields)
-    assert "<refermsg>" not in joined and "<content>" not in joined
+    """`fields` 里不得出现 XML 片段或标签。
+
+    **这条原来守的是空串**：`QUOTE_XML` 的 `fields` 恒为 `()`（`type`/`title` 被跳过、
+    `refermsg` 是具名子树），`joined == ""`，任何单点缺陷都不会让它红——包括它 docstring
+    点名的「把 XML 片段当值带出」（实施期审阅用 12 个变异确认）。
+    **所以夹具换成 `fields` 非空的那种**，并顺带钉住「非叶子不入表」。
+    """
+    a = appmsg.parse(WEAPP_XML).appmsg
+    assert a.fields, "夹具的 fields 不许为空，否则这条断言守的是空串"
+    joined = " ".join(f"{p}={v}" for p, v in a.fields)
+    assert "<" not in joined and ">" not in joined
+    assert not any(p == "weappinfo" for p, _ in a.fields)   # 非叶子不入表
 
 
 def test_malformed_numeric_fields_do_not_crash_or_escape():
@@ -301,3 +309,38 @@ def test_deeply_nested_payload_does_not_blow_the_stack():
           + "</appmsg></msg>"
     r = appmsg.parse(xml)                       # 不抛即通过
     assert r.reason is None
+
+
+def test_link_url_is_subject_to_the_value_filter():
+    """回归：`_link` 直接 findtext("url") 会绕过值过滤——同一个值走 `fields` 就丢、
+    走 `Link` 就进信封（spec §4.5 明列信封含 link）。删掉 `_link` 里那道过滤会红。"""
+    xml = ('<msg><appmsg><title>x</title><type>5</type>'
+           '<url>https://cdn.example/x?token=REALTOKEN9&amp;idx=1</url></appmsg></msg>')
+    a = appmsg.parse(xml).appmsg
+    assert a.link.url is None
+    assert not any("REALTOKEN9" in v for _, v in a.fields)
+
+
+def test_secret_container_names_leak_nothing():
+    """回归：名字过滤只锚末段时，`<aeskey><value>…</value></aeskey>` 的末段是 `value`，
+    密钥值原样进字段表（审阅发现、控制器复现）。退回只锚末段，它红。"""
+    xml = ('<msg><appmsg><title>t</title><type>33</type>'
+           '<aeskey><value>00112233445566778899aabbccddeeff</value></aeskey>'
+           '<weappinfo><appid>a</appid></weappinfo></appmsg></msg>')
+    a = appmsg.parse(xml).appmsg
+    joined = " ".join(v for _, v in a.fields)
+    assert "00112233445566778899aabbccddeeff" not in joined
+    assert ("weappinfo.appid", "a") in a.fields      # 反假护栏：良性字段还在
+
+
+def test_numeric_fields_fall_back_to_none_not_zero():
+    """回归：数字字段解不开给 `None`，**不是 0**（0 是合法值，混淆两者会让
+    「没有这个字段」与「值是 0」不可区分）。这条覆盖 `kind` 之外的六个字段——
+    此前 `_int -> ... or 0` 的变异全绿（审阅者的 Minor-3）。"""
+    a = appmsg.parse('<msg><appmsg><title>t</title><type>6</type><appattach>'
+                     '<totallen>一兆</totallen></appattach></appmsg></msg>').appmsg
+    assert a.file.totallen is None
+    q = appmsg.parse('<msg><appmsg><title>t</title><type>57</type><refermsg>'
+                     '<content>x</content><svrid>abc</svrid>'
+                     '<createtime>昨天</createtime></refermsg></appmsg></msg>').appmsg.quote
+    assert q.svrid is None and q.create_time is None

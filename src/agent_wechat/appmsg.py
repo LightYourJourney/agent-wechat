@@ -107,8 +107,18 @@ _NAMED_LEAVES = {KIND_LINK: ("url", "des")}
 # `fields` 会进 get_message_parts 的 MCP 信封，而 spec §7 与 Global Constraints 都明令
 # token / key 不进信封。名字过滤之外再加一道**值**过滤：凭据也可能挂在名字干净的字段上
 # （如 `iconurl` 带 `?token=`）。实测 27 类的字段名里未见误伤。
-_SECRET_NAME = re.compile(r"(aeskey|key|token|passphrase)$", re.I)
-_SECRET_VALUE = re.compile(r"[?&](?:token|key|aeskey|passphrase)=", re.I)
+#
+# 名字过滤**逐段**判，不只看末段：`<aeskey><value>…</value></aeskey>` 的末段是 `value`，
+# 只锚末段会让**密钥值原样进字段表**（审阅发现、控制器复现，实测泄漏）。
+_SECRET_SEG = re.compile(r"(aeskey|passphrase|token|key)$", re.I)
+# 分隔符集含 `;` 与 `,`：实测 `http://c/x;token=…` 在只有 `?`/`&` 时不被丢。
+_SECRET_VALUE = re.compile(r"[?&;,](?:token|key|aeskey|passphrase)=", re.I)
+
+
+def _is_secret(path: str, value: str) -> bool:
+    """该字段是否为密材 —— 名字**逐段**命中，或值里带凭据参数。"""
+    return (any(_SECRET_SEG.search(seg) for seg in path.split("."))
+            or bool(_SECRET_VALUE.search(value)))
 
 
 @dataclass(frozen=True)
@@ -250,7 +260,17 @@ def _quote(appmsg_el: ET.Element) -> Quote:
 
 
 def _link(appmsg_el: ET.Element) -> Link:
-    return Link(url=appmsg_el.findtext("url"),
+    """链接（type 5）。
+
+    `url` 要过**值**过滤：同一个凭据走 `fields` 被丢掉、走 `Link` 却进信封（spec §4.5 的信封
+    含 `link`），这种不一致本身就是缺陷。**只有 `url` 需要这道过滤**——`Quote` 的
+    `content`/`displayname`/`from_usr` 是被引用的**用户正文**，对它做值过滤会连用户内容一起丢；
+    `FileRef.md5` 是内容指纹不是凭据；`Transfer` 没有凭据字段。**不要顺手扩大。**
+    """
+    url = appmsg_el.findtext("url")
+    if url is not None and _SECRET_VALUE.search(url):
+        url = None
+    return Link(url=url,
                 title=appmsg_el.findtext("title"),
                 des=appmsg_el.findtext("des"))
 
@@ -293,11 +313,12 @@ def parse(raw: str) -> ParseResult:
     try:
         root = ET.fromstring(normalize(raw))
     except (ET.ParseError, ValueError):
-        # ValueError 这一支是**防御性**的：`ET.fromstring` 对带编码声明的 str 会抛它，
-        # 而 `normalize` 已剥掉全部声明，**作者试了四种「声明可能活过 normalize」的写法，
-        # 全部走 ParseError，没构造出能走到这里的载荷**。保留它的理由是失败方向——
-        # 「裸异常逃出 core 层」是本仓库明令禁止的，多兜一个类型比漏一个便宜得多。
-        # **不要把它当成「已知有洞已补」的证据。**
+        # `ValueError` 这一支是**防御性**的，而且**它的前提本身未经证实**：本文作者与审阅者
+        # 都**未能构造出 repro**（stdlib 3.12/expat 对 `encoding="utf-8"` / `"gbk"` /
+        # `"nonsense-99"` 的声明一律正常解析、不抛；**据实测，抛 ValueError 是 lxml 的行为**，
+        # 不是这里用的 `xml.etree`）。保留它纯粹是失败方向上的取舍——「裸异常逃出 core 层」
+        # 是本仓库明令禁止的，多兜一个类型比漏一个便宜。
+        # **不要把它当成「已知有洞已补」的证据，也不要按图索骥去找那个洞。**
         return ParseResult(None, "malformed")
     appmsg_el = root.find("appmsg")
     if appmsg_el is None:
@@ -308,7 +329,7 @@ def parse(raw: str) -> ParseResult:
     if kind is None:
         kind = -1
     fields = tuple((p, v) for p, v in _leaf_fields(appmsg_el, kind)
-                   if not (_SECRET_NAME.search(p) or _SECRET_VALUE.search(v)))
+                   if not _is_secret(p, v))
     return ParseResult(
         AppMsg(
             kind=kind,
