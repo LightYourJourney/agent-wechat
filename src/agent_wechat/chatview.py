@@ -168,22 +168,23 @@ def write(view: ChatView, *, formats: Sequence[str] = FORMATS) -> list[pathlib.P
     文件名固定 `index.*`，媒体用相对路径 `../image/…` 引用**同级**的既有媒体树
     —— 因此调用方的 `--out` 必须与 `media export` 用同一个（spec 裁定 13）。
 
-    未知格式抛 `SearchInputError`，**不静默跳过**：少写一个文件与「格式名写错了」在
-    「产物列表短了一截」上长得一模一样。单文件写失败（磁盘满/权限/只读挂载）返回 None
-    并 continue，不进返回列表——由调用方按自己的口径计数（沿用 `media._save` 的形状，
-    裸 `OSError` 不逃出 core）。
+    未知格式 / 空格式表一律抛 `SearchInputError`，**不静默跳过**：少写一个文件与「格式名
+    写错了」在「产物列表短了一截」上长得一模一样（`--format ""` 过滤空项后正是空表，
+    放过去就是「零个产物 + exit 0」）。校验在建目录之前——失败的一次调用不留空目录。
+    单文件写失败（磁盘满/权限/只读挂载）：那个文件**不进返回列表**（写失败就是没写成，
+    不返回 `None` 也不抛，沿用 `media._save` 的立场：吞掉 `OSError`，裸异常不逃出 core）。
     """
+    if not formats or any(fmt not in _RENDERERS for fmt in formats):
+        raise errors.SearchInputError(
+            f"导出格式只能是 {', '.join(FORMATS)}（至少要一种）："
+            f"收到 {list(formats) or '空'}")
     from . import media            # 惰性：media 顶层拉起 cryptography（同 usecases 的取舍）
     root = media.ensure_tree(pathlib.Path(view.out_dir), "chat")
     out: list[pathlib.Path] = []
     for fmt in formats:
-        render = _RENDERERS.get(fmt)
-        if render is None:
-            raise errors.SearchInputError(
-                f"未知的导出格式：{fmt}（可用: {', '.join(FORMATS)}）")
         p = root / f"index.{fmt}"
         try:
-            p.write_text(render(view), encoding="utf-8")
+            p.write_text(_RENDERERS[fmt](view), encoding="utf-8")
             p.chmod(0o600)                 # 产物是聊天原文：除了属主谁也读不到
         except OSError:
             continue

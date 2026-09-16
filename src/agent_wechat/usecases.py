@@ -612,8 +612,8 @@ def chat_export(contact: str, *, months: list[str] | None = None, limit: int = 5
     **`--out` 必须与 `media export` 用同一个根**（spec 裁定 13）：媒体是以
     `../image/…` 的相对引用指向**同级**的既有媒体树，换个根就全是死链。
 
-    标题就是 `chat_id`：本层不再额外问一次显示名（那要走 contact.db，而会话名不是
-    导出内容的一部分；`contacts` / `recent` 各有自己的显示名口径）。
+    标题（`view.title`）走既有的 `_display_or_id` —— 与 `recent` / `search` 同一个来源，
+    contact 表漂移时回落 `chat_id`（漂移随 degraded 出去）。
     """
     from . import media                       # 惰性：media 顶层拉起 cryptography
     ctx = ChatContext(account)
@@ -626,8 +626,16 @@ def chat_export(contact: str, *, months: list[str] | None = None, limit: int = 5
     after_ts = before_ts = None
     if months:
         bounds = media.month_bounds(months)
-        after_ts = min(lo for lo, _ in bounds)
-        before_ts = max(hi for _, hi in bounds)
+        # **必须连续**：`messages_in_range` 只有一对边界，非连续月份只能取包络——
+        # `2026-08,2026-10` 会把 9 月也带进来，而 `limit` / `truncated` 还按放大后的窗口算，
+        # 产物上完全看不出多导了。静默放大窗口比报错更坏（同「月份格式不符不静默 0 命中」）。
+        # 兄弟命令 `media export` / `message_media` 是逐月 OR，非连续月份能被正确表达 ——
+        # 那两处**不动**（同一面 flag 语义不同是刻意的：那里是筛选，这里是单一时间窗）。
+        if any(cur[0] != prev[1] for prev, cur in zip(bounds, bounds[1:])):
+            raise errors.SearchInputError(
+                f"--months 必须是一段连续的月份（相邻月首尾相接）：{', '.join(months)}"
+                "；非连续月份只能取包络，会把中间的月份也静默带进来")
+        after_ts, before_ts = bounds[0][0], bounds[-1][1]
     # 输出根绝对化：`--out 相对路径` 时 `view.out_dir` 是相对的，而媒体状态的路径是绝对的
     # （`message_media` 自己 resolve 过），`chat_text.media_src` 用 `os.path.relpath` 算
     # 相对引用时按 **cwd** 展开相对的那一侧 —— 产物的 `<img>` 照常渲染、打不开
@@ -709,9 +717,12 @@ def chat_export(contact: str, *, months: list[str] | None = None, limit: int = 5
                    "媒体块"))
 
     view = chatview.build(
-        chat_id, title=chat_id, rows=rows, parts=parts, media=states,
+        chat_id, title=_display_or_id(ctx, chat_id), rows=rows, parts=parts, media=states,
         out_dir=str(out_root / chat_md5), truncated=truncated, unparsed=unparsed,
         rejected=rejected,
+        # 富化（取展示名）**先**做，降级**后**收：`_display_or_id` 回落 chat_id 的那次
+        # SchemaDrift 记在 `ctx.reader._drift` 上，这个顺序才让它随 degraded 出去
+        # （`_display_or_id` 的注释把这条顺序写成约定）。
         degraded=tuple(degraded) + collect_degradations(ctx.reader), refs=refs)
     files = chatview.write(view, formats=formats)
     return ChatExportResult(

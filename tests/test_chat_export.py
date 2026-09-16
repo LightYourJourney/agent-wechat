@@ -190,17 +190,24 @@ def test_messages_in_range_is_scoped_to_one_account_and_one_chat(con):
 # ---------------- T9：会话时间线导出（chat_export / chatview.write）----------------
 
 class _StubReader:
-    """collect_degradations 读 `rdr._drift`，故这里必须给一个空 list，不能给 None。"""
+    """collect_degradations 读 `rdr._drift`（必须给一个空 list，不能给 None），
+    `_display_or_id` 读 `display_name` —— 两者都不碰微信库。"""
     _drift: list = []
+
+    def __init__(self, display="测试群"):
+        self._display = display
+
+    def display_name(self, chat_id):
+        return self._display
 
 
 class _Ctx:
     """替掉 ChatContext：chat_export 只用 account / resolve / reader / degradations，
     四者都不碰微信库。"""
 
-    def __init__(self, account=None):
+    def __init__(self, account=None, display="测试群"):
         self.account = account or "acct"
-        self._r = _StubReader()
+        self._r = _StubReader(display)
 
     @property
     def reader(self):
@@ -294,8 +301,11 @@ def test_chat_export_parses_msg_parts_and_links_the_quote_anchor(con, chat_env):
 
     夹具里 `raw_xml` 按 `appmsg_rebuild_parts` 的**真实形态**写入（zlib + 规范化 XML），
     两条消息都落在本次范围内。回归（任一 → 这条会红）：
-      · 删掉 `zlib.decompress`（把压缩字节当 XML 喂 `parse`）→ 没有 appmsg 块，
-        产物里只剩 `[appmsg: 同意]` 这行提示文字，`引用`/`同意` 都不出现；
+      · 删掉 `zlib.decompress`（把压缩字节当 XML 喂 `parse`）→ 没有 appmsg 块：
+        判别串是 `引用：同意`（结构化标题，只有块里才有）与 `昨天说的那件事`，
+        以及 `<a href="#` —— 三者一起消失。
+        **`同意` 不是判别串**：`content` 兜底文案 `[appmsg: 同意]` 里也有它（初稿这条
+        docstring 把 `同意` 当成了闸，是假的）；
       · 把 `parts` 传成原始四元组 → `ViewMsg.appmsg` 不是 `AppMsg`，模板取 `.kind` 时崩；
       · `refs` 误取 `v[1]`（`ref_svrid`）→ 值是整数 1001，`in_range` 里没有它，
         `<a href="#` 消失。
@@ -318,7 +328,8 @@ def test_chat_export_parses_msg_parts_and_links_the_quote_anchor(con, chat_env):
     con.commit()
     res = usecases.chat_export("wxid_testacct02", out_dir=str(chat_env), account="acct")
     text = _html(res)
-    assert "同意" in text                        # 结构化标题（不是 [appmsg: 同意] 提示）
+    # 判别串是**结构化标题**，不是 `同意`：`content` 的兜底文案 `[appmsg: 同意]` 里也有后者
+    assert "引用：同意" in text
     assert "昨天说的那件事" in text               # 引用原文：渲染不依赖回指成功
     assert '<a href="#' in text                  # 回指命中 → 整块可点跳
     # 解析计数：这一条**成功解析**，不该被算成解不开或拒绝
@@ -426,3 +437,82 @@ def test_chat_export_announces_dropped_media_states(con, chat_env, monkeypatch):
     res = usecases.chat_export("wxid_testacct02", out_dir=str(chat_env), account="acct")
     assert any("媒体状态" in d.effect for d in res.degraded), res.degraded
     assert "媒体状态" in _html(res)          # 顶部也印（与 truncated/unparsed 同一位置）
+
+
+def test_chat_export_title_is_the_display_name(con, chat_env):
+    """产物标题必须是**展示名**，不是裸 chat_id：这是本功能第一个给人看的产物，
+    `<title>` 与页首那行都印同一份 `view.title`（`_display_or_id`，与 recent/search 同源）。
+
+    把 `title=_display_or_id(ctx, chat_id)` 改回 `title=chat_id` → 两条断言同时红。
+    夹具的 `_StubReader.display_name` 恒返回「测试群」，与 chat_id 不同 —— 所以
+    「取到展示名」与「取到 chat_id」在产物里是可分辨的。
+    """
+    _seed(con)
+    res = usecases.chat_export("wxid_testacct02", out_dir=str(chat_env), account="acct")
+    text = _html(res)
+    assert "<title>测试群</title>" in text
+    assert "会话 <b>测试群</b>" in text           # 页首那行读的是同一个 view.title
+    # MD 侧同一份标题（`chat_text` 之外没有第二份措辞）
+    md = pathlib.Path(next(f for f in res.files if f.endswith(".md"))).read_text("utf-8")
+    assert "测试群" in md.splitlines()[0]
+
+
+def test_chat_export_rejects_non_contiguous_months(con, chat_env):
+    """`--months` 必须**连续**：`messages_in_range` 只有一对边界，非连续月份只能取包络
+    ——`2026-08,2026-10` 会把 9 月也带进来，而 `limit` / `truncated` 还按放大后的窗口算，
+    **产物上完全看不出多导了一个月**（静默放大窗口比报错更坏，与「格式不符不静默 0 命中」
+    同源）。兄弟命令 `media export` 是逐月 OR，非连续能正确表达 —— 那两处不动。
+
+    删掉连续性校验 → 这条红（当前实现会静默跑完并返回产物）。下半段钉住「连续月份照常工作」，
+    免得把闸写成了「多个月份一律拒绝」。
+    """
+    _seed(con, n=3)
+    with pytest.raises(errors.SearchInputError):
+        usecases.chat_export("wxid_testacct02", months=["2026-08", "2026-10"],
+                             out_dir=str(chat_env), account="acct")
+    # 反序也是非连续（包络会把中间的月份吞进来）
+    with pytest.raises(errors.SearchInputError):
+        usecases.chat_export("wxid_testacct02", months=["1970-02", "1970-01"],
+                             out_dir=str(chat_env), account="acct")
+    ok = usecases.chat_export("wxid_testacct02", months=["1970-01", "1970-02"],
+                              out_dir=str(chat_env), account="acct")
+    assert "第3条" in _html(ok) and len(ok.files) == 2
+
+
+def test_chat_export_rejects_an_empty_format_list(con, chat_env):
+    """`--format ""` 在 CLI 里过滤空项后成为空表：不能「零个产物 + exit 0」——
+    那与「格式名写错了」在「产物列表短了一截」上长得一模一样
+    （`chatview.write` 的注释正是这么写的，而空表此前能绕过那道闸）。
+
+    删掉空表校验 → 这条红（返回 `[]`、不抛，还白建一级目录）。
+    第二条断言钉住**校验发生在建目录之前**：失败的一次调用不该在 `--out` 下留空目录。
+    """
+    _seed(con)
+    with pytest.raises(errors.SearchInputError):
+        usecases.chat_export("wxid_testacct02", formats=(), out_dir=str(chat_env),
+                             account="acct")
+    assert not (chat_env / "aaaa" / "chat").exists()
+
+
+def test_chat_export_reports_only_the_files_it_actually_wrote(con, chat_env, monkeypatch):
+    """`files` 只装**真正落盘**的产物：单文件写失败（磁盘满 / 权限 / 只读挂载）不进列表 ——
+    「列表短了一截」本身就是信号，而不是让调用方以为两份都写成了。
+
+    这条是 F58.2 的行为面：`chatview.write` 的 docstring 原写「写失败返回 None 并 continue」
+    （brief 逐字带进来的），而函数返回 `list[Path]`、从不返回 None —— 改成如实之后，
+    必须有一条夹具钉住**那个 `continue`**。
+    把 `except OSError: continue` 改成 `except OSError: pass`（把没写成的路径也 append）→ 这条红。
+    """
+    _seed(con)
+    real = pathlib.Path.write_text
+
+    def fake(self, data, *a, **kw):
+        if str(self).endswith("index.md"):
+            raise OSError(28, "No space left on device", str(self))   # ENOSPC
+        return real(self, data, *a, **kw)
+
+    monkeypatch.setattr(pathlib.Path, "write_text", fake)
+    res = usecases.chat_export("wxid_testacct02", out_dir=str(chat_env), account="acct")
+    assert sorted(pathlib.Path(f).name for f in res.files) == ["index.html"]
+    assert not (chat_env / "aaaa" / "chat" / "index.md").exists()
+    assert "第1条" in _html(res)          # 写成了的那份照常可用
