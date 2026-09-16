@@ -243,6 +243,96 @@ agent-wechat decrypt message/message_0.db --out m0.db   # 导出明文库（调�
 # ⚠️ --out 产物是持久明文库（~/.agent-wechat/m0.db），用后手动删除
 ```
 
+### chat（会话时间线导出与索引页）
+
+`media export` 搬的是媒体文件；`chat export` 产出的是**可读的会话正文**——appmsg（引用 /
+链接 / 文件 / 转账）渲染成结构化块，媒体以相对路径引用**同级**的既有媒体树。
+
+```bash
+# 前提：先跑过一次 export（读的是本地索引库）；appmsg 的内容还需先 `appmsg rebuild`（见下）
+agent-wechat chat export --chat 小李
+# 会话 wxid_abc123def456   58 条   appmsg=12 image=3 system=2 text=41
+# 产物：/Users/you/.agent-wechat/media/<会话md5>/chat/index.html
+# 产物：/Users/you/.agent-wechat/media/<会话md5>/chat/index.md
+
+# 限定窗口、调条数上限、只出一种格式
+agent-wechat chat export --chat 小李 --months 2026-08,2026-09 --limit 200 --format md
+
+# 列出已导出的会话，生成索引页（{--out}/index.html）
+agent-wechat chat index
+# 已导出的会话：3 个
+# 产物：/Users/you/.agent-wechat/media/index.html
+```
+
+**参数**：
+
+| 参数 | 说明 |
+|---|---|
+| `--chat` | 会话（username 或展示名；消歧同其它子命令）**必填** |
+| `--months 2026-08,2026-09` | 必须是一段**升序且相邻月首尾相接**的窗口。非连续（`2026-08,2026-10`）只能取包络、会把 9 月静默带进来，反序会得到倒置（或退化成空区间）的窗口——两者都**报错**，不静默产出空产物；格式不符同理 |
+| `--limit N` | 封顶窗口内**最近的** N 条，默认 500（触顶时 stderr 多一行提示，产物页首也印） |
+| `--format html,md` | 逗号分隔，默认两种；未知格式或空串**报错**（「少写一个文件」与「格式名写错」不许长得一样） |
+| `--out DIR` | 输出根，默认 `$AGENT_WECHAT_HOME/media`。**必须与 `media export` 用同一个**（见下） |
+| `--account` | 同其它子命令 |
+
+**约束一：`chat export` / `chat index` 的 `--out` 必须与 `media export` 用同一个根。**
+产物在 `{--out}/{会话md5}/chat/` 下，媒体是以 `../image/…` 形式的**相对引用**指向**同级**的
+`{--out}/{会话md5}/image|voice|video/`（也就是 `media export` 落的那棵树）。换个根，两个产物
+照常生成、页面照常打开，但**所有媒体引用静默断链**（图全打不开，spec 裁定 13）。索引页同理：
+它用相对路径链到同一棵树下的会话产物，所以整棵产物目录可以整体拷到别处/别的机器。
+
+**约束二：Markdown 与 HTML 不等价——有三处固有损失（如实记，不假装一致）：**
+
+1. **语音 / 视频没有原生语法**：图片才有 `![]()`，音视频只能给链接（`[语音](…)`）；
+2. **引用没有可点锚点**：HTML 侧是 `<a href="#…">` 可点跳，Markdown 降级成 blockquote，
+   位置信息丢失（**被引用的原文照常出现**——它一直带在 appmsg 的 `refermsg` 里，渲染
+   从不依赖回指成功）；
+3. **字段表更朴素**：平铺成 `- 路径：值` 列表，没有 HTML 那份表格的列对齐。
+
+**计数与降级**：
+
+- 与其它命令一样，`--chat` 的会话消歧（以及标题里的人员名）要读 `contact.db`，因此**需要
+  passphrase 缓存**（先 bootstrap）；缺缓存时整条命令失败并指向 bootstrap。
+- CLI 印一行 `appmsg=12 image=3 …`（`kind=条数`）与每条**真正落盘**的产物路径——写失败的产物不进列表，
+  所以「少了一行」本身就是信号。
+- `--limit` 触顶（`truncated`）与 appmsg 的 `unparsed`（解不开）/ `rejected`（载荷含 DTD /
+  实体声明，我们主动拒绝）**各印两处**：stderr 一次、产物顶部一次——产物会离开这次会话，
+  只回终端的话读产物的人看不到。
+- 三条降级说明走 stderr（`⚠️` 前缀），并同时印在产物顶部（`降级：…`）：`msg_parts` 未回填
+  （appmsg 只显示 `[appmsg: 标题]`，跑 `appmsg rebuild`）、媒体状态覆盖不足（最多答 500 条，
+  **没覆盖到的消息在产物里不会出现媒体块**）、显示名降级（标题与发送者回落成原始标识）。
+- 索引页只列**磁盘上真有产物**的会话；索引里查不到的会话（导出之后重建过索引 / `purge --index`）
+  印「条数未知（索引里没有这个会话）」——**不是「0 条」**；一个产物都没有时不写空壳页面，
+  只印一句「没有已导出的会话；先运行 `chat export`」、退出码 0。
+
+Agent 侧对应 MCP 工具 `export_chat`（参数与返回结构见 TOOLS.md §12）。
+
+### appmsg（回填 appmsg 原始载荷）
+
+`chat export` 里的 appmsg 结构化内容、以及 MCP 的 `get_message_parts`，读的都是本地索引库的
+`msg_parts` 表（见 DATA_MODEL.md §3）。**这张表不会随 `export` 自动生成**——它由这条命令显式
+回填（存量历史如此，将来也是），重跑幂等：
+
+```bash
+agent-wechat appmsg rebuild
+#   已回填 20000 条 appmsg…
+# 完成：本轮写入 msg_parts 66663 条；该账号回指解析 53625 / 未解析 38；拒绝 0；解不开 0
+```
+
+- **要解密全部分片**（引用回指需要一张账号级的 `server_id → msg_key` 表，而被引用的原文大多
+  是普通文本消息），所以与其它读微信库的命令一样**需要 passphrase 缓存**（先 bootstrap）。
+- **只写 `msg_parts`**：不碰 `messages` / FTS / 向量表 / 水位线（本机回填前后逐表指纹相同）。
+- **耗时与体积（本机实测）**：37.5–38.7 s、`index.db` **+232.8 MB**。
+- **覆盖范围**：它扫的是**微信库**，覆盖「回填那一刻微信库里已有的 appmsg」（载荷为 NULL 的
+  除外）；`export` **不写**这张表，所以**回填之后新到微信**的 appmsg 要重跑一次才有内容。
+- **回指是快照**：`ref_msg_key` 取的是回填那一刻的答案。被引用的消息若**后来才**导出进索引，
+  重跑一次 `appmsg rebuild` 即刷新（幂等）；它只影响「能否跳到原消息」，**被引用的原文不受
+  影响**。
+- 那一条输出里的两组计数**分母不同**，别并排当同一个读：`本轮写入` 是本轮扫描落库的条数；
+  `回指解析 / 未解析` 是跑完后**该账号整张 `msg_parts` 表**里回指解出 / 没解出的条数。
+- MCP 侧**没有**对应工具——回填是显式的一次性运维动作；未回填时 `export_chat` /
+  `get_message_parts` 的信封会带 `degraded` 与 `hint` 指出这件事（TOOLS.md §12 / §13）。
+
 ### media（导出图片 / 语音 / 视频）
 
 ```bash

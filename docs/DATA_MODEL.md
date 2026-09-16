@@ -43,7 +43,7 @@ CREATE TABLE messages (
 
 **msg_type 常见值**（微信原始类型，已按低 32 位掩码）：
 `1` 文本 · `3` 图片 · `34` 语音 · `43` 视频 · `47` 表情 · `48` 位置 ·
-`49` appmsg（链接/文件/引用，正文为 XML，入库时转为 `[appmsg: 标题]`）·
+`49` appmsg（引用/链接/文件/转账…；正文 XML 规范化后存 `msg_parts.raw_xml`，`content` 只存 `[appmsg: 标题]` 投影）·
 `10000` 系统消息 · `10002` 撤回。
 
 ## 3. 索引设计
@@ -103,6 +103,46 @@ CREATE TABLE IF NOT EXISTS media_refs (
 - 图片与语音的导出**不查此表**：图片按 attach 树目录枚举、语音按 `media_*.db` 的
   `VoiceInfo` 三元组直接命中。
 
+**appmsg 原始载荷表 `msg_parts`**（同一批 DDL 建，无迁移）：
+
+```sql
+CREATE TABLE IF NOT EXISTS msg_parts (
+    msg_key     TEXT PRIMARY KEY,      -- = messages.msg_key
+    appmsg_type INTEGER NOT NULL,      -- <appmsg><type>（正文类别的数字投影）
+    ref_svrid   INTEGER,               -- 引用类（57）的 <refermsg><svrid>
+    ref_msg_key TEXT,                  -- 解析出的目标消息；解不到为 NULL（不是空串）
+    raw_xml     BLOB NOT NULL          -- 规范化后的 appmsg XML，zlib 压缩
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS idx_parts_ref ON msg_parts(ref_msg_key)
+    WHERE ref_msg_key IS NOT NULL;
+```
+
+- **不变量：`raw_xml` 是 appmsg 正文的权威，其余三列都是它的投影。** 它们存在的唯一理由是
+  「不必解压就能筛选与重解析」——`appmsg_type` 供按类型筛选，`ref_svrid` / `ref_msg_key`
+  供回填时解析与呈现。与「`messages.content` 是消息的检索投影」同构：投影可以再算，权威
+  只有一份。渲染与 `get_message_parts` 一律**从 `raw_xml` 解压后解析**，不拿投影当内容。
+- `idx_parts_ref` 是建在 `ref_msg_key` 上的**部分索引**（`WHERE ref_msg_key IS NOT NULL`）。
+  **当前所有读路径都按 `msg_key`（主键）取，还没有按目标反查的消费者**——索引在 DDL 里，
+  但别把它读成「已经有按引用反查的功能」。
+- **谁写它**：只有 CLI `agent-wechat appmsg rebuild`（`usecases.appmsg_rebuild_parts`）。
+  它全量重扫微信原库分片、**只写 `msg_parts`**——不碰 `messages` / `messages_fts` /
+  向量表 / 水位线（本机回填前后逐表指纹相同）。幂等：重跑覆盖同一批 `msg_key`。
+  MCP 侧没有对应工具——回填是显式的一次性运维动作。
+- **覆盖范围**：`appmsg rebuild` 扫的是**微信库**（全部分片的 `Msg_%` 表，载荷为 NULL 的除外），
+  不是索引库；而 **`export` 不写这张表**。所以 `msg_parts` 覆盖的是「回填那一刻微信库里已有的
+  appmsg」——回填之后新到微信的消息要重跑回填才有行，**这与它何时被导出无关**。
+- **陈旧规则（必须写进文档，不能只活在代码里）**：`ref_msg_key` 是**回填那一刻的快照**。
+  被引用的消息若**后来才**导出进索引，`ref_msg_key` 不会自己变——**重跑 `appmsg rebuild`
+  即刷新**（幂等；本机实测 37.5–38.7 s）。**渲染从不依赖回指成功**：被引用的原文一直带在
+  `raw_xml` 的 `<refermsg><content>` 里，回指只决定「能不能跳到原消息」。
+- **计数不 join `messages`**：`store.count_msg_parts` 按 `msg_key` 前缀计数，理由与
+  `count_media_refs` 完全相同——`appmsg rebuild` 只写 `msg_parts`、不写 `messages`，
+  join 出来的 0 会把「没回填」与「这些消息本来就没有可读内容」混成一种。
+- **规模（本机实测）**：66,663 行，`index.db` **+232.8 MB**（`raw_xml` 压缩存储；appmsg
+  的 XML 一个字节都不进 `messages`）。
+- 与 `media_refs` 的分工：那张表回答「媒体本体在不在、在哪」，这张表回答「appmsg 的内容是
+  什么」。两者都以 `msg_key` 为主键，存量历史都只由显式的重建动作回填。
+
 ## 4. 去重主键与增量策略
 
 ### msg_key
@@ -142,7 +182,7 @@ CREATE TABLE watermark (
 | `WCDB_CT_message_content=0`（明文） | 直接 UTF-8 |
 | `local_type` 高位含标志位（如 244813135921） | `& 0xffffffff` 取真实类型 |
 | 群消息正文 `<sender_wxid>:\n<正文>` | 前缀拆出 `sender_id`/`sender_name`，正文归 content（`sender_name` 是原值，展示时由 `display_names` 名册覆盖） |
-| 非文本消息（图片/语音/appmsg XML…） | content = `[image]` / `[appmsg: 标题]` 等提示，原始 XML 不入库 |
+| 非文本消息（图片/语音/appmsg XML…） | content = `[image]` / `[appmsg: 标题]` 等提示；**appmsg 的原始 XML 另存 `msg_parts.raw_xml`**（见 §3），其余类型的原始载荷不入库 |
 | `real_sender_id`（整数） | 经同库 `Name2Id` 表解析为 username |
 | 表 md5 无法反查会话名 | `chat_id = "md5:<hash>"`（数据不丢，展示降级） |
 | 图片 dat（V2：15B 头 + AES-128-ECB 段 + XOR 尾段） | `media export` 解密为明文图片，扩展名按解密后魔数判定（jpg/png/gif/webp/wxgf），落 `media/<会话md5>/image/<月份>/`（按 `msg/attach/<md5(会话)>/<月份>/Img/` 目录枚举定位） |
@@ -226,7 +266,9 @@ for chat, in con.execute("SELECT DISTINCT chat_id FROM messages"):
 
 > 📌 按对话窗口自动切片（如 30 分钟静默切段）的蒸馏导出格式为**规划中功能**，
 > 当前需按上述方式自行组织。非文本消息在 `messages` 里以提示占位，媒体本体不入 `index.db`
-> ——需要本体时走 `agent-wechat media export`（见 USAGE.md §7），产物在 `~/.agent-wechat/media/`。
+> ——需要本体时走 `agent-wechat media export`（见 USAGE.md §7），产物在 `~/.agent-wechat/media/`；
+> appmsg（引用/链接/文件/转账）的结构化正文在 `msg_parts`（见 §3），要读成可读时间线走
+> `agent-wechat chat export`（见 USAGE.md §7）。
 
 ## 8. 备份与销毁
 

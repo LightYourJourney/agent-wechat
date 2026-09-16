@@ -536,7 +536,7 @@
   不只回终端：产物会离开这次会话，只回终端的话读产物的人看不到。
 - `degraded` 键**恒存在**（形状同 §3 的 `{capability, effect}`），当前三个来源：
   1. `msg_parts` 未回填 → appmsg 会显示成 `[appmsg: 标题]`，跑 CLI `agent-wechat appmsg
-     rebuild` 补齐（约 40 s、幂等）；
+     rebuild` 补齐（本机实测 37.5–38.7 s、幂等）；
   2. `msg_media` 媒体状态覆盖不足（媒体状态最多答 500 条）→ **没覆盖到的消息在产物里不会
      出现媒体块**（`effect` 里给了「答了 N/M 条」）；
   3. 显示名降级（`roster`，如 `contact.db` 漂移）→ 标题与发送者回落成原始标识。
@@ -557,10 +557,13 @@
 
 1. **未回填**（账号级）→ `degraded` + `hint` 指出，重跑 `appmsg rebuild` 可补救；
 2. 这条消息本来就不是 appmsg；
-3. **回填之后才导出进索引的消息**——它的行不在 `msg_parts` 里，于是 `parts` 空、
+3. **回填之后才到微信的消息**（或那条 appmsg 的载荷本身为空——两者都不产生行）——
+   它的行不在 `msg_parts` 里，于是 `parts` 空、
    `unparsed` / `rejected` 为 0、`degraded` 为空，**与第 2 种逐字节相同**（`backfilled` 是
-   **账号级**的，答案是**按 key** 的）。出路同样是重跑 `agent-wechat appmsg rebuild`（幂等，
-   刷新 `msg_parts` 快照）——这是 spec 裁定 5 那条「快照」在 `parts` 上的对应物。
+   **账号级**的，答案是**按 key** 的）。出路同样是重跑 `agent-wechat appmsg rebuild`（幂等）：
+   回填扫的是**微信库**（全部分片的全部 `Msg_%` 表，载荷为 NULL 的除外），不是索引库
+   ——所以「行在不在」取决于**消息何时到达微信**，与它何时导出无关（`export` **不写**
+   `msg_parts`）。
 
 第 2/3 种只能靠**调用方手上别的信号**自己分：`get_recent_messages`（§3）的 `type` / `content`，
 或 `search_history`（§6）命中里的 `msg_type` / `content`（appmsg 的 `content` 是
@@ -569,7 +572,7 @@
 | 参数 | 类型 | 必填 | 默认 | 说明 |
 |---|---|---|---|---|
 | `contact` | string | **是** | — | username（`wxid_*` / `*@chatroom` / `filehelper`）或展示名（歧义返回 `need_confirm`，形状见 §3；未命中返回 `{"error": "找不到联系人「XXX」，请用 list_contacts 查询"}`）。**`keys` 只答属于该会话的**：别的会话的 key 静默略过 |
-| `keys` | string | **是** | — | 逗号分隔的 `msg_key`（取自 §3 / §6 / §8 返回的 `msg_key` 字段）。msg_parts 里没有的 key（消息没导出、不是 appmsg）**静默略过**——答案里没有某个 key，不等于它不是 appmsg。**载荷解不开 / 被主动拒绝的不在此列**：它们进下面的 `unparsed` / `rejected` 计数。空串 → `parts: []` |
+| `keys` | string | **是** | — | 逗号分隔的 `msg_key`（取自 §3 / §6 / §8 返回的 `msg_key` 字段）。msg_parts 里没有的 key（回填跑在它之前、不是 appmsg）**静默略过**——答案里没有某个 key，不等于它不是 appmsg。**载荷解不开 / 被主动拒绝的不在此列**：它们进下面的 `unparsed` / `rejected` 计数。空串 → `parts: []` |
 | `account` | string | 否 | null | 同通用约定 |
 
 **成功返回**：
@@ -618,7 +621,7 @@
   `receiver`、交易号 `transaction_id`，另加 `paysubtype`（中文语义无权威映射，原样给数字）、
   `transfer_id`、三个时间戳与 `is_red_envelope`。`payer` 为空是常态（实测 61%），不是异常。
   **这些内容会离开本机**（信封进 agent / LLM 上下文）——与 `search_history` 已在信封返回消息
-  正文一致，不为转账单开例外，见 SECURITY.md。
+  正文一致，不为转账单开例外，见 SECURITY.md §1「MCP 信封里的消息正文」。
 - `ref_msg_key` 是引用（`kind=57`）的目标，**取的是回填那一刻的快照**：目标消息若后来才导出进
   索引，重跑 `appmsg rebuild`（幂等）即刷新。解不到时是 `null`（**不是空串**）——「解不到」与
   「没有引用」在渲染上同义，被引用的原文一直在 `quote.content` 里。

@@ -100,3 +100,31 @@ lldb attach 需要 `task_for_pid` 权限；Hardened Runtime 会阻止它，所�
 不清理，**7,390 条 100% 有本体**，所以 **`exportable` 在本机实质上是语音专属状态**。
 查法：CLI `agent-wechat media locate --chat 小李` / MCP `get_message_media`；四态与计数
 口径见 TOOLS.md §11、USAGE.md §7 的 `media locate`。
+
+**Q17：为什么有些 appmsg（引用 / 链接 / 文件 / 转账）读不出来？**
+三种成因，处置各不相同：
+
+1. **没回填**（最常见；也包括「回填跑在这条消息到达微信之前」）。appmsg 的原始 XML **不进
+   `messages`**，而是存在索引库的 `msg_parts` 表里，由 CLI `agent-wechat appmsg rebuild`
+   显式回填（本机实测 37.5–38.7 s，幂等）。没跑过它时，`chat export` 的产物里 appmsg 只显示
+   `[appmsg: 标题]`，MCP 的 `get_message_parts` 答不出任何 key——两者的信封都会带 `degraded`
+   + `hint` 指出这件事。回填扫的是**微信库**，`export` **不写**这张表，所以**回填之后新到
+   微信**的 appmsg 要重跑一次才拿得到内容。
+2. **解不开（`unparsed`）**：载荷解压失败（半拷贝的 WAL / 手工改过的索引库），或三步规范化后
+   仍不是合法 XML。原库全量普查里，规范化把 appmsg 的可解析率从 32.8% 提到 **99.9985%**
+   （66,655 / 66,656），剩下的那条是非法字符引用。
+3. **被主动拒绝（`rejected`）**：载荷含 `<!DOCTYPE` / `<!ENTITY` 声明，展开有把进程打挂的风险
+   （billion laughs），守卫**直接拒绝**——这是保护，不是数据坏了。实测这两个串在全量 appmsg
+   里出现 0 次，所以守卫**零误伤**。
+
+2 与 3 **分开计数**（合成一个数会让人以为数据坏了）：本机那次回填 66,663 条里两者都是 **0**。
+明细印在 `chat export` 产物顶部，MCP 信封装 `unparsed` / `rejected`。
+
+另有一条**陈旧规则**：引用的**跳转目标**（`ref_msg_key`）只反映回填那一刻的索引状态——目标
+后来才导出进索引时，重跑回填才能跳转（**被引用的原文不受影响**，它一直带在 appmsg 里，见
+DATA_MODEL.md §3）。
+
+还有一件事：`get_message_parts` 少了一个 key 时，成因可能是「未回填」（只有这一种信封会
+点名——`degraded` + `hint`）、「回填跑在它之前」、「这条本来就不是 appmsg」三者之一。
+**后两种彼此逐字节相同**且都不带 `degraded`（`backfilled` 是账号级的，答案是按 key 的）。
+用法见 USAGE.md §7 的 `appmsg` 与 `chat` 两节。

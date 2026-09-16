@@ -300,6 +300,67 @@
   媒体，不抓取
 - 发布 / 删除动态、小程序卡片内嵌渲染均不做（微信目录恒只读）
 
+### 会话时间线导出（appmsg 富文本，HTML / Markdown）
+
+- 新增两个 MCP 工具：`export_chat`（§12）与 `get_message_parts`（§13）；工具面 11 → 13
+- 新增三个 CLI 命令：`agent-wechat chat export`（某会话 → HTML / Markdown 时间线）、
+  `chat index`（已导出会话的索引页）、`appmsg rebuild`（回填 appmsg 原始载荷）
+- **appmsg 的原始 XML 首次落库**：索引库新增 `msg_parts` 表，`raw_xml` 是正文的**权威**，
+  `appmsg_type` / `ref_svrid` / `ref_msg_key` 是它的**投影**（存在的唯一理由是「不必解压就能
+  筛选与重解析」）。`messages.content` **一字未动**（仍是 `[appmsg: 标题]` 投影）——改它要
+  重建 FTS + 向量两套索引
+- **解析形态是本轮最大的一处实测**：群消息的 `<sender>:\n` 前缀**没有被剥掉**（`reader` 只对
+  文本消息剥），`<?xml?>` 声明可能缺失。不做规范化，appmsg 的可解析率只有 **32.8%**；三步
+  规范化后 **99.9985%**（66,655 / 66,656），剩下的那条是非法字符引用。若按「`content` 就是
+  XML」写实现，**2/3 的 appmsg 会静默消失**
+- **四类具名建模**（引用 57 / 链接 5 / 文件 6 / 转账 2000），其余类型进 `fields`（点分路径）；
+  含义未确认的类型回落成 `appmsg:<type>`，**不猜**。凭据类字段（`aeskey` / `token` / `key` /
+  `passphrase`，名字或值里出现）**进不了信封**
+- **危险载荷守卫**：含 `<!DOCTYPE` / `<!ENTITY` 的载荷在送进 XML 解析器**之前**直接拒绝
+  （防 billion laughs）；与「解不开」**分开计数**（`rejected` / `unparsed`）。实测那两个串在
+  全量 appmsg 里出现 0 次，故零误伤
+- **回填 `msg_parts` 是显式的一次性动作**（`appmsg rebuild`，幂等）：**只写 `msg_parts`**，
+  不碰 messages / FTS / 向量 / 水位线（本机回填前后逐表指纹相同）。本机实测 **37.5–38.7 s**、
+  `index.db` **+232.8 MB**。MCP 侧**没有**对应工具
+- **`ref_msg_key` 是快照**：被引用的消息若后来才导出进索引，重跑 `appmsg rebuild` 即刷新。
+  渲染**从不依赖回指成功**——被引用的原文一直带在 `refermsg` 里，回指只决定「能不能跳」
+- **两个模板的语义一致由单一来源保证**：`chat_text.py` 收拢措辞与纯函数（时间 / 相对路径 /
+  四态文案），`ChatView` 是唯一数据源。Markdown 的**三处固有损失如实记在 USAGE.md**，
+  不假装与 HTML 等价
+- **`chat export` / `chat index` 与 `media export` 必须用同一个 `--out`**：产物在
+  `{--out}/{会话md5}/chat/` 下，媒体是 `../image/…` 形式的相对引用、指向**同级**的既有媒体树；
+  用错根会**静默断链**（spec 裁定 13）
+- **`get_message_parts` 照实返回转账字段**（金额 / 备注 / 双方用户名 / 交易号）：与
+  `search_history` 已在信封返回正文一致，**不为转账单开例外**——这是刻意的裁定，记明于
+  SECURITY.md §1
+- **`chat export --out DIR` 与既有 `media export --out` 同一类例外**：会把会话正文明文写到
+  `~/.agent-wechat/` 之外，用后自行清理（SECURITY.md §1 的例外表）
+- `--months` 必须是**升序且相邻月首尾相接**的一段窗口：非连续（`2026-08,2026-10`）只能取
+  包络、会把中间的月份静默带进来，反序会得到倒置（或退化成空区间）的窗口——两者都**报错**，
+  不静默产出空产物
+- 新模块 6 个：`appmsg.py`（规范化 + 守卫 + 解析，纯函数）/ `chat_text.py`（两模板共享的
+  措辞）/ `chatview.py`（`ChatView` 组装与落盘）/ `chat_html.py` / `chat_md.py`（两个纯模板）/
+  `chat_index.py`（索引页）
+
+### 已知限制（会话时间线导出）
+
+- **引用原文仍搜不到**：`messages.content` 一字未动，`search` / `semantic` 检索不到被引用的
+  原话。`raw_xml` 已在库里，日后补检索只需加一张独立 FTS 表
+- 未回填 `msg_parts` 时 appmsg 只显示 `[appmsg: 标题]`（信封带 `degraded` + `hint` 指出，
+  跑 `appmsg rebuild` 补齐）；**回填之后新到微信**的 appmsg 也要重跑回填才有内容——回填扫的是
+  微信库、`export` **不写** `msg_parts`
+- `get_message_parts` 少一个 key 时**三种空答案里信封只分得出第一种**（未回填，带
+  `degraded` + `hint`）：另有「回填跑在它之前」与「这条本来就不是 appmsg」——**这两种彼此
+  逐字节相同**且都不带 `degraded`
+- `chat export` 只导**范围里最近的** N 条（`--limit`，默认 500）；`truncated` 的语义是
+  「**可能**还有更早的没进来」——范围内恰好 N 条时它也为真
+- 媒体状态最多答 500 条：**没覆盖到的消息在产物里没有媒体块**（信封的 `degraded` 给出
+  「答了 N/M 条」）
+- 合并转发（19）的内层 `<recorditem>` **不做专门建模**：内层内容以点分路径平铺进 `fields`，
+  不是结构化的子消息列表
+- `msg_parts` **没有** `purge` 具名范围（既有缺口，与 `moments/` 同命）：只能 `purge --all`
+  连带删
+
 ### 其他规划
 
 - 蒸馏导出格式（按对话窗口切片的 JSONL）

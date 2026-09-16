@@ -10,15 +10,27 @@
 | 数据库密钥 passphrase（32 字节） | 内存（微信进程）→ `~/.agent-wechat/passphrase.json` | 极高 |
 | 聊天数据库（加密） | 微信容器目录 | 高（本工具不解密落盘存储它） |
 | 解密后的消息明文 | `~/.agent-wechat/tmp/`（临时）→ `index.db`（持久） | 极高 |
-| 解密后的媒体明文（图片/语音 WAV/视频） | `~/.agent-wechat/media/`（持久） | 极高 |
+| 解密后的媒体明文（图片/语音 WAV/视频）与**会话时间线产物**（HTML / Markdown 明文，含引用 / 链接 / 转账内容） | `~/.agent-wechat/media/`（持久） | 极高 |
 | 朋友圈正文 / 评论 / 点赞 / 媒体明文（`moments export` 产物） | `~/.agent-wechat/moments/`（持久；目录 0700、文件 0600） | 极高 |
 | **例外**：`moments export --out DIR` 会把同一份朋友圈明文（含已下载的媒体）写到**任意指定目录** | `DIR`（代码尽力 chmod 0700，但不在 `~/.agent-wechat/` 之下） | 极高（用后必须手动删除；不受 Time Machine 排除与 `purge` 覆盖） |
 | **例外**：`decrypt <db> --out` 调试命令会**持久**写出整库明文 | `~/.agent-wechat/<out>` | 极高（用后必须手动删除） |
 | **例外**：`media export --out DIR` 会把同一份媒体明文写到**任意指定目录** | `DIR`（代码尽力 chmod 0700，但不在 `~/.agent-wechat/` 之下） | 极高（用后必须手动删除；不受 Time Machine 排除与 `purge` 覆盖） |
+| **例外**：`chat export --out DIR` 会把同一份**会话正文明文**（HTML / Markdown，含引用原文与转账字段）写到**任意指定目录** | `DIR`（代码逐级 chmod 0700、文件 0600，但不在 `~/.agent-wechat/` 之下） | 极高（用后必须手动删除；不受 Time Machine 排除与 `purge` 覆盖。`chat index --out` 只写一页索引，同理） |
 
 数据流向**默认始终在本机**：embedding、检索、MCP（stdio 传输）全部本地闭环，
 不存在任何网络上传路径。媒体导出同理——pilk（进程内调用）与 ffmpeg（本地子进程）
 都只做本机解码，不联网、不上传。
+
+**MCP 信封里的消息正文（含本次新增的 `get_message_parts`）**
+
+上面那句「不存在任何网络上传路径」说的是**本工具自身**：MCP 走 stdio，Server 不向任何服务器
+发送数据。但**信封的内容会进入 Agent 会话**，因而**可能进入你所用的 LLM 上下文**——这是项目
+既有的性质，不是本次新增：`get_recent_messages` / `search_history` / `semantic_search` 一直
+在返回消息正文。本次新增的 `get_message_parts` 沿同一约定，按 `msg_key` 返回 appmsg 的结构化
+内容，**包括转账（type 2000）的金额 `amount_desc`、备注 `memo`、双方用户名 `payer` /
+`receiver` 与交易号 `transaction_id`**（凭据类字段另有剔除，见 TOOLS.md §13）。**这是刻意的、
+有据的**——2026-09-16 的裁定 8：与 `search_history` 已在信封返回正文一致，**不为转账单开例外**，
+不是遗漏。不想让某类内容离开本机，就不要调用会返回它的工具。
 
 ### 零网络例外（本次新增：朋友圈媒体下载）
 
