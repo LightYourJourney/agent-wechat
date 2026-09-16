@@ -750,8 +750,10 @@ def test_message_parts_usecase_returns_typed_result(monkeypatch):
     `backfilled` 是「回填过没有」这个**事实**本身，文案与信封渲染全在适配层（F67）。
 
     放在本文件是因为**夹具在这里**（`_parts_fixture` 走生产路径种库）；它测的是用例层。
-    回归：把 `parts` 换回原始四元组（不解压不解析）、或把 `backfilled` 写成常量 True，
-    这条会红。
+    回归：把 `parts` 换回原始四元组（不解压不解析），这条会红。
+    **`backfilled` 写成常量 `True` 这条杀不掉**（本夹具种了行，常量 True 与真相同色）——
+    钉它的是 `test_get_message_parts_empty_index_carries_hint`。**别照前半句的形状去验后半句**
+    （初稿把两者写成同一句「都会红」，审阅者照着变异得到绿，白怀疑一次自己的方法）。
     """
     key, _foreign = _parts_fixture(monkeypatch)
     res = usecases.message_parts("张三", keys=[key(2), key(5)])

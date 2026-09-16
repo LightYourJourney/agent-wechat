@@ -328,7 +328,8 @@ def export_chat(contact: str, months: str | None = None, limit: int = 500,
     空串或未知格式返回 error（不静默少写一个文件）。limit 封顶窗口内**最近的** N 条。
 
     产物落 `out_dir` 下（默认 ~/.agent-wechat/media，目录 0700），用文件系统工具自行打开；
-    信封不回传正文与文件清单明细（大结果膨胀上下文）。**`out_dir` 必须与
+    信封只给产物**路径**与计数、不回传正文或逐条消息的明细（大结果膨胀上下文）。
+    **`out_dir` 必须与
     `export_chat_media` / CLI `media export` 用同一个根**：产物里的媒体以相对路径引用
     **同级**的既有媒体树，换个根就全是死链。
 
@@ -359,8 +360,19 @@ def get_message_parts(contact: str, keys: str, account: str | None = None) -> di
 
     **需先运行 `agent-wechat appmsg rebuild`**（CLI）：内容读的是本地检索库的
     `msg_parts` 表。未回填时每个 key 都答不出东西，信封另带 `hint`（可操作的那一句）与
-    `degraded`（结构化记录）——**别把「没回填」当成「这条消息本来就没有可读内容」**
-    （两者都是空 parts，只靠这两个键区分）。
+    `degraded`（结构化记录）。
+
+    **空答案有三种成因，信封只分得出其中两种**（别宣称「靠这几个键就能分清」）：
+    ① **未回填**（账号级）→ `degraded` + `hint` 指出，重跑 `appmsg rebuild` 可补救；
+    ② 这条消息本来就不是 appmsg；
+    ③ **回填之后才导出进索引的消息**——它的行不在 `msg_parts` 里，于是 `parts` 空、
+    `unparsed`/`rejected` 为 0、`degraded` 为空，**与 ② 逐字节相同**（`backfilled` 是
+    **账号级**的，答案是**按 key** 的）。出路同样是重跑 `agent-wechat appmsg rebuild`
+    （幂等）——这正是 spec 裁定 5 那条「快照」在 `parts` 上的对应物（那边只写了
+    `ref_msg_key`）。
+    ②/③ 只能靠**调用方手上别的信号**自己分：`get_recent_messages` 的 `type` / `content`，
+    或 `search_history` 命中里的 `msg_type` / `content`（appmsg 的 `content` 是
+    `[appmsg: 标题]`）——**信封本身不给这个信号**。
 
     keys 为逗号分隔的 msg_key（取自 get_recent_messages / search_history / semantic_search
     返回的 msg_key 字段），只答**属于 contact 那个会话**的 key：别的会话的 key、以及

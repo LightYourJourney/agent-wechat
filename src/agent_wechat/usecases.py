@@ -790,9 +790,11 @@ class MessagePartsResult:
     （不 join `messages`）。入口靠它把「没回填」与「这些消息本来就没有可读内容」分开——
     两种「空答案」不许长得一样（丙 R23）。**它只承载事实，不带文案**：具体给用户看什么
     （MCP 的 `hint` 与 `degraded`）是入口层的渲染决定，同 `search_history` 的 hint。
+
+    **刻意没有 `chat_id` 字段**（对照 `MessageMediaResult.chat_id` 有真消费者）：本工具的
+    信封按 spec 不含 `chat_id`、CLI 侧也没有命令消费它，加了就是没人读的死字段（审阅 F73）。
     """
 
-    chat_id: str
     parts: tuple[MessagePart, ...]
     unparsed: int
     rejected: int
@@ -848,7 +850,7 @@ def message_parts(contact: str, *, keys: Sequence[str],
             unparsed += 1
         elif parsed is not None:
             out.append(MessagePart(key, parsed, row[2]))   # 四元组的第三项是 ref_msg_key
-    return MessagePartsResult(chat_id=chat_id, parts=tuple(out), unparsed=unparsed,
+    return MessagePartsResult(parts=tuple(out), unparsed=unparsed,
                               rejected=rejected, backfilled=backfilled)
 
 
