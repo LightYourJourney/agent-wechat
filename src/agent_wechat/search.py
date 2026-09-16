@@ -89,6 +89,11 @@ def messages_in_range(chat_id: str, *, account: str,
     `truncated` 的含义是「范围内还有更早的没进来」——取的是最近的一端，不是最早的一端，
     取向写反会让产物看起来「从很久以前开始」，而用户以为自己拿到了最近的消息（spec §4.4）。
     `after_ts` 含下界、`before_ts` 不含上界（与 `search` / `media.month_bounds` 的 [lo, hi) 一致）。
+
+    本函数**不做区间校验**：调用方负责限幅（`usecases.clamp_limit`）。
+    `limit` 直通 SQLite 的 `LIMIT`，所以 `limit=-1` 的语义是**不限量**（不是「一条都不要」），
+    此时 `truncated` 仍按 `len(rows) == limit` 算，会是 `False` —— 那是「真的都进来了」而不是错，
+    但调用方不该依赖这个巧合。
     """
     where, args = ["m.account = ?", "m.chat_id = ?"], [account, chat_id]
     if after_ts is not None:

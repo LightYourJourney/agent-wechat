@@ -125,17 +125,19 @@ def test_messages_in_range_takes_the_most_recent_n_not_the_oldest(con, monkeypat
     assert [r["content"] for r in rows] == ["m8", "m9", "m10"]     # 正序，且是最新的三条
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "brief 的期望值只在下界**独占**（m.ts > after_ts）时成立："
-    "after_ts=1004 含下界会多带回 m4。但独占下界与本仓已落地的三条事实矛盾："
-    "(1) search.py:39 同模块同名的 after_ts 是 m.ts >= ?；"
-    "(2) usecases.py:460 _month_clause 是 (m.ts >= ? AND m.ts < ?)；"
-    "(3) tests/test_media.py:139 钉死 month_bounds 的 [lo, hi)「下界含」，"
-    "而 plan task-6 把 month_bounds 的值直接喂给 after_ts/before_ts。"
-    "独占下界会在 chat export --months 的每月第一秒上开一个缝。"
-    "本 xfail 已在两个方向钉住：实现改成 > 时这条会 XPASS 而 strict 转红。"
-    "裁定见 task-5-report.md §4 缺陷 2。"))
 def test_messages_in_range_filters_and_reports_not_truncated(con):
+    """**下界是含的**（`[lo, hi)`）：`after_ts=1005` 带回 ts=1005 那条。
+
+    回归：把 `m.ts >= ?` 改成 `m.ts > ?`，或把 `before_ts` 的 `<` 改成 `<=`，这条会红。
+
+    **初稿这条写错过，值得记下来**：原写 `after_ts=1004` 期望 `["m5","m6","m7"]`，
+    那**只有独占下界才成立**（含下界会多带回 m4）。而独占下界与本仓三处已落地事实矛盾：
+    `search.py:39` 同名参数用 `>=`、`usecases.py:460` 的月份筛选是
+    `(m.ts >= ? AND m.ts < ?)`、`tests/test_media.py:134` 把 `month_bounds` 钉成
+    `[lo, hi)`「下界含、相邻月首尾相接无缝隙」。**而 T6 把 `month_bounds` 的值直接喂给
+    `after_ts`/`before_ts`** —— 照初稿写就是给 `chat export --months` 的**每月第一秒开一个
+    静默数据丢失的缝**。（T5 实施者发现并拒绝改断言，标 `xfail(strict=True)` 请裁定。）
+    """
     con.executemany(
         "INSERT INTO messages (msg_key, account, chat_md5, chat_id, shard, local_id,"
         " ts, msg_type, is_self, content, exported_at)"
@@ -145,7 +147,7 @@ def test_messages_in_range_filters_and_reports_not_truncated(con):
     con.commit()
     from agent_wechat import search
     rows, truncated = search.messages_in_range(
-        "wxid_testacct02", account="acct", after_ts=1004, before_ts=1008)
+        "wxid_testacct02", account="acct", after_ts=1005, before_ts=1008)
     assert [r["content"] for r in rows] == ["m5", "m6", "m7"]
     assert truncated is False
 
