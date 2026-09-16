@@ -368,6 +368,23 @@ def cmd_chat_export(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_chat_index(args: argparse.Namespace) -> int:
+    """列出已导出的会话，写 `{--out}/index.html`。
+
+    **一个产物都没有时不写空壳页面、也不是错误**：印一句提示、退出码 0 —— 用户只是还没
+    导过任何会话。写一张 0 行的页面会把「还没导过」与「索引页坏了」弄得一模一样。
+    """
+    from . import usecases
+    res = usecases.chat_index(out_dir=args.out, account=args.account)
+    if res.file is None:
+        print("没有已导出的会话；先运行 `chat export`")
+        return 0
+    print(f"已索引 {res.chats} 个会话")
+    print(f"产物：{res.file}")
+    _render_degradations(res.degraded)
+    return 0
+
+
 def _human_size(n: int) -> str:
     """十进制单位。spec §3 的表样就是十进制的：5.30 GB / 12 MB / 182 B。
 
@@ -601,6 +618,13 @@ def main(argv: list[str] | None = None) -> None:
                      help="输出根（默认 $AGENT_WECHAT_HOME/media，与 media export 同根）")
     esp.add_argument("--account")
     esp.set_defaults(fn=cmd_chat_export)
+
+    isp = csp.add_parser("index", help="列出已导出的会话，生成 {--out}/index.html 索引页")
+    # 与 `chat export` 同根：索引页链到的是**同一个 --out** 下的会话产物。
+    isp.add_argument("--out", default=None,
+                     help="输出根（默认 $AGENT_WECHAT_HOME/media，与 chat/media export 同根）")
+    isp.add_argument("--account")
+    isp.set_defaults(fn=cmd_chat_index)
 
     sp = sub.add_parser("appmsg", help="appmsg 原始载荷（引用/链接/文件/转账…）")
     asp = sp.add_subparsers(dest="appmsg_cmd", required=True)

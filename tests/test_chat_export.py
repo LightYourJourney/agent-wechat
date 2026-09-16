@@ -5,7 +5,7 @@ import zlib
 
 import pytest
 
-from agent_wechat import errors, store, usecases
+from agent_wechat import errors, messages, store, usecases
 
 
 class _FakeReader:
@@ -537,3 +537,136 @@ def test_chat_export_reports_only_the_files_it_actually_wrote(con, chat_env, mon
     assert sorted(pathlib.Path(f).name for f in res.files) == ["index.html"]
     assert not (chat_env / "aaaa" / "chat" / "index.md").exists()
     assert "第1条" in _html(res)          # 写成了的那份照常可用
+
+
+# ---------------- T10：索引页（chat index）----------------
+
+def test_chat_index_links_to_each_exported_chat(con, chat_env):
+    """回归：索引页必须**链到产物**（相对路径）—— 只列名字不给链接，第一条断言会红。"""
+    _seed(con)
+    usecases.chat_export("wxid_testacct02", out_dir=str(chat_env), account="acct")
+    res = usecases.chat_index(out_dir=str(chat_env), account="acct")
+    assert res.chats == 1
+    page = pathlib.Path(res.file).read_text(encoding="utf-8")
+    assert "aaaa/chat/index.html" in page
+
+
+def test_chat_index_on_empty_out_dir_writes_nothing(tmp_path):
+    """没有产物时：不抛异常、**也不写一个空壳页面**（空产物比没有产物更难分辨）。"""
+    res = usecases.chat_index(out_dir=str(tmp_path / "nothing"), account="acct")
+    assert res.chats == 0 and res.file is None
+    # 上面那两条只钉住「返回值的说法」；**这一条才钉住「一个字节都没写」**：
+    # 写一张空页面却回 `file=None`（自相矛盾的实现）此前能全绿。
+    assert not (tmp_path / "nothing").exists(), "空目录被建出来了"
+
+
+def test_chat_index_reads_label_and_count_from_the_index_scoped_to_one_account(con, chat_env):
+    """会话名与条数来自**一次查库**（`GROUP BY chat_md5`），且只数本账号的行。
+
+    两条断言各杀一个变异：
+      · `assert "3 条"` —— 删掉 `WHERE account = ?`：`messages` 是**多账号共用**的表，
+        异账号的 97 行会并进同一个 `aaaa` 分组，条数变成 3+97=100 → 红。
+        （异账号行数**故意取 97**：100 的十进制写法里没有 "3"，不会与 "3 条" 撞子串。）
+      · `assert "wxid_testacct02"` —— 标签必须来自查库结果，而不是一律走 `md5:` 回落；
+        把查询结果丢掉、标签恒为 `md5:aaaa` → 红。
+    """
+    _seed(con, n=3)
+    con.executemany(_MSG_SQL, [
+        (f"other|aaaa|message_0.db|{i}", "other", "aaaa", "wxid_otheracct",
+         "message_0.db", i, 100 + i, 1, 0, f"异账号第{i}条", 0) for i in range(1, 98)])
+    con.commit()
+    usecases.chat_export("wxid_testacct02", out_dir=str(chat_env), account="acct")
+    res = usecases.chat_index(out_dir=str(chat_env), account="acct")
+    page = pathlib.Path(res.file).read_text(encoding="utf-8")
+    assert "3 条" in page, "条数不是本账号那 3 条（账号谓词丢了？）"
+    assert "wxid_testacct02" in page, "标签没有取查库结果"
+
+
+def test_chat_index_falls_back_to_the_degraded_md5_label(con, chat_env):
+    """目录里有产物、索引里没有这个会话（重建过索引 / purge 过 index.db）：
+    标签回落成 `md5:{chat_md5}` —— 与 `messages.degraded_chat_id` **同形**，
+    不自造第三种写法；条数印「未知」而**不是 0 条**（0 是一条确定的信息，这里我们只是不知道）。
+
+    三条断言各杀一个变异：
+      · 删掉 `degraded_chat_id` 回落（换成空串或自造形态）→ 第一条红；
+      · 模板把「未知」那支删掉、一律印 `{messages} 条` → 第二条红（那会印成 `0 条`）；
+      · 无脑 `int` 出一个条数（比如拿 `len(entries)`）→ 还是 `0 条`，第二条红。
+    """
+    _seed(con)
+    usecases.chat_export("wxid_testacct02", out_dir=str(chat_env), account="acct")
+    con.execute("DELETE FROM messages")       # 索引没了，产物还在
+    con.commit()
+    res = usecases.chat_index(out_dir=str(chat_env), account="acct")
+    assert res.chats == 1, "产物在，就该照样列出来（查不到索引不等于没导过）"
+    page = pathlib.Path(res.file).read_text(encoding="utf-8")
+    assert messages.degraded_chat_id("aaaa") in page, "回落形态与 messages.degraded_chat_id 不同形"
+    assert "条数未知" in page and "0 条" not in page
+
+
+def test_chat_index_links_the_markdown_only_when_it_was_written(con, chat_env):
+    """`has_md` = 产物目录里**真的**有 `index.md`（`chatview.write` 单文件写失败时只留 HTML）。
+
+    两条断言各杀一个变异：
+      · `has_md` 恒 True（无条件印 md 链接）→ 第一条红：`--format html` 时那是个**死链**；
+      · `has_md` 恒 False（`(p.parent / "index.md").exists()` 这行被删）→ 第二条红。
+    """
+    _seed(con)
+    usecases.chat_export("wxid_testacct02", formats=("html",), out_dir=str(chat_env),
+                         account="acct")
+    res = usecases.chat_index(out_dir=str(chat_env), account="acct")
+    assert "aaaa/chat/index.md" not in pathlib.Path(res.file).read_text(encoding="utf-8")
+    usecases.chat_export("wxid_testacct02", formats=("html", "md"),
+                         out_dir=str(chat_env), account="acct")
+    res = usecases.chat_index(out_dir=str(chat_env), account="acct")
+    assert "aaaa/chat/index.md" in pathlib.Path(res.file).read_text(encoding="utf-8")
+
+
+def test_chat_index_escapes_the_label_it_reads_from_the_index(con, chat_env):
+    """`chat_id` 是从索引库读出来的文本 —— 与 `chat_html` 同一立场
+    （消息与名字都可能是对手可控的），一律走 `html.escape`。
+
+    把模板里的 `_esc(e.label)` 换成裸 `e.label` → 第一条断言红（`<script>` 原样进产物）。
+
+    夹具：导出**之后**才把那条消息的 `chat_id` 改成脚本串 —— 产物目录名（`chat_md5`）
+    仍是 `aaaa`，枚举照常命中，改的只是「页面上要印的那个名字」。
+    """
+    _seed(con)
+    usecases.chat_export("wxid_testacct02", out_dir=str(chat_env), account="acct")
+    con.execute("UPDATE messages SET chat_id=?", ("<script>alert(1)</script>",))
+    con.commit()
+    res = usecases.chat_index(out_dir=str(chat_env), account="acct")
+    page = pathlib.Path(res.file).read_text(encoding="utf-8")
+    assert "<script>alert(1)</script>" not in page
+    assert "&lt;script&gt;" in page
+
+
+def test_chat_index_cli_on_empty_out_dir_is_not_an_error(tmp_path, capsys):
+    """一个产物都没有时：印提示、**退出码 0**（这不是错误）。
+
+    删掉 `cmd_chat_index` 里 `file is None` 那条分支（改成抛错、或什么都不印）→ 两条断言红。
+
+    本用例**没有任何 WeChat 夹具**：`--out` 指向不存在的目录，实现必须在解析账号 /
+    开索引库**之前**就返回，否则这里会去碰真实的微信容器/索引库。
+    """
+    from agent_wechat import cli
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["chat", "index", "--out", str(tmp_path / "nothing"), "--account", "acct"])
+    assert ei.value.code == 0, "「还没有导出过」不是错误"
+    out = capsys.readouterr().out
+    assert "没有已导出的会话" in out and "chat export" in out
+
+
+def test_chat_index_cli_prints_the_artifact_path(con, chat_env, capsys):
+    """成功路径：条数与产物路径都要印出来（用户照着打开）。
+
+    删掉 `print(f"产物：{res.file}")` → 第二条断言红。
+    """
+    from agent_wechat import cli
+    _seed(con)
+    usecases.chat_export("wxid_testacct02", out_dir=str(chat_env), account="acct")
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["chat", "index", "--out", str(chat_env), "--account", "acct"])
+    assert ei.value.code == 0
+    out = capsys.readouterr().out
+    assert "1 个会话" in out
+    assert f"产物：{chat_env}/index.html" in out

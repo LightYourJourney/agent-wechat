@@ -24,6 +24,9 @@ from typing import TYPE_CHECKING
 
 from . import account as acc_mod
 from . import appmsg, chatview, errors, export, keys, messages, paths, reader, search, store, tasks, vector
+# 模板模块名与下面的用例函数 `chat_index()` **同名**：这里起别名，否则函数定义会遮蔽
+# 模块名（`index_html.render` 那处引用会变成调用函数自身）。
+from . import chat_index as index_html
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -740,6 +743,82 @@ def chat_export(contact: str, *, months: list[str] | None = None, limit: int = 5
         chat_id=chat_id, out_dir=view.out_dir, files=tuple(str(p) for p in files),
         counts=view.counts, truncated=truncated, unparsed=unparsed, rejected=rejected,
         degraded=view.degraded)
+
+
+@dataclass(frozen=True)
+class ChatIndexResult:
+    """chat_index 的返回（当前只有 CLI 入口消费）。
+
+    `file is None` = **一个文件都没写**：`{--out}` 下一个已导出的会话都没有。这不是错误
+    （用户还没导过），但**也不写一张空壳页面**——「共 0 个会话」的页面与「索引页坏了」
+    在用户眼里一模一样，空产物比没有产物更难分辨。
+    """
+
+    out_dir: str
+    file: str | None
+    chats: int
+    degraded: tuple[Degradation, ...] = ()
+
+
+def chat_index(out_dir: str | None = None, account: str | None = None) -> ChatIndexResult:
+    """把 `{--out}` 下**所有已导出的会话**列成一页 `{--out}/index.html`。
+
+    枚举 `{out}/*/chat/index.html`（T9 的落盘布局，`chat_md5` 就是那个目录名），
+    会话名与条数**一次查库**取回（`GROUP BY chat_md5`；逐会话一条 SQL 在真机 772 个
+    会话上是 772 次往返）。索引里查不到的会话（导出之后重建过索引 / `purge --index`）
+    回落成 `messages.degraded_chat_id` 的 `md5:{chat_md5}` 形态——**不自造第三种写法**，
+    那个函数存在的理由就是生产端与解析端共用一种形态。
+
+    **枚举先于查库、也先于账号解析**：没有产物就没有要查的名字，`chat index` 在
+    「还没导出过任何会话」时必须是零依赖可用的（不碰微信目录、不碰索引库）。
+
+    会话名**只用索引库里的 `chat_id`**，不取展示名：`reader._contacts_all_cached()` 是
+    `contacts(limit=5000)` 的 5000 行窗口，窗口外的会话会静默回落裸 id（真机 772 个会话
+    只有 18% 在窗口内）——那条已 park，别在这里顺手接上。
+    """
+    # 与 `chat_export` 同款绝对化：`--out` 给相对路径时，`out_dir`/`file` 才是能直接打开、
+    # 也能与 `chat export` 对齐的路径。
+    out_root = (pathlib.Path(out_dir) if out_dir else paths.HOME_DIR / "media").resolve()
+    found = list(out_root.glob("*/chat/index.html"))
+    if not found:
+        return ChatIndexResult(out_dir=str(out_root), file=None, chats=0)
+    ctx = ChatContext(account)
+    try:
+        with store.open() as con:
+            rows = con.execute(
+                "SELECT chat_md5, chat_id, count(*) AS n FROM messages WHERE account=?"
+                " GROUP BY chat_md5", (ctx.account,)).fetchall()
+    except (sqlite3.Error, OSError) as exc:
+        # 与 chat_export 同一口径：索引读不了就什么都答不了，且裸异常不得逃出 core 层。
+        # 退回「没有已导出的会话」是**谎报**——产物明明在，用户会以为导出白做了。
+        raise errors.IndexUnavailable(
+            f"本地检索库不可用：{errors.redact(str(exc))}",
+            hint="索引库可能损坏；删除 index.db 后重跑 export_full_history 可重建"
+        ) from exc
+    indexed = {r["chat_md5"]: r for r in rows}
+    entries = []
+    for p in found:
+        chat_md5 = p.parent.parent.name         # {out}/{chat_md5}/chat/index.html
+        row = indexed.get(chat_md5)
+        entries.append(index_html.ChatIndexEntry(
+            chat_md5=chat_md5,
+            chat_id=row["chat_id"] if row else "",
+            label=row["chat_id"] if row else messages.degraded_chat_id(chat_md5),
+            messages=row["n"] if row else 0,    # 查不到时 `chat_id` 为空 → 模板印「条数未知」
+            has_md=(p.parent / "index.md").exists()))
+    from . import media                       # 惰性：media 顶层拉起 cryptography
+    target = media.ensure_tree(out_root) / "index.html"
+    try:
+        target.write_text(index_html.render(entries), encoding="utf-8")
+    except OSError as exc:
+        # 单个产物写失败**不吞**（与 `chatview.write` 的多产物取舍不同）：这里只有一个文件，
+        # 吞掉就是「退出码 0、什么都没有」，而索引页正是用户唯一的入口（同 moments_export）。
+        raise errors.MediaOutputError(f"写产物失败：{target}") from exc
+    try:
+        target.chmod(0o600)                   # 尽力而为：权限没收紧不该让产物作废
+    except OSError:
+        pass
+    return ChatIndexResult(out_dir=str(out_root), file=str(target), chats=len(entries))
 
 
 def media_rebuild_refs(account: str | None = None, progress=None) -> int:
