@@ -1072,6 +1072,32 @@ def test_exported_path_image_suffixed_source_stem(tmp_path):
                                file_key="beef").name == "beef_hd.png"
 
 
+def test_exported_path_image_prev_month_is_in_window(tmp_path):
+    """产物可能落在**上月**：写盘用的是源目录的月名（`mon = month_dir.name`），而源目录
+    可能比消息 ts 的月份早一个月 —— 这正是 `resolve_image` 有 ±1 回退的理由。窗口塌成
+    单月，这条就红。"""
+    root = tmp_path / "out"
+    cm = "h" * 32
+    ts = int(datetime.datetime(2026, 9, 15, 12, 0).timestamp())
+    d = root / cm / "image" / media._shift_month(media.month_of(ts), -1)
+    d.mkdir(parents=True)
+    (d / "beef.jpg").write_bytes(b"x")
+    assert media.exported_path(root, chat_md5=cm, kind="image", ts=ts,
+                               file_key="beef") == d / "beef.jpg"
+
+
+def test_exported_path_image_next_month_is_in_window(tmp_path):
+    """另一侧同样在窗口里（`resolve_*` 的窗口是 当月→上月→下月，不是单侧）。"""
+    root = tmp_path / "out"
+    cm = "i" * 32
+    ts = int(datetime.datetime(2026, 9, 15, 12, 0).timestamp())
+    d = root / cm / "image" / media._shift_month(media.month_of(ts), 1)
+    d.mkdir(parents=True)
+    (d / "beef.jpg").write_bytes(b"x")
+    assert media.exported_path(root, chat_md5=cm, kind="image", ts=ts,
+                               file_key="beef") == d / "beef.jpg"
+
+
 def test_exported_path_video_is_mp4_only(tmp_path):
     """video 只认 mp4：同目录里只有 jpg 时必须是 None，不能被当成产物。
 
@@ -1128,6 +1154,19 @@ def test_exported_path_voice_wav_wins_over_slk(tmp_path):
     (d / f"{ts}_7.wav").write_bytes(b"x")
     assert media.exported_path(root, chat_md5="c" * 32, kind="voice", ts=ts,
                                local_id=7).name == f"{ts}_7.wav"
+
+
+def test_exported_path_voice_has_no_month_window(tmp_path):
+    """语音**不**做 ±1：写盘用的就是 `month_of(create_time)`（`_export_voices_from`），
+    与消息 ts 同源（实测 400/400 相等）—— 给它加上窗口就成了「认别的月的产物」。"""
+    root = tmp_path / "out"
+    cm = "j" * 32
+    ts = int(datetime.datetime(2026, 9, 15, 12, 0).timestamp())
+    d = root / cm / "voice" / media._shift_month(media.month_of(ts), -1)
+    d.mkdir(parents=True)
+    (d / f"{ts}_7.wav").write_bytes(b"x")
+    assert media.exported_path(root, chat_md5=cm, kind="voice", ts=ts,
+                               local_id=7) is None
 
 
 def test_exported_path_missing_returns_none(tmp_path):

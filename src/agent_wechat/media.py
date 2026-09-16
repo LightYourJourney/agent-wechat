@@ -445,27 +445,40 @@ def _save(out_root: pathlib.Path, cm: str, kind: str, mon: str,
 _EXPORT_EXTS: tuple[str, ...] = tuple(dict.fromkeys(ext for _, ext in MAGICS))
 
 
+def _month_window(ts: int) -> tuple[str, str, str]:
+    """与 resolve_image / resolve_video 同一窗口、同一顺序（当月 → 上月 → 下月）。
+
+    导出端写的是**源目录**的月名（`mon = month_dir.name`），而源目录可能比消息 ts 的
+    月份早或晚一个月 —— 这正是 resolve_* 那两个 ±1 回退存在的理由。
+    """
+    mon = month_of(ts)
+    return (mon, _shift_month(mon, -1), _shift_month(mon, 1))
+
+
 def exported_path(out_root: pathlib.Path, *, chat_md5: str, kind: str, ts: int,
                   file_key: str | None = None,
                   local_id: int | None = None) -> pathlib.Path | None:
     """已导出产物的路径；没导出过返回 None。**纯探测，不建目录、不写盘。**
 
     布局与 `_dest` 同源：`{out_root}/{chat_md5}/{kind}/{YYYY-MM}/{stem}.{ext}`，
-    而 (stem, ext) 按**写盘方的原样**逐个枚举（导出从不改名：写盘用的就是源文件的 stem），
-    首个命中即返回：
-    - image: `file_key` + `_SUFFIX_PRIORITY`（与 `resolve_image` 同序），扩展名逐个试 `_EXPORT_EXTS`
-    - video: `{K}.mp4` > `{K}_raw.mp4`（真实语料里的变体）> `{K}_thumb.jpg`（无缝体时落的就是它）
-    - voice: stem=f"{ts}_{local_id}"，.wav 优先（pilk 缺失时落的是 .slk）
+    而**月份窗口与候选名都按写盘方的原样**枚举（导出从不改名：写盘用的就是源文件的
+    stem），月份外层、候选内层，首个命中即返回：
+    - image: 月份 `_month_window(ts)`；`file_key` + `_SUFFIX_PRIORITY`（与 `resolve_image` 同序），扩展名逐个试 `_EXPORT_EXTS`
+    - video: 月份 `_month_window(ts)`；`{K}.mp4` > `{K}_raw.mp4`（真实语料里的变体）> `{K}_thumb.jpg`（无缝体时落的就是它）
+    - voice: 月份恒 `month_of(ts)`（写盘用的就是它，与消息 ts 同源，**无 ±1**）；
+      stem=f"{ts}_{local_id}"，.wav 优先（pilk 缺失时落的是 .slk）
 
     参数不全（image 无 file_key / voice 无 local_id）→ None。
     """
     if kind == "voice":
         if local_id is None:
             return None
+        months = (month_of(ts),)          # 语音写盘用的就是 month_of(create_time)，无需 ±1
         cands = [(f"{ts}_{local_id}", "wav"), (f"{ts}_{local_id}", "slk")]
     elif kind == "image":
         if file_key is None:
             return None
+        months = _month_window(ts)
         # 与 resolve_image 的后缀优先级一致：写盘用的是**源文件**的 stem（`_save(..., dat.stem, ...)`），
         # 而源文件可能是 K_hd.dat —— 只探裸 K 会漏掉真正存在的那份产物。
         cands = [(f"{file_key}{suf}", ext)
@@ -473,17 +486,19 @@ def exported_path(out_root: pathlib.Path, *, chat_md5: str, kind: str, ts: int,
     elif kind == "video":
         if file_key is None:
             return None
+        months = _month_window(ts)
         # 与 resolve_video / 视频导出分支一致：mp4 优先，_raw 变体次之，
         # 最后才是同一目录里的 _thumb.jpg（无缝体时导出写下的就是它）。
         cands = [(file_key, "mp4"), (f"{file_key}_raw", "mp4"),
                  (f"{file_key}_thumb", "jpg")]
     else:
         return None
-    d = out_root / chat_md5 / kind / month_of(ts)
-    for stem, ext in cands:
-        p = d / f"{stem}.{ext}"
-        if p.exists():
-            return p
+    for mon in months:                     # 月份外层、候选内层 —— 与 resolve_* 的嵌套顺序一致
+        d = out_root / chat_md5 / kind / mon
+        for stem, ext in cands:
+            p = d / f"{stem}.{ext}"
+            if p.exists():
+                return p
     return None
 
 
