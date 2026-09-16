@@ -17,6 +17,10 @@ from agent_wechat import account, bootstrap, cli, errors, keys, media, reader, s
 # 跨模块复用夹具与 test_usecases 同法：`env` 依赖它**自己模块**里的 module 级 `wechat`。
 from test_reader_export_pipeline import (ACCT, FRIEND, T0, build_shard, drift_tree,  # noqa: F401
                                          enc_db, env, wechat)
+# T8 的 C3 用例走**真实** message_media，要的就是一份只含 messages 的索引：与
+# test_usecases_media_link 同一套夹具（索引 + `_FakeCtx`），抄一份必漂。导入的都是常量、
+# 桩类与 fixture，没有 test_* 名，不会被本模块重复收集。
+from test_usecases_media_link import CM, MON, TS, _FakeCtx, idx  # noqa: F401
 
 
 @pytest.fixture()
@@ -753,3 +757,169 @@ def test_media_export_unwritable_out_dir_is_one_line(captured, tmp_path, monkeyp
     err = capsys.readouterr().err
     assert "输出目录不可用" in err and str(bad) in err
     assert "Traceback" not in err
+
+
+# ---------- T8：media locate（CLI 渲染层；用例层测试在 test_usecases_media_link.py） ----------
+
+def _media_states(*pairs):
+    """(kind, status) → MediaRefState 列表。msg_key 只求唯一，不参与渲染。"""
+    return [usecases.MediaRefState(f"k{i}", i, kind, status, None)
+            for i, (kind, status) in enumerate(pairs)]
+
+
+def _media_result(states=(), counts=None, *, truncated=False, degraded=()):
+    return usecases.MessageMediaResult(
+        chat_id="wxid_x", out_dir="/tmp/m", states=list(states),
+        counts=counts or {"none": 0, "exported": 0, "exportable": 0, "gone": 0},
+        truncated=truncated, degraded=tuple(degraded))
+
+
+def test_media_locate_renders_states_and_counts(capsys, monkeypatch):
+    """逐条 + 汇总都要印出来。替换用例层，不碰真实数据。"""
+    from agent_wechat import usecases
+
+    def _fake(contact, **kw):
+        return usecases.MessageMediaResult(
+            chat_id="wxid_x", out_dir="/tmp/m",
+            states=[usecases.MediaRefState(msg_key="a|b|c|1", ts=1, kind="image",
+                                           status="exported", path="/tmp/m/x.jpg"),
+                    usecases.MediaRefState(msg_key="a|b|c|2", ts=2, kind="voice",
+                                           status="gone", path=None)],
+            counts={"none": 0, "exported": 1, "exportable": 0, "gone": 1})
+    monkeypatch.setattr(usecases, "message_media", _fake)
+    rc = cli.cmd_media_locate(SimpleNamespace(chat="wxid_x", keys=None, months=None,
+                                              limit=200, out=None, account=None))
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "  [exported  ] image 1  /tmp/m/x.jpg" in out
+    assert "  [gone      ] voice 2  " in out
+    assert "汇总：exported=1 exportable=0 gone=1 none=0" in out
+    assert "gone 表示消息引用了媒体但本机找不到" in out
+
+
+def test_media_locate_wires_args_and_defaults(monkeypatch, capsys):
+    """argparse 编组：--keys/--months 逗号拆列表、--limit 默认 200、--out/--account 透传。
+
+    直接调 `cmd_*` 的测试绕开了 argparse，参数名与默认值改错也测不出来（brief 的
+    逐字输出测试就是那样），所以这里必须经 `cli.main` 走一遍真参数表。"""
+    seen: dict = {}
+
+    def fake(contact, **kw):
+        seen.update(kw, contact=contact)
+        return _media_result()
+
+    monkeypatch.setattr(usecases, "message_media", fake)
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["media", "locate", "--chat", "张三", "--keys", "a|b|c|1, a|b|c|2",
+                  "--months", "2026-08,2026-09"])
+    assert ei.value.code == 0
+    assert seen == {"contact": "张三", "keys": ["a|b|c|1", "a|b|c|2"],
+                    "months": ["2026-08", "2026-09"], "limit": 200,
+                    "out_dir": None, "account": None}
+
+
+def test_media_locate_breaks_counts_down_by_kind(monkeypatch, capsys):
+    """按 kind 再拆一次（C2）：池化的四个数字会把「语音几乎全可导出」与「图片视频几乎全
+    gone」加成一个数，读起来像「这个会话的媒体大多没了」，拆开才是实情。
+
+    夹具**必须含两种以上 kind 且状态不同**：只有一种 kind 时拆与不拆印出来一样，这里的
+    断言会恒真。`none` 态没有 kind，只该进「汇总」。"""
+    states = _media_states(("voice", "exportable"), ("voice", "exportable"),
+                           ("image", "gone"), ("video", "gone"), (None, "none"))
+    counts = {"none": 1, "exported": 0, "exportable": 2, "gone": 2}
+    monkeypatch.setattr(usecases, "message_media",
+                        lambda contact, **kw: _media_result(states, counts))
+    assert cli.cmd_media_locate(SimpleNamespace(chat="wxid_x", keys=None, months=None,
+                                                limit=200, out=None, account=None)) == 0
+    out = capsys.readouterr().out
+    assert "汇总：exported=0 exportable=2 gone=2 none=1" in out      # 池化那行仍在：它是总数
+    assert "  按类型 image exported=0 exportable=0 gone=1" in out
+    assert "  按类型 video exported=0 exportable=0 gone=1" in out
+    assert "  按类型 voice exported=0 exportable=2 gone=0" in out
+    # 只有这三个媒体类型：顺序由固定表决定（夹具里 voice 排在最前，印出来仍在最后），
+    # `none` 态不进这一节
+    assert out.count("  按类型 ") == 3
+
+
+def test_media_locate_prints_truncation_notice_only_when_truncated(monkeypatch, capsys):
+    """触顶要印（C1）：没有这行，「就这些」与「我在 --limit 处停了」分不出来，
+    而计数只是答完的这些。未截断时不许有——正常路径不该多一行噪音。"""
+    args = SimpleNamespace(chat="wxid_x", keys=None, months=None, limit=1,
+                           out=None, account=None)
+    gone = _media_states(("image", "gone"))
+    counts = {"none": 0, "exported": 0, "exportable": 0, "gone": 1}
+    monkeypatch.setattr(usecases, "message_media",
+                        lambda contact, **kw: _media_result(gone, counts, truncated=True))
+    assert cli.cmd_media_locate(args) == 0
+    assert "达到 --limit 上限，已提前收手" in capsys.readouterr().out
+
+    monkeypatch.setattr(usecases, "message_media",
+                        lambda contact, **kw: _media_result(gone, counts))
+    assert cli.cmd_media_locate(args) == 0
+    assert "达到 --limit 上限" not in capsys.readouterr().out
+
+
+def test_media_locate_prints_absolute_paths_for_relative_out(tmp_path, monkeypatch, capsys,
+                                                             idx):
+    """`--out media`（相对路径）→ 打印出来的产物根与产物路径必须**绝对**（C3）：CLI 与 MCP
+    的消费方都用不了相对路径，且它是 `cd` 之后才解析的——同一份产物在两次运行里会是两个串。
+
+    这条走**真实** usecases.message_media（只在 `_ctx`/`_con` 处注入夹具的索引）：替身那条
+    路上 out_dir 由替身自己编，绝对化是替身的性质，测不出这里。"""
+    from agent_wechat import paths
+    con, rows = idx
+    real = usecases.message_media
+    monkeypatch.setattr(usecases, "message_media",
+                        lambda contact, **kw: real(contact, _ctx=_FakeCtx(), _con=con, **kw))
+    monkeypatch.setattr(paths, "XWECHAT_FILES", tmp_path / "wx")   # 空微信树：不碰真实数据
+    monkeypatch.chdir(tmp_path)
+    d = tmp_path / "media" / CM / "image" / MON
+    d.mkdir(parents=True)
+    (d / ("c" * 32 + ".jpg")).write_bytes(b"x")                   # rows[3] 的产物已落盘
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["media", "locate", "--chat", "wxid_x", "--keys", rows[3]["msg_key"],
+                  "--out", "media"])
+    assert ei.value.code == 0
+    out = capsys.readouterr().out
+    assert f"产物根 {(tmp_path / 'media').resolve()}" in out
+    assert f"  [exported  ] image {TS}  {(d / ('c' * 32 + '.jpg')).resolve()}" in out
+
+
+def test_media_locate_rejects_bad_months_with_search_input_error(captured, capsys):
+    """`--months 2026-9` → SearchInputError 经 main() 既有翻译：单行中文 + 退出码 1，
+    不是静默 0 命中、exit 0。校验在用例层，CLI 不另写一套（这条走**真实**
+    usecases.message_media，`captured` 只桩掉账号与 reader）。"""
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["media", "locate", "--chat", "张三", "--months", "2026-9"])
+    assert ei.value.code == 1
+    err = capsys.readouterr().err
+    assert "月份格式应为 YYYY-MM" in err and "2026-9" in err
+    assert "Traceback" not in err
+
+
+def test_media_locate_renders_degraded_to_stderr(monkeypatch, capsys):
+    """降级说明走 stderr（spec §7）：成功但有保留，不该污染 stdout——那里是逐条明细与
+    计数，也是管道里机器可读的部分。"""
+    monkeypatch.setattr(usecases, "message_media", lambda contact, **kw: _media_result(
+        _media_states(("voice", "gone")),
+        {"none": 0, "exported": 0, "exportable": 0, "gone": 1},
+        degraded=(usecases.Degradation("msg_media", "message/media_0.db", "VoiceInfo", (),
+                                       "语音库读不到：语音消息一律按「本体不在本机」呈现"),)))
+    assert cli.cmd_media_locate(SimpleNamespace(chat="wxid_x", keys=None, months=None,
+                                                limit=200, out=None, account=None)) == 0
+    out, err = capsys.readouterr()
+    assert "语音库读不到" in err and "VoiceInfo" in err
+    assert "语音库读不到" not in out
+
+
+def test_media_locate_needs_confirm_on_ambiguous_contact(monkeypatch, capsys):
+    """多候选 → stdout 出候选 JSON、退出码 1（与 media export 同形，不猜）。"""
+    monkeypatch.setattr(usecases, "message_media", lambda *a, **k: usecases.NeedConfirm(
+        [usecases.Candidate("wxid_a", "张三01", "friend"),
+         usecases.Candidate("wxid_b", "张三02", "friend")]))
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["media", "locate", "--chat", "张三"])
+    assert ei.value.code == 1
+    out, err = capsys.readouterr()
+    assert [c["username"] for c in json.loads(out)] == ["wxid_a", "wxid_b"]
+    assert "无法唯一解析「张三」" in err

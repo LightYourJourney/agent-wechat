@@ -255,6 +255,52 @@ def cmd_media_rebuild_refs(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_media_locate(args: argparse.Namespace) -> int:
+    """按消息列出媒体归属。与 MCP get_message_media 同一个用例，只是渲染成人类可读。
+
+    `--out` 只参与 `exported` 的判定（要与导出时用的那个一致），本命令不写盘、不联网。
+    """
+    from . import usecases
+    keys = [s.strip() for s in args.keys.split(",") if s.strip()] if args.keys else None
+    months = ([m.strip() for m in args.months.split(",") if m.strip()]
+              if args.months else None)
+    res = usecases.message_media(args.chat, keys=keys, months=months, limit=args.limit,
+                                 out_dir=args.out, account=args.account)
+    if isinstance(res, usecases.NeedConfirm):
+        return _need_confirm(args.chat, res)
+    print(f"会话 {res.chat_id}    产物根 {res.out_dir}")
+    for s in res.states:
+        where = s.path or ""
+        print(f"  [{s.status:10s}] {s.kind or '-':5s} {s.ts}  {where}")
+    c = res.counts
+    print(f"汇总：exported={c['exported']} exportable={c['exportable']} "
+          f"gone={c['gone']} none={c['none']}")
+    # 池化的 counts 把本机可得率相差几个数量级的类别加在一起，看起来像「这个会话的媒体
+    # 大多没了」；按 kind 拆开才看得出语音几乎全可导出、图片视频几乎全 gone（与 MCP 信封
+    # 的 by_kind 同一份理由）。`none` 态没有 kind，只进上面那行汇总。
+    by_kind: dict[str, dict[str, int]] = {}
+    for s in res.states:
+        if s.kind is None:
+            continue
+        bucket = by_kind.setdefault(s.kind, {})
+        bucket[s.status] = bucket.get(s.status, 0) + 1
+    # 固定顺序（不是消息顺序）：两次运行、两次导出的输出可直接 diff
+    for kind in ("image", "video", "voice"):
+        bucket = by_kind.get(kind)
+        if not bucket:
+            continue
+        stats = " ".join(f"{st}={bucket.get(st, 0)}"
+                         for st in ("exported", "exportable", "gone"))
+        print(f"  按类型 {kind:5s} {stats}")
+    if res.truncated:
+        # 没有这行，「就这些」与「我在 --limit 处停了」分不出来：明细与计数只是答完的这些
+        print("（达到 --limit 上限，已提前收手；以上计数只是答完的这些）")
+    if c["gone"]:
+        print("提示：gone 表示消息引用了媒体但本机找不到（未导出，或微信已清理本体）。")
+    _render_degradations(res.degraded)       # stderr：成功但有保留，不污染 stdout（spec §7）
+    return 0
+
+
 def cmd_moments_export(args: argparse.Namespace) -> int:
     """朋友圈导出：默认零网络；--with-media 才下载远程媒体本体。"""
     from . import media, usecases
@@ -477,6 +523,14 @@ def main(argv: list[str] | None = None) -> None:
     msp.add_argument("--limit", type=int, default=2000, help="最多导出文件数（1-2000）")
     msp.add_argument("--account")
     msp.set_defaults(fn=cmd_media_export)
+    msp = media_sub.add_parser("locate", help="按消息列出媒体归属（不写盘、不联网）")
+    msp.add_argument("--chat", required=True, help="会话（名字或 username）")
+    msp.add_argument("--keys", default=None, help="逗号分隔的 msg_key（默认整个会话）")
+    msp.add_argument("--months", default=None, help="逗号分隔的 YYYY-MM")
+    msp.add_argument("--out", default=None, help="产物根（默认 ~/.agent-wechat/media/）")
+    msp.add_argument("--limit", type=int, default=200, help="最多回答几条（1-500）")
+    msp.add_argument("--account")
+    msp.set_defaults(fn=cmd_media_locate)
     msp = media_sub.add_parser("rebuild-refs", help="全量重扫微信库回填 media_refs 索引")
     msp.add_argument("--account")
     msp.set_defaults(fn=cmd_media_rebuild_refs)

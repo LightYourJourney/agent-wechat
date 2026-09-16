@@ -296,6 +296,61 @@ agent-wechat media export --chat 小李
 因此同样需要 passphrase 缓存（先 bootstrap）。Agent 侧对应 MCP 工具 `export_chat_media`
 （见 TOOLS.md §9；rebuild-refs 仅 CLI）。
 
+### media locate（按消息列出媒体归属）
+
+`media export` 是「按会话批量导出」；`media locate` 是反向的按需查询——**某条消息的媒体
+在不在本机、在哪**。它只做路径探测与索引只读查询：不写盘、不联网。
+
+```bash
+agent-wechat media locate --chat 小李
+# 会话 wxid_abc123def456    产物根 /Users/you/.agent-wechat/media
+#   [exported  ] image 1789046525  /Users/you/.agent-wechat/media/<会话md5>/image/2026-09/<md5>.jpg
+#   [gone      ] image 1789045401
+#   [exportable] voice 1789046102
+# 汇总：exported=1 exportable=19 gone=30 none=3
+#   按类型 image exported=1 exportable=0 gone=22
+#   按类型 video exported=0 exportable=0 gone=8
+#   按类型 voice exported=0 exportable=19 gone=0
+# 提示：gone 表示消息引用了媒体但本机找不到（未导出，或微信已清理本体）。
+
+# 只看指定几条：--keys 是 msg_key 的逗号分隔列表（取自 recent / search 的输出）
+agent-wechat media locate --chat 小李 --keys 'wxid_abc123def456|9f2c1a…|message_0.db|81234'
+
+# 限定月份，或调高条数上限（1-500，默认 200）
+agent-wechat media locate --chat 小李 --months 2026-08,2026-09 --limit 500
+```
+
+**四态**（判定顺序严格按此序）：
+
+| 状态 | 含义 |
+|---|---|
+| `none` | 这条消息没有媒体（按消息类型判，不依赖引用表） |
+| `exported` | 产物已在产物根下，行尾给出**绝对路径** |
+| `exportable` | 有媒体、本体还在微信里，但还没导出到产物根 |
+| `gone` | 有媒体，但本机找不到（未导出，或微信已清理本体） |
+
+- **`gone` 是常态，不是错误**：微信只为**近期**消息保留媒体本体，而近期消息往往还没导出
+  进本索引，能对上的极少。实测（2026-09-16）对索引内已有的消息：图片本体兑现率约
+  **0.005%**、视频 **0**；语音相反——本体存在 `media_*.db` 里、微信不清理，**7,390 条
+  100% 有**。所以 **`exportable` 在本机实质上是语音专属状态**，图片与视频几乎一律 `gone`。
+- **`exportable` 不保证视频本体可用**：视频只定位到缩略图时也算 `exportable`——本机只有
+  一张 jpg，`mp4` 本体不在。逐条明细**不区分这一点**（缩略图标志不外露）。
+- **「按类型」那三行要连着「汇总」一起看**：三类的本机可得率相差几个数量级，池化的
+  「汇总」会把「语音几乎全可导出」与「图片视频几乎全 `gone`」加成一个数字，读起来像
+  「这个会话的媒体大多没了」；按 `image`/`video`/`voice` 拆开才是实情。`none` 态没有
+  类型，只进「汇总」。
+- `--out` 要与导出时用的那个一致（默认 `~/.agent-wechat/media`），否则已导出的产物会被
+  判成 `exportable` 而不是 `exported`。
+- `--months` 在 SQL 里筛，所以 `--limit` 卡的是**命中月份**的条数；触顶时多印一行
+  「（达到 --limit 上限，已提前收手；以上计数只是答完的这些）」——此时明细与计数都不是
+  全量，可按 `--months` 分批重跑。
+- 与其它 `media` 子命令一样需要 passphrase 缓存（会话消歧要读 `contact.db`）；`--chat`
+  消歧同形（多命中时候选 JSON 打到 stdout、一行说明打到 stderr、退出码 1）。降级说明
+  （如语音库读不到，此时语音一律按 `gone` 呈现）走 stderr。
+
+Agent 侧对应 MCP 工具 `get_message_media`——同一个用例、同一套四态与 `by_kind`，
+信封见 TOOLS.md §11。
+
 ### purge（销毁本地产物）
 
 ```bash
