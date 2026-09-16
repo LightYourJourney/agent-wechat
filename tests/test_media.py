@@ -900,7 +900,7 @@ def test_export_media_voice_write_error_counts_failed(tmp_path, monkeypatch):
 
 # ---------- Ruling 15：chmod 尽力而为 + out_root 一次 stat 检查 ----------
 
-def test_ensure_tree_chmod_failure_is_best_effort(tmp_path, monkeypatch):
+def test_chmod_failure_is_best_effort(tmp_path, monkeypatch):
     """Ruling 15：chmod 抛 OSError（`--out` 指向不归自己的既有目录）不得逃出 core。
 
     mkdir 对已存在目录是 no-op，能被拒的只有 chmod——权限没收紧只该降级提示，
@@ -918,7 +918,7 @@ def test_ensure_tree_chmod_failure_is_best_effort(tmp_path, monkeypatch):
         return real_chmod(self, mode, **kw)
 
     monkeypatch.setattr(pathlib.Path, "chmod", fake)
-    d = media._ensure_tree(out, "cm", "voice", "2026-09")
+    d = media.ensure_tree(out, "cm", "voice", "2026-09")
     assert d.is_dir() and _mode(d) == 0o700          # 自己能建的照常收紧
     assert _mode(out) != 0o700                       # 收不紧的那级保持原样
 
@@ -1158,7 +1158,7 @@ def test_export_media_voice_broken_shards_are_degraded(tmp_path, monkeypatch):
     assert "passphrase 缓存缺失" in voice_notes[0]
 
 
-# ---------- 终审 Fix 3：_ensure_tree 的 mkdir 不是裸 OSError ----------
+# ---------- 终审 Fix 3：ensure_tree 的 mkdir 不是裸 OSError ----------
 
 def test_export_media_unwritable_out_dir_raises_media_output_error(tmp_path, monkeypatch):
     """输出根建不出来（`--out` 只读 / 不可写 HOME / 磁盘满）→ MediaOutputError。

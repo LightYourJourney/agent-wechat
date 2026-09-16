@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from . import account as acc_mod
-from . import appmsg, errors, export, keys, messages, paths, reader, search, store, tasks, vector
+from . import appmsg, chatview, errors, export, keys, messages, paths, reader, search, store, tasks, vector
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -579,6 +579,147 @@ def message_media(contact: str, *, keys: Sequence[str] | None = None,
                               degraded=tuple(degraded) + collect_degradations(ctx.reader))
 
 
+@dataclass(frozen=True)
+class ChatExportResult:
+    """chat_export 的成功返回（CLI 与 MCP 共用）。
+
+    `out_dir` 是**本会话的媒体树根**（`{--out}/{chat_md5}`，也就是 `view.out_dir`）——
+    产物在它的 `chat/` 子目录里。刻意不回传输出**根**：那需要在这里（或入口层）重算一遍
+    `chat_md5`，正是「两套路径推导」的开端，而两套推导的分歧就是产物里所有媒体引用的
+    静默 404（见 `chatview.write` 的模块注释）。
+    """
+
+    chat_id: str
+    out_dir: str
+    files: tuple[str, ...]          # 真正落盘的产物；写失败的不在列表里
+    counts: dict[str, int]          # kind → 条数
+    truncated: bool
+    unparsed: int
+    rejected: int
+    degraded: tuple[Degradation, ...] = ()
+
+
+def chat_export(contact: str, *, months: list[str] | None = None, limit: int = 500,
+                formats: Sequence[str] = ("html", "md"), out_dir: str | None = None,
+                account: str | None = None) -> ChatExportResult | NeedConfirm:
+    """导出会话为可读时间线（HTML / Markdown）。产物落 `{--out}/{chat_md5}/chat/index.*`。
+
+    `months` 复用 `media.month_bounds` 与同一套校验（格式不符抛 `SearchInputError`，
+    不静默 0 命中）；给多个月份时取月份的**包络** `[min(lo), max(hi))`——
+    `messages_in_range` 只有一对边界，非相邻月份（`2026-08,2026-10`）中间的 9 月也会被带进来，
+    而连续月份（`2026-08,2026-09`，最常见的用法）无缝隙：`month_bounds` 是 `[lo, hi)`、首尾相接。
+    `limit` 封顶的是范围内**最近的** N 条（spec §4.4）。
+    **`--out` 必须与 `media export` 用同一个根**（spec 裁定 13）：媒体是以
+    `../image/…` 的相对引用指向**同级**的既有媒体树，换个根就全是死链。
+
+    标题就是 `chat_id`：本层不再额外问一次显示名（那要走 contact.db，而会话名不是
+    导出内容的一部分；`contacts` / `recent` 各有自己的显示名口径）。
+    """
+    from . import media                       # 惰性：media 顶层拉起 cryptography
+    ctx = ChatContext(account)
+    chat_id = ctx.resolve(contact)
+    if isinstance(chat_id, NeedConfirm):
+        return chat_id
+    bad_months = [m for m in (months or []) if not MONTH_RE.fullmatch(m)]
+    if bad_months:
+        raise errors.SearchInputError(f"月份格式应为 YYYY-MM：{', '.join(bad_months)}")
+    after_ts = before_ts = None
+    if months:
+        bounds = media.month_bounds(months)
+        after_ts = min(lo for lo, _ in bounds)
+        before_ts = max(hi for _, hi in bounds)
+    # 输出根绝对化：`--out 相对路径` 时 `view.out_dir` 是相对的，而媒体状态的路径是绝对的
+    # （`message_media` 自己 resolve 过），`chat_text.media_src` 用 `os.path.relpath` 算
+    # 相对引用时按 **cwd** 展开相对的那一侧 —— 产物的 `<img>` 照常渲染、打不开
+    # （静默 404）。与 `message_media` 同款处理。
+    out_root = (pathlib.Path(out_dir) if out_dir else paths.HOME_DIR / "media").resolve()
+    try:
+        rows, truncated = search.messages_in_range(
+            chat_id, account=ctx.account, after_ts=after_ts, before_ts=before_ts,
+            limit=clamp_limit(limit))
+        keys = [r["msg_key"] for r in rows]
+        with store.open() as con:
+            got = store.msg_parts_by_keys(con, keys)
+            # 「回填过没有」**只能**由表的状态回答：`appmsg rebuild` 只写 msg_parts、不写
+            # messages，join 出来的条数会把「没回填」与「这些消息本来就没有可读内容」混成
+            # 一种（丙 R23 的教训——两者在产物里长得一模一样）。
+            backfilled = store.count_msg_parts(con, ctx.account)
+    except (sqlite3.Error, OSError) as exc:
+        # 裸 sqlite3/OSError 会穿透 core 层（CLI 印 traceback、MCP 落 generic_payload 兜底）。
+        # 索引读不了就是什么都答不了：一个空产物只会把「库坏了」谎报成「这个会话没有消息」。
+        raise errors.IndexUnavailable(
+            f"本地检索库不可用：{errors.redact(str(exc))}",
+            hint="索引库可能损坏；删除 index.db 后重跑 export_full_history 可重建"
+        ) from exc
+
+    # 媒体：直接复用丙的 message_media，`states` 就是 `MediaRefState`。`_ctx=ctx` 复用刚解析
+    # 好的会话（省一次 contact.db 解密），`contact` 仍按原样传（入口签名不变）。
+    # `limit` 跟着 keys 走（message_media 自己封顶 500，所以 keys 超过 500 条时它会只答
+    # 最近的那 500 个 key）——没答到的 key 在产物里与「本来就没有媒体」一模一样，
+    # 故下面按**答回的条数**公告（判据见 degraded 那一段，`truncated` 在 keys 路径上不适用）。
+    mm = message_media(contact, keys=keys, out_dir=str(out_root),
+                       limit=len(keys) or 1, _ctx=ctx)
+    states = {s.msg_key: s for s in mm.states}
+
+    # 会话根：chat_md5 取**行里那个**（`messages.chat_md5` 列就是 Msg_<md5> 表的 md5 部分，
+    # 也是 msg_key 的第二段）；范围内没有消息时回落到 `messages.chat_md5(chat_id)`。
+    chat_md5 = rows[0]["chat_md5"] if rows else messages.chat_md5(chat_id)
+
+    # 四元组的第一、二项（`appmsg_type` / `ref_svrid`）**刻意不用**：它们是 raw_xml 的投影，
+    # 存在的理由是「不必解压就能筛选 / 重解析」，而这里已经把 XML 解开了 —— 用解析结果更权威。
+    parts: dict[str, appmsg.AppMsg] = {}
+    refs: dict[str, str] = {}
+    unparsed = rejected = 0
+    for key, (_appmsg_type, _ref_svrid, ref_key, raw_xml) in got.items():
+        if ref_key:
+            refs[key] = ref_key       # `None` 的不进表：build 靠「在不在表里」判退化
+        try:
+            raw = zlib.decompress(raw_xml).decode("utf-8", "ignore")
+        except zlib.error:
+            # raw_xml 是**别人写进去**的字节（索引库可被手工改动，半拷贝的 WAL 也会落下
+            # 半页），解压失败按「解不开」计数 —— 裸 zlib.error 不得逃出 core 层。
+            unparsed += 1
+            continue
+        res = appmsg.parse(raw)
+        if res.reason == "rejected":
+            rejected += 1             # 我们主动拒绝（DTD / 实体），与「解不开」分开计数
+        elif res.reason is not None:  # 'malformed'
+            unparsed += 1
+        else:
+            parts[key] = res.appmsg
+
+    degraded: list[Degradation] = []
+    if not backfilled:
+        # 与「这些消息本来就没有可读内容」**必须印得不一样**：前者可以补救（跑一次回填），
+        # 后者是数据本身就长这样（丙 R23）。复用 Degradation 信封，不新造并行类型。
+        degraded.append(Degradation(
+            capability="msg_parts", db="index.db", table="msg_parts", missing_columns=(),
+            effect="msg_parts 未回填，appmsg 会显示成 `[appmsg: 标题]`；"
+                   "运行 `agent-wechat appmsg rebuild` 补齐"))
+    if len(states) < len(keys):
+        # 判据是**答回的条数**，不是 `mm.truncated`：keys 路径下 message_media 是「一个 key
+        # 一行」（非媒体消息也在里面、状态为 `none`），于是 `truncated`（= `len(rows) >= lim`）
+        # 在「limit 恰好等于 key 数」时恒为真 —— 照它公告就是每次导出都报一次假警
+        # （真机实测：`--limit 200` 时 states 与 keys 等长，却报「可能被截断」）。
+        # 而「答回得比 keys 少」正是产物里会**静默少一块**的那个条件。
+        degraded.append(Degradation(
+            capability="msg_media", db="index.db", table="messages", missing_columns=(),
+            effect=f"媒体状态只覆盖了 {len(states)}/{len(keys)} 条消息"
+                   "（message_media 的 limit 上限 500）：没覆盖到的消息在产物里不会出现"
+                   "媒体块"))
+
+    view = chatview.build(
+        chat_id, title=chat_id, rows=rows, parts=parts, media=states,
+        out_dir=str(out_root / chat_md5), truncated=truncated, unparsed=unparsed,
+        rejected=rejected,
+        degraded=tuple(degraded) + collect_degradations(ctx.reader), refs=refs)
+    files = chatview.write(view, formats=formats)
+    return ChatExportResult(
+        chat_id=chat_id, out_dir=view.out_dir, files=tuple(str(p) for p in files),
+        counts=view.counts, truncated=truncated, unparsed=unparsed, rejected=rejected,
+        degraded=view.degraded)
+
+
 def media_rebuild_refs(account: str | None = None, progress=None) -> int:
     """全量重扫微信库，只为存量历史回填 media_refs（spec §4.5）。幂等 upsert；
     **不写 messages**（消息内容不变，只有 refs 需要补）。分钟级，同步执行。"""
@@ -782,7 +923,7 @@ def moments_export(contact: str | None = None, *, months: list[str] | None = Non
     cap = clamp_limit(limit, (1, 2000))
     do_fetch = fetch if fetch is not None else sns_media.fetch
 
-    out_root = media._ensure_tree(
+    out_root = media.ensure_tree(
         pathlib.Path(out_dir) if out_dir else paths.HOME_DIR / "moments")
     report = moments.MomentsReport()
     kept: list[moments.SnsPost] = []

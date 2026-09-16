@@ -4,11 +4,12 @@
 `messages` 行 + `msg_parts` + `MediaRefState` 拼一遍，这句话就没有任何东西支撑它
 ——两份互相无法校验的副本。组装只做一次，两个模板只吃 `ChatView`、只吐字符串。
 
-**本模块是纯函数、零 IO、不碰 SQLite。** 三份数据全由调用方喂进来：
-`rows`（`search.messages_in_range` 的普通 dict）、`parts`（已解析的 `AppMsg`）、
-`media`（丙的 `MediaRefState`）。渲染端不查库，模板端不查库——查库只发生在用例层。
-唯一的例外是 `build` 末尾读一次时钟（`time.time()`）填 `generated_at`：那是**读时钟不是 IO**，
-且调用方可以用 `generated_at=` 显式覆盖（测试要确定性时用得上）。
+**`build` 是纯函数、零 IO、不碰 SQLite**（`write` 是本模块唯一的 IO：落盘两份产物）。
+三份数据全由调用方喂进来：`rows`（`search.messages_in_range` 的普通 dict）、
+`parts`（已解析的 `AppMsg`）、`media`（丙的 `MediaRefState`）。渲染端不查库，
+模板端不查库——查库只发生在用例层。唯一的例外是 `build` 末尾读一次时钟（`time.time()`）
+填 `generated_at`：那是**读时钟不是 IO**，且调用方可以用 `generated_at=` 显式覆盖
+（测试要确定性时用得上）。
 
 **必须绕开的一个 import 环**：`ViewMsg.media` / `ChatView.degraded` 的类型分别是
 `usecases.MediaRefState` 与 `usecases.Degradation`（丙的产物），而 `usecases` 要
@@ -24,12 +25,13 @@ HTML `id` 与 URL fragment（`msg_key` 里有 `|` 与 `.`）。`anchor_of` 是�
 from __future__ import annotations
 
 import hashlib
+import pathlib
 import time
 from collections import Counter
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from . import messages
+from . import chat_html, chat_md, errors, messages
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -144,3 +146,46 @@ def build(chat_id: str, *, title: str, rows: Sequence[dict], parts: Mapping[str,
         counts=dict(Counter(m.kind for m in msgs)),
         unparsed=unparsed, rejected=rejected, degraded=degraded, truncated=truncated,
     )
+
+
+# ---------- 落盘 ----------
+
+# 格式 → 渲染器。**两张模板只在这一处配对**：多一处配对就多一处会分叉的真相
+# （与 `chat_text` 收拢措辞同一条理由）。
+FORMATS: tuple[str, ...] = ("html", "md")
+_RENDERERS = {"html": chat_html.render, "md": chat_md.render}
+
+
+def write(view: ChatView, *, formats: Sequence[str] = FORMATS) -> list[pathlib.Path]:
+    """把 `ChatView` 落盘到 `{view.out_dir}/chat/index.{html,md}`（目录逐级 0700、文件 0600）。
+
+    **参数里刻意没有「输出根」**：产物目录完全由 `view.out_dir` 推出（控制器采纳的改法，
+    见 brief Step 5 注 2）。此前设想的是「调用方给 `out_root`、`write` 自己拼
+    `{out_root}/{chat_md5}/chat/`」——那与模板用的 `view.out_dir` 构成**两套路径推导**，
+    而两者的分歧恰好让所有媒体引用**多一级**：`<img>` 照常渲染、**打不开**（静默 404，
+    浏览器与测试都不报错）。只留一份推导，这个坑由构造消失。
+
+    文件名固定 `index.*`，媒体用相对路径 `../image/…` 引用**同级**的既有媒体树
+    —— 因此调用方的 `--out` 必须与 `media export` 用同一个（spec 裁定 13）。
+
+    未知格式抛 `SearchInputError`，**不静默跳过**：少写一个文件与「格式名写错了」在
+    「产物列表短了一截」上长得一模一样。单文件写失败（磁盘满/权限/只读挂载）返回 None
+    并 continue，不进返回列表——由调用方按自己的口径计数（沿用 `media._save` 的形状，
+    裸 `OSError` 不逃出 core）。
+    """
+    from . import media            # 惰性：media 顶层拉起 cryptography（同 usecases 的取舍）
+    root = media.ensure_tree(pathlib.Path(view.out_dir), "chat")
+    out: list[pathlib.Path] = []
+    for fmt in formats:
+        render = _RENDERERS.get(fmt)
+        if render is None:
+            raise errors.SearchInputError(
+                f"未知的导出格式：{fmt}（可用: {', '.join(FORMATS)}）")
+        p = root / f"index.{fmt}"
+        try:
+            p.write_text(render(view), encoding="utf-8")
+            p.chmod(0o600)                 # 产物是聊天原文：除了属主谁也读不到
+        except OSError:
+            continue
+        out.append(p)
+    return out

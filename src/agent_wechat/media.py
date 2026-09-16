@@ -387,8 +387,12 @@ def _chmod_quiet(p: pathlib.Path) -> None:
         pass
 
 
-def _ensure_tree(root: pathlib.Path, *parts: str) -> pathlib.Path:
+def ensure_tree(root: pathlib.Path, *parts: str) -> pathlib.Path:
     """逐级建目录并**逐级 chmod 0700**，返回最终路径（Ruling 11）。
+
+    **公开名**（原 `_ensure_tree`）：同一条「逐级 0700」现在也服务于**非媒体产物**
+    （`chatview.write` 的会话时间线、`moments_export` 的 HTML），复制一份就是第二份真相。
+    名字里的 `MediaOutputError` 因此涵盖非媒体产物——改名会波及既有消费点，不值当（裁定 11）。
 
     `mkdir(parents=True, mode=…)` 只给最后一级套 mode，中间级按 umask 落成 0755；而
     `exist_ok=True` 对**已存在**的目录完全不动权限。本函数的调用点要的是「这条输出路径
@@ -441,7 +445,7 @@ def _dest(out_root: pathlib.Path, cm: str, kind: str, mon: str,
           stem: str, ext: str) -> pathlib.Path:
     """导出终路径（`out_root/cm/kind/mon` 逐级 0700，含已存在的 out_root）。
     与 _save 共用：wxgf 转码要先拿路径才能直写。"""
-    d = _ensure_tree(out_root, cm, kind, mon)
+    d = ensure_tree(out_root, cm, kind, mon)
     return d / f"{stem}.{ext}"
 
 
@@ -533,7 +537,7 @@ def export_media(account: str, chat_ids: list[str], *, kinds: list[str],
     `usecases.media_export` 自己开索引库并传进来；`None` 只留给不走索引的直接调用方（回归网）。
     """
     report = MediaReport()
-    out_root = _ensure_tree(pathlib.Path(out_dir) if out_dir else paths.HOME_DIR / "media")
+    out_root = ensure_tree(pathlib.Path(out_dir) if out_dir else paths.HOME_DIR / "media")
     report.out_dir = str(out_root)
     # 一次 stat 检查（Ruling 15）：chmod 是尽力而为的（见 _chmod_quiet），收紧失败在这里
     # 如实上报——只报一次、带路径，不按文件刷屏。stat 也失败（目录被换掉/没权限）同样算

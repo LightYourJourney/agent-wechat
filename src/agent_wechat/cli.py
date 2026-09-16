@@ -342,6 +342,32 @@ def cmd_moments_export(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_chat_export(args: argparse.Namespace) -> int:
+    """会话时间线导出（HTML / Markdown）。产物路径逐条印出来 —— **印的是真正落盘的那些**，
+    写失败的不会出现在列表里（`chatview.write` 的口径），故「缺少一行」本身就是信号。"""
+    from . import usecases
+    months = ([m.strip() for m in args.months.split(",") if m.strip()]
+              if args.months else None)
+    formats = tuple(f.strip() for f in args.format.split(",") if f.strip())
+    res = usecases.chat_export(args.chat, months=months, limit=args.limit,
+                               formats=formats, out_dir=args.out, account=args.account)
+    if isinstance(res, usecases.NeedConfirm):
+        return _need_confirm(args.chat, res)
+    kinds = "  ".join(f"{k}={v}" for k, v in sorted(res.counts.items()))
+    print(f"会话 {res.chat_id}   {sum(res.counts.values())} 条   {kinds}")
+    if res.truncated:
+        # 触顶只回终端不印产物：用户会以为拿到的是全部（与 media export 同一口径）
+        print("注意：触及 --limit，只导了范围内最近的这些（可能还有更早的没进来）",
+              file=sys.stderr)
+    if res.unparsed or res.rejected:
+        print(f"appmsg：解不开 {res.unparsed} 条，主动拒绝 {res.rejected} 条"
+              "（明细见产物顶部）", file=sys.stderr)
+    for f in res.files:
+        print(f"产物：{f}")
+    _render_degradations(res.degraded)
+    return 0
+
+
 def _human_size(n: int) -> str:
     """十进制单位。spec §3 的表样就是十进制的：5.30 GB / 12 MB / 182 B。
 
@@ -560,6 +586,21 @@ def main(argv: list[str] | None = None) -> None:
     esp.add_argument("--limit", type=int, default=2000, help="最多导出动态数（1-2000）")
     esp.add_argument("--account", help="账号目录名")
     esp.set_defaults(fn=cmd_moments_export)
+
+    sp = sub.add_parser("chat", help="会话时间线导出（HTML / Markdown）")
+    csp = sp.add_subparsers(dest="chat_cmd", required=True)
+    esp = csp.add_parser("export", help="把某会话导成可读时间线（含媒体与引用）")
+    esp.add_argument("--chat", required=True, help="会话（名字或 username）")
+    esp.add_argument("--months", default=None, help="逗号分隔的 YYYY-MM（默认不限）")
+    esp.add_argument("--limit", type=int, default=500,
+                     help="最多导出范围内最近 N 条（默认 500）")
+    esp.add_argument("--format", default="html,md", help="逗号分隔，html / md（默认两者）")
+    # --out 必须与 media export 同根：产物在 {--out}/{chat_md5}/chat/ 下，媒体以相对路径
+    # 引用它**同级**的既有媒体树（{--out}/{chat_md5}/image|voice|video/…）。
+    esp.add_argument("--out", default=None,
+                     help="输出根（默认 $AGENT_WECHAT_HOME/media，与 media export 同根）")
+    esp.add_argument("--account")
+    esp.set_defaults(fn=cmd_chat_export)
 
     sp = sub.add_parser("appmsg", help="appmsg 原始载荷（引用/链接/文件/转账…）")
     asp = sp.add_subparsers(dest="appmsg_cmd", required=True)
