@@ -582,6 +582,30 @@ def message_media(contact: str, *, keys: Sequence[str] | None = None,
                               degraded=tuple(degraded) + collect_degradations(ctx.reader))
 
 
+def _decode_part(raw_xml: bytes) -> tuple["appmsg.AppMsg | None", str]:
+    """解压 + 解析一条 `msg_parts` 载荷 → `(AppMsg | None, 结果)`。
+
+    结果是三者之一：`"ok"` / `"unparsed"`（解压失败或 XML 解不开）/ `"rejected"`（命中危险
+    载荷守卫）。**对任意 bytes 全定义、不抛**：`raw_xml` 是**别人写进去**的字节（索引库可被
+    手工改动，半拷贝的 WAL 会落下半页），裸 `zlib.error` 不得逃出 core 层；而 `appmsg.parse`
+    自己就对任意 `str` 全定义。
+
+    **`chat_export` 与 `message_parts` 共用这一份**（丙 R21：同一个解码两处实现，迟早漂移成
+    「`unparsed` 与 `rejected` 在两个入口口径不同」）。两处都按同一个「解压失败与解不开合
+    计 `unparsed`、主动拒绝单独计 `rejected`」的分工（spec §5）。
+    """
+    try:
+        raw = zlib.decompress(raw_xml).decode("utf-8", "ignore")
+    except zlib.error:
+        return None, "unparsed"
+    res = appmsg.parse(raw)
+    if res.reason == "rejected":
+        return None, "rejected"
+    if res.reason is not None:            # 'malformed'
+        return None, "unparsed"
+    return res.appmsg, "ok"
+
+
 @dataclass(frozen=True)
 class ChatExportResult:
     """chat_export 的成功返回（CLI 与 MCP 共用）。
@@ -695,20 +719,15 @@ def chat_export(contact: str, *, months: list[str] | None = None, limit: int = 5
     for key, (_appmsg_type, _ref_svrid, ref_key, raw_xml) in got.items():
         if ref_key:
             refs[key] = ref_key       # `None` 的不进表：build 靠「在不在表里」判退化
-        try:
-            raw = zlib.decompress(raw_xml).decode("utf-8", "ignore")
-        except zlib.error:
-            # raw_xml 是**别人写进去**的字节（索引库可被手工改动，半拷贝的 WAL 也会落下
-            # 半页），解压失败按「解不开」计数 —— 裸 zlib.error 不得逃出 core 层。
-            unparsed += 1
-            continue
-        res = appmsg.parse(raw)
-        if res.reason == "rejected":
+        # 解压 + 解析是**共用的一份**（`_decode_part`，`message_parts` 用的是同一个）：
+        # 两处各写一遍时，「解压失败算哪一种」这种口径迟早分叉。
+        parsed, outcome = _decode_part(raw_xml)
+        if outcome == "rejected":
             rejected += 1             # 我们主动拒绝（DTD / 实体），与「解不开」分开计数
-        elif res.reason is not None:  # 'malformed'
+        elif outcome == "unparsed":
             unparsed += 1
-        else:
-            parts[key] = res.appmsg
+        elif parsed is not None:
+            parts[key] = parsed
 
     degraded: list[Degradation] = []
     if not backfilled:
@@ -743,6 +762,94 @@ def chat_export(contact: str, *, months: list[str] | None = None, limit: int = 5
         chat_id=chat_id, out_dir=view.out_dir, files=tuple(str(p) for p in files),
         counts=view.counts, truncated=truncated, unparsed=unparsed, rejected=rejected,
         degraded=view.degraded)
+
+
+@dataclass(frozen=True)
+class MessagePart:
+    """一条消息的 appmsg 内容：`msg_key` + **已解析**的 `AppMsg` + 回指目标。
+
+    `appmsg` 给已解析的 `AppMsg`（不是 `msg_parts_by_keys` 的原始四元组）：原始形态
+    （zlib 压缩的 XML）只该在 `store`/用例层出现，入口拿到的必须是能直接渲染的东西。
+    `ref_msg_key` 是回填那一刻的**快照**，解不到为 `None`（不是空串）。
+    """
+
+    msg_key: str
+    appmsg: appmsg.AppMsg
+    ref_msg_key: str | None
+
+
+@dataclass(frozen=True)
+class MessagePartsResult:
+    """`message_parts` 的结果。
+
+    `unparsed` / `rejected` 的**口径与 `chat_export` 逐字同源**（共用 `_decode_part`）：
+    解压失败与 XML 解不开合计 `unparsed`，命中危险载荷守卫计 `rejected`，**两者分开**
+    （spec §5：『我们主动拒绝』与『解不开』是两件事）。
+
+    `backfilled` 是「这个账号回填过没有」这个**事实**，由 `count_msg_parts` 回答
+    （不 join `messages`）。入口靠它把「没回填」与「这些消息本来就没有可读内容」分开——
+    两种「空答案」不许长得一样（丙 R23）。**它只承载事实，不带文案**：具体给用户看什么
+    （MCP 的 `hint` 与 `degraded`）是入口层的渲染决定，同 `search_history` 的 hint。
+    """
+
+    chat_id: str
+    parts: tuple[MessagePart, ...]
+    unparsed: int
+    rejected: int
+    backfilled: bool
+
+
+def message_parts(contact: str, *, keys: Sequence[str],
+                  account: str | None = None) -> MessagePartsResult | NeedConfirm:
+    """消息 → appmsg 结构化内容（spec §4.5 的 `get_message_parts`）。
+
+    `keys` 只答**属于该会话**的：`msg_key = account|chat_md5|shard|local_id`，第二段对不上
+    的一律静默略过——与 `message_media` 的 keys 路径**同一条约定**（那里的注释：`chat_md5`
+    一滤不能少，否则别的会话的内容会被冠上本次解析出的 `chat_id` 报出去）。`msg_parts` 里
+    没有的 key 也不出现在结果里。返回顺序按 `keys`（去重后、保序）。
+
+    **判据**：`parts` 为空**不等于**「这个会话没有 appmsg」——`backfilled=False` 时全部
+    appmsg 都取不到，入口必须把这两件事分开说（丙 R23）。
+
+    索引库读不了抛 `errors.IndexUnavailable`（不是空结果）：一个空 `parts` 只会把「库坏了」
+    谎报成「这些消息没有可读内容」——与 `message_media` 同款翻译。
+    """
+    ctx = ChatContext(account)
+    chat_id = ctx.resolve(contact)
+    if isinstance(chat_id, NeedConfirm):
+        return chat_id
+    prefix = f"{ctx.account}|{messages.chat_md5(chat_id)}|"
+    # 去重保序在**这里**做（与 `message_media` 的 `list(dict.fromkeys(keys))` 同位置）：
+    # 入口只管把逗号串拆成 list，归属过滤与去重是入口策略。
+    wanted = list(dict.fromkeys(k for k in keys if k.startswith(prefix)))
+    try:
+        with store.open() as con:
+            got = store.msg_parts_by_keys(con, wanted)
+            # 「回填过没有」只能由表的状态回答（`count_msg_parts` 不 join messages）：
+            # join 出来的条数会把「未回填」与「本来就没有可读内容」混成一种（丙 R23）。
+            # 存成**布尔**（不是条数）：入口要的是「回填过没有」这一个判断，条数没人用，
+            # 而一个叫 `backfilled` 的 int 字段读起来像布尔、用起来像计数（两边都骗）。
+            backfilled = store.count_msg_parts(con, ctx.account) > 0
+    except (sqlite3.Error, OSError) as exc:
+        raise errors.IndexUnavailable(
+            f"本地检索库不可用：{errors.redact(str(exc))}",
+            hint="索引库可能损坏；删除 index.db 后重跑 export_full_history 可重建"
+        ) from exc
+    out: list[MessagePart] = []
+    unparsed = rejected = 0
+    for key in wanted:
+        row = got.get(key)
+        if row is None:               # 不是 appmsg / 没导出：两种情形在这里不可分
+            continue
+        parsed, outcome = _decode_part(row[3])
+        if outcome == "rejected":
+            rejected += 1
+        elif outcome == "unparsed":
+            unparsed += 1
+        elif parsed is not None:
+            out.append(MessagePart(key, parsed, row[2]))   # 四元组的第三项是 ref_msg_key
+    return MessagePartsResult(chat_id=chat_id, parts=tuple(out), unparsed=unparsed,
+                              rejected=rejected, backfilled=backfilled)
 
 
 @dataclass(frozen=True)

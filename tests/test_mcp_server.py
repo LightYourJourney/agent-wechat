@@ -11,6 +11,7 @@ import pathlib
 import re
 import sqlite3
 import time
+import zlib
 from types import SimpleNamespace
 
 import pytest
@@ -590,9 +591,10 @@ def _parts_fixture(monkeypatch):
     """一次种齐五个 kind（四个具名块各一 + 一个未具名建模的），返回 `(key, foreign)`。
 
     - `key(i)`：本会话（`wxid_friend`）的 msg_key。
-    - `foreign`：**另一个会话**里一条**真实存在**的 appmsg 行——会话过滤那条夹具要有东西
-      可滤才有意义（第一版它只是构造了一个库里没有的 key，于是「删掉过滤」照样全绿，变异
-      实测抓出来的）。
+    - `foreign`：**另一个会话**里一条**真实存在**的 appmsg 行（真的 `upsert` 进去）。
+      **必须真种一行，不能只构造一个「别的会话的 msg_key」**：第一版就是这么写的，而那个 key
+      在库里根本不存在 → 工具过滤不过滤都答不出它 →「删掉会话过滤」那条夹具照样全绿。
+      **变异复验（M5 第一轮）才对出来**：夹具与现实形态不符时，绿是假的。
     第 1 条是**被引用的原文**（无 appmsg 载荷，只有 server_id），让引用那条能解出回指。
     """
     cm = messages.chat_md5("wxid_friend")
@@ -605,6 +607,19 @@ def _parts_fixture(monkeypatch):
     return key, foreign
 
 
+def _seed_raw(monkeypatch, rows, *, account="acct", chat_id="wxid_friend"):
+    """直接往隔离索引库写 `msg_parts` 行（**不走生产路径**）。
+
+    解不开 / 被主动拒绝 / 字节坏掉的行**只能这样造**：`appmsg_rebuild_parts` 不落库解析失败
+    的载荷（它只在成功分支 append）。真机上这类行来自「别人写进去的字节」——索引库被手工
+    改动、半拷贝的 WAL 落下半页（`usecases.chat_export` 的注释记着同一条）。
+    """
+    monkeypatch.setattr(usecases, "ChatContext",
+                        lambda acct=None: _StubCtx(account=account, chat_id=chat_id))
+    with store.open() as con:                      # store.open 退出时提交
+        store.upsert_msg_parts(con, [(k, 49, None, None, blob) for k, blob in rows])
+
+
 def test_get_message_parts_envelope_shape(monkeypatch):
     """信封 = {parts: [...], degraded}，每条十个键、按 keys 顺序、**四个具名块按 kind 择一非空**。
     夹具五个 kind 各一：引用 57 / 链接 5 / 文件 6 / 转账 2000 / 小程序 33（未具名建模）。
@@ -614,7 +629,9 @@ def test_get_message_parts_envelope_shape(monkeypatch):
     key, _foreign = _parts_fixture(monkeypatch)
     res = _call(mcp_server.get_message_parts, contact="张三",
                 keys=",".join(key(i) for i in (2, 3, 4, 5, 6)))
-    assert set(res) == {"parts", "degraded"}          # 已回填：不带 hint（hint 只在未回填时给）
+    # 已回填：不带 hint（hint 只在未回填时给）；解不开/被拒两个计数恒存在（这里都是 0）
+    assert set(res) == {"parts", "unparsed", "rejected", "degraded"}
+    assert (res["unparsed"], res["rejected"]) == (0, 0)
     assert [p["msg_key"] for p in res["parts"]] == [key(i) for i in (2, 3, 4, 5, 6)]
     assert [p["kind"] for p in res["parts"]] == [57, 5, 6, 2000, 33]
     assert [p["kind_name"] for p in res["parts"]] == ["引用", "链接", "文件", "转账", "小程序"]
@@ -672,15 +689,19 @@ def test_get_message_parts_answers_only_this_conversation(monkeypatch):
                 keys=f"{key(2)}, {foreign}, acct|deadbeef|message_0.db|99")
     assert [p["msg_key"] for p in res["parts"]] == [key(2)]
     assert res["degraded"] == []
+    # 已回填：答案非空且**不该**带 hint（hint 不是无条件的装饰）
+    assert "hint" not in res
 
 
 def test_get_message_parts_empty_index_carries_hint(monkeypatch):
     """未回填时信封必须带 hint（并点名 `appmsg rebuild`）：否则那份「parts: []、
     degraded: []」与「这些消息本来就没有可读内容」**逐字节相同**——丙 R23 同一个坑。
 
+    两个通道**分工、不复读**（控制器 F69.2）：`degraded` 说「少了什么」（结构化记录），
+    `hint` 只给**可操作的那一句**。
     这里**不种任何 msg_parts 行**：conftest 的 autouse 闸已把索引库指到 tmp_path 的空库，
-    工具走的是真实的 `store.count_msg_parts`。
-    回归：删掉 hint（或 degraded 那条公告），这条会红。
+    工具走的是真实的 `count_msg_parts`。
+    回归（各一次）：删掉 hint 或那条 degraded 记录 → 红；把两者改回印同一句 → 红（末条断言）。
     """
     monkeypatch.setattr(usecases, "ChatContext",
                         lambda acct=None: _StubCtx(chat_id="wxid_friend"))
@@ -688,10 +709,57 @@ def test_get_message_parts_empty_index_carries_hint(monkeypatch):
                 keys="acct|deadbeef|message_0.db|1")
     assert res["parts"] == []
     assert res["degraded"] == [{"capability": "msg_parts",
-                                "effect": "msg_parts 未回填，取不到任何 appmsg 内容；"
-                                          "运行 `agent-wechat appmsg rebuild` 补齐"}]
+                                "effect": "msg_parts 未回填：引用 / 链接 / 文件 / 转账"
+                                          "一律取不到内容"}]
     assert "agent-wechat appmsg rebuild" in res["hint"]
+    effect = res["degraded"][0]["effect"]
+    assert effect not in res["hint"] and res["hint"] not in effect, \
+        "hint 与 degraded 印了同一句——两个通道要分工，不是复读"
     assert "error" not in res                          # hint 是附加说明，不是错误信封
+
+
+def test_get_message_parts_counts_unparsed_and_rejected_separately(monkeypatch):
+    """「解不开」与「被主动拒绝」**分开计**（形状照 `ChatExportResult` 的 `unparsed` /
+    `rejected`，不新造并行类型），两者也都**不进 `parts`**——不然「解不开」与「本来就没有
+    可读内容」又长成一个样（丙 R23，控制器 F69.3）。
+
+    三条夹具行都是**别人写进去的字节**（见 `_seed_raw`）：XML 解不开、含 DTD（危险载荷守卫）、
+    以及根本不是 zlib 的字节。
+    回归（验收点）：把两个计数并成一个（或让 `except zlib.error` 那一支算进 rejected），
+    这条会红。
+    """
+    key, _foreign = _parts_fixture(monkeypatch)
+    cm = messages.chat_md5("wxid_friend")
+    k = lambda i: messages.row_key("acct", cm, "message_0.db", i)   # noqa: E731
+    _seed_raw(monkeypatch, [
+        (k(7), zlib.compress(b"<msg><unclosed></msg>", 6)),              # XML 解不开
+        (k(8), zlib.compress(b"<!DOCTYPE x [<!ENTITY a 'b'>]><msg/>", 6)),  # 危险载荷
+        (k(9), b"\x00\x01 not-zlib"),                                    # 解压就失败
+    ])
+    res = _call(mcp_server.get_message_parts, contact="张三",
+                keys=f"{key(2)}, {k(7)}, {k(8)}, {k(9)}")
+    assert res["unparsed"] == 2        # 解压失败 + XML 解不开，合计
+    assert res["rejected"] == 1        # 主动拒绝单独计
+    assert [p["msg_key"] for p in res["parts"]] == [key(2)]   # 三条都没进 parts
+    assert res["degraded"] == []       # 回填过（夹具种了行）：不报「未回填」
+
+
+def test_message_parts_usecase_returns_typed_result(monkeypatch):
+    """用例层 `usecases.message_parts` 的结果是**类型化**的：`parts` 里是 `MessagePart`
+    （msg_key + **已解析**的 `AppMsg` + `ref_msg_key`），不是 `msg_parts_by_keys` 的原始四元组；
+    `backfilled` 是「回填过没有」这个**事实**本身，文案与信封渲染全在适配层（F67）。
+
+    放在本文件是因为**夹具在这里**（`_parts_fixture` 走生产路径种库）；它测的是用例层。
+    回归：把 `parts` 换回原始四元组（不解压不解析）、或把 `backfilled` 写成常量 True，
+    这条会红。
+    """
+    key, _foreign = _parts_fixture(monkeypatch)
+    res = usecases.message_parts("张三", keys=[key(2), key(5)])
+    assert isinstance(res, usecases.MessagePartsResult)
+    assert [p.msg_key for p in res.parts] == [key(2), key(5)]
+    assert res.parts[0].appmsg.kind == 57 and res.parts[0].ref_msg_key == key(1)
+    assert res.parts[1].appmsg.transfer.amount_desc == "¥88.00"
+    assert (res.unparsed, res.rejected, res.backfilled) == (0, 0, True)
 
 
 def test_get_message_parts_need_confirm_passthrough(monkeypatch):

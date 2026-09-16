@@ -273,6 +273,30 @@ def test_chat_export_degrades_loudly_when_msg_parts_is_empty(con, chat_env):
     assert any("msg_parts" in c for c in caps), f"未回填必须公告，实际 degraded={caps}"
 
 
+def test_chat_export_counts_unparsed_and_rejected_separately(con, chat_env):
+    """解码收敛到 `usecases._decode_part`（`message_parts` 用的是**同一个**）之后，
+    chat_export 的口径**一字不变**：解压失败与 XML 解不开合计 `unparsed`，命中危险载荷守卫
+    计 `rejected`，两者分开（spec §5）。
+
+    三条载荷都是**别人写进去的字节**（回填路径不落库解析失败的行）：索引库可被手工改动、
+    半拷贝的 WAL 会落下半页——与 `_decode_part` 的注释同源。
+    回归（验收点）：把三分类并成两类（`except zlib.error` 那一支也算 rejected，或两个计数
+    同增），这条会红——**chat_export 一侧的口径闸**，与
+    `tests/test_mcp_server.py::test_get_message_parts_counts_unparsed_and_rejected_separately` 配对。
+    """
+    _seed(con, n=3)
+    store.upsert_msg_parts(con, [
+        ("acct|aaaa|message_0.db|1", 49, None, None,
+         zlib.compress(b"<msg><unclosed></msg>", 6)),                    # XML 解不开
+        ("acct|aaaa|message_0.db|2", 49, None, None,
+         zlib.compress(b"<!DOCTYPE x [<!ENTITY a 'b'>]><msg/>", 6)),     # 危险载荷
+        ("acct|aaaa|message_0.db|3", 49, None, None, b"\x00\x01 not-zlib"),  # 解压就失败
+    ])
+    con.commit()
+    res = usecases.chat_export("wxid_testacct02", out_dir=str(chat_env), account="acct")
+    assert (res.unparsed, res.rejected) == (2, 1)
+
+
 def test_chat_export_reports_no_degradation_once_backfilled(con, chat_env):
     """反向守卫：回填之后同一路径不该再报降级 —— 防「降级公告写成了常量」。"""
     _seed(con)

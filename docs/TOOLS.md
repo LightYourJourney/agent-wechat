@@ -557,7 +557,7 @@
 | 参数 | 类型 | 必填 | 默认 | 说明 |
 |---|---|---|---|---|
 | `contact` | string | **是** | — | username（`wxid_*` / `*@chatroom` / `filehelper`）或展示名（歧义返回 `need_confirm`，形状见 §3；未命中返回 `{"error": "找不到联系人「XXX」，请用 list_contacts 查询"}`）。**`keys` 只答属于该会话的**：别的会话的 key 静默略过 |
-| `keys` | string | **是** | — | 逗号分隔的 `msg_key`（取自 §3 / §6 / §8 返回的 `msg_key` 字段）。msg_parts 里没有的 key（消息没导出、不是 appmsg、载荷解不开或被主动拒绝）**静默略过**——答案里没有某个 key，不等于它不是 appmsg；空串 → `parts: []` |
+| `keys` | string | **是** | — | 逗号分隔的 `msg_key`（取自 §3 / §6 / §8 返回的 `msg_key` 字段）。msg_parts 里没有的 key（消息没导出、不是 appmsg）**静默略过**——答案里没有某个 key，不等于它不是 appmsg。**载荷解不开 / 被主动拒绝的不在此列**：它们进下面的 `unparsed` / `rejected` 计数。空串 → `parts: []` |
 | `account` | string | 否 | null | 同通用约定 |
 
 **成功返回**：
@@ -582,6 +582,8 @@
                     "invalid_time": 1789600000, "is_red_envelope": false },
       "ref_msg_key": null }
   ],
+  "unparsed": 0,
+  "rejected": 0,
   "degraded": []
 }
 ```
@@ -608,9 +610,15 @@
 - `ref_msg_key` 是引用（`kind=57`）的目标，**取的是回填那一刻的快照**：目标消息若后来才导出进
   索引，重跑 `appmsg rebuild`（幂等）即刷新。解不到时是 `null`（**不是空串**）——「解不到」与
   「没有引用」在渲染上同义，被引用的原文一直在 `quote.content` 里。
-- 未回填时 `degraded` 出现 `{"capability": "msg_parts", "effect": "…运行 `agent-wechat
-  appmsg rebuild` 补齐"}`，且信封带 `hint`（与 §11 的「本地索引为空」同一约定：空答案必须
-  自证是哪一种空）。
+- `unparsed` / `rejected` **恒存在**，口径与 §12 `export_chat` 逐字同源（同一份解码）：
+  前者是「解压失败（半拷贝的 WAL / 手工改过的索引库）或 XML 解不开」，后者是「命中危险载荷
+  守卫被主动拒绝（DTD / 实体声明）」。两者**分开计**且都不进 `parts`——`parts` 里少一条时，
+  看这两个数才知道是「解不开」还是「本来就没有可读内容」。
+- 未回填时信封给**两条**、且**分工不复读**：`degraded` 给结构化记录
+  （`capability: "msg_parts"`，`effect` 说清少了什么：「msg_parts 未回填：引用 / 链接 /
+  文件 / 转账一律取不到内容」），`hint` 只给**可操作的那一句**「请先运行 CLI：
+  `agent-wechat appmsg rebuild`」。空答案必须自证是哪一种空（与 §11 的「本地索引为空」
+  同一约定）。
 - 索引库打不开 / 读不了（损坏、半拷贝的 WAL、权限）→ `{"error": "本地检索库不可用：…",
   "hint": "索引库可能损坏；删除 index.db 后重跑 export_full_history 可重建"}`，**不是**一个空
   `parts`——空答案会把「库坏了」谎报成「没有可读内容」。

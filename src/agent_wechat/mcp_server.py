@@ -5,14 +5,12 @@ import asyncio
 import dataclasses
 import functools
 import json
-import sqlite3
-import zlib
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from mcp.server.mcpserver import MCPServer
 
-from . import appmsg, errors, messages, store, usecases
+from . import appmsg, errors, usecases
 
 if TYPE_CHECKING:
     # 仅类型检查期：reader 已由 usecases 间接载入，这里只为让注解可解析
@@ -354,34 +352,20 @@ def export_chat(contact: str, months: str | None = None, limit: int = 500,
                          for d in res.degraded]}
 
 
-def _parse_part(raw_xml: bytes) -> appmsg.AppMsg | None:
-    """解压 + 解析一条 `msg_parts` 载荷；**解不开一律 None，不抛**。
-
-    `raw_xml` 是**别人写进去**的字节（索引库可被手工改动，半拷贝的 WAL 会落下半页），
-    裸 `zlib.error` 不得逃出 core 层；而 `appmsg.parse` 自己就对任意 `str` 全定义。
-    「主动拒绝（DTD/实体）」与「解不开」在这里同归 None —— 两者都不该出现在答案里。
-    """
-    try:
-        raw = zlib.decompress(raw_xml).decode("utf-8", "ignore")
-    except zlib.error:
-        return None
-    return appmsg.parse(raw).appmsg
-
-
 @server.tool()
 @_guard
 def get_message_parts(contact: str, keys: str, account: str | None = None) -> dict:
     """取消息的 appmsg 结构化内容：引用 / 链接 / 文件 / 转账 / 其余类型。
 
     **需先运行 `agent-wechat appmsg rebuild`**（CLI）：内容读的是本地检索库的
-    `msg_parts` 表。未回填时每个 key 都答不出东西，信封另带 `hint` 与 `degraded`
-    说明——**别把「没回填」当成「这条消息本来就没有可读内容」**（两者都是空 parts）。
+    `msg_parts` 表。未回填时每个 key 都答不出东西，信封另带 `hint`（可操作的那一句）与
+    `degraded`（结构化记录）——**别把「没回填」当成「这条消息本来就没有可读内容」**
+    （两者都是空 parts，只靠这两个键区分）。
 
     keys 为逗号分隔的 msg_key（取自 get_recent_messages / search_history / semantic_search
     返回的 msg_key 字段），只答**属于 contact 那个会话**的 key：别的会话的 key、以及
-    msg_parts 里没有的 key（消息没导出、不是 appmsg、载荷解不开或被主动拒绝）都静默略过
-    ——答案里没有某个 key，不等于它不是 appmsg。contact 歧义返回 need_confirm，未命中
-    返回 error。
+    msg_parts 里没有的 key（消息没导出、不是 appmsg）都静默略过——答案里没有某个 key，
+    不等于它不是 appmsg。contact 歧义返回 need_confirm，未命中返回 error。
 
     每条含 kind（数字 type）与 kind_name（中文名，含义未确认的类型回落成 `appmsg:<type>`，
     不猜）；fields 是 [[点分路径, 值], …]（未具名建模的叶子字段、文档序，密钥/凭据类已在
@@ -389,64 +373,43 @@ def get_message_parts(contact: str, keys: str, account: str | None = None) -> di
     null；ref_msg_key 是引用目标（回填那一刻的快照，解不到为 null——目标后来才导出时
     重跑 `appmsg rebuild` 即刷新）。
 
+    顶层另有 `unparsed` / `rejected` 两个计数（口径与 export_chat 逐字同源）：
+    「解压失败或 XML 解不开」与「命中危险载荷守卫被主动拒绝」**分开计**，两者都不进
+    parts——答案里少一条时，看这两个数才知道是「解不开」还是「本来就没有可读内容」。
+
     转账（type 2000）的金额、备注、双方用户名与交易号**照实返回**（用户 2026-09-16 裁定：
     与 search_history 已在信封返回正文一致，不为转账单开例外）——这些内容会离开本机，
     见 SECURITY.md。
     """
-    ctx = usecases.ChatContext(account)
-    chat_id = ctx.resolve(contact)
-    if isinstance(chat_id, usecases.NeedConfirm):
-        return _need_confirm(chat_id)
-    # 会话归属由 msg_key 的第二段判定（`account|chat_md5|shard|local_id`）：与
-    # `message_media` 的 keys 路径同一条约定，不加这道过滤就会把别的会话的内容
-    # 冠上本次解析出的 chat_id 报出去。
-    prefix = f"{ctx.account}|{messages.chat_md5(chat_id)}|"
-    # 去重去空、保序：同一条 key 给两遍只答一条（与 message_media 的 keys 路径同口径）。
-    wanted = list(dict.fromkeys(k.strip() for k in keys.split(",") if k.strip()))
-    try:
-        with store.open() as con:
-            got = store.msg_parts_by_keys(con, [k for k in wanted if k.startswith(prefix)])
-            # 「回填过没有」**只能**由表的状态回答（`count_msg_parts` 不 join messages）：
-            # join 出来的条数会把「未回填」与「这些消息本来就没有可读内容」混成一种——两者
-            # 在信封里长得一模一样（丙 R23 的教训，chat_export 用的是同一个判据）。
-            backfilled = store.count_msg_parts(con, ctx.account)
-    except (sqlite3.Error, OSError) as exc:
-        # 索引读不了就是什么都答不了：一个空 parts 只会把「库坏了」谎报成「没有可读内容」。
-        raise errors.IndexUnavailable(
-            f"本地检索库不可用：{errors.redact(str(exc))}",
-            hint="索引库可能损坏；删除 index.db 后重跑 export_full_history 可重建"
-        ) from exc
-    parts = []
-    for key in wanted:
-        row = got.get(key)
-        if row is None:
-            continue
-        parsed = _parse_part(row[3])
-        if parsed is None:
-            continue
-        parts.append({
-            "msg_key": key, "kind": parsed.kind,
-            "kind_name": appmsg.kind_name(parsed.kind), "title": parsed.title,
-            # tuple 在 JSON 里会变成 list，这里直接给 list：文档化的形态就是 [[路径, 值], …]
-            "fields": [[path, value] for path, value in parsed.fields],
-            "quote": dataclasses.asdict(parsed.quote) if parsed.quote else None,
-            "link": dataclasses.asdict(parsed.link) if parsed.link else None,
-            "file": dataclasses.asdict(parsed.file) if parsed.file else None,
-            "transfer": dataclasses.asdict(parsed.transfer) if parsed.transfer else None,
-            "ref_msg_key": row[2]})
-    payload: dict[str, Any] = {"parts": parts, "degraded": []}
-    if not backfilled:
-        # 与「这些消息本来就没有可读内容」**必须印得不一样**（两者都是 parts: []）：复用
-        # Degradation 信封、capability 与 chat_export 的同一条降级同名（同一件事一个名字），
-        # 但 effect 不同——那边讲的是产物里会看到什么（`[appmsg: 标题]`），这里没有产物。
+    res = usecases.message_parts(
+        contact, keys=[k.strip() for k in keys.split(",") if k.strip()], account=account)
+    if isinstance(res, usecases.NeedConfirm):
+        return _need_confirm(res)
+    payload: dict[str, Any] = {
+        "parts": [{"msg_key": p.msg_key, "kind": p.appmsg.kind,
+                   "kind_name": appmsg.kind_name(p.appmsg.kind), "title": p.appmsg.title,
+                   # tuple 在 JSON 里会变成 list：这里直接给 list，文档形态就是 [[路径, 值], …]
+                   "fields": [[path, value] for path, value in p.appmsg.fields],
+                   "quote": dataclasses.asdict(p.appmsg.quote) if p.appmsg.quote else None,
+                   "link": dataclasses.asdict(p.appmsg.link) if p.appmsg.link else None,
+                   "file": dataclasses.asdict(p.appmsg.file) if p.appmsg.file else None,
+                   "transfer": (dataclasses.asdict(p.appmsg.transfer)
+                                if p.appmsg.transfer else None),
+                   "ref_msg_key": p.ref_msg_key}
+                  for p in res.parts],
+        "unparsed": res.unparsed, "rejected": res.rejected, "degraded": []}
+    if not res.backfilled:
+        # 两个通道**分工不重复**（控制器 F69.2）：degraded 只说「少了什么」（结构化记录），
+        # 可操作的那一句在 hint 里。同一句话印两遍对读的人只是噪声。
+        # capability 与 chat_export 的同一条降级同名，但 effect 不同——那边的文案讲的是
+        # 产物里会看到什么（`[appmsg: 标题]`），这个工具没有产物。
         payload["degraded"].append({
             "capability": "msg_parts",
-            "effect": "msg_parts 未回填，取不到任何 appmsg 内容；"
-                      "运行 `agent-wechat appmsg rebuild` 补齐"})
-    if not parts and not backfilled:
+            "effect": "msg_parts 未回填：引用 / 链接 / 文件 / 转账一律取不到内容"})
+    if not res.parts and not res.backfilled:
         # 与 get_message_media 的「索引为空」同一个道理（文案是 MCP 专属渲染，故留在这里）：
-        # `not parts` 是**便宜的前置条件**——非空答案不必再去开一次索引库。
-        payload["hint"] = "msg_parts 未回填：请先运行 `agent-wechat appmsg rebuild`"
+        # `not res.parts` 是**便宜的前置条件**——非空答案不必再去问一次回填状态。
+        payload["hint"] = "请先运行 CLI：agent-wechat appmsg rebuild"
     return payload
 
 
