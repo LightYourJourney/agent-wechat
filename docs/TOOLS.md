@@ -328,13 +328,26 @@
   不是错误。
 - 计数口径：`image.failed` = 解密/未知格式/落盘失败数；`voice.raw_only` = pilk 缺失时
   导出的原始 `.slk` 数；`video.thumb` = 本体不在、回退缩略图的数量；
-  `video.missing` = 本体/缩略图在但读不了或写不出来。`image.missing` **当前恒为 0**——
-  图片导出直接扫磁盘目录，不按消息逐条清点；该键为将来 `media_refs` 驱动的按消息导出预留。
+  **`video.missing` 现在还会数「有视频消息、但本机既没有本体也没有缩略图」**（此外仍是
+  文件在磁盘上却读不了/写不出来的那些）——微信只为**近期**消息保留本体，本机实测
+  4,626 条视频消息只剩 30 个文件，所以**几千的 `video.missing` 是如实回答，不是故障**；
+  判断是不是故障，看 `video.ok` / `video.thumb` 是否意外为 0。`image.missing` **当前恒为
+  0**——图片导出直接扫磁盘目录，不按消息逐条清点；该键为将来 `media_refs` 驱动的按消息
+  导出预留。
 - `kinds` 传空串（或全是逗号/空白）表示**不导任何类型**：不报错，成功返回且三类计数全为 0
   （只有 0700 权限等环境类 `degraded` 可能非空）。想导出全部请显式给 `image,voice,video`。
 - `degraded` 键**恒存在**（与 §3 同一惯例：降级不是错误），但此处每项是**中文字符串**
-  （图片密钥推导失败、pilk 缺失、wxgf 未转 JPEG、输出目录权限未收紧等），不是
-  `{capability, effect}`。图片密钥问题不影响语音/视频导出。
+  （图片密钥推导失败、pilk 缺失、wxgf 未转 JPEG、输出目录权限未收紧、视频索引相关等），
+  不是 `{capability, effect}`。图片密钥问题不影响语音/视频导出。
+- **视频是唯一依赖索引的类型，因此多出四种降级说明**（措辞已指明该做什么，别混成一件事）：
+  1. 该账号一条视频引用都没有 → 索引建立在 `media_refs` 之前 → 跑 `media rebuild-refs` 补齐引用；
+  2. 请求的会话在索引里没有视频引用（该账号其它会话有，说明索引可用）→ 这些会话确实没有
+     视频消息，**无需修复**；
+  3. 请求的会话**有**引用、但它们的**消息**不在索引里 → 只有**导出这些会话的历史**有效
+     （`export_full_history` / CLI `export` 同时写消息与引用；`media rebuild-refs` **只写引用、
+     不写消息**，对这种索引永远修不好）；
+  4. 索引库打不开或读不了（如损坏）→ **本次不导视频**，其余类型照常——**不会**退回旧的
+     账号级枚举：那会把账号视频树里的**全部**文件写进本次请求的会话目录（错归属比缺归属更坏）。
 - `truncated=true` 表示触及 `limit` 提前收手，结果不完整——可按 `months` 分批重跑补齐。
 - 存量历史回填（`media rebuild-refs`）是一次性运维动作，仅提供 CLI（见 USAGE.md），
   MCP 侧无对应工具。
@@ -424,11 +437,12 @@
 {
   "chat_id": "wxid_abc123def456",
   "out_dir": "/Users/you/.agent-wechat/media",
-  "counts": { "none": 3, "exported": 0, "exportable": 19, "gone": 31 },
-  "by_kind": { "voice": { "exportable": 19 }, "image": { "gone": 23 }, "video": { "gone": 8 } },
+  "counts": { "none": 3, "exported": 1, "exportable": 19, "gone": 30 },
+  "by_kind": { "voice": { "exportable": 19 }, "image": { "exported": 1, "gone": 22 },
+               "video": { "gone": 8 } },
   "truncated": false,
   "messages": [
-    { "msg_key": "wxid_abc123def456|9f2c1a…|message_0.db|81234", "time": 1789046525,
+    { "msg_key": "wxid_abc123def456|9f2c1a…|message_0.db|81234", "time": 1789046102,
       "kind": "voice", "status": "exportable", "path": null }
   ],
   "degraded": []

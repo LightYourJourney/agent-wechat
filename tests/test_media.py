@@ -346,6 +346,8 @@ def test_unreadable_sample_raises_media_key_error(tmp_path, monkeypatch):
 def test_export_media_multi_chat_skips_video(tmp_path, monkeypatch):
     """Ruling 8：`msg/video/{月}` 没有会话维度——多会话调用无从归属，跳过 + degraded。
 
+    只对 `con=None` 这条**账号级枚举**路成立（生产入口只在索引打不开时走到它）；给了 `con`
+    时视频按 `media_refs` 逐条归属、任意会话数都能导（见下方 test_video_export_* 系列）。
     按会话循环会把同一批文件重复写进 N 个目录、`video.ok`/`produced`（进而 max_files 口径）
     翻 N 倍；单会话路径由 test_export_media_images_and_videos 的 ok==1/thumb==1 守住。
     """
