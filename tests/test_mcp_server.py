@@ -356,6 +356,7 @@ def test_get_message_media_envelope_shape(monkeypatch):
                                            ts=1, kind="image", status="exported",
                                            path="/tmp/m/x.jpg")],
             counts={"none": 0, "exported": 1, "exportable": 0, "gone": 0},
+            by_kind={"image": {"exported": 1}},      # 推导已归用例层：夹具自己给
             degraded=())
     monkeypatch.setattr(usecases, "message_media", _fake)
     res = mcp_server.get_message_media(contact="张三")
@@ -385,6 +386,8 @@ def test_get_message_media_by_kind_breakdown(monkeypatch):
                     _state("k3", "image", "gone"), _state("k4", "image", "exported"),
                     _state("k5", "video", "gone"), _state("k6", None, "none")],
             counts={"none": 1, "exported": 1, "exportable": 2, "gone": 2},
+            by_kind={"voice": {"exportable": 2}, "image": {"gone": 1, "exported": 1},
+                     "video": {"gone": 1}},          # 推导已归用例层：夹具自己给
             truncated=True, degraded=())
     monkeypatch.setattr(usecases, "message_media", _fake)
     res = mcp_server.get_message_media(contact="张三")

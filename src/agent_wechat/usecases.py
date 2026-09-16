@@ -374,6 +374,10 @@ class MessageMediaResult:
     out_dir: str
     states: list[MediaRefState]
     counts: dict[str, int]
+    # 按 kind 再拆一次 counts。**由本层派生、两个入口共用**：此前 MCP 与 CLI 各派生一份
+    # 逐字相同的代码，而两份文档承诺两边暴露同一套 by_kind——改动一侧就会静默分歧。
+    # 默认空 dict 只为让不关心拆分的构造点（测试夹具）不必写它；生产路径恒被填。
+    by_kind: dict[str, dict[str, int]] = dataclasses.field(default_factory=dict)
     truncated: bool = False    # limit 截断了答案：与 media.MediaReport.truncated 同义
     degraded: tuple[Degradation, ...] = ()
 
@@ -506,12 +510,22 @@ def message_media(contact: str, *, keys: Sequence[str] | None = None,
     counts = {"none": 0, "exported": 0, "exportable": 0, "gone": 0}
     for s in states:
         counts[s.status] += 1
+    # 池化的 counts 把本机可得率相差几个数量级的类别加在一起（语音几乎全可导出、图片视频
+    # 几乎全 gone），读起来像「这个会话的媒体大多没了」；按 kind 拆开才是实情。`none` 态
+    # 没有 kind，只进池化的 counts——**这一份拆分是两个入口唯一的真相**。
+    by_kind: dict[str, dict[str, int]] = {}
+    for s in states:
+        if s.kind is None:
+            continue
+        bucket = by_kind.setdefault(s.kind, {})
+        bucket[s.status] = bucket.get(s.status, 0) + 1
     # 走 `collect_degradations(ctx.reader)` 而不是 `ctx.degradations()`：后者是 search/
     # semantic 的**信封形状**出口（dict），而本结果类型的元素是 `Degradation`（同
     # recent_messages 的口径，转换归入口层）。reader 在这行之前必然已构造——`ctx.resolve`
     # 走的就是它——所以这里不会为报降级白读一次库（那正是 ctx.degradations 的顾虑）。
     return MessageMediaResult(chat_id=chat_id, out_dir=str(out_root),
-                              states=states, counts=counts, truncated=truncated,
+                              states=states, counts=counts, by_kind=by_kind,
+                              truncated=truncated,
                               degraded=tuple(degraded) + collect_degradations(ctx.reader))
 
 

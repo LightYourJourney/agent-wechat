@@ -242,14 +242,10 @@ def get_message_media(contact: str, keys: str | None = None, months: str | None 
         limit=limit, out_dir=out_dir, account=account)
     if isinstance(res, usecases.NeedConfirm):
         return _need_confirm(res)
-    by_kind: dict[str, dict[str, int]] = {}
-    for s in res.states:
-        if s.kind is None:            # 'none' 态没有 kind，只进池化的 counts
-            continue
-        bucket = by_kind.setdefault(s.kind, {})
-        bucket[s.status] = bucket.get(s.status, 0) + 1
+    # by_kind 由用例层从 states 派生（cli.py 读的是同一份）：两个入口逐字重复过这段推导，
+    # 而 TOOLS.md / USAGE.md 承诺两边暴露同一套 by_kind。
     return {"chat_id": res.chat_id, "out_dir": res.out_dir,
-            "counts": res.counts, "by_kind": by_kind, "truncated": res.truncated,
+            "counts": res.counts, "by_kind": res.by_kind, "truncated": res.truncated,
             "messages": [{"msg_key": s.msg_key, "time": s.ts, "kind": s.kind,
                           "status": s.status, "path": s.path} for s in res.states],
             "degraded": [{"capability": d.capability, "effect": d.effect}

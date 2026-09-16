@@ -276,17 +276,11 @@ def cmd_media_locate(args: argparse.Namespace) -> int:
     print(f"汇总：exported={c['exported']} exportable={c['exportable']} "
           f"gone={c['gone']} none={c['none']}")
     # 池化的 counts 把本机可得率相差几个数量级的类别加在一起，看起来像「这个会话的媒体
-    # 大多没了」；按 kind 拆开才看得出语音几乎全可导出、图片视频几乎全 gone（与 MCP 信封
-    # 的 by_kind 同一份理由）。`none` 态没有 kind，只进上面那行汇总。
-    by_kind: dict[str, dict[str, int]] = {}
-    for s in res.states:
-        if s.kind is None:
-            continue
-        bucket = by_kind.setdefault(s.kind, {})
-        bucket[s.status] = bucket.get(s.status, 0) + 1
+    # 大多没了」；按 kind 拆开才看得出语音几乎全可导出、图片视频几乎全 gone。拆分由用例层
+    # 派生（MCP 信封的 by_kind 读的就是同一份），`none` 态没有 kind，只进上面那行汇总。
     # 固定顺序（不是消息顺序）：两次运行、两次导出的输出可直接 diff
     for kind in ("image", "video", "voice"):
-        bucket = by_kind.get(kind)
+        bucket = res.by_kind.get(kind)
         if not bucket:
             continue
         stats = " ".join(f"{st}={bucket.get(st, 0)}"

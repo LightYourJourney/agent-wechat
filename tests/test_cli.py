@@ -767,11 +767,13 @@ def _media_states(*pairs):
             for i, (kind, status) in enumerate(pairs)]
 
 
-def _media_result(states=(), counts=None, *, truncated=False, degraded=()):
+def _media_result(states=(), counts=None, *, by_kind=None, truncated=False, degraded=()):
+    # by_kind 由用例层从 states 派生（推导的测试在 test_usecases_media_link.py），所以
+    # 渲染层的夹具必须自己给：不给就是空，按类型那几行会静默消失。
     return usecases.MessageMediaResult(
         chat_id="wxid_x", out_dir="/tmp/m", states=list(states),
         counts=counts or {"none": 0, "exported": 0, "exportable": 0, "gone": 0},
-        truncated=truncated, degraded=tuple(degraded))
+        by_kind=by_kind or {}, truncated=truncated, degraded=tuple(degraded))
 
 
 def test_media_locate_renders_states_and_counts(capsys, monkeypatch):
@@ -827,8 +829,9 @@ def test_media_locate_breaks_counts_down_by_kind(monkeypatch, capsys):
     states = _media_states(("voice", "exportable"), ("voice", "exportable"),
                            ("image", "gone"), ("video", "gone"), (None, "none"))
     counts = {"none": 1, "exported": 0, "exportable": 2, "gone": 2}
+    by_kind = {"voice": {"exportable": 2}, "image": {"gone": 1}, "video": {"gone": 1}}
     monkeypatch.setattr(usecases, "message_media",
-                        lambda contact, **kw: _media_result(states, counts))
+                        lambda contact, **kw: _media_result(states, counts, by_kind=by_kind))
     assert cli.cmd_media_locate(SimpleNamespace(chat="wxid_x", keys=None, months=None,
                                                 limit=200, out=None, account=None)) == 0
     out = capsys.readouterr().out

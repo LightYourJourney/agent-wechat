@@ -114,6 +114,40 @@ def test_four_states_are_all_reachable(tmp_path, monkeypatch, idx):
     assert res.counts == {"none": 1, "exported": 1, "exportable": 2, "gone": 2}
 
 
+def test_by_kind_breakdown_excludes_none_state(tmp_path, monkeypatch, idx):
+    """**by_kind 由本层派生**（MCP 信封与 CLI 那几行读的是同一份）。
+
+    这条是唯一能钉住推导的断言：两个适配层各自的测试都只把 by_kind 喂进渲染/信封，
+    推错了它们照样绿。夹具沿用四条状态全可达的那套（image 三种状态 + voice 两种 +
+    一条 none 态）：只有一种 kind、或没有 none 态时，下面两条断言都会恒真。
+    `none` 态没有 kind，只该进池化的 counts。
+    """
+    con, rows = idx
+    out_root = tmp_path / "media"
+    d = out_root / CM / "image" / MON
+    d.mkdir(parents=True)
+    (d / ("c" * 32 + ".jpg")).write_bytes(b"x")           # 4 号：已导出
+    wx = tmp_path / "wx"
+    monkeypatch.setattr(paths, "XWECHAT_FILES", wx)
+    img = wx / ACCT / "msg/attach" / CM / MON / "Img"
+    img.mkdir(parents=True)
+    (img / ("b" * 32 + ".dat")).write_bytes(b"x")         # 3 号：本体在，未导出
+    monkeypatch.setattr(usecases, "_voice_keys_for",
+                        lambda acct: frozenset({(CM, 5)}))   # 5 号语音有本体
+
+    res = usecases.message_media(
+        "wxid_x", keys=[r["msg_key"] for r in rows],
+        out_dir=str(out_root), account=ACCT, _ctx=_FakeCtx(), _con=con)
+    assert res.by_kind == {"image": {"exported": 1, "exportable": 1, "gone": 1},
+                           "voice": {"exportable": 1, "gone": 1}}
+    # kind=None 混进桶里会多出一个 None 键（'none' 态本来只该进池化的 counts）
+    assert None not in res.by_kind
+    # 桶里恰好是 counts 的三态之和：没有状态被漏掉，也没有状态被算两次
+    assert sum(sum(b.values()) for b in res.by_kind.values()) == (
+        res.counts["exported"] + res.counts["exportable"] + res.counts["gone"])
+    assert res.counts["none"] == 1                        # 夹具自证：确实有一条 none 态
+
+
 def test_voice_keys_none_degrades_not_lies(tmp_path, monkeypatch, idx):
     """语音库读不到时必须出 degraded，且语音不得被判成 exportable。"""
     con, rows = idx
