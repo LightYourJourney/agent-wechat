@@ -12,6 +12,7 @@
 """
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import hashlib
 import pathlib
@@ -21,9 +22,11 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from . import account as acc_mod
-from . import errors, export, keys, paths, reader, search, store, tasks, vector
+from . import errors, export, keys, messages, paths, reader, search, store, tasks, vector
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     # 仅类型检查期：media 顶层拉起 cryptography，运行时在 media_export 内惰性 import
     from . import media
 
@@ -336,6 +339,180 @@ def media_export(contact: str, *, kinds: list[str], months: list[str] | None = N
     report = media.export_media(ctx.account, [chat_id], kinds=kinds, months=months,
                                 out_dir=out_dir, max_files=clamp_limit(limit, (1, 2000)))
     return MediaExportResult(chat_id=chat_id, out_dir=report.out_dir, report=report)
+
+
+LIMIT_MEDIA = (1, 500)
+
+_VOICE_TYPE = messages.TYPE_VOICE
+_MEDIA_TYPES = (messages.TYPE_IMAGE, messages.TYPE_VIDEO, messages.TYPE_VOICE)
+
+
+def _voice_keys_for(account: str) -> frozenset[tuple[str, int]] | None:
+    """语音本体存在集合。**测试接缝**：替换它以免测试真去开 media_*.db。
+
+    写成函数而不是 `_voice_keys_for = media.voice_body_keys`：本模块顶层不 import media
+    （顶层会拉起 cryptography，见文件头部的 TYPE_CHECKING 注释），模块级取属性会在
+    import 期就 NameError。生产路径上就是 `media.voice_body_keys`。
+    """
+    from . import media
+    return media.voice_body_keys(account)
+
+
+@dataclass(frozen=True)
+class MediaRefState:
+    """一条消息的媒体状态。`kind` 为 None 只在 status='none' 时出现。"""
+    msg_key: str
+    ts: int
+    kind: str | None
+    status: str                # 'none' | 'exported' | 'exportable' | 'gone'
+    path: str | None           # 仅 'exported'：产物绝对路径
+
+
+@dataclass(frozen=True)
+class MessageMediaResult:
+    chat_id: str
+    out_dir: str
+    states: list[MediaRefState]
+    counts: dict[str, int]
+    truncated: bool = False    # limit 截断了答案：与 media.MediaReport.truncated 同义
+    degraded: tuple[Degradation, ...] = ()
+
+
+_KIND_OF_TYPE = {messages.TYPE_IMAGE: "image",
+                 messages.TYPE_VIDEO: "video",
+                 messages.TYPE_VOICE: "voice"}
+
+
+def _state_of(row: dict, ref: tuple[str, str | None] | None, *,
+              out_root: pathlib.Path, account: str,
+              voice_keys: frozenset | None) -> MediaRefState:
+    """单条消息的四态判定。顺序严格按 spec §4.1：none → exported → exportable → gone。"""
+    from . import media                       # 惰性：media 顶层拉起 cryptography
+    # none 只由 msg_type 判（索引内实测有 259 条媒体消息拿不到 ref）：ref 只提供 file_key
+    kind = _KIND_OF_TYPE.get(row["msg_type"])
+    if kind is None:
+        return MediaRefState(row["msg_key"], row["ts"], None, "none", None)
+    file_key = ref[1] if ref else None
+    local_id = row["local_id"]
+    p = media.exported_path(out_root, chat_md5=row["chat_md5"], kind=kind,
+                            ts=row["ts"], file_key=file_key, local_id=local_id)
+    if p is not None:
+        return MediaRefState(row["msg_key"], row["ts"], kind, "exported", str(p))
+    if kind == "voice":
+        # 语音库读不到（None）时不能当成空集合：那会把「读不到」谎报成「本机没有」
+        present = voice_keys is not None and (row["chat_md5"], local_id) in voice_keys
+    elif kind == "image":
+        present = file_key is not None and media.resolve_image(
+            account, row["chat_md5"], row["ts"], file_key) is not None
+    else:
+        present = file_key is not None and media.resolve_video(
+            account, row["ts"], file_key) is not None
+    return MediaRefState(row["msg_key"], row["ts"], kind,
+                         "exportable" if present else "gone", None)
+
+
+def _month_clause(months: list[str] | None) -> tuple[str, list[int]]:
+    """months → SQL 片段与绑定参数（本地月区间，见 `media.month_bounds`）。
+
+    **必须在 SQL 里筛**：取回后再滤等于让 limit 卡在筛之前——命中月份之外的新消息会把
+    命中月份的消息挤出答案，于是 `counts` 全 0，而「那个月真没有媒体」与「我只看了最新
+    的 N 条」完全无法区分。空 months 返回空片段，SQL 一字不多。
+
+    **调用方必须先校验格式**（`message_media` 里的 `bad_months`）：`media.month_bounds`
+    是裸 `datetime` 运算，`2026-13` 会让它抛 ValueError 穿透 core 层。
+    """
+    if not months:
+        return "", []
+    from . import media                       # 惰性：media 顶层拉起 cryptography
+    parts: list[str] = []
+    args: list[int] = []
+    for lo, hi in media.month_bounds(months):
+        parts.append("(m.ts >= ? AND m.ts < ?)")
+        args += [lo, hi]
+    return " AND (" + " OR ".join(parts) + ")", args
+
+
+def message_media(contact: str, *, keys: Sequence[str] | None = None,
+                  months: list[str] | None = None, limit: int = 200,
+                  out_dir: str | None = None, account: str | None = None,
+                  _ctx=None, _con=None) -> MessageMediaResult | NeedConfirm:
+    """消息 → 媒体状态（spec §4.1 的四态）。
+
+    keys=None → 该会话**所有媒体类型的消息**（msg_type ∈ {3,43,34}），受 limit 约束
+    ——按 msg_type 而非按 ref 筛选：索引内实测有 259 条媒体消息拿不到 ref，
+    按 ref 筛会把它们谎报成「没有媒体」。给了 keys → 只答这些，查不到的静默略过。
+    months 在 SQL 里筛（不是取回后再滤）：limit 卡的必须是**命中月份**的条数。
+    truncated=True 表示 limit 截断了答案，别把它当成「那个月没有媒体」。
+    """
+    from . import media                       # 惰性：media 顶层拉起 cryptography
+    ctx = _ctx or ChatContext(account)
+    chat_id = ctx.resolve(contact)
+    if isinstance(chat_id, NeedConfirm):
+        return chat_id
+    # 与 media_export / moments_export 同一口径：格式错的月份串永远比不中，不拦就是
+    # 静默 0 命中、exit 0（用户看到「这个月没有媒体」而不是「月份写错了」）。
+    bad_months = [m for m in (months or []) if not MONTH_RE.fullmatch(m)]
+    if bad_months:
+        raise errors.SearchInputError(f"月份格式应为 YYYY-MM：{', '.join(bad_months)}")
+    cm = messages.md5_of(chat_id)
+    # 绝对化：`--out 相对路径` 会让 states[].path 变成 MCP 客户端用不了的相对路径。
+    # `.resolve()` 是纯路径运算，不碰微信数据（红线不受影响）。
+    out_root = (pathlib.Path(out_dir) if out_dir else paths.HOME_DIR / "media").resolve()
+    lim = clamp_limit(limit, LIMIT_MEDIA)
+    month_sql, month_args = _month_clause(months)
+    degraded: list[Degradation] = []
+
+    with contextlib.ExitStack() as stack:
+        con = _con if _con is not None else stack.enter_context(store.open())
+        if keys is not None:
+            placeholders = ",".join("?" * len(keys))
+            # `chat_md5` 一滤不能少：keys 是调用方给的，可能来自别的会话——不加就会把
+            # 别人的媒体冠上本次解析出的 chat_id 报出去。
+            sql = (f"SELECT {messages.column_list(*messages.COLUMNS, prefix='m.')} "
+                   f"FROM messages m WHERE m.msg_key IN ({placeholders}) "
+                   f"AND m.chat_md5 = ?{month_sql} ORDER BY m.ts DESC")
+            rows = [dict(zip(messages.COLUMNS, r))
+                    for r in con.execute(sql, [*keys, cm, *month_args])]
+            rows = [r for r in rows if r["account"] == ctx.account]
+            truncated = len(rows) >= lim
+            rows = rows[:lim]
+        else:
+            type_ph = ",".join("?" * len(_MEDIA_TYPES))
+            sql = (f"SELECT {messages.column_list(*messages.COLUMNS, prefix='m.')} "
+                   f"FROM messages m WHERE m.account=? AND m.chat_md5=? "
+                   f"AND m.msg_type IN ({type_ph}){month_sql} "
+                   f"ORDER BY m.ts DESC LIMIT ?")
+            rows = [dict(zip(messages.COLUMNS, r))
+                    for r in con.execute(sql,
+                                         [ctx.account, cm, *_MEDIA_TYPES, *month_args, lim])]
+            # 取回条数正好等于 limit ⇒ 库里可能还有更多。这里偏保守（恰好等于总数时也报
+            # True），与 media.MediaReport 的 `produced >= max_files` 同一取舍：宁可多报
+            # 「可能被截断」，也不能漏报一条真的没答完。
+            truncated = len(rows) >= lim
+        refs = store.media_refs_by_keys(con, [r["msg_key"] for r in rows])
+
+    # 语音本体集合**按需**取：这个会话一条语音都没有时，不值得去开 media_*.db
+    voice_keys = None
+    if any(r["msg_type"] == _VOICE_TYPE for r in rows):
+        voice_keys = _voice_keys_for(ctx.account)
+        if voice_keys is None:
+            degraded.append(Degradation(
+                capability="msg_media", db="message/media_*.db", table="VoiceInfo",
+                missing_columns=(),
+                effect="语音库读不到：语音消息一律按「本体不在本机」呈现"))
+
+    states = [_state_of(r, refs.get(r["msg_key"]), out_root=out_root,
+                        account=ctx.account, voice_keys=voice_keys) for r in rows]
+    counts = {"none": 0, "exported": 0, "exportable": 0, "gone": 0}
+    for s in states:
+        counts[s.status] += 1
+    # 走 `collect_degradations(ctx.reader)` 而不是 `ctx.degradations()`：后者是 search/
+    # semantic 的**信封形状**出口（dict），而本结果类型的元素是 `Degradation`（同
+    # recent_messages 的口径，转换归入口层）。reader 在这行之前必然已构造——`ctx.resolve`
+    # 走的就是它——所以这里不会为报降级白读一次库（那正是 ctx.degradations 的顾虑）。
+    return MessageMediaResult(chat_id=chat_id, out_dir=str(out_root),
+                              states=states, counts=counts, truncated=truncated,
+                              degraded=tuple(degraded) + collect_degradations(ctx.reader))
 
 
 def media_rebuild_refs(account: str | None = None, progress=None) -> int:

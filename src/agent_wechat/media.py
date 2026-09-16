@@ -202,6 +202,21 @@ def _shift_month(mon: str, delta: int) -> str:
     return f"{i // 12:04d}-{i % 12 + 1:02d}"
 
 
+def month_bounds(months: list[str]) -> list[tuple[int, int]]:
+    """月份 → [lo, hi) 的 unix 秒区间，用与 month_of 同一套本地时区规则。
+
+    `month_of` 是 `datetime.fromtimestamp(ts).strftime("%Y-%m")`（**本地时区**），
+    所以下界必须是本地时间的当月 1 日 00:00 —— 用 UTC 会让跨月边界错一天。
+    月份串须已是 `YYYY-MM`（调用方校验格式后），本函数不做校验。
+    """
+    out: list[tuple[int, int]] = []
+    for m in months:
+        y, mo = int(m[:4]), int(m[5:7])
+        out.append((int(datetime.datetime(y, mo, 1).timestamp()),
+                    int(datetime.datetime(y + mo // 12, mo % 12 + 1, 1).timestamp())))
+    return out
+
+
 _SUFFIX_PRIORITY = ("_hd", "_h", "", "_b", "_t")
 
 

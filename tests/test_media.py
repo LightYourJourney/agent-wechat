@@ -130,6 +130,24 @@ def test_month_of_uses_local_timezone(monkeypatch):
     assert len(m) == 7 and m[4] == "-" and m.replace("-", "").isdigit()
 
 
+def test_month_bounds_covers_the_local_month():
+    """月份 → [lo, hi)：区间内每个 ts 的 month_of 都是该月，区间外一个都不是。
+
+    月份串由 ts 现算（不硬编码月对）——本函数与 month_of 必须是同一套本地时区规则：
+    下界用 UTC 算会在月初/月末错一天，而那正是两个函数唯一要对齐的地方。
+    """
+    ts = int(datetime.datetime(2026, 9, 15, 12, 0).timestamp())
+    mon = media.month_of(ts)
+    (lo, hi), = media.month_bounds([mon])
+    assert lo <= ts < hi
+    assert media.month_of(lo) == mon                # 下界含：本地当月 1 日 00:00
+    assert media.month_of(hi - 1) == mon            # 上界不含
+    assert media.month_of(lo - 1) != mon            # 差一秒就落到上一个月
+    assert media.month_of(hi) != mon
+    (nlo, nhi), = media.month_bounds([media._shift_month(mon, 1)])
+    assert (nlo, nhi) == (hi, nhi) and nhi > nlo    # 相邻月首尾相接，无缝隙无重叠
+
+
 def test_resolve_image_month_and_suffix_priority(tmp_path, monkeypatch):
     root, account = make_tree(tmp_path, monkeypatch)
     cm = "a" * 32
