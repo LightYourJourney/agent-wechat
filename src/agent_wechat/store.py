@@ -241,10 +241,14 @@ def media_refs_by_chat(con: sqlite3.Connection, account: str,
                        ) -> dict[str, list[tuple[int, str]]]:
     """按会话批量取媒体引用：{chat_id: [(ts, file_key), …]}（会话内按 ts、local_id 升序）。
 
-    `media_refs` 只有 msg_key（没有 account / chat 维度），所以必须 join `messages` 取回
-    会话与时间。**只出现在结果里的会话是有引用的那些**——调用方用 `.get(chat, ())` 取，
+    `media_refs` 只有 msg_key（没有 account / chat / ts 维度），所以必须 join `messages`
+    取回会话与时间。**只出现在结果里的会话是有引用的那些**——调用方用 `.get(chat, ())` 取，
     据此区分「这个会话没有媒体消息」与「查不到」。file_key 为 NULL 的行跳过：没有文件名
     就无从定位本体，带出去只会让调用方逐条判空。
+
+    **join 出来的「空」不等于「没有引用」**：`media rebuild-refs` 只写 refs、不写 messages，
+    所以「有 refs 但消息没进索引」的索引同样在这里返回空。要分清这两种空，用不 join 的
+    `count_media_refs`（它按 msg_key 前缀计数）。
     """
     if not chat_ids:
         return {}
@@ -268,20 +272,34 @@ def media_refs_by_chat(con: sqlite3.Connection, account: str,
 
 
 def count_media_refs(con: sqlite3.Connection, account: str, *,
+                     chat_ids: Sequence[str] | None = None,
                      kind: str | None = None) -> int:
-    """该账号媒体引用的条数（可按 kind 过滤）。
+    """media_refs 里该账号（或其中指定会话）的引用条数。**不 join `messages`。**
 
-    单独存在是为了把「索引里一条此类引用都没有（没建过索引 / 建时本机没有）」与「这个
-    会话没有这类媒体消息」分开：两者都导出 0 条，但只有前者用户能动手修（重建索引）。
-    `media_refs` 没有 account 列，同 media_refs_by_chat 一样 join `messages` 取回。
+    为什么必须与 join 无关：`media rebuild-refs` **只写 refs、不写 messages**（它自己不依赖
+    messages），所以「账号里一条 refs 都没有」与「refs 在、但那些会话的消息没进索引」是两种
+    不同的病，join 出来的 0 把它们混成一种，还会把用户导向错误的修法（重建索引写不出消息）。
+    按 msg_key 前缀计数就分得开：`msg_key = account|chat_md5|shard|local_id`，而 wxid 不可能
+    含 `|`，所以账号前缀与 `account|chat_md5|` 会话前缀都不会串到别的账号或会话
+    （也**不能**用 LIKE——account 里的 `_`、`%` 是通配符）。
     """
-    sql = ("SELECT count(*) FROM media_refs r JOIN messages m ON m.msg_key = r.msg_key "
-           "WHERE m.account = ?")
-    args: list[str] = [account]
+    args: list[str] = []
+    # 前缀比对而非 LIKE：substr 是逐字符的，account 里的 `_`/`%` 不会被当通配符。
+    where = ["substr(msg_key, 1, ?) = ?"]
+    acct_prefix = f"{account}|"
+    args += [len(acct_prefix), acct_prefix]
+    if chat_ids is not None:
+        pats = [f"{account}|{messages.md5_of(c)}|" for c in dict.fromkeys(chat_ids)]
+        if not pats:                            # 空集：一条都不算（IN () / OR 空集是语法错）
+            return 0
+        where.append("(" + " OR ".join("substr(msg_key, 1, ?) = ?" for _ in pats) + ")")
+        for p in pats:
+            args += [len(p), p]
     if kind is not None:
-        sql += " AND r.media_kind = ?"
+        where.append("media_kind = ?")
         args.append(kind)
-    return con.execute(sql, args).fetchone()[0]
+    return con.execute("SELECT count(*) FROM media_refs WHERE " + " AND ".join(where),
+                       args).fetchone()[0]
 
 
 def get_watermark(con: sqlite3.Connection, account: str, shard: str, chat_md5: str) -> int:

@@ -411,9 +411,10 @@ def test_video_export_degrades_when_no_refs(tmp_path, monkeypatch):
 
 
 def test_video_export_distinguishes_empty_index_from_chat_without_videos(tmp_path, monkeypatch):
-    """「索引里一条视频引用都没有」与「这个会话没有视频消息」是两回事：前者用户能动手修。
+    """「索引里一条视频引用都没有」与「这个会话没有视频引用」是两回事，修法也不同。
 
-    只报「本次没导出视频」会让这两种情形混在一起——正是 spec §4.7 要求分开的那对事实。
+    第二种**没有可执行的修复动作**（该账号其它会话有引用，说明索引本身可用），所以连
+    `rebuild-refs` 都不该提——那会把人支去跑一个改不了任何事的命令。
     """
     root, account = make_tree(tmp_path, monkeypatch)
     ts = int(datetime.datetime(2026, 9, 15, 12, 0).timestamp())
@@ -422,6 +423,29 @@ def test_video_export_distinguishes_empty_index_from_chat_without_videos(tmp_pat
     assert rep.video.ok == 0
     assert any("本次请求的会话" in d for d in rep.degraded), rep.degraded
     assert not any("一条视频引用都没有" in d for d in rep.degraded), rep.degraded
+    assert not any("rebuild-refs" in d for d in rep.degraded), rep.degraded
+
+
+def test_video_export_points_at_history_export_when_messages_are_missing(tmp_path, monkeypatch):
+    """第三种成因：refs 在、**消息**不在 → 提示「导出这些会话的历史」，且不许提 `rebuild-refs`。
+
+    `media rebuild-refs` **只写 refs、不写 messages**（它自己不依赖 messages），所以这种索引
+    永远 join 不出行——唯一能让 refs 路径跑起来的动作是走导出管道（它同时写 messages 与 refs）。
+    这条用例同时钉住「空判定不能 join messages」：用 join 计数的话这里会被报成
+    「一条视频引用都没有」（而那条提示给的正是无效的修法）。
+    """
+    root, account = make_tree(tmp_path, monkeypatch)
+    fk = "ee" * 16
+    con = store.connect(tmp_path / "refs-only.db")
+    store.upsert_media_refs(con, [
+        (messages.row_key(account, messages.md5_of("wxid_a"), "message_0.db", 1),
+         "video", fk, None)])
+    con.commit()
+    rep = media.export_media(account, ["wxid_a"], kinds=["video"], con=con)
+    assert rep.video.ok == 0
+    note, = rep.degraded                      # 恰好一条：不是「一条引用都没有」那条
+    assert "导出这些会话的历史" in note and "export_full_history" in note
+    assert "rebuild-refs" not in note         # 它只写引用，永远修不好这一种
 
 
 def test_video_export_thumb_keeps_source_stem(tmp_path, monkeypatch):

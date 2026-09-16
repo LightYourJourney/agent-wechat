@@ -93,9 +93,13 @@ CREATE TABLE IF NOT EXISTS media_refs (
   `agent-wechat media rebuild-refs` 全量重扫回填（幂等，不重写 `messages`）。
 - **读路径有三条**（`store.media_refs_by_keys` / `media_refs_by_chat` / `count_media_refs`）：
   「按消息定位媒体」（`media locate` / `get_message_media` 的四态判定）按 msg_key 批量查；
-  **视频导出的会话归属**按会话查——视频树 `msg/video/{月份}/` 没有会话维度，只有经此表
-  才知道某条视频属于哪个会话（多会话归属由此成立）；`count_media_refs` 只用来把「索引里
-  没有视频引用」与「这个会话没有视频消息」分开报（两者都产出 0 条，但只有前者可修）。
+  **视频导出的会话归属**按会话查（join `messages` 取 ts 与会话名）——视频树
+  `msg/video/{月份}/` 没有会话维度，只有经此表才知道某条视频属于哪个会话（多会话归属由此成立）。
+- `count_media_refs` **不 join `messages`**，按 `msg_key` 前缀计数（`account|` 或
+  `account|chat_md5|`；`msg_key` 的形态保证前缀不会串到别的账号——wxid 里不可能有 `|`）。
+  为什么必须不 join：**`media rebuild-refs` 只写 refs、不写 messages**，所以「一条 refs 都没有」
+  与「refs 在、但那些会话的消息没进索引」是两种病（前者该重建索引，后者该**导出历史**），
+  join 出来的 0 会把它们混成一种，并把用户支去跑一个修不好后者的命令。
 - 图片与语音的导出**不查此表**：图片按 attach 树目录枚举、语音按 `media_*.db` 的
   `VoiceInfo` 三元组直接命中。
 

@@ -5,9 +5,10 @@
 + dat 尾部统计 xorKey；**推导后必须用样本验证，不验证不交付**。
 
 红线：code/aesKey/xorKey 是推导材料，视同密钥——不进日志、错误消息、repr。
-依赖方向：本模块不 import reader（reader 可以 import 本模块）；**唯一** import store 的地方是
-视频导出的 refs 驱动归属（`store.media_refs_by_chat`）——视频树是账号级的，没有索引就无从
-知道某条视频属于哪个会话（spec §4.7）。
+依赖方向（单向，不得反向）：**media 可以 import store；store 不得 import media**；本模块不
+import reader（reader 可以 import 本模块）。唯一的 store 调用点是视频导出的 refs 驱动归属
+（`store.media_refs_by_chat` / `count_media_refs`）——视频树是账号级的，没有索引就无从知道
+某条视频属于哪个会话（spec §4.7）。
 """
 from __future__ import annotations
 
@@ -525,7 +526,12 @@ def export_media(account: str, chat_ids: list[str], *, kinds: list[str],
                  con: sqlite3.Connection | None = None) -> MediaReport:
     """按会话导出媒体。图片解密（MediaKeyError → 能力级降级不抛）；语音见 Task 3；视频明文复制
     （refs 驱动：给 `con` 时按 media_refs 归属，任意会话数都成立；`con=None` 时退回账号级枚举，
-    只有恰好一个会话时可归属）。"""
+    只有恰好一个会话时可归属）。
+
+    **调用方必须传 `con`**：默认的 `None` 会静默选中账号级枚举那条老路——多会话下它一条都不归属，
+    单会话下它会把账号级视频树里的全部文件都算到该会话头上（错归属，不只是缺归属）。生产入口
+    `usecases.media_export` 自己开索引库并传进来；`None` 只留给不走索引的直接调用方（回归网）。
+    """
     report = MediaReport()
     out_root = _ensure_tree(pathlib.Path(out_dir) if out_dir else paths.HOME_DIR / "media")
     report.out_dir = str(out_root)
@@ -624,15 +630,27 @@ def export_media(account: str, chat_ids: list[str], *, kinds: list[str],
             try:
                 refs_by_chat = store.media_refs_by_chat(con, account, chat_ids, kind="video")
                 if not refs_by_chat:
-                    # 索引里一条视频引用都没有 vs 这些会话确实没有视频消息：都产出 0 条，但只有
-                    # 前者用户能动手修（重建索引），所以两种情形分开说（spec §4.7）。
-                    if store.count_media_refs(con, account, kind="video"):
-                        note = ("视频导出按 media_refs 索引归属：本次请求的会话在索引里没有视频消息，"
-                                "本次未导出任何视频。若确信它们有视频，请运行 `media rebuild-refs` 重建索引。")
+                    # 「一条都没导出」有三种成因，修法各不相同（spec §4.7），必须分开说：
+                    # 计数一律走**不 join messages** 的 count_media_refs——`media rebuild-refs`
+                    # 只写 refs 不写 messages，join 出来的空会把后两种混成一种，还会把用户
+                    # 导向错误的修法。
+                    if store.count_media_refs(con, account, kind="video") == 0:
+                        # 情形 1：该账号一条视频引用都没有（索引建在 media_refs 之前，或建时本机没有视频）
+                        note = ("视频导出按 media_refs 索引归属：索引里这个账号一条视频引用都没有"
+                                "（索引建立在 media_refs 之前，或建索引时本机没有视频消息），"
+                                "本次未导出任何视频。请先运行 `media rebuild-refs` 补齐引用。")
+                    elif store.count_media_refs(con, account, chat_ids=chat_ids, kind="video"):
+                        # 情形 3：这些会话**有**引用，但 join 不出消息——它们的消息没进索引。
+                        #    rebuild-refs 写不出消息，唯一有效的动作是导出这些会话的历史
+                        #    （导出管道同时写 messages 与 refs）。
+                        note = ("视频导出按 media_refs 索引归属：本次请求的会话有视频引用，"
+                                "但它们的消息不在索引里，本次未导出任何视频。"
+                                "请先导出这些会话的历史（`export_full_history` / CLI `export`）"
+                                "——它同时写入消息与媒体引用。")
                     else:
-                        note = ("视频导出按 media_refs 索引归属：索引里一条视频引用都没有"
-                                "（没建过索引，或建索引时本机没有视频消息），本次未导出任何视频。"
-                                "请先运行 `media rebuild-refs`。")
+                        # 情形 2：引用在别处——这些会话确实没有视频引用（索引本身可用，无需修复）
+                        note = ("视频导出按 media_refs 索引归属：本次请求的会话在索引里没有视频引用，"
+                                "本次未导出任何视频（该账号其它会话有引用，说明索引可用）。")
             except (sqlite3.Error, OSError) as exc:
                 # 索引读不了 = 归属无从谈起：**如实降级**产出 0 条。裸 sqlite3.Error 逃出 core
                 # 层会击穿错误契约，而静默返回 0 会把「索引坏了」说成「本机没有视频」。

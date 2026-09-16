@@ -54,6 +54,9 @@ def stub(monkeypatch, tmp_path):
     monkeypatch.setattr(reader, "MessageReader", _StubReader)
     # 检索用例现在会先 _refresh_roster → store.open()：不隔离 DB_PATH 就会碰真实索引库
     monkeypatch.setattr(store, "DB_PATH", tmp_path / "index.db")
+    # store.connect() 还会经 paths.ensure_home_dirs() 建目录（并 shell 出 tmutil）：
+    # HOME_DIR 同样要隔离，否则 media_export 开索引库时会在真实 ~/.agent-wechat 下动土
+    monkeypatch.setattr(paths, "HOME_DIR", tmp_path / "home")
     return seen
 
 
@@ -322,11 +325,12 @@ def test_media_export_opens_index_for_video(stub, monkeypatch):
     assert seen["refs"] == 0            # 真查到了隔离后的索引库（stub 夹具把 DB_PATH 指到 tmp_path）
 
 
-def test_media_export_unavailable_index_degrades_loudly(stub, monkeypatch):
-    """索引库打不开 → **如实降级**（不在 degraded 里出现「不可用」就是静默退回账号级枚举）。
+def test_media_export_unavailable_index_skips_video_and_degrades_loudly(stub, monkeypatch):
+    """索引库打不开 → **本次不导视频** + 如实降级；其余类型照常。
 
-    退回账号级枚举本身是既有行为（单会话时归属仍正确），但必须说出来：用户对索引可修，
-    对「本机没有视频」不可修。
+    绝不退回 `export_media(con=None)` 那条账号级枚举：单会话请求下它会把账号级视频树里的
+    **全部**文件写进这个会话的目录（错归属，比不导出更坏）。断言「没连接时绝不请求 video」
+    这个硬不变量——把 video 从 kinds 里摘掉才是唯一合规的做法。
     """
     from agent_wechat import media
     _unique(stub)
@@ -334,7 +338,9 @@ def test_media_export_unavailable_index_degrades_loudly(stub, monkeypatch):
 
     def fake_export_media(account, chat_ids, *, kinds, months, out_dir, max_files,
                           progress=None, con=None):
-        seen["con"] = con
+        # 用例层的硬不变量：没有索引连接时绝不请求视频导出
+        assert con is not None or "video" not in kinds
+        seen["kinds"], seen["con"] = kinds, con
         return media.MediaReport(out_dir="/default/media")
 
     def boom(*a, **kw):
@@ -342,9 +348,11 @@ def test_media_export_unavailable_index_degrades_loudly(stub, monkeypatch):
 
     monkeypatch.setattr(media, "export_media", fake_export_media)
     monkeypatch.setattr(store, "open", boom)
-    res = usecases.media_export("张三", kinds=["video"])
-    assert seen["con"] is None                          # 没连接 → 走账号级枚举
-    assert len(res.report.degraded) == 1 and "索引库不可用" in res.report.degraded[0]
+    res = usecases.media_export("张三", kinds=["image", "video"])
+    assert seen["kinds"] == ["image"]          # video 被摘掉，图片照常导
+    assert seen["con"] is None                 # 本来就没连接（不是「拿老路子凑」）
+    assert len(res.report.degraded) == 1
+    assert "索引库不可用" in res.report.degraded[0] and "未导出任何视频" in res.report.degraded[0]
 
 
 def test_media_export_rejects_bad_months(stub):

@@ -324,8 +324,9 @@ def media_export(contact: str, *, kinds: list[str], months: list[str] | None = N
     若未来放开多会话，调用方须自行保证无重复（重复 chat_id 会使图片/语音计数翻倍）。
 
     视频归属要索引库：本层打开 `store` 并把连接交给 `export_media`（按消息的 `media_refs`
-    定位本体——视频树本身没有会话维度）。索引打不开时**如实降级**，不静默退回账号级枚举：
-    那会把「索引不可用」藏起来，而用户对它是能动手修的。
+    定位本体——视频树本身没有会话维度）。索引打不开时**本次不导视频**并如实降级，绝不退回
+    `export_media` 的 `con=None`（账号级枚举）：那会把账号级视频树里的全部文件算到本次请求
+    的会话头上——错归属比缺归属更坏。
     """
     from . import media                       # 惰性：media 顶层拉起 cryptography
     ctx = ChatContext(account)
@@ -341,6 +342,7 @@ def media_export(contact: str, *, kinds: list[str], months: list[str] | None = N
     if bad_months:
         raise errors.SearchInputError(f"月份格式应为 YYYY-MM：{', '.join(bad_months)}")
     index_note = None
+    kinds_to_export = list(kinds)
     with contextlib.ExitStack() as stack:
         con = None
         if "video" in kinds:
@@ -349,14 +351,18 @@ def media_export(contact: str, *, kinds: list[str], months: list[str] | None = N
             try:
                 con = stack.enter_context(store.open())
             except (errors.AgentWeChatError, sqlite3.Error, OSError) as exc:
+                # 索引打不开 → **不导视频**。绝不能退回 `con=None` 那条账号级枚举：它会把
+                # 账号级视频树里的全部文件算到本次请求的会话头上（错归属，比不导出更坏——
+                # 本任务修的就是这个缺陷）。其余类型照常导。
                 index_note = errors.redact(str(exc))
-        report = media.export_media(ctx.account, [chat_id], kinds=kinds, months=months,
+                kinds_to_export = [k for k in kinds if k != "video"]
+        report = media.export_media(ctx.account, [chat_id], kinds=kinds_to_export, months=months,
                                     out_dir=out_dir, max_files=clamp_limit(limit, (1, 2000)),
                                     con=con)
     if index_note is not None:
         report.degraded.append(
-            f"视频索引库不可用（{index_note}）：视频退回账号级枚举，多会话时无从归属；"
-            "请修复后重跑（`media rebuild-refs`）")
+            f"视频索引库不可用（{index_note}）：本次未导出任何视频——视频归属按 media_refs "
+            "索引，没有索引时无从判断某条视频属于哪个会话")
     return MediaExportResult(chat_id=chat_id, out_dir=report.out_dir, report=report)
 
 
