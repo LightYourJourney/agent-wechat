@@ -1113,3 +1113,18 @@ def test_media_rebuild_refs_idempotent_and_does_not_touch_messages(env, tmp_path
     with store.open() as con:
         assert con.execute("SELECT count(*) FROM media_refs").fetchone()[0] == 1
         assert con.execute("SELECT count(*) FROM messages").fetchone()[0] == 0
+
+
+# ---------- T6：msg_key 在 _read_rows 里真实赋值（不能靠字段默认值空转） ----------
+
+def test_recent_messages_msg_key_populated_by_read_rows(env):
+    """`reader.py:362` 的 `m.msg_key = messages.row_key(...)` 是 get_recent_messages
+    路径上 msg_key 唯一的真实来源。走 `wechat` 夹具的完整库（真 roster + 真 _read_rows），
+    删掉那一行字段仍在（默认空串）但毫无用处——这条断言会红：先验非空，再验等于
+    四字段重算值（钉住顺序与组成）。"""
+    res = usecases.recent_messages(FRIEND, limit=5, account=ACCT)
+    assert res.messages, "夹具没建出消息，下面的断言将恒真"
+    assert all(m.msg_key for m in res.messages), "msg_key 不能是空串：字段在但没用"
+    for m in res.messages:
+        assert m.msg_key == messages.row_key(ACCT, messages.md5_of(m.chat_id),
+                                             m.shard, m.local_id)

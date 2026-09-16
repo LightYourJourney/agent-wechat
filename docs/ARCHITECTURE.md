@@ -175,7 +175,8 @@ moments.iter_posts(account, report=…)       # 复用 passphrase 解密 sns/sns
 | 导出与向量化解耦 | 导出时同时嵌入 | 嵌入是 CPU 密集长任务，与 I/O 管道耦合会互相拖累。已落地：`vector.py` 独立嵌入管道，手动/按需触发 |
 
 **消息信封契约**：`get_recent_messages` / `search_history` / `semantic_search` 三处返回的消息
-统一带 `msg_key` 字段（`account|chat_md5|shard|local_id`，内容派生，跨导出稳定）。
+统一带 `msg_key` 字段（`account|chat_md5|shard|local_id`，由消息的身份/位置字段派生，
+跨导出稳定）。
 `msg_key` 与 `search_history` hits 里既有的 `id`（`messages.id`，DB rowid）不是同一件事
 ——rowid 随重建变化，`msg_key` 是指认消息的稳定句柄，供 `get_message_media`（T7）指认
 「这条消息的媒体是什么」。三处消费点同步添加，避免字段名冲突（`id` 已被占用）。

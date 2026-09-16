@@ -88,13 +88,13 @@
   "chat_id": "wxid_abc123def456",
   "display": "小李（产品）",
   "messages": [
-    { "msg_key": "wxid_testacct01|msg_md5hex|message_4.db|22415",
+    { "msg_key": "wxid_testacct01|0123456789abcdef0123456789abcdef|message_4.db|22415",
       "time": 1789045400, "sender": "我", "is_self": true,
       "type": "text", "content": "今晚一起吃饭吗" },
-    { "msg_key": "wxid_testacct01|msg_md5hex|message_4.db|22416",
+    { "msg_key": "wxid_testacct01|0123456789abcdef0123456789abcdef|message_4.db|22416",
       "time": 1789045521, "sender": "wxid_abc123def456", "is_self": false,
       "type": "text", "content": "好啊，七点老地方？" },
-    { "msg_key": "wxid_testacct01|msg_md5hex|message_4.db|22417",
+    { "msg_key": "wxid_testacct01|0123456789abcdef0123456789abcdef|message_4.db|22417",
       "time": 1789045600, "sender": "wxid_abc123def456", "is_self": false,
       "type": "image", "content": "[image]" }
   ],
@@ -102,7 +102,7 @@
 }
 ```
 
-> `msg_key` 是消息的稳定标识（`account|chat_md5|shard|local_id`，74 字符），
+> `msg_key` 是消息的稳定标识（`account|chat_md5|shard|local_id`），
 > 跨导出保持不变；后续 `get_message_media`（T7）靠它指认「这条消息的媒体是什么」。
 
 **降级说明**：信封**总是**带 `degraded` 键（数组，正常情况下是空数组），每项是
@@ -186,7 +186,7 @@
   "mode": "fts",
   "total": 2,
   "hits": [
-    { "msg_key": "wxid_testacct01|msg_md5hex|message_4.db|22415",
+    { "msg_key": "wxid_testacct01|0123456789abcdef0123456789abcdef|message_4.db|22415",
       "id": 735662, "chat_id": "wxid_abc123def456",
       "shard": "message_4.db", "local_id": 22415, "ts": 1789045400,
       "msg_type": 1, "sender_id": "wxid_testacct01",
@@ -202,8 +202,9 @@
 - 1-2 字查询**建议传 `contact`**，否则全表扫描（秒级）
 - 索引为空时返回 `{"hits": [], "hint": "本地索引为空：请先运行 export_full_history", ...}`
 - `msg_key` 是消息的稳定标识（`account|chat_md5|shard|local_id`），跨导出保持不变；
-  与_hits 里既有的 `id`（`messages.id`，DB rowid）不是一回事——rowid 随重建变化，
-  `msg_key` 是内容派生的，可用于 `get_message_media`（T7）指认消息。
+  与 `hits` 里既有的 `id`（`messages.id`，DB rowid）不是一回事——rowid 随重建变化，
+  `msg_key` 由消息的身份/位置字段派生（不含内容，编辑消息不会改它），
+  可用于 `get_message_media`（T7）指认消息。
 - `degraded` 键（§3）在显示名降级时非空：那时 `sender_name` 会回落成 wxid，
   **不要**当成真实姓名呈现
 
@@ -261,7 +262,7 @@
 { "mode": "semantic",
   "model": "fastembed:BAAI/bge-small-zh-v1.5:512",
   "total": 1,
-  "hits": [ { "msg_key": "wxid_testacct01|msg_md5hex|message_4.db|22415",
+  "hits": [ { "msg_key": "wxid_testacct01|0123456789abcdef0123456789abcdef|message_4.db|22415",
               "chat_id": "wxid_xxx", "display": "张三", "ts": 1757462400,
               "sender": "张三", "is_self": false,
               "content": "周末爬山的安排定了吗", "media_hint": null,

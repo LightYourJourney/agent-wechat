@@ -92,7 +92,8 @@ def get_recent_messages(contact: str, limit: int = 50,
 
     contact 可以是 username（wxid / xxx@chatroom）或展示名（备注/昵称）。
     若按名字解析出多个联系人，返回 {"need_confirm": [...]} 让用户消歧，不要猜。
-    每条消息含 time(unix秒)/sender/is_self/type/content。
+    每条消息含 time(unix秒)/sender/is_self/type/content，以及稳定标识 msg_key
+    （后续按它指名某条消息，如查该消息的媒体文件）。
     微信库结构变更导致能力降级时，另带 degraded: [{capability, effect}]（未降级时为空）。
     """
     res = usecases.recent_messages(contact, limit=limit, account=account)
@@ -135,7 +136,8 @@ def search_history(query: str, contact: str | None = None, limit: int = 20,
 
     需先运行 export_full_history。contact 可选限定会话（username 或展示名；
     展示名命中多个联系人时返回 need_confirm，不命中返回 error，不会静默扩大范围）。
-    返回 hits: [{chat_id, ts, sender_id, sender_name, is_self, content, media_hint, snip}]。
+    返回 hits: [{chat_id, ts, sender_id, sender_name, is_self, content, media_hint, snip}]，
+    每条另带稳定标识 msg_key（可用来指名该消息）。
     微信库结构变更导致显示名等能力降级时，另带 degraded: [{capability, effect}]——
     降级会让 sender_name 回落成 wxid，别把它当成真实姓名。
     """
@@ -157,7 +159,8 @@ def semantic_search(query: str, contact: str | None = None, limit: int = 10,
     与 search_history 的分工：精确关键词/人名/专名用 search_history（FTS 更快更准），
     模糊意图（「上次说的那个爬山的安排」）用本工具。contact 可选限定会话，
     展示名歧义时返回 need_confirm。返回 hits: [{chat_id, display, ts, sender,
-    is_self, content, media_hint, distance}]，distance 越小越相近（cosine 距离）。
+    is_self, content, media_hint, distance}]，distance 越小越相近（cosine 距离）；
+    每条另带稳定标识 msg_key（可用来指名该消息）。
     微信库结构变更导致显示名等能力降级时，另带 degraded: [{capability, effect}]。
     """
     res = usecases.semantic_search(query, contact=contact, limit=limit, account=account)
