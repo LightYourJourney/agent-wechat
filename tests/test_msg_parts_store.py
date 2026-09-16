@@ -1,6 +1,5 @@
 # tests/test_msg_parts_store.py
 """msg_parts 的读写。夹具用临时库（store.connect(db_path)），绝不碰真实 index.db。"""
-import sqlite3
 
 import pytest
 
@@ -19,12 +18,26 @@ def _row(key="acct|deadbeef|message_0.db|1", kind=57, svrid=None, ref=None, blob
 
 
 def test_schema_creates_msg_parts_without_touching_messages(con):
-    """回归：新表不许动既有表。删掉 SCHEMA 里的 msg_parts 块这条会红。"""
-    names = {r[0] for r in con.execute(
-        "SELECT name FROM sqlite_master WHERE type='table'")}
+    """回归：新增 `msg_parts` 不许动**既有的索引与触发器**。
+
+    **原稿钉不住它自己的宣称**：只断言两个表名存在 + msg_parts 自己的列，
+    把三个 `idx_msg_*` 索引整个删掉，这 7 条**全绿**（T3 审阅者用隔离副本变异发现）。
+
+    但审阅者的推论**只对了一半**，控制器实测厘清：
+    - 「给 messages 加列」**已经有主** —— `tests/test_messages.py::test_columns_match_messages_ddl_exactly`
+      会红（它断言 `messages.COLUMNS == 从 DDL 抽出的列`）。审阅者只跑了本文件，没看见。
+    - 「删掉三个 `idx_msg_*` 索引」**确实全仓无人守**（实测：全量 614 passed 全绿）。
+    所以本用例守的是**索引与触发器**这一半，列清单那一半归 `test_messages.py`。
+    """
+    names = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert "msg_parts" in names and "messages" in names
     cols = [r[1] for r in con.execute("PRAGMA table_info('msg_parts')")]
     assert cols == ["msg_key", "appmsg_type", "ref_svrid", "ref_msg_key", "raw_xml"]
+    idx = {r[0] for r in con.execute(
+        "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='messages'")}
+    assert {"idx_msg_chat_ts", "idx_msg_ts", "idx_msg_sender"} <= idx, f"既有索引丢了：{idx}"
+    trg = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='trigger'")}
+    assert {"msg_fts_ai", "msg_fts_ad", "msg_fts_au"} <= trg, f"FTS 触发器丢了：{trg}"
 
 
 def test_partial_index_on_ref_msg_key_exists(con):
@@ -77,15 +90,21 @@ def test_by_keys_omits_misses(con):
 
 
 def test_count_does_not_join_messages_and_uses_prefix_not_like(con):
-    """回归：join 出来的「空」有歧义（回填只写 msg_parts）。
-    account 里含 `_` —— 用 LIKE 会被 `_` 当通配符，把别的账号算进来。"""
+    """回归：join 出来的「空」有歧义（回填只写 msg_parts）；且**两条过度计数的路都要堵**：
+    ① `account` 里的 `_` 被 `LIKE` 当通配符（`wxid_aXb` 那条）；
+    ② 分隔符 `|` 丢了，一个账号成为另一个的前缀（`wxid_a` 那条）。
+    第 ② 条原先无人守 —— 把 `prefix = f"{account}|"` 改成 `prefix = account` 时 7 条全绿
+    （T3 审阅者发现）。"""
     store.upsert_msg_parts(con, [
         _row(key="wxid_a_b|deadbeef|message_0.db|1"),
         _row(key="wxid_aXb|deadbeef|message_0.db|2"),   # `_` 若被当通配符，这条会被误计
         _row(key="wxid_c|deadbeef|message_0.db|3"),
+        # 前缀关系：把 `prefix = f"{account}|"` 写成 `prefix = account` 会误计这条
+        _row(key="wxid_a|deadbeef|message_0.db|4"),
     ])
     assert store.count_msg_parts(con, "wxid_a_b") == 1
     assert store.count_msg_parts(con, "wxid_c") == 1
+    assert store.count_msg_parts(con, "wxid_a") == 1      # 少一个 `wxid_a_b` 就会变 2
 
 
 def test_count_on_empty_table_is_zero_not_an_error(con):
