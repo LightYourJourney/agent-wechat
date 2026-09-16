@@ -244,6 +244,27 @@ def test_bad_month_is_rejected_not_silently_empty(tmp_path, monkeypatch, idx):
     assert "2026-13" in str(ei.value) and "2026-9" in str(ei.value)
 
 
+@pytest.mark.parametrize("bad", ["9999-12", "0000-01"])
+def test_month_outside_the_datetime_range_is_rejected_too(tmp_path, monkeypatch, idx, bad):
+    """**形状合规 ≠ 可表示**：`MONTH_RE` 放行 `9999-12` / `0000-01`，而 `datetime` 的年是
+    1–9999，上界还要算**下个月**的 1 号——于是 `media.month_bounds` 抛 `ValueError`。
+
+    这条压的是**共用那一段**（`month_bounds`）而不是某一个命令：`media export` 经
+    `_month_clause` 走它、`chat export` 直接走它，`message_media` 是前者的调用方。
+    把翻译层删掉 → 逃出来的是裸 `ValueError`，这条红（同类用例见
+    `test_chat_export_rejects_a_malformed_month` 的后两个参数）。
+
+    `2026-13` 那种形状错的**不由这里拦**——`bad_months` 抢在 `month_bounds` 之前，
+    所以本用例只放形状合规、越界的那两个。
+    """
+    con, _rows = idx
+    monkeypatch.setattr(usecases, "_voice_keys_for", lambda acct: frozenset())
+    with pytest.raises(errors.SearchInputError) as ei:
+        usecases.message_media("wxid_x", months=[bad], out_dir=str(tmp_path / "media"),
+                               account=ACCT, _ctx=_FakeCtx(), _con=con)
+    assert bad in str(ei.value)
+
+
 def test_months_filter_applies_before_limit(tmp_path, monkeypatch, idx):
     """limit 必须卡住**命中月份**的条数，而不是「先按时间截 N 条、再滤月份」。
 

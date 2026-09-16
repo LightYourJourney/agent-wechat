@@ -210,13 +210,38 @@ def month_bounds(months: list[str]) -> list[tuple[int, int]]:
 
     `month_of` 是 `datetime.fromtimestamp(ts).strftime("%Y-%m")`（**本地时区**），
     所以下界必须是本地时间的当月 1 日 00:00 —— 用 UTC 会让跨月边界错一天。
-    月份串须已是 `YYYY-MM`（调用方校验格式后），本函数不做校验。
+    月份串须已是 `YYYY-MM`（调用方校验格式后），本函数**不再校验形状**。
+
+    **形状合不等于可表示**：调用方的 `MONTH_RE` 是纯形状判据，`9999-12` 与 `0000-01`
+    都逐字符合规（四位年 + 合法月），但 `datetime` 的年是 1–9999，而上界还要算
+    **下个月**的 1 号（`y + mo // 12`），于是
+      · `0000-01` → `ValueError: year 0 is out of range`
+      · `9999-12` → `ValueError: year 10000 is out of range`
+    **边界是平台/时区相关的，别去预测它**：`.timestamp()` 走本地时区，UTC+ 的机器上
+    `0001-01` 也会越界（本地 1 月 1 日 00:00 折回 UTC 就成了 year 0；本机实测如此），
+    所以「年份须在 1–9998」只是一句**给用户的实用区间**，不是判据。判据就是这段
+    `except`——**能表示与否由 `datetime` 说了算，不由我们猜**。
+    裸 `ValueError` 会一路穿透到 CLI（traceback）与 MCP（「内部错误」），而
+    `chat_export` / `USAGE.md` / `TOOLS.md` 对 `--months` 的宣称是「格式不符**一律报错**
+    （返回 error）」——用户拿到的必须是一句带修复指引的中文，不是一个年份上界的 traceback。
+
+    故**在这一处**把越界翻成 `SearchInputError`（`media` 自己的名字空间里原本就没有
+    月份相关的错误类型，而这就是一条「入参不合法」）。四个调用点共用本函数，
+    改这里 `media export` / `message_media` / `chat export` 一并变好。
+    **不要在调用点各加一层 try**：那是同一段校验的四份副本，正是本分支立 `chat_text.py`
+    要消掉的那类分叉（丙 R21）。
     """
     out: list[tuple[int, int]] = []
     for m in months:
         y, mo = int(m[:4]), int(m[5:7])
-        out.append((int(datetime.datetime(y, mo, 1).timestamp()),
-                    int(datetime.datetime(y + mo // 12, mo % 12 + 1, 1).timestamp())))
+        try:
+            lo = int(datetime.datetime(y, mo, 1).timestamp())
+            hi = int(datetime.datetime(y + mo // 12, mo % 12 + 1, 1).timestamp())
+        except (ValueError, OverflowError, OSError) as exc:
+            raise errors.SearchInputError(
+                f"月份 {m} 超出可表示的时间范围（年份须在 1–9998；"
+                f"9999-12 的下个月已是 year 10000）") from exc
+        out.append((lo, hi))
     return out
 
 

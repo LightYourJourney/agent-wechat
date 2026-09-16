@@ -1,11 +1,15 @@
 # tests/test_appmsg.py
 """appmsg 规范化。夹具形态全部来自 spec §2.5 的真机实测（内容为合成）。"""
+from html import escape as html_escape
+
+import pytest
+
 from agent_wechat import appmsg
 
 # 三种真实前缀形态：wxid / 自定义微信号 / openim
 PREFIXED = [
     ("wxid_testacct01:\n<msg><appmsg><type>57</type></appmsg></msg>", "wxid_testacct01"),
-    ("Ulrica-fs:\n<msg><appmsg><type>57</type></appmsg></msg>", "自定义微信号"),
+    ("custom_id_01:\n<msg><appmsg><type>57</type></appmsg></msg>", "自定义微信号"),
     ("12345678@openim:\n<msg><appmsg><type>57</type></appmsg></msg>", "@openim"),
 ]
 
@@ -148,7 +152,11 @@ def test_parse_red_envelope_flag():
 
 
 def test_unknown_kind_still_gets_title_and_fields():
-    """27 种里未具名建模的 23 类必须仍有专门呈现（标题 + 字段表），不是原样吐 XML。"""
+    """未具名建模的类型必须仍有专门呈现（标题 + 字段表），不是原样吐 XML。
+
+    数字口径：**真机顶层 22 种**（`msg_parts.appmsg_type` 实测），不是 spec §2.2 那个
+    「27 种」——那张表数的是「`<type>` 在整篇文档里出现过」，口径不同。
+    """
     xml = "<msg><appmsg><title>接龙</title><type>53</type><solitaire_info>abc</solitaire_info></appmsg></msg>"
     a = appmsg.parse(xml).appmsg
     assert a.kind == 53 and a.title == "接龙"
@@ -165,6 +173,57 @@ AES_XML = """<msg><appmsg><title>某个小程序</title><type>33</type>
 <appattach><aeskey>00112233445566778899aabbccddeeff</aeskey>
 <fileuploadtoken>UPLOADTOKEN123</fileuploadtoken><percent>80</percent></appattach>
 <weappinfo><appid>a</appid></weappinfo></appmsg></msg>"""
+
+
+# 合并转发（19）的内层聊天记录：**转义后**嵌进外层 XML 的第二份 XML。
+# `html.escape` 出来的形态与真机一致 —— 实测字段值里留着 `&#x0A;` / `&#x20;` 这类实体
+# （它们是内层 XML 自己的字符引用，随 `&amp;#x0A;` 一起被外层解码回来）。
+_RECORD_ITEM = ('<recordinfo><title>张三和我的聊天记录</title>'
+                '<desc>张三:&#x20;明天开会&#x0A;我:&#x20;好的</desc>'
+                '<datalist count="2"><dataitem>明天开会</dataitem></datalist></recordinfo>')
+RECORD_XML = ('<msg><appmsg><title>聊天记录</title><type>19</type>'
+              '<des>张三: 明天开会</des>'
+              f'<recorditem>{html_escape(_RECORD_ITEM)}</recorditem></appmsg></msg>')
+# `recorditem` 不是 19 的专属：实测它还出现在 57 / 6 / 5 / 51 / 24 / 33 / 4 / 76 / 8 上
+# （本机 index.db 共 5,489 个，其中 3,380 个挂在引用 57 下）。跳过规则必须是**与 kind 无关**的。
+RECORD_QUOTE_XML = ('<msg><appmsg><title>回复</title><type>57</type>'
+                    '<recorditem>' + html_escape(_RECORD_ITEM) + '</recorditem>'
+                    '<refermsg><svrid>1</svrid><content>明天开会</content></refermsg>'
+                    '</appmsg></msg>')
+
+
+@pytest.mark.parametrize("xml", [RECORD_XML, RECORD_QUOTE_XML], ids=["19", "57"])
+def test_recorditem_is_not_a_leaf_field(xml):
+    """合并转发（19）的内层 `<recorditem>` 是**内层 XML 载荷**，不是叶子值 —— 与 `refermsg`
+    同族，任何 kind 下都不进字段表。
+
+    夹具形态抄自真机（本机 index.db：1,023 个 `recorditem`，值就是一段
+    `<recordinfo><title>…` 文本；长度中位 ~9.5 KB、最长 **224,800** 字符）。不跳它的后果
+    **用户可见**：整段原始 XML 进 HTML / Markdown 的字段表，也进 `get_message_parts` 的
+    MCP 信封。
+
+    空断言防呆（本仓栽过）：两条断言的判别字串是 `"recordinfo"` 与 `recorditem`，
+    **都只可能来自那个字段值本身**——`des` 与 `title` 里都没有这两个词。
+
+    回归：把 `recorditem` 从 `_INNER_XML_PAYLOADS` 里删掉（或从 `_leaf_fields` 的 skip
+    集合里拿掉）→ 两条断言都红。
+    """
+    a = appmsg.parse(xml).appmsg
+    assert not any("recordinfo" in v for _, v in a.fields), "内层 XML 原样进了字段表"
+    assert not any("recorditem" in k for k, _ in a.fields), "内层 XML 载荷作为字段名进了字段表"
+
+
+def test_recorditem_does_not_take_its_readable_siblings_with_it():
+    """跳过的是**载荷本身**，同层的可读摘录（`<des>`）必须照常留下 —— 与「引用跳过
+    `refermsg` 而正文照常出现在具名块里」同一个分寸：跳多了是另一种数据丢失。
+
+    回归：把 skip 放宽成「凡名字里带 record 的一律跳」之类的写法、或整棵子树剪掉，
+    第一条断言红。
+    """
+    a = appmsg.parse(RECORD_XML).appmsg
+    assert ("des", "张三: 明天开会") in a.fields
+    a = appmsg.parse(RECORD_QUOTE_XML).appmsg
+    assert a.quote is not None and a.quote.content == "明天开会"
 
 
 def test_nested_fields_use_dotted_paths():

@@ -7,8 +7,10 @@
 `index.html` 与 `index.md`，对**同一条消息**的媒体可得性得到互相矛盾的说法。
 本模块补的就是这半边。
 
-**它不是数据源**：只有文案与纯函数（时间格式化、相对路径、降级文案）。两个模板仍然
-只从 `ChatView` 取数据（spec §4.3「两个模板只吃 `ChatView`」不受影响）。
+**它不是数据源**：只有文案与纯函数（时间格式化、相对路径、降级文案、**转账的字段清单**）。
+两个模板仍然只从 `ChatView` 取数据（spec §4.3「两个模板只吃 `ChatView`」不受影响）：
+`transfer_fields` 吃的是 `AppMsg.transfer`，那是 `ChatView` 里已经装好的**同一个对象**，
+不是第二份数据。
 
 **改这里的任何一句话，两个产物同时变** —— 这正是目的；分叉从此不可能悄悄发生。
 """
@@ -19,6 +21,7 @@ import os
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from .appmsg import Transfer
     from .usecases import Degradation
 
 # 媒体类型的中文名。未确认的 kind 兜底成 kind 本身（**不猜**，spec §2.9 的规矩）。
@@ -60,8 +63,62 @@ def rejected_note(n: int) -> tuple[str, str]:
 
 
 def when(ts: int | None) -> str:
-    """`ts == 0` 是「时间戳没解析出来」，不是 1970 年 —— 返回空串，不编一个日期。"""
-    return datetime.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M") if ts else ""
+    """`ts == 0` 是「时间戳没解析出来」，不是 1970 年 —— 返回空串，不编一个日期。
+
+    **超范围的时间戳同样返回空串，不抛**。载荷是**对手可控**的（任何人可以给你发一条
+    appmsg），而 `<begintransfertime>` 这类字段只要求是数字：`_to_int` 放行
+    `99999999999999999999`，`datetime.fromtimestamp` 随即抛 `OverflowError`。
+    它在 core 层无人接住 —— 两个模板都直接调本函数，于是 CLI 打 traceback（违反
+    USAGE.md §9 的「单行中文」）、MCP 返回「内部错误」。与 `_to_int` 对非数字字段的
+    立场一致：**不可表示的时间就印空**，不编日期、也不崩掉整次导出。
+    `ValueError` / `OSError` 一并接住：前者是 `fromtimestamp` 在部分平台上对越界值的
+    模样，后者是极端负值经 `localtime` 转换时的失败形态（下限一侧）。
+    """
+    if not ts:
+        return ""
+    try:
+        return datetime.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
+    except (ValueError, OverflowError, OSError):
+        return ""
+
+
+def transfer_fields(t: Transfer) -> list[str]:
+    """转账 / 红包（type 2000）→ `spec §4.5` 信封字段的可读列表。**两个模板共用这一份。**
+
+    为什么它也在这里：11 个字段名与顺序、三个时间标签、`paysubtype` 那句「语义未确认」
+    此前在 `chat_html._transfer_block` 与 `chat_md._transfer_line` 里**逐字两写**，
+    而两个模块头都宣称「改文案只改 `chat_text` 一处，分叉不可能悄悄发生」——转账这一段
+    恰恰不在 `chat_text` 里。实测：把 `chat_md._transfer_line` 整个改成 `return ""`
+    （MD 产物里转账块全没了），695 条用例**全绿**。这正是丙 R21 的复发形状。
+    搬进来之后，那条变异至少让 MD 侧的新夹具红了。
+
+    **标记仍各留各的**（照本模块既有的「措辞共享、标记不共享」）：分隔符 ` · ` 由两边
+    各自接，行首（Markdown 的 `- `）只有 MD 有。
+
+    `paysubtype` **原样印数字**并注明语义未确认（spec §2.9：实测只有取值分布，没有权威
+    映射，不许替微信编一套类型名）。`payer` 61% 为空**是常态不是异常**，空着就不印这一
+    行，不写「（空）」——那是把缺失包装成信息。
+    """
+    rows: list[str] = ["红包" if t.is_red_envelope else "转账"]
+    if t.amount_desc:
+        rows.append(f"金额：{t.amount_desc}")
+    if t.memo:
+        rows.append(f"备注：{t.memo}")
+    if t.payer:
+        rows.append(f"付款方：{t.payer}")
+    if t.receiver:
+        rows.append(f"收款方：{t.receiver}")
+    if t.transaction_id:
+        rows.append(f"交易号：{t.transaction_id}")
+    if t.transfer_id:
+        rows.append(f"转账单号：{t.transfer_id}")
+    if t.paysubtype:
+        rows.append(f"paysubtype：{t.paysubtype}（语义未确认，原样呈现）")
+    for label, value in (("发起时间", t.begin_time), ("生效日期", t.effective_date),
+                         ("失效时间", t.invalid_time)):
+        if value:
+            rows.append(f"{label}：{when(value)}")
+    return rows
 
 
 def media_src(path: str, out_dir: str, prefix: str) -> str:

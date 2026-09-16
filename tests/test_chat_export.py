@@ -297,6 +297,49 @@ def test_chat_export_counts_unparsed_and_rejected_separately(con, chat_env):
     assert (res.unparsed, res.rejected) == (2, 1)
 
 
+_TRANSFER_XML = (
+    "<msg><appmsg><title>转账</title><type>2000</type><wcpayinfo>"
+    "<feedesc>￥1.00</feedesc><pay_memo>合成备注</pay_memo>"
+    "<begintransfertime>99999999999999999999</begintransfertime>"
+    "<effectivedate>not-a-number</effectivedate>"
+    "<invalidtime>-99999999999999999999</invalidtime>"
+    "</wcpayinfo></appmsg></msg>")
+
+
+def test_chat_export_survives_an_out_of_range_timestamp(con, chat_env):
+    """**载荷对手可控**（任何人可以给你发一条 appmsg）：`<begintransfertime>` 只要求是数字，
+    `_to_int` 于是放行 `99999999999999999999`，而 `chat_text.when` 的
+    `datetime.fromtimestamp` 会抛裸 `OverflowError`。
+
+    后果不是「少印一个日期」：它在 core 层无人接住（`chatview.write` 只接 `OSError`、
+    `cli.py` 只接 `AgentWeChatError`），CLI 打的是 traceback（违反 USAGE.md §9 的
+    「单行中文」），MCP 回「内部错误」。**两个模板都要过**——它们各自调 `when`，只修一侧
+    这条仍会红。
+
+    消息自身的 `ts` 走**同一条**路径（`chat_html` 的 `.when` / `chat_md` 的标题行），
+    所以那条也一并压上 —— 用 `2**62`（SQLite 存得下、`fromtimestamp` 抛 `OSError`），
+    与载荷那条（Python 整数可以更大，抛 `OverflowError`）一起覆盖三类异常里的两类；
+    `ValueError` 是第三种（`253402300800` = 公元 10000 年）。
+
+    回归：把 `when` 里的 `try/except` 去掉（或收窄成只接 `ValueError`）→ 本用例红。
+    """
+    con.execute(_MSG_SQL, ("acct|aaaa|message_0.db|1", "acct", "aaaa",
+                           "wxid_testacct02", "message_0.db", 1, 2 ** 62,
+                           49, 0, "[appmsg: 转账]", 0))
+    con.commit()
+    store.upsert_msg_parts(con, [("acct|aaaa|message_0.db|1", 2000, None, None,
+                                  zlib.compress(_TRANSFER_XML.encode(), 6))])
+    con.commit()
+    res = usecases.chat_export("wxid_testacct02", out_dir=str(chat_env), account="acct")
+    assert sorted(pathlib.Path(f).name for f in res.files) == ["index.html", "index.md"]
+    for f in res.files:
+        out = pathlib.Path(f).read_text(encoding="utf-8")
+        assert "99999999999999999999" not in out, "超范围的时间戳原样进了产物"
+        assert "合成备注" in out, "整块转账信息被丢弃了 —— 要的是「印不出来就空着」"
+        # 标签在、值是空串：`when` 返回 "" 而不是编一个日期，也不是把整行删掉。
+        assert "发起时间：" in out
+
+
 def test_chat_export_reports_no_degradation_once_backfilled(con, chat_env):
     """反向守卫：回填之后同一路径不该再报降级 —— 防「降级公告写成了常量」。"""
     _seed(con)
@@ -400,12 +443,15 @@ def test_chat_export_clamps_a_negative_limit(con, chat_env):
     assert "第3条" in text and "第1条" not in text
 
 
-@pytest.mark.parametrize("bad", ["2026-9", "2026-13", "上个月"])
+@pytest.mark.parametrize("bad", ["2026-9", "2026-13", "上个月", "9999-12", "0000-01"])
 def test_chat_export_rejects_a_malformed_month(con, chat_env, bad):
     """月份格式错必须**响亮报错**，不能静默 0 命中（`media export` / `moments export`
-    同一口径）。三个参数各自都能让 `media.month_bounds` 抛裸 `ValueError`
-    （`int("")` / `int("13")` 越界 / 切片不成形）——删掉那段校验，逃出 core 层的就不是
-    `SearchInputError` 了，这条红。
+    同一口径）。前三个参数让 `MONTH_RE` 直接失配；**后两个（`9999-12` / `0000-01`）逐字
+    符合格式**，却落在 `datetime` 的可表示区间之外——拦它们的是 `media.month_bounds`
+    里的翻译层，而不是这段格式校验。
+
+    判据是「逃出来的是 `SearchInputError`」（CLI 印单行中文、MCP 回带指引的信封），
+    不是「谁拦的」：任一层漏掉，逃出 core 层的就不再是这个类型，这条红。
     """
     _seed(con)
     with pytest.raises(errors.SearchInputError):
@@ -682,6 +728,89 @@ def test_chat_index_reports_a_write_failure_as_a_project_error(con, chat_env, mo
     monkeypatch.setattr(pathlib.Path, "write_text", boom)
     with pytest.raises(errors.MediaOutputError):
         usecases.chat_index(out_dir=str(chat_env), account="acct")
+
+
+# ---------------- 两个新 CLI 命令的线级用例 ----------------
+#
+# 此前 `grep -rn '"chat", "export"\|"appmsg", "rebuild"' tests/` **零命中**：`chat index`
+# 有两条线级用例，而这两个（`cli.py` 的 `cmd_chat_export` / `cmd_appmsg_rebuild`）一条都没有
+# —— argparse 的属性名、拆表、progress 回调、stderr 那几行全在网外。
+
+def test_chat_export_cli_splits_months_and_format_and_prints_artifacts(con, chat_env,
+                                                                      capsys):
+    """`chat export` 的线级路径：`--months` / `--format` 的**拆表与去空白**、产物逐条印出。
+
+    `--format` 是**单数**属性名（`args.format`），`--months` 才是复数——写反了 argparse 会
+    直接 AttributeError。两条参数都**带空白**，所以 `.strip()` 那一步是载荷的一部分：
+    去掉它，`MONTH_RE.fullmatch(" 1970-01 ")` 失配 → `SearchInputError` → 退出码 1，本用例红。
+
+    产物逐条印出（`res.files` 的口径：**只印真正落盘的**）——`--format html` 时不能出现
+    `index.md`。
+    """
+    from agent_wechat import cli
+    _seed(con, n=3)
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["chat", "export", "--chat", "wxid_testacct02",
+                  "--months", " 1970-01 , 1970-02 ", "--format", "html",
+                  "--out", str(chat_env), "--account", "acct"])
+    assert ei.value.code == 0
+    out = capsys.readouterr().out
+    assert "会话 wxid_testacct02   3 条" in out
+    assert f"产物：{chat_env}/aaaa/chat/index.html" in out
+    assert "index.md" not in out, "只点了 html，却印了 md 的路径（拆表或 files 口径错了）"
+
+
+def test_chat_export_cli_warns_on_stderr_when_truncated(con, chat_env, capsys):
+    """触顶那一行走 **stderr**（stdout 留给产物路径，管道里不被污染），且**退出码仍是 0**
+    ——截断是提示不是失败。
+
+    产物顶部**也会**印（spec §4.5）：这里顺带把两侧一起钉住，免得下一个人照着
+    「只回终端不印产物」的旧注释把产物那一半删掉。
+    """
+    from agent_wechat import cli
+    _seed(con, n=3)
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["chat", "export", "--chat", "wxid_testacct02", "--limit", "1",
+                  "--out", str(chat_env), "--account", "acct"])
+    assert ei.value.code == 0
+    cap = capsys.readouterr()
+    assert "触及 --limit" in cap.err and "触及 --limit" not in cap.out
+    # 产物那一侧用的是 `chat_text.TRUNCATED_NOTE` 的措辞（**不是**终端这一句）：两处都印，
+    # 但各说各的话，所以这里不能拿终端的字串去产物里找。
+    page = (chat_env / "aaaa" / "chat" / "index.html").read_text(encoding="utf-8")
+    assert "本次导出被 limit 截断" in page, "产物顶部没印截断提示（spec §4.5）"
+
+
+def test_appmsg_rebuild_cli_prints_the_two_denominators_and_progress(con, monkeypatch,
+                                                                     capsys):
+    """`appmsg rebuild` 的线级路径：`--account` 的属性名、四组计数、以及 `progress` 回调
+    真的被接上了（`cmd_appmsg_rebuild` 里那个局部函数——删掉它，终端在 40 秒里一片安静）。
+
+    计数有两组**不同的分母**（见 `usecases.appmsg_rebuild_parts` 的 docstring）：`parts`
+    是本轮写入，`resolved` / `unresolved` 是该账号整表。这条用例两者都印出来，顺带钉住
+    它们**不会被并成一句**（并了就看不出 1 与 2 各是谁）。
+    """
+    from agent_wechat import cli
+    rows = [
+        (1001, "acct|aaa|message_0.db|1", None),                      # 被引用的原文
+        (1002, "acct|aaa|message_0.db|2",
+         '<msg><appmsg><title>同意</title><type>57</type><refermsg>'
+         '<svrid>1001</svrid><content>明天开会</content></refermsg></appmsg></msg>'),
+    ]
+    monkeypatch.setattr(usecases, "ChatContext", lambda acct=None: type(
+        "C", (), {"account": "acct", "reader": _FakeReader(rows)})())
+    # `flush` 只在攒够 `store.BATCH` 行时才报进度，而真机的 BATCH 是 2000 —— 夹具那两行
+    # 永远攒不满，progress 一次也不会被调用（这一条正是在**没有** patch 时红的）。
+    # 调小它只是让「回调接没接上」可观测，不改变任何计数。
+    monkeypatch.setattr(store, "BATCH", 1)
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["appmsg", "rebuild", "--account", "acct"])
+    assert ei.value.code == 0
+    out = capsys.readouterr().out
+    assert "本轮写入 msg_parts 1 条" in out
+    assert "回指解析 1 / 未解析 0" in out
+    assert "拒绝 0；解不开 0" in out
+    assert "已回填 1 条 appmsg" in out, "progress 回调没接上（40 秒静默）"
 
 
 def test_chat_index_cli_on_empty_out_dir_is_not_an_error(tmp_path, capsys):

@@ -617,6 +617,10 @@
   带 `?token=` / `&key=` 一类的凭据参数（链接的 `url` 同样过滤）。已具名建模的子树
   （`refermsg` / `appattach` / `wcpayinfo`）与它们的兄弟叶子（`kind=5` 的 `url` / `des`）
   **不在字段表里重复出现**——那些值在具名块里。
+  **内层 XML 载荷也不在**：`recorditem`（合并转发 19 的内层聊天记录，另一个 `refermsg`
+  同族的载荷）**不是叶子值**——它是一整段**转义后嵌进来**的 XML 文本，实测中位 ~9.5 KB、
+  最长 224,800 字符。同层的可读摘录（如 `<des>`）照常留在 `fields` 里；要看完整的子消息
+  列表请读 `msg_parts.raw_xml`。
 - **转账（type 2000）照实返回**：金额 `amount_desc`、备注 `memo`、双方用户名 `payer` /
   `receiver`、交易号 `transaction_id`，另加 `paysubtype`（中文语义无权威映射，原样给数字）、
   `transfer_id`、三个时间戳与 `is_red_envelope`。`payer` 为空是常态（实测 61%），不是异常。

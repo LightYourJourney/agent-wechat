@@ -128,11 +128,13 @@ def wechat(tmp_path_factory):
     })
     # shard0：friend 5 条（文本/本人/高比特位类型/zstd/appmsg）+ group 1 条（群前缀）
     friend_rows0 = [
-        (1, 1, 1, T0 + 10, "你好，最近怎么样", 0),
+        # 首行与 appmsg 那行给到第 8 列（server_id）：`iter_parts_input` 读它，引用回指
+        # 全靠它。其余行留 6 元组 → `build_shard` 补 None（也就是真机里 NULL 的形态）。
+        (1, 1, 1, T0 + 10, "你好，最近怎么样", 0, None, 9001),
         (2, 1, 2, T0 + 11, "在吗", 0),                        # sender=Name2Id rowid 2 → 本人
         (3, 0x100000001, 1, T0 + 12, "高比特位类型掩码", 0),    # & 0xffffffff == 1 → 文本
         (4, 1, 1, T0 + 13, zstandard.compress("压缩消息内容".encode()), 4),
-        (5, 49, 1, T0 + 14, "<msg><title>分享标题</title></msg>", 0),
+        (5, 49, 1, T0 + 14, "<msg><title>分享标题</title></msg>", 0, None, 9005),
     ]
     group_rows0 = [(1, 1, 1, T0 + 15, f"{FRIEND}:\n开会啦", 0)]
     build_shard(wx, ACCT, "message_0.db",
@@ -1116,6 +1118,50 @@ def test_media_rebuild_refs_idempotent_and_does_not_touch_messages(env, tmp_path
     with store.open() as con:
         assert con.execute("SELECT count(*) FROM media_refs").fetchone()[0] == 1
         assert con.execute("SELECT count(*) FROM messages").fetchone()[0] == 0
+
+
+def test_iter_parts_input_keys_are_the_same_row_keys_messages_uses(env):
+    """`reader.iter_parts_input` 产出的 `msg_key` 必须与 `messages.row_key` **逐字符同形**。
+
+    **为什么这条不能省**：它是回填那条链路上**唯一真跑生产扫描器**的地方。两个新测试文件
+    都用桩把 `iter_parts_input` 替掉了（`test_chat_export.py` 的 `_FakeReader`、
+    `test_mcp_server.py` 的 `_StubCtx`），而唯一真跑它的 `test_appmsg_real.py` 被
+    `addopts = -m 'not slow'` **默认 deselect**，且忽略返回的 `_key`（只算比率）。
+    于是**失败是静默的**：`row_key` 的 shard / md5 / 账号前缀拼错时，回填会往 `msg_parts`
+    写一大堆**没有任何消息对得上**的行，而 `count_msg_parts` 是**账号级**的 →
+    `chat export` 不报任何 `degraded`，用户只看到 appmsg 全变 `[appmsg: 标题]`。
+
+    判据是**两条生产路径的集合相等**（形状照 `test_recent_messages_msg_key_populated_by_read_rows`）：
+    `messages` 的 `msg_key` 由 `reader._decode_row` 算，回填的由 `iter_parts_input` 算，
+    两者必须**逐字符落在同一批字符串上**——**这里比的是两个独立实现，不是实现与自己**。
+
+    **为什么是集合相等，而不是「appmsg 那几条都在」**：夹具里的 appmsg 只有 `message_0.db`
+    那一行，于是「分片名写死成 `message_0.db`」这个变异**对它是等价的**（实测：只挑 appmsg
+    来比时，那条变异全绿——一条真护栏就这样退化成恒真）。`message_1.db` 的普通文本消息
+    不受 msg_type 过滤的影响，才照得出这个变异——**回填扫的是全部分片，一个都不该漏**。
+
+    再钉一条**字面量**（不调 `messages.row_key` 现算）：集合法对「两边一起漂移」是盲的
+    ——两边都调同一个函数时，改坏它两边一起变、集合照样相等。
+    """
+    assert export.run_export(ACCT, full=True) > 0
+    with store.open() as con:
+        in_index = {r[0] for r in con.execute(
+            "SELECT msg_key FROM messages WHERE account = ?", (ACCT,))}
+        n_appmsg = con.execute(
+            "SELECT count(*) FROM messages WHERE account = ? AND msg_type = ?",
+            (ACCT, messages.TYPE_APPMSG)).fetchone()[0]
+    assert n_appmsg == 1, "夹具里没有 appmsg 行，下面的载荷断言将恒真"
+    assert any("|message_1.db|" in k for k in in_index), "夹具没跨分片，分片那条会退化成恒真"
+
+    scanned: dict[str, tuple] = {key: (sid, raw)
+                                 for sid, key, raw in reader.MessageReader(ACCT).iter_parts_input()}
+    assert set(scanned) == in_index, (
+        "两条路径算出的 msg_key 不同形 —— 回填会写出对不上的行，且不报警")
+    sid, raw = scanned[f"{ACCT}|{md5(FRIEND)}|message_0.db|5"]
+    assert raw is not None and raw.startswith("<msg>"), "appmsg 载荷没被解出来"
+    assert sid == 9005, "server_id 没从微信库带出来（引用回指整条断掉）"
+    # 契约写死成字面量：账号 | chat_md5 | 分片名 | local_id，四段缺一不可。
+    assert f"{ACCT}|{md5(FRIEND)}|message_0.db|5" in scanned
 
 
 # ---------- T6：msg_key 在 _read_rows 里真实赋值（不能靠字段默认值空转） ----------

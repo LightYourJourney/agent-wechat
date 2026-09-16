@@ -451,8 +451,11 @@ def _month_clause(months: list[str] | None) -> tuple[str, list[int]]:
     命中月份的消息挤出答案，于是 `counts` 全 0，而「那个月真没有媒体」与「我只看了最新
     的 N 条」完全无法区分。空 months 返回空片段，SQL 一字不多。
 
-    **调用方必须先校验格式**（`message_media` 里的 `bad_months`）：`media.month_bounds`
-    是裸 `datetime` 运算，`2026-13` 会让它抛 ValueError 穿透 core 层。
+    **调用方仍必须先校验格式**（`message_media` 里的 `bad_months`）：要的是那句点名的
+    「月份格式应为 YYYY-MM：`2026-13`」——用户看得见是**哪个**字符串写错了。
+    `media.month_bounds` 对**形状**仍不校验，但它已经不再把 `datetime` 的 `ValueError`
+    漏出去（越界的年份会翻成 `SearchInputError`，见该函数）；本函数不再背
+    「穿透 core 层」这个理由，只背文案。
     """
     if not months:
         return "", []

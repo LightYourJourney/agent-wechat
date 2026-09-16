@@ -119,30 +119,10 @@ def _quote_block(q: appmsg.Quote, ref_anchor: str | None) -> str:
 def _transfer_block(t: appmsg.Transfer) -> str:
     """转账 / 红包（type 2000）→ `spec §4.5` 信封字段的可读列表。
 
-    `paysubtype` **原样印数字**并注明语义未确认（spec §2.9：实测只有取值分布，
-    没有权威映射，不许替微信编一套类型名）。`payer` 61% 为空**是常态不是异常**，
-    空着就不印这一行，不写「（空）」——那是把缺失包装成信息。
+    **字段清单、顺序与标签全在 `chat_text.transfer_fields`**（改一处，两个产物同时变）；
+    本模板只套自己的分隔符与转义——「措辞共享、标记不共享」，与上方 `_b` 同一条规矩。
     """
-    rows: list[str] = ["红包" if t.is_red_envelope else "转账"]
-    if t.amount_desc:
-        rows.append(f"金额：{t.amount_desc}")
-    if t.memo:
-        rows.append(f"备注：{t.memo}")
-    if t.payer:
-        rows.append(f"付款方：{t.payer}")
-    if t.receiver:
-        rows.append(f"收款方：{t.receiver}")
-    if t.transaction_id:
-        rows.append(f"交易号：{t.transaction_id}")
-    if t.transfer_id:
-        rows.append(f"转账单号：{t.transfer_id}")
-    if t.paysubtype:
-        rows.append(f"paysubtype：{t.paysubtype}（语义未确认，原样呈现）")
-    for label, value in (("发起时间", t.begin_time), ("生效日期", t.effective_date),
-                         ("失效时间", t.invalid_time)):
-        if value:
-            rows.append(f"{label}：{chat_text.when(value)}")
-    return " · ".join(_esc(r) for r in rows)
+    return " · ".join(_esc(r) for r in chat_text.transfer_fields(t))
 
 
 def _appmsg_block(a: AppMsg, ref_anchor: str | None) -> str:

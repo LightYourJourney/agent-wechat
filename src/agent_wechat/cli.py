@@ -356,7 +356,12 @@ def cmd_chat_export(args: argparse.Namespace) -> int:
     kinds = "  ".join(f"{k}={v}" for k, v in sorted(res.counts.items()))
     print(f"会话 {res.chat_id}   {sum(res.counts.values())} 条   {kinds}")
     if res.truncated:
-        # 触顶只回终端不印产物：用户会以为拿到的是全部（与 media export 同一口径）
+        # 终端这一行是**补充**，不是唯一出口：**产物顶部也会印**（`chat_html` / `chat_md`
+        # 的 `_notice`，spec §4.5 明令「必须印在产物顶部」，`test_truncated_is_printed_at_the_top`
+        # 两个模板各有一条）。这里再回一次终端，是因为用户可能只读了 stdout 里的产物路径、
+        # 根本没打开产物。
+        # **不要反过来读成「只回终端、产物里不印」**——产物里不印才是「用户会以为拿到的
+        # 是全部」那个故障；本行的存在理由恰恰是**不要**发生它。（与 media export 同一口径。）
         print("注意：触及 --limit，只导了范围内最近的这些（可能还有更早的没进来）",
               file=sys.stderr)
     if res.unparsed or res.rejected:

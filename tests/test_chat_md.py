@@ -29,6 +29,34 @@ def test_truncated_is_printed_at_the_top():
     assert "1 条 appmsg 被主动拒绝" in out, "拒绝那一行没印出来"
 
 
+def test_transfer_envelope_renders_as_a_readable_line():
+    """MD 侧的转账夹具 —— **此前一条都没有**。
+
+    实测的漏法：把 `chat_md._transfer_line` 整个改成 `return ""`（MD 产物里转账块全没
+    了），695 条用例**全绿**。字段清单与标签原本在两个模板里逐字两写，而那条变异正好
+    落在没有夹具的那一半上（丙 R21 的复发形状）。清单现已收进 `chat_text.transfer_fields`，
+    本条钉住 MD 这一侧真的去取了它。
+
+    `paysubtype` 必须**原样**呈现：spec §2.9 明令不猜它的中文语义。
+    `payer` 为 None（实测 61% 为空）→ 那一行**不印**，也不写「（空）」。
+    """
+    t = appmsg.Transfer(paysubtype="3", amount_desc="¥100.00", memo="还款", payer=None,
+                        receiver="wxid_testacct02", transaction_id="TXN1",
+                        transfer_id="TR1", begin_time=None, effective_date=None,
+                        invalid_time=None, is_red_envelope=False)
+    a = appmsg.AppMsg(kind=appmsg.KIND_TRANSFER, title="转账", fields=(), quote=None,
+                      link=None, file=None, transfer=t)
+    out = chat_md.render(chatview.build(
+        "c", title="t", rows=[{"msg_key": "k1", "ts": 1, "msg_type": 49, "content": "",
+                               "sender_name": "张三", "is_self": False}],
+        parts={"k1": a}, media={}, out_dir="/tmp", truncated=False,
+        unparsed=0, rejected=0, degraded=()))
+    assert "¥100.00" in out and "还款" in out and "TXN1" in out
+    assert "paysubtype：3（语义未确认，原样呈现）" in out
+    assert "付款方" not in out, "payer 为空却被印了一行"
+    assert "金额：¥100.00 · 备注：还款" in out, "字段顺序或分隔符与 HTML 侧分叉了"
+
+
 def test_quote_becomes_blockquote_with_original_text():
     """Markdown 没有可点锚点，但**原文必须照常出现**（spec §2.6）。"""
     quote = appmsg.AppMsg(kind=57, title="同意", fields=(), link=None, file=None,

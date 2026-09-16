@@ -65,30 +65,12 @@ def _media_block(m: MediaRefState, prefix: str, out_dir: str) -> str:
 
 
 def _transfer_line(t: appmsg.Transfer) -> str:
-    """转账 / 红包 → 一行可读字段（与 HTML 侧同一份字段清单与同一套规矩）。
+    """转账 / 红包 → 一行可读字段。
 
-    `paysubtype` 原样印数字并注明语义未确认；`payer` 为空是 61% 的常态，空着就不印。
+    **字段清单、顺序与标签全在 `chat_text.transfer_fields`**（与 HTML 侧**同一份**，
+    不是两份互校的副本）；本模板只加 Markdown 自己的行首 `- ` 与转义。
     """
-    rows: list[str] = ["红包" if t.is_red_envelope else "转账"]
-    if t.amount_desc:
-        rows.append(f"金额：{t.amount_desc}")
-    if t.memo:
-        rows.append(f"备注：{t.memo}")
-    if t.payer:
-        rows.append(f"付款方：{t.payer}")
-    if t.receiver:
-        rows.append(f"收款方：{t.receiver}")
-    if t.transaction_id:
-        rows.append(f"交易号：{t.transaction_id}")
-    if t.transfer_id:
-        rows.append(f"转账单号：{t.transfer_id}")
-    if t.paysubtype:
-        rows.append(f"paysubtype：{t.paysubtype}（语义未确认，原样呈现）")
-    for label, value in (("发起时间", t.begin_time), ("生效日期", t.effective_date),
-                         ("失效时间", t.invalid_time)):
-        if value:
-            rows.append(f"{label}：{chat_text.when(value)}")
-    return "- " + _t(" · ".join(rows))
+    return "- " + _t(" · ".join(chat_text.transfer_fields(t)))
 
 
 def _appmsg_lines(a: AppMsg, ref_anchor: str | None) -> list[str]:

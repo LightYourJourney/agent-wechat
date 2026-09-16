@@ -64,9 +64,17 @@ def is_dangerous(raw: str) -> bool:
 
 # ---------------------------------------------------------------- 解析层
 #
-# 输出形状：**不建 27 个 dataclass**。4 类具名建模（引用 57 / 链接 5 / 文件 6 / 转账 2000），
-# 其余走 `title` + 点分路径字段表 —— 「27 种都有专门呈现」是用户已认可的解释，
-# 不是 27 个 bespoke 结构。
+# 输出形状：**不为每种类型建一个 dataclass**。4 类具名建模（引用 57 / 链接 5 / 文件 6 /
+# 转账 2000），其余走 `title` + 点分路径字段表 —— 「每种都有专门呈现」是用户已认可的解释，
+# 不是每种一个 bespoke 结构。
+#
+# **数字口径（订正）**：spec §2.2 那张表里的「27 种可辨识类型」数的是
+# 「`<type>` 在**整篇文档**里出现过」，含 `<refermsg>` 里的**嵌套** `<type>`。
+# **真机顶层只有 22 种**（`index.db` 的 `msg_parts.appmsg_type`，2026-09-17 实测 66,663 行、
+# `count(distinct appmsg_type) == 22`）。同一个口径差也让 spec 的「57 = 53,472」与本机的
+# 53,663 对不上。
+# **实质成立、数字不成立**：「每种都有块」这一条照旧（那 22 种全都有 `title` + 字段表），
+# 但**别再引用 27** —— 要么写 22，要么写明是哪个口径。
 KIND_QUOTE = 57
 KIND_LINK = 5
 KIND_FILE = 6
@@ -93,6 +101,25 @@ _NAMED_SUBTREES = {
     KIND_FILE: ("appattach",),
     KIND_TRANSFER: ("wcpayinfo",),
 }
+
+# **内层 XML 载荷**：值是**一整段 XML 文本**，不是叶子标量，任何 kind 下都不进字段表。
+#
+# `refermsg`：引用的载荷，已由 `Quote` 具名建模（见上表）。
+# `recorditem`：合并转发（19，以及带转发卡的 57 / 6 / 5 / 51 / 24 / 33 / 4 / 76 / 8）的
+# **内层聊天记录**。实测它长得像 `<recordinfo><title>…</title><desc>…</desc>
+# <datalist count="9">…`，是**转义后**嵌在外层 XML 里的第二份 XML（`&#x0A;` 这类实体
+# 原样留着）。
+#
+# 为什么必须跳（spec §10.3 那条"实现期必须先按 §4.2 三步重测"的探针，**已重测、已裁定**）：
+#   · 重测结果（本机 index.db，2026-09-17）：1,023 个 `recorditem`，**原样 `ET.fromstring`
+#     就 100% 可解析**，套完 §4.2 三步仍是 1,023/1,023 —— spec §10.3 转述的「611 可解析 /
+#     813 不可解析」在这份语料上**没有复现**，那 813 条不是规范化问题（假设被推翻）。
+#   · 所以它该按 `refermsg` 的先例处理：**是载荷，不是叶子**，不当叶子也不在本期解析成结构
+#     （那是新能力，spec 也没要求）。据实处理的结论就是这一条规则。
+#   · 不跳的后果是**用户可见**的：字段值是一段原始 XML，实测中位 ~9.5 KB、最长 224,800
+#     字符，含 `&#x0A;` 实体 —— 它同时进 HTML/Markdown 的字段表与 `get_message_parts` 的
+#     MCP 信封。`test_recorditem_is_not_a_leaf_field` 钉住这条。
+_INNER_XML_PAYLOADS = ("refermsg", "recorditem")
 # `type` / `title` 自身已在 `AppMsg` 的具名字段里，不再重复进字段表。只跳**顶层**
 # 这两个名字：更深处的同名叶子（如某个未具名子树里的 `<type>`）是该子树自己的数据。
 _SELF_NAMES = ("type", "title")
@@ -233,9 +260,11 @@ def _leaf_fields(appmsg_el: ET.Element, kind: int) -> list[tuple[str, str]]:
     """未具名建模的叶子字段，(点分路径, 值)，文档序。
 
     **只收叶子**（无子元素）：非叶子的 `text` 只是标签间的空白，收进来是噪声。
+    「只收叶子」**不够**——`recorditem` 本身就是叶子（它没有子元素，整段内层 XML 在
+    `text` 里），所以还要显式跳过 `_INNER_XML_PAYLOADS`。
     密材过滤不在这里做 —— 它还要看**值**，由 `parse` 统一过一道。
     """
-    skip = (set(_NAMED_SUBTREES.get(kind, ())) | {"refermsg"}
+    skip = (set(_NAMED_SUBTREES.get(kind, ())) | set(_INNER_XML_PAYLOADS)
             | set(_NAMED_LEAVES.get(kind, ())))
     out: list[tuple[str, str]] = []
     # 显式栈而不是递归：载荷对手可控，`<a><a><a>…` 一万层会把递归爆成 RecursionError，
