@@ -136,7 +136,7 @@ def test_quote_without_a_displayname_prints_an_explicit_placeholder():
     assert "明天开会" in out
 
 
-def test_both_templates_take_their_wording_from_chat_text():
+def test_both_templates_take_their_wording_from_chat_text(monkeypatch):
     """F51：两个模板的措辞**同源**（`chat_text`）—— spec §4.3 的「HTML 与 Markdown 语义
     一致」不能靠两份互相无法校验的副本支撑（丙 R21 的教训）。
 
@@ -144,9 +144,16 @@ def test_both_templates_take_their_wording_from_chat_text():
     **19 条用例全绿**，而症状是用户读 `index.html` 与 `index.md` 对同一条消息的媒体
     可得性得到互相矛盾的说法。
 
-    这条断言把两侧都钉在**共享常量本身**上：任一侧留一份自己的副本并分叉
-    （改回硬编码字符串）→ 对应那句 `in html_out and in md_out` 立刻红。
-    反向确认：只改 `chat_text.GONE` 一处 → 两个模板的输出**同时**变 → 这条也红。
+    两段断言各守一半：
+    1. 上面那轮 `in html_out and in md_out`：**拿共享常量的实际值**去比两个产物 ——
+       任一侧留一份自己的副本并分叉（硬编码字符串），那边立刻红。
+    2. 下面那轮 monkeypatch：改 `chat_text.GONE` 后**产物里的措辞必须跟着变**。
+       这条守的是 F53 —— 两个模板此前写 `from .chat_text import GONE`，那是**导入期绑定**：
+       运行期 monkeypatch 对产物**完全无效**（实测 HTML=False MD=False），产物停在旧值上，
+       而那正是 `purge.py:10` 明令禁止的形状（「测试 monkeypatch 会失效」）。
+       改回 `from .chat_text import GONE` **或**任一侧自己绑局部名 → 第 2 轮红。
+       （顺带订正：本用例初稿把机制写反了 —— 当时那两条断言能红，恰恰是因为
+       常量变了而产物**没**变；订正前那种形态下「两个产物同时变」根本不成立。）
     """
     from agent_wechat import chat_html, chat_text
     from agent_wechat.usecases import MediaRefState
@@ -160,3 +167,7 @@ def test_both_templates_take_their_wording_from_chat_text():
     for shared in (chat_text.GONE, chat_text.TRUNCATED_NOTE[0],
                    chat_text.unparsed_note(2)[0], chat_text.rejected_note(1)[0]):
         assert shared in html_out and shared in md_out, f"两个模板的措辞分叉了：{shared}"
+
+    monkeypatch.setattr(chat_text, "GONE", "改过的文案XYZ")
+    assert "改过的文案XYZ" in chat_html.render(view), "HTML 读的是导入期的旧值（F53）"
+    assert "改过的文案XYZ" in chat_md.render(view), "Markdown 读的是导入期的旧值（F53）"

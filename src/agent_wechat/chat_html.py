@@ -34,10 +34,7 @@ from __future__ import annotations
 import html
 from typing import TYPE_CHECKING
 
-from . import appmsg
-from .chat_text import (EXPORTABLE, EXPORTABLE_OTHER, GONE, KIND_LABEL,
-                        TRUNCATED_NOTE, degradation_text, media_src, rejected_note,
-                        unparsed_note, when)
+from . import appmsg, chat_text
 
 if TYPE_CHECKING:
     from .appmsg import AppMsg
@@ -80,13 +77,13 @@ def _esc(v: str | None) -> str:
 def _media_block(m: MediaRefState, prefix: str, out_dir: str) -> str:
     """`MediaRefState` 四态 → HTML。`none` 不印任何东西（那条消息本来就没有媒体）。"""
     kind = m.kind or ""
-    label = KIND_LABEL.get(kind, kind)
+    label = chat_text.KIND_LABEL.get(kind, kind)
     if m.status == "exported":
         if not m.path:
             # 状态说「导出了」却没有路径：这是上游的不一致，**不能静默成空白**
             # （空白看起来与「这条消息没有媒体」一模一样）。
             return '<div class="ph">[已导出，但拿不到产物路径 —— 状态与路径不一致]</div>'
-        src = _esc(media_src(m.path, out_dir, prefix))
+        src = _esc(chat_text.media_src(m.path, out_dir, prefix))
         if kind == "image":
             return f'<div class="media"><img loading="lazy" src="{src}" alt="{_esc(label)}"></div>'
         if kind == "voice":
@@ -95,10 +92,10 @@ def _media_block(m: MediaRefState, prefix: str, out_dir: str) -> str:
             return f'<div class="media"><video controls src="{src}"></video></div>'
         return f'<div class="media"><a href="{src}">{_esc(label or "媒体")}</a></div>'
     if m.status == "exportable":
-        why = EXPORTABLE.get(kind, EXPORTABLE_OTHER)
+        why = chat_text.EXPORTABLE.get(kind, chat_text.EXPORTABLE_OTHER)
         return f'<div class="ph">[{_esc(label)} · {_esc(why)}]</div>'
     if m.status == "gone":
-        return f'<div class="ph">[{_esc(label)} · {_esc(GONE)}]</div>'
+        return f'<div class="ph">[{_esc(label)} · {_esc(chat_text.GONE)}]</div>'
     if m.status == "none":
         return ""
     # 四态之外的取值（上游将来加枚举值）：照实印出来，不猜也不吞。
@@ -144,7 +141,7 @@ def _transfer_block(t: appmsg.Transfer) -> str:
     for label, value in (("发起时间", t.begin_time), ("生效日期", t.effective_date),
                          ("失效时间", t.invalid_time)):
         if value:
-            rows.append(f"{label}：{when(value)}")
+            rows.append(f"{label}：{chat_text.when(value)}")
     return " · ".join(_esc(r) for r in rows)
 
 
@@ -182,7 +179,7 @@ def _msg_block(m: ViewMsg, prefix: str, out_dir: str) -> str:
     who = "我" if m.is_self else (m.sender or "（未知发送者）")
     cls = "self" if m.is_self else "other"
     inner = [f'<div class="meta"><span class="who">{_esc(who)}</span>'
-             f'<span class="when">{when(m.ts)}</span>'
+             f'<span class="when">{chat_text.when(m.ts)}</span>'
              f'<span class="kind">{_esc(m.kind)}</span></div>']
     # appmsg 的 `text` 是 `[appmsg: 标题]` 形态的提示（`content` 语义不变，见 spec §2.4），
     # 解析成功时它与下面的结构化块逐字重复，故只在没有结构化块时才印它。
@@ -201,19 +198,19 @@ def _notice(view: ChatView) -> str:
     三个计数的措辞全部来自 `chat_text`（与 `chat_md` 同源）：改一处，两个产物同时变。
     """
     rows = [f"会话 <b>{_esc(view.title or view.chat_id)}</b> · 共 <b>{len(view.msgs)}</b> 条"
-            f" · 导出时间 {when(view.generated_at)}"]
+            f" · 导出时间 {chat_text.when(view.generated_at)}"]
     if view.counts:
         rows.append("类型：" + " · ".join(f"{_esc(k)} {v}"
                                         for k, v in sorted(view.counts.items())))
     if view.truncated:
-        rows.append(_b(*TRUNCATED_NOTE))
+        rows.append(_b(*chat_text.TRUNCATED_NOTE))
     if view.unparsed:
-        rows.append(_b(*unparsed_note(view.unparsed)))
+        rows.append(_b(*chat_text.unparsed_note(view.unparsed)))
     if view.rejected:
         # 与「解不开」**分开印**：那是我们主动拒绝，池化会让用户以为数据坏了（spec §5）。
-        rows.append(_b(*rejected_note(view.rejected)))
+        rows.append(_b(*chat_text.rejected_note(view.rejected)))
     for d in view.degraded:
-        rows.append("降级：" + _esc(degradation_text(d)))
+        rows.append("降级：" + _esc(chat_text.degradation_text(d)))
     return '<div class="notice">' + "<br>".join(rows) + "</div>"
 
 

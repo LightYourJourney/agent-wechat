@@ -25,10 +25,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from . import appmsg
-from .chat_text import (EXPORTABLE, EXPORTABLE_OTHER, GONE, KIND_LABEL,
-                        TRUNCATED_NOTE, degradation_text, media_src, rejected_note,
-                        unparsed_note, when)
+from . import appmsg, chat_text
 
 if TYPE_CHECKING:
     from .appmsg import AppMsg
@@ -49,19 +46,19 @@ def _t(v: str | None) -> str:
 def _media_block(m: MediaRefState, prefix: str, out_dir: str) -> str:
     """`MediaRefState` 四态 → Markdown。`none` 不印任何东西。"""
     kind = m.kind or ""
-    label = KIND_LABEL.get(kind, kind)
+    label = chat_text.KIND_LABEL.get(kind, kind)
     if m.status == "exported":
         if not m.path:
             return "〔已导出，但拿不到产物路径 —— 状态与路径不一致〕"
-        src = media_src(m.path, out_dir, prefix)
+        src = chat_text.media_src(m.path, out_dir, prefix)
         if kind == "image":
             return f"![{_t(label)}]({src})"
         # 音视频没有原生语法（模块头的固有损失 1）：给链接。
         return f"[{_t(label) or '媒体'}]({src})"
     if m.status == "exportable":
-        return "〔{} · {}〕".format(_t(label), _t(EXPORTABLE.get(kind, EXPORTABLE_OTHER)))
+        return "〔{} · {}〕".format(_t(label), _t(chat_text.EXPORTABLE.get(kind, chat_text.EXPORTABLE_OTHER)))
     if m.status == "gone":
-        return "〔{} · {}〕".format(_t(label), _t(GONE))
+        return "〔{} · {}〕".format(_t(label), _t(chat_text.GONE))
     if m.status == "none":
         return ""
     return f"〔{_t(label)} · 未知媒体状态 {_t(m.status)}〕"
@@ -90,7 +87,7 @@ def _transfer_line(t: appmsg.Transfer) -> str:
     for label, value in (("发起时间", t.begin_time), ("生效日期", t.effective_date),
                          ("失效时间", t.invalid_time)):
         if value:
-            rows.append(f"{label}：{when(value)}")
+            rows.append(f"{label}：{chat_text.when(value)}")
     return "- " + _t(" · ".join(rows))
 
 
@@ -134,7 +131,7 @@ def _message_lines(m: ViewMsg, prefix: str, out_dir: str) -> list[str]:
     `self` / `other` 同一件事（Markdown 没有对齐，只能用标记）。"""
     who = "我" if m.is_self else (m.sender or "（未知发送者）")
     tag = "（自己）" if m.is_self else ""
-    out = [f"## {_t(who)}{tag} · {when(m.ts)} · {_t(m.kind)}", ""]
+    out = [f"## {_t(who)}{tag} · {chat_text.when(m.ts)} · {_t(m.kind)}", ""]
     # appmsg 的 `text` 是 `[appmsg: 标题]` 形态的提示，解析成功时与下面的结构化块逐字重复。
     if m.text and m.appmsg is None:
         out += [_t(m.text), ""]
@@ -152,19 +149,19 @@ def _notice_lines(view: ChatView) -> list[str]:
 
     三个计数的措辞全部来自 `chat_text`（与 `chat_html` 同源）：改一处，两个产物同时变。
     """
-    rows = [f"- 共 {len(view.msgs)} 条 · 导出时间 {when(view.generated_at)}"]
+    rows = [f"- 共 {len(view.msgs)} 条 · 导出时间 {chat_text.when(view.generated_at)}"]
     if view.counts:
         rows.append("- 类型：" + " · ".join(f"{_t(k)} {v}"
                                          for k, v in sorted(view.counts.items())))
     if view.truncated:
-        rows.append("- " + _b(*TRUNCATED_NOTE))
+        rows.append("- " + _b(*chat_text.TRUNCATED_NOTE))
     if view.unparsed:
-        rows.append("- " + _b(*unparsed_note(view.unparsed)))
+        rows.append("- " + _b(*chat_text.unparsed_note(view.unparsed)))
     if view.rejected:
         # 与「解不开」分开印：那是我们主动拒绝，池化会让用户以为数据坏了（spec §5）。
-        rows.append("- " + _b(*rejected_note(view.rejected)))
+        rows.append("- " + _b(*chat_text.rejected_note(view.rejected)))
     for d in view.degraded:
-        rows.append("- 降级：" + _t(degradation_text(d)))
+        rows.append("- 降级：" + _t(chat_text.degradation_text(d)))
     return rows
 
 
