@@ -211,6 +211,53 @@ def export_chat_media(contact: str, kinds: str = "image,voice,video",
 
 @server.tool()
 @_guard
+def get_message_media(contact: str, keys: str | None = None, months: str | None = None,
+                      limit: int = 200, out_dir: str | None = None,
+                      account: str | None = None) -> dict:
+    """查消息的媒体：有没有、什么类型、在不在本机、在哪。
+
+    keys 为逗号分隔的 msg_key（取自 get_recent_messages / search_history / semantic_search
+    返回的 msg_key 字段）；省略则回答该会话全部媒体类型的消息。out_dir 省略时按
+    ~/.agent-wechat/media——若导出时用过 --out，这里也要给同一个，否则已导出的产物会被
+    判成 exportable 而非 exported。
+
+    status 四态：none(没有媒体) / exported(已导出，path 是产物路径) /
+    exportable(有媒体、本体还在微信里，但你还没导出) / gone(有媒体但本机找不到)。
+    **本机绝大多数图片与视频的本体已被微信清理，gone 是常态，不是错误。**
+    counts 给出四态的汇总，用来一眼判断是不是「全是 gone」；by_kind 再把 counts 按
+    image/video/voice 拆开——池化会把「语音几乎全可导出」与「图片视频几乎全 gone」
+    混成一个数字，读起来像「这个会话的媒体大多没了」，按 kind 看才是实情。
+
+    **exportable 只保证本机有可定位的产物**：video 命中缩略图时也算 exportable，
+    此时本机只有一张 jpg，mp4 本体并不在。
+
+    truncated=true 表示触及 limit 提前收手：counts/by_kind 是**答完的这些**，不是全量。
+
+    语音库读不到时会降级：degraded 非空，且语音一律按 gone 呈现（不会假装成 exportable）。
+    """
+    res = usecases.message_media(
+        contact,
+        keys=[k.strip() for k in keys.split(",") if k.strip()] if keys else None,
+        months=[m.strip() for m in months.split(",") if m.strip()] if months else None,
+        limit=limit, out_dir=out_dir, account=account)
+    if isinstance(res, usecases.NeedConfirm):
+        return _need_confirm(res)
+    by_kind: dict[str, dict[str, int]] = {}
+    for s in res.states:
+        if s.kind is None:            # 'none' 态没有 kind，只进池化的 counts
+            continue
+        bucket = by_kind.setdefault(s.kind, {})
+        bucket[s.status] = bucket.get(s.status, 0) + 1
+    return {"chat_id": res.chat_id, "out_dir": res.out_dir,
+            "counts": res.counts, "by_kind": by_kind, "truncated": res.truncated,
+            "messages": [{"msg_key": s.msg_key, "time": s.ts, "kind": s.kind,
+                          "status": s.status, "path": s.path} for s in res.states],
+            "degraded": [{"capability": d.capability, "effect": d.effect}
+                         for d in res.degraded]}
+
+
+@server.tool()
+@_guard
 def export_moments(contact: str | None = None, months: str | None = None,
                    with_media: bool = False, limit: int = 500,
                    account: str | None = None) -> dict:

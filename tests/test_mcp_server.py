@@ -42,9 +42,10 @@ def _call(fn, **kwargs):
     ("semantic_search", {"query": "爬山"}),
     ("export_chat_media", {"contact": "张三"}),
     ("export_moments", {}),
+    ("get_message_media", {"contact": "张三"}),
 ])
 def test_tools_with_missing_account_return_error_not_raise(name, kwargs):
-    """经 `usecases` 账号解析的这 7 个工具：account 不存在时必须返回 error 信封，零异常逃逸。"""
+    """经 `usecases` 账号解析的这 8 个工具：account 不存在时必须返回 error 信封，零异常逃逸。"""
     res = _call(getattr(mcp_server, name), account=BOGUS, **kwargs)
     assert isinstance(res, dict) and res.get("error"), res
     assert "账号目录不存在" in res["error"]
@@ -58,6 +59,7 @@ def test_tools_with_missing_account_return_error_not_raise(name, kwargs):
     ("semantic_search", {"query": "爬山"}),
     ("export_chat_media", {"contact": "张三"}),
     ("export_moments", {}),
+    ("get_message_media", {"contact": "张三"}),
 ])
 def test_errors_reach_the_agent_through_call_tool(name, args):
     """端到端：经 SDK 的 `call_tool` 也必须拿到中文信封、is_error=False。
@@ -129,7 +131,7 @@ def test_every_registered_tool_is_guarded():
     for name in ("get_account_status", "list_contacts", "get_recent_messages",
                  "export_full_history", "get_task_status", "search_history",
                  "semantic_search", "build_vector_index", "export_chat_media",
-                 "export_moments"):
+                 "export_moments", "get_message_media"):
         assert getattr(mcp_server, name).__wrapped__ is not None, f"{name} 缺 @_guard"
 
 
@@ -314,3 +316,96 @@ def test_msg_dict_carries_msg_key():
                        sender_name=None, is_self=False, content="hi", media_hint=None,
                        msg_key="acct|deadbeef|message_0.db|42")
     assert mcp_server._msg_dict(m)["msg_key"] == "acct|deadbeef|message_0.db|42"
+
+
+# ---------- T7：get_message_media 的信封（spec §4.5） ----------
+
+def test_tool_count_is_eleven():
+    """工具数变了，README/TOOLS.md 的数法必须跟着变 —— 这条断言守的就是「别忘改文档」。"""
+    tools = asyncio.run(mcp_server.server.list_tools())
+    assert len(tools) == 11
+    assert "get_message_media" in {t.name for t in tools}
+
+
+def test_get_message_media_envelope_shape(monkeypatch):
+    """信封形状：chat_id / out_dir / counts / truncated / by_kind / messages / degraded；
+    messages 里带 msg_key。
+
+    替换用例层而不是造真数据：本任务要验的是**信封**，四态判定已由 Task 4 单独覆盖。
+    """
+    from agent_wechat import usecases
+
+    def _fake(*a, **k):
+        return usecases.MessageMediaResult(
+            chat_id="wxid_x", out_dir="/tmp/m",
+            states=[usecases.MediaRefState(msg_key="acct|deadbeef|message_0.db|1",
+                                           ts=1, kind="image", status="exported",
+                                           path="/tmp/m/x.jpg")],
+            counts={"none": 0, "exported": 1, "exportable": 0, "gone": 0},
+            degraded=())
+    monkeypatch.setattr(usecases, "message_media", _fake)
+    res = mcp_server.get_message_media(contact="张三")
+    assert set(res) == {"chat_id", "out_dir", "counts", "truncated", "by_kind",
+                        "messages", "degraded"}
+    assert res["truncated"] is False
+    assert res["by_kind"] == {"image": {"exported": 1}}
+    assert res["messages"] == [{"msg_key": "acct|deadbeef|message_0.db|1", "time": 1,
+                                "kind": "image", "status": "exported",
+                                "path": "/tmp/m/x.jpg"}]
+
+
+def test_get_message_media_by_kind_breakdown(monkeypatch):
+    """by_kind 按 kind 再拆一次四态。夹具含**两种以上 kind 且状态不同**——池化的 counts
+    把「语音全部可导出」与「图片视频全 gone」算成一个数字，读起来像「这会话媒体大多没了」，
+    而按 kind 拆开后正相反。kind=None 的 none 态只进池化 counts，不进任何桶（它没有 kind）。
+    """
+    from agent_wechat import usecases
+
+    def _state(key, kind, status):
+        return usecases.MediaRefState(msg_key=key, ts=1, kind=kind, status=status, path=None)
+
+    def _fake(*a, **k):
+        return usecases.MessageMediaResult(
+            chat_id="wxid_x", out_dir="/tmp/m",
+            states=[_state("k1", "voice", "exportable"), _state("k2", "voice", "exportable"),
+                    _state("k3", "image", "gone"), _state("k4", "image", "exported"),
+                    _state("k5", "video", "gone"), _state("k6", None, "none")],
+            counts={"none": 1, "exported": 1, "exportable": 2, "gone": 2},
+            truncated=True, degraded=())
+    monkeypatch.setattr(usecases, "message_media", _fake)
+    res = mcp_server.get_message_media(contact="张三")
+    assert res["by_kind"] == {"voice": {"exportable": 2},
+                              "image": {"gone": 1, "exported": 1},
+                              "video": {"gone": 1}}
+    assert res["counts"] == {"none": 1, "exported": 1, "exportable": 2, "gone": 2}
+    assert res["truncated"] is True
+
+
+def test_get_message_media_degraded_is_converted_to_dict(monkeypatch):
+    """`degraded` 的 dict 转换归适配层（用例层给的元素是 `Degradation` 对象而不是 dict），
+    对外形状与 get_recent_messages 同一个键、同一个形状。"""
+    from agent_wechat import usecases
+    monkeypatch.setattr(usecases, "message_media", lambda *a, **k: usecases.MessageMediaResult(
+        chat_id="wxid_x", out_dir="/tmp/m", states=[],
+        counts={"none": 0, "exported": 0, "exportable": 0, "gone": 0},
+        degraded=(usecases.Degradation("msg_media", "message/media_*.db", "VoiceInfo", (),
+                                       "语音库读不到：语音消息一律按「本体不在本机」呈现"),)))
+    res = mcp_server.get_message_media(contact="张三")
+    assert res["degraded"] == [
+        {"capability": "msg_media",
+         "effect": "语音库读不到：语音消息一律按「本体不在本机」呈现"}]
+
+
+def test_get_message_media_parses_comma_separated_keys(monkeypatch):
+    """keys 是逗号分隔字符串（与 kinds/months 同约定）；msg_key 内的 `|` 与 `,` 不冲突。"""
+    from agent_wechat import usecases
+    seen = {}
+
+    def _fake(contact, **kw):
+        seen.update(kw)
+        return usecases.MessageMediaResult(chat_id="wxid_x", out_dir="/tmp/m",
+                                           states=[], counts={"none": 0, "exported": 0,
+                                                              "exportable": 0, "gone": 0})
+    monkeypatch.setattr(usecases, "message_media", _fake)
+    mcp_server.get_message_media(contact="张三", keys="a|b|c|1, a|b|c|2")
+    assert seen["keys"] == ["a|b|c|1", "a|b|c|2"]

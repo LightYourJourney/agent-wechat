@@ -1,6 +1,6 @@
 # TOOLS — MCP 工具参考
 
-> 本文档逐个说明 agent-wechat MCP Server 暴露的 10 个工具：用途、参数、返回结构、
+> 本文档逐个说明 agent-wechat MCP Server 暴露的 11 个工具：用途、参数、返回结构、
 > 示例与错误。所有工具经 stdio JSON-RPC 调用；示例为 Agent 视角的调用与实际返回。
 
 通用约定：
@@ -403,6 +403,62 @@
 
 ---
 
+## 11. get_message_media
+
+**用途**：查一批消息各自的媒体状态——有没有媒体、什么类型、本机在不在、产物在哪。
+是「消息 → 媒体」的按需查询：`export_chat_media`（§9）按会话批量导出且信封不回传文件
+清单，这里由调用方自己缩小范围（给 `keys`），所以逐条回传明细不会膨胀上下文。
+
+| 参数 | 类型 | 必填 | 默认 | 说明 |
+|---|---|---|---|---|
+| `contact` | string | **是** | — | username（`wxid_*` / `*@chatroom` / `filehelper`）或展示名（歧义返回 `need_confirm`，形状见 §3；未命中返回 `{"error": "找不到联系人「XXX」，请用 list_contacts 查询"}`） |
+| `keys` | string | 否 | null | 逗号分隔的 `msg_key`（取自 §3 / §6 / §8 返回的 `msg_key` 字段）；省略 = 该会话**全部媒体类型的消息**。只答属于该会话的 key，别的会话的 key 静默略过 |
+| `months` | string | 否 | null | 逗号分隔的月份（`YYYY-MM`），按消息时间过滤；格式不符返回 `{"error": "月份格式应为 YYYY-MM：…"}`（不静默 0 命中） |
+| `limit` | int | 否 | 200 | 消息条数上限（1-500，超出按边界处理）。`months` 在 SQL 里筛，故 `limit` 卡的是**命中月份**的条数 |
+| `out_dir` | string | 否 | null | 已导出产物的根目录；省略按 `~/.agent-wechat/media`。**要与导出时用的 `--out` 同一个**，否则已导出的产物会被判成 `exportable` |
+| `account` | string | 否 | null | 同通用约定 |
+
+**成功返回**：
+
+```json
+{
+  "chat_id": "wxid_abc123def456",
+  "out_dir": "/Users/you/.agent-wechat/media",
+  "counts": { "none": 3, "exported": 0, "exportable": 19, "gone": 31 },
+  "by_kind": { "voice": { "exportable": 19 }, "image": { "gone": 23 }, "video": { "gone": 8 } },
+  "truncated": false,
+  "messages": [
+    { "msg_key": "wxid_abc123def456|9f2c1a…|message_0.db|81234", "time": 1789046525,
+      "kind": "voice", "status": "exportable", "path": null }
+  ],
+  "degraded": []
+}
+```
+
+**说明**：
+- `status` 四态（判定顺序严格按此序）：
+  - `none` —— 这条消息没有媒体（由消息类型判定，不依赖引用表）
+  - `exported` —— 产物已在 `out_dir` 下，`path` 是产物**绝对路径**
+  - `exportable` —— 有媒体且**本体还在微信里**，但还没导出到 `out_dir`
+  - `gone` —— 有媒体，但本机找不到
+- **`gone` 是常态，不是错误**：微信按需下载并定期清理本地媒体。本机实测（2026-09-16）
+  索引内 39,551 条图片引用只有 181 条（0.5%）能在本机找到本体，视频 4,445 条中 30 条
+  （0.7%，且多为缩略图）；语音相反，7,390 条 100% 有本体。
+- **`by_kind` 是把 `counts` 按 `image` / `video` / `voice` 再拆一次**：三类的本机可得率
+  相差几个数量级，池化的 `counts` 会把「语音几乎全可导出」与「图片视频几乎全 `gone`」
+  加成一个数字，看起来像「这个会话的媒体大多没了」。`kind` 为 `null` 的 `none` 态没有
+  类型，只进 `counts`。
+- **`exportable` 不保证本体可用**：视频只定位到缩略图时也算 `exportable`（本机只有一张
+  jpg，`mp4` 本体不在）。
+- `counts` 四键**恒存在**（含 0）；`degraded` 键**恒存在**（每项是 `{capability, effect}`，
+  形状见 §3 的约定）。当前来源是语音库读不到（`message/media_*.db` 漂移）——此时语音
+  一律按 `gone` 呈现，不会假装成 `exportable`。
+- `truncated=true` 表示触及 `limit` 提前收手——此时 `counts` / `by_kind` 只是**答完的
+  这些**，不是全量；可按 `months` 分批重跑补齐。
+- **只读**：不写微信目录、不写 `out_dir`、不联网——它只做 `pathlib` 探测与索引只读查询。
+
+---
+
 ## 错误汇总
 
 | 现象 | 原因 | 处置 |
@@ -442,4 +498,4 @@ async def main():
 asyncio.run(main())
 ```
 
-期望输出包含 10 个工具名与 `get_account_status` 的 JSON。
+期望输出包含 11 个工具名与 `get_account_status` 的 JSON。
