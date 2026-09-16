@@ -1,16 +1,22 @@
 # tests/test_appmsg_real.py
 """真机冒烟：规范化后的 appmsg 可解析率。**这个测试的存在理由就是证伪「content 是纯 XML」。**
 
-需要本机已登录微信且已建索引；`pyproject.toml` 的 addopts 已按惯例 deselect `*_real.py`。
+需要本机已登录微信且已建索引。默认套件不跑它：`addopts` 是 `-m 'not slow'`——按 **marker**
+筛，不是按 `*_real.py` 文件名，故靠下面那行 `pytestmark` 才被 deselect（与
+`test_media_real.py` / `test_moments_real.py` 同形）。
+跑法：`uv run pytest tests/test_appmsg_real.py -m real -v`。
 不计具体条数（微信库是活的），只断言比率下界。
 """
-import sqlite3
 import xml.etree.ElementTree as ET
 
 import pytest
 
 from agent_wechat import account as account_mod
 from agent_wechat import appmsg, reader
+
+# slow：默认 deselect 由 addopts 的 -m 'not slow' 负责（与 test_media_real 同一机制）；
+# real：真机冒烟的统一入口标记，`-m real` 只跑真实数据路径的用例。
+pytestmark = [pytest.mark.slow, pytest.mark.real]
 
 
 def _account() -> str:

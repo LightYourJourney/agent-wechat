@@ -10,7 +10,7 @@
    appmsg 载荷**，故可用更强的判据。**不要「顺手统一」这两处。**
 2. 剥掉**全部** `<?xml … ?>` 声明 —— 实测 8,980 条无声明、11 条声明位置非法（嵌在 `<msg>`
    内部）。声明的唯一功能是编码，而载荷到这里已是 `str`（`reader._decode_content` 已完成）。
-3. 剔除非法的数字字符引用 —— XML 1.0 的合法码位之外。实测剩最后 1 条失败即此。
+3. 按 XML 1.0 的合法码位剔除非法的数字字符引用。实测剩最后 1 条失败即此。
 """
 from __future__ import annotations
 
@@ -22,18 +22,26 @@ import re
 # 失配是响亮的：真机可解析率会从 0.9999 崩到 0.33，由 test_appmsg_real.py 兜住。
 _GROUP_PREFIX = re.compile(r"^[^\n<>]{1,64}:\n(?=<\?xml|<msg)")
 _XML_DECL = re.compile(r"<\?xml[^>]*\?>")
-# 非法数字字符引用：十进制 &#0;..#31（除 9/10/13）、或任何 &#x0;..&#x1F 的同类。
-# 用区间规则而不是枚举实测碰到的坏值 —— 枚举法对下一个坏值无防护。
-_BAD_CHARREF = re.compile(
-    r"&#(?:(?:x0*|0*)(?:[0-8]|1[0-9]|2[0-9]|3[01]|11|12|13|14|15|16|17|18|19|1[aA]|1[bB]|"
-    r"1[cC]|1[dD]|1[eE]|1[fF]);)")
+# 非法的数字字符引用。**用数值判定，不要手写字符类**：手写版极易把合法的
+# `&#10;`(LF) / `&#13;`(CR) 一起删掉（本计划初稿正是如此，而当时的断言恒真、抓不到），
+# 或者随写法变化悄悄漏掉某个区间。XML 1.0 的合法码位是：
+#   #x9 | #xA | #xD | [#x20-#xD7FF] | [#xE000-#xFFFD] | [#x10000-#x10FFFF]
+# 落在区间外的一律剔除。实测全库只有 1 条命中此规则。
+_CHARREF = re.compile(r"&#(x?)([0-9a-fA-F]+);", re.I)
+
+
+def _keep_charref(m: re.Match) -> str:
+    cp = int(m.group(2), 16 if m.group(1) else 10)
+    ok = (cp in (9, 10, 13) or 0x20 <= cp <= 0xD7FF
+          or 0xE000 <= cp <= 0xFFFD or 0x10000 <= cp <= 0x10FFFF)
+    return m.group(0) if ok else ""
 
 
 def normalize(raw: str) -> str:
     """把微信原文规范成可交给 ET 解析的 `<msg>` 片段。幂等。"""
     s = _GROUP_PREFIX.sub("", raw.lstrip())
     s = _XML_DECL.sub("", s)
-    return _BAD_CHARREF.sub("", s).strip()
+    return _CHARREF.sub(_keep_charref, s).strip()
 
 
 def is_dangerous(raw: str) -> bool:
