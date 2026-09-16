@@ -314,16 +314,23 @@ def parse(raw: str) -> ParseResult:
     """
     if is_dangerous(raw):
         return ParseResult(None, "rejected")
-    norm = normalize(raw)
     try:
+        # `normalize` **必须在 try 之内**：它自己会抛 `ValueError`（见下面 `except` 的注释）。
+        # 把它挪到 try 外，这个分支就失去它**唯一真正接住的东西**，裸 `ValueError` 直接逃出
+        # core 层——`appmsg_rebuild_parts` 对每条载荷调 `parse` 且无外层 try，整次回填会崩。
+        norm = normalize(raw)
         root = ET.fromstring(norm)
     except (ET.ParseError, ValueError):
-        # `ValueError` 这一支是**防御性**的，而且**它的前提本身未经证实**：本文作者与审阅者
-        # 都**未能构造出 repro**（stdlib 3.12/expat 对 `encoding="utf-8"` / `"gbk"` /
-        # `"nonsense-99"` 的声明一律正常解析、不抛；**据实测，抛 ValueError 是 lxml 的行为**，
-        # 不是这里用的 `xml.etree`）。保留它纯粹是失败方向上的取舍——「裸异常逃出 core 层」
-        # 是本仓库明令禁止的，多兜一个类型比漏一个便宜。
-        # **不要把它当成「已知有洞已补」的证据，也不要按图索骥去找那个洞。**
+        # `ValueError` 这一支**不是纯防御性的**：它接住的主要是 **`normalize` 自己的
+        # `ValueError`** —— `_keep_charref` 的 `int(group(2), 10)` 撞上 Python 3.11+ 的
+        # 十进制 int 转换上限（4300 位）。有 repro：
+        # `parse("<msg>&#" + "1" * 6000 + ";</msg>")`（`is_dangerous` 不拦它——无 DTD/ENTITY，
+        # 而载荷是对手可控的）。这正是上面 `normalize` 不能挪出 try 的原因。
+        #
+        # **`ET.fromstring` 自己不抛 `ValueError`**：stdlib/expat 对带编码声明的 str 一律正常
+        # 解析（实测 3.12/expat 对 `encoding="utf-8"` / `"gbk"` / `"nonsense-99"` 都不抛）；
+        # 抛 `ValueError` 是 lxml 的行为，不是这里用的 `xml.etree`。多兜这个类型是失败方向上
+        # 的取舍——「裸异常逃出 core 层」本仓库明令禁止。
         return ParseResult(None, "malformed")
     appmsg_el = root.find("appmsg")
     if appmsg_el is None:

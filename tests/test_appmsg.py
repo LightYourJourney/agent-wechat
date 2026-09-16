@@ -214,6 +214,22 @@ def test_reason_distinguishes_rejected_from_malformed():
     assert appmsg.parse("<msg><appmsg><type>5</type></appmsg></msg>").reason is None
 
 
+def test_long_decimal_charref_does_not_escape_parse():
+    """回归：`normalize` **自己**会抛 `ValueError` —— Python 3.11+ 对十进制数字串
+    有 4300 位的 int 转换上限，而 `_keep_charref` 的 `int(group(2), 10)` 会撞上它。
+
+    实测：`normalize("<msg>&#" + "1"*6000 + ";</msg>")` 抛
+    `ValueError: Exceeds the limit (4300 digits) for integer string conversion`；
+    `is_dangerous` 不拦它（无 DTD/ENTITY），而载荷对手可控。
+
+    **这条守的是「`normalize` 必须在 `parse` 的 `try` 之内」**：把它挪到 try 外，
+    裸 ValueError 当场逃出 core 层，整次 `appmsg rebuild` 崩掉。挪回去，绿。
+    """
+    res = appmsg.parse("<msg>&#" + "1" * 6000 + ";</msg>")
+    assert res.reason == "malformed"      # 被接住 → 归 malformed，而不是崩
+    assert res.appmsg is None
+
+
 def test_kind_name_falls_back_without_guessing():
     """含义未确认的类型不许猜（spec §10.1）。"""
     assert appmsg.kind_name(appmsg.KIND_QUOTE) == "引用"
