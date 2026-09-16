@@ -336,8 +336,8 @@ def build_index(accounts: Sequence[str] | None = None, rebuild: bool = False,
 # ---------- KNN 查询 ----------
 
 _SELECT_MSGS = ("SELECT " + (
-    messages.column_list("id", "chat_id", "shard", "local_id", "ts", "msg_type",
-                         "sender_id", prefix="m.")
+    messages.column_list("id", "msg_key", "chat_id", "shard", "local_id", "ts",
+                         "msg_type", "sender_id", prefix="m.")
     + f", {store._SENDER_EXPR} AS sender_name, "
     + messages.column_list("is_self", "content", "media_hint", prefix="m."))
     + f" FROM messages m {store._SENDER_JOIN} WHERE m.id IN ({{ph}})")
@@ -391,7 +391,8 @@ def semantic_search(query: str, chat_id: str | None = None, limit: int = 10,
             hits.append({"chat_id": m["chat_id"], "ts": m["ts"],
                          "sender": m["sender_name"] or m["sender_id"] or "?",
                          "is_self": bool(m["is_self"]), "content": m["content"],
-                         "media_hint": m["media_hint"], "distance": r["distance"]})
+                         "media_hint": m["media_hint"], "msg_key": m["msg_key"],
+                         "distance": r["distance"]})
         return {"mode": "semantic", "model": MODEL_ID,
                 "total": len(hits[:limit]), "hits": hits[:limit]}
     finally:

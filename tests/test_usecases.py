@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent_wechat import account, cli, errors, mcp_server, reader, search, store, usecases, vector
+from agent_wechat import account, cli, errors, mcp_server, paths, reader, search, store, usecases, vector
 # 合成微信目录（真实 sqlcipher 解密链路；路径全部指向 tmp_path，绝不碰真实数据）
 from test_reader_export_pipeline import ACCT, FRIEND, env, wechat  # noqa: F401
 
@@ -361,3 +361,30 @@ def test_cli_recent_renders_synthetic_messages(env, capsys):
     assert len(out) == 7
     assert any(line.endswith("压缩消息内容") for line in out)      # WCDB_CT=4 已解码
     assert out[-1].endswith("[appmsg: 分享标题]")                # 媒体提示替代正文
+
+
+# ---------- T6：消息信封加稳定标识 msg_key（spec §4.3） ----------
+
+def test_search_hits_carry_msg_key(tmp_path, monkeypatch):
+    """检索命中也要带稳定标识 —— 只给 id/shard/local_id 是问不出媒体的。
+
+    用**真索引**而不是桩：`_HIT_COLUMNS` 漏选 msg_key 时这里必须红。
+    注意 hits 里的既有 `id` 是 messages.id（rowid），与 msg_key 是两回事。
+    """
+    from agent_wechat import messages
+    acct, cm = "wxid_testacct01_ab12", "a" * 32
+    monkeypatch.setattr(paths, "HOME_DIR", tmp_path)
+    monkeypatch.setattr(store, "DB_PATH", tmp_path / "index.db")
+    con = store.connect()
+    store.upsert_batch(con, [{
+        "msg_key": messages.row_key(acct, cm, "message_0.db", 7),
+        "account": acct, "chat_md5": cm, "chat_id": "wxid_x",
+        "shard": "message_0.db", "local_id": 7, "server_id": None,
+        "ts": 1700000000, "msg_type": messages.TYPE_TEXT,
+        "sender_id": "wxid_x", "sender_name": "张三",
+        "is_self": 0, "content": "你好世界", "media_hint": None}])
+    con.commit()
+    con.close()
+    res = search.search("你好", account=acct)
+    assert res["hits"], "夹具没建出命中，下面的断言将恒真"
+    assert res["hits"][0]["msg_key"] == messages.row_key(acct, cm, "message_0.db", 7)

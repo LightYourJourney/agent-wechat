@@ -38,6 +38,7 @@ class Message:
     is_self: bool
     content: str | None
     media_hint: str | None
+    msg_key: str = ""          # 由 _read_rows 赋（需 account + chat_md5 + shard + local_id 四者齐备）
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -358,6 +359,7 @@ class MessageReader:
         for row in con.execute(sql):
             m = self._decode_row(*row, md5hex, chat_map, n2i)
             m.shard = shard
+            m.msg_key = messages.row_key(self.acct, md5hex, shard, m.local_id)
             out.append(m)
         return out
 

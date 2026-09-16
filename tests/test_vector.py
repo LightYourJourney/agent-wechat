@@ -584,3 +584,19 @@ def test_build_index_embeds_length_sorted(env):
     assert len(seen) == 1                       # 单批
     lens = [len(t) for t in seen[0]]
     assert lens == sorted(lens)                 # 批内按长度升序
+
+
+# ---------- T6：消息信封加稳定标识 msg_key（spec §4.3） ----------
+
+def test_semantic_search_hits_carry_msg_key(env):
+    """语义检索命中也要带稳定标识 —— 其 hits 是手写字典而非 dict(r)，
+    忘加 msg_key 不会在选列那步报错，只会静默缺字段。"""
+    from agent_wechat import messages
+    fake = _seed_search_fixture(env)
+    res = vector.semantic_search("爬山", account="acct", limit=5, embedder=fake)
+    assert res["hits"], "夹具没建出命中，下面的断言将恒真"
+    for h in res["hits"]:
+        assert "msg_key" in h, "semantic_search 的手写字典漏了 msg_key"
+        # 形态校验：account|chat_md5|shard|local_id
+        parts = h["msg_key"].split("|")
+        assert len(parts) == 4, f"msg_key 形态不对：{h['msg_key']!r}"

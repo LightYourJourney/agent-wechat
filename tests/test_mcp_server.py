@@ -201,13 +201,13 @@ def test_msg_dict_marks_self_as_me():
     """`cli.py:149` 有 is_self 判断而 MCP 没有——自己发的**私聊**消息（sender_id 是自己
     ≠ chat_id，名册 join 不上）因此在 MCP 里显示成一串 wxid。"""
     m = SimpleNamespace(ts=1, sender_name=None, sender_id="wxid_me", is_self=True,
-                        type_name="文本", content="在", media_hint=None)
+                        type_name="文本", content="在", media_hint=None, msg_key="k")
     assert mcp_server._msg_dict(m)["sender"] == "我"
 
 
 def test_msg_dict_falls_back_to_sender_id():
     m = SimpleNamespace(ts=1, sender_name=None, sender_id="wxid_x", is_self=False,
-                        type_name="文本", content="在", media_hint=None)
+                        type_name="文本", content="在", media_hint=None, msg_key="k")
     assert mcp_server._msg_dict(m)["sender"] == "wxid_x"
 
 
@@ -303,3 +303,14 @@ def test_export_chat_media_need_confirm_passthrough(monkeypatch):
     assert res == {"need_confirm": [
         {"username": "wxid_a", "display": "张三01", "kind": "direct"},
         {"username": "888@chatroom", "display": "张三（群）", "kind": "group"}]}
+
+
+# ---------- T6：消息信封加稳定标识 msg_key（spec §4.3） ----------
+
+def test_msg_dict_carries_msg_key():
+    """信封必须带稳定标识 —— 没有它，「这条消息的媒体是什么」问不出来。"""
+    m = reader.Message(chat_id="wxid_x", shard="message_0.db", local_id=42, ts=1,
+                       msg_type=1, type_name="文本", sender_id="wxid_x",
+                       sender_name=None, is_self=False, content="hi", media_hint=None,
+                       msg_key="acct|deadbeef|message_0.db|42")
+    assert mcp_server._msg_dict(m)["msg_key"] == "acct|deadbeef|message_0.db|42"

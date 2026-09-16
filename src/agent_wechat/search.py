@@ -8,8 +8,8 @@ from .errors import SearchInputError
 
 # 命中行的列清单（fts / like 两条路径共用；两处 SQL 曾各抄一份）
 _HIT_COLUMNS = (
-    messages.column_list("id", "chat_id", "shard", "local_id", "ts", "msg_type",
-                         "sender_id", prefix="m.")
+    messages.column_list("id", "msg_key", "chat_id", "shard", "local_id", "ts",
+                         "msg_type", "sender_id", prefix="m.")
     + f", {store._SENDER_EXPR} AS sender_name, "
     + messages.column_list("is_self", "content", "media_hint", prefix="m."))
 

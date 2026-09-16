@@ -88,16 +88,22 @@
   "chat_id": "wxid_abc123def456",
   "display": "小李（产品）",
   "messages": [
-    { "time": 1789045400, "sender": "我", "is_self": true,
+    { "msg_key": "wxid_testacct01|msg_md5hex|message_4.db|22415",
+      "time": 1789045400, "sender": "我", "is_self": true,
       "type": "text", "content": "今晚一起吃饭吗" },
-    { "time": 1789045521, "sender": "wxid_abc123def456", "is_self": false,
+    { "msg_key": "wxid_testacct01|msg_md5hex|message_4.db|22416",
+      "time": 1789045521, "sender": "wxid_abc123def456", "is_self": false,
       "type": "text", "content": "好啊，七点老地方？" },
-    { "time": 1789045600, "sender": "wxid_abc123def456", "is_self": false,
+    { "msg_key": "wxid_testacct01|msg_md5hex|message_4.db|22417",
+      "time": 1789045600, "sender": "wxid_abc123def456", "is_self": false,
       "type": "image", "content": "[image]" }
   ],
   "degraded": []
 }
 ```
+
+> `msg_key` 是消息的稳定标识（`account|chat_md5|shard|local_id`，74 字符），
+> 跨导出保持不变；后续 `get_message_media`（T7）靠它指认「这条消息的媒体是什么」。
 
 **降级说明**：信封**总是**带 `degraded` 键（数组，正常情况下是空数组），每项是
 `{capability, effect}`——例如微信升级改了库结构时
@@ -180,7 +186,8 @@
   "mode": "fts",
   "total": 2,
   "hits": [
-    { "id": 735662, "chat_id": "wxid_abc123def456",
+    { "msg_key": "wxid_testacct01|msg_md5hex|message_4.db|22415",
+      "id": 735662, "chat_id": "wxid_abc123def456",
       "shard": "message_4.db", "local_id": 22415, "ts": 1789045400,
       "msg_type": 1, "sender_id": "wxid_testacct01",
       "sender_name": "wxid_testacct01", "is_self": 1,
@@ -194,6 +201,9 @@
 - `mode`: `fts`（trigram 命中，含高亮 `snip`）| `like`（1-2 字兜底，`snip` 为 null）
 - 1-2 字查询**建议传 `contact`**，否则全表扫描（秒级）
 - 索引为空时返回 `{"hits": [], "hint": "本地索引为空：请先运行 export_full_history", ...}`
+- `msg_key` 是消息的稳定标识（`account|chat_md5|shard|local_id`），跨导出保持不变；
+  与_hits 里既有的 `id`（`messages.id`，DB rowid）不是一回事——rowid 随重建变化，
+  `msg_key` 是内容派生的，可用于 `get_message_media`（T7）指认消息。
 - `degraded` 键（§3）在显示名降级时非空：那时 `sender_name` 会回落成 wxid，
   **不要**当成真实姓名呈现
 
@@ -251,13 +261,15 @@
 { "mode": "semantic",
   "model": "fastembed:BAAI/bge-small-zh-v1.5:512",
   "total": 1,
-  "hits": [ { "chat_id": "wxid_xxx", "display": "张三", "ts": 1757462400,
+  "hits": [ { "msg_key": "wxid_testacct01|msg_md5hex|message_4.db|22415",
+              "chat_id": "wxid_xxx", "display": "张三", "ts": 1757462400,
               "sender": "张三", "is_self": false,
               "content": "周末爬山的安排定了吗", "media_hint": null,
               "distance": 0.1842 } ] }
 ```
 
 - `distance` 为 cosine 距离，越小越相近。
+- `msg_key` 是消息的稳定标识（同 `search_history`），可用于 `get_message_media`（T7）。
 - `degraded` 键（§3）在显示名降级时非空——那时 `display` / `sender` 会回落成 wxid。
 - **没有相关性阈值**：KNN 恒返回距离最近的 `limit` 条（无论多不相关）；`total` 是本次
   返回的条数（≤ `limit`），**不代表相关程度**——结果是否可用由调用方按 `distance` 判断，
