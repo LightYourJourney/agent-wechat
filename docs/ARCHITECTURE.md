@@ -40,7 +40,7 @@ src/agent_wechat/
 ├── tasks.py        长任务注册表：后台线程 + 进度落盘 + 中断回收（不认识任何具体任务）
 ├── usecases.py     用例层：两个入口共享的入口策略（参数归一化、账号/会话解析、结果形状）
 ├── purge.py        数据销毁：清单 → 计划 → 执行 → 核查（只做 CLI，不进 MCP）
-├── mcp_server.py   MCP 薄适配层（11 工具，只做参数编组与渲染）
+├── mcp_server.py   MCP 薄适配层（13 工具，只做参数编组与渲染）
 └── cli.py          命令行入口（只做参数编组与渲染）
 ```
 
@@ -204,7 +204,7 @@ moments.iter_posts(account, report=…)       # 复用 passphrase 解密 sns/sns
 | 1-2 字高频查询 | LIKE 兜底（限 contact 时够用） | 增加 bigram 影子 FTS 表（存储约 +2×，做成配置项） |
 | 更大规模（千万级） | 单文件 SQLite（百万级实测流畅） | 分库（按账号/年份）或迁移 PostgreSQL + pgvector |
 | 媒体导出 | 已实现：`media.py`（图片 dat 解密 / 语音 SILK→WAV / 视频定位）+ `media_refs` 映射 | 按会话导出与存量回填已就绪；按相册批量导出未做 |
-| 媒体与消息关联 | 已实现：CLI `media locate` / MCP `get_message_media`（第 11 个工具）按 `msg_key` 回答四态（`none` / `exported` / `exportable` / `gone`），信封另给 `counts` 与 `by_kind` 拆分 | 不写微信目录、不写 `out_dir`、不联网；判定做 `pathlib` 探测与索引只读查询，语音的本体判定要解密 `media_*.db`（明文只在 `tmp/` 短暂存在，见 SECURITY.md）。`exportable` 在本机实质上是语音专属——图片/视频本体只为**近期（尚未导出）**的消息保留（详见 TOOLS.md §11） |
+| 媒体与消息关联 | 已实现：CLI `media locate` / MCP `get_message_media`（第 11 个注册的工具）按 `msg_key` 回答四态（`none` / `exported` / `exportable` / `gone`），信封另给 `counts` 与 `by_kind` 拆分 | 不写微信目录、不写 `out_dir`、不联网；判定做 `pathlib` 探测与索引只读查询，语音的本体判定要解密 `media_*.db`（明文只在 `tmp/` 短暂存在，见 SECURITY.md）。`exportable` 在本机实质上是语音专属——图片/视频本体只为**近期（尚未导出）**的消息保留（详见 TOOLS.md §11） |
 | 朋友圈读取与导出 | 已实现：`moments.py`（离线解析 `sns.db`）+ `moments_html.py`（单文件 HTML）+ `sns_media.py`（远程媒体，默认关） | 远程媒体需联网——`--with-media` / `with_media=True` 显式开启，只连微信 CDN 两域（`*.qpic.cn` / `*.video.qq.com`），默认全程零网络；本地缓存图不参与（文件名与动态对不上）；发布 / 删除等写操作不做 |
 | 群成员显示名 | 已实现：索引库存 `display_names` 名册，查询时 join；实时路径 `recent` 用内存名册 | 群昵称在 `contact.db` 的 `chat_room.ext_buffer`（protobuf，字段 f2，可选），回落 `contact.remark` / `nick_name` |
 | 增量自动同步 | 手动重跑 export（秒级） | export 管道与水位线已就绪，加定时触发即可 |

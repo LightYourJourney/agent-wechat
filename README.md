@@ -22,7 +22,7 @@
 | 🖼️ 媒体导出 | 按会话导出图片（dat 解密）/ 语音（SILK → WAV）/ 视频（定位明文）；产物在 `~/.agent-wechat/media/`（0700） |
 | 🧩 媒体与消息关联 | 按消息回答「有没有媒体、什么类型、本机在不在、在哪」：MCP `get_message_media` / CLI `media locate` 同一套四态（`none` / `exported` / `exportable` / `gone`），检索命中用稳定标识 `msg_key` 指名 |
 | 📱 朋友圈导出 | 读取本账号可见的动态 / 评论 / 点赞，渲染成单文件 HTML 时间线；**默认零网络**，`--with-media` 才下载远程媒体本体 |
-| 🤖 Agent 集成 | MCP Server（11 个工具）+ Claude Code Skill + 同源 CLI |
+| 🤖 Agent 集成 | MCP Server（13 个工具）+ Claude Code Skill + 同源 CLI |
 
 ## 适用场景
 
@@ -39,7 +39,7 @@
 └──────────┬───────────────────────┬──────────────┬───────────┘
            │      stdio (JSON-RPC) │              │
 ┌──────────▼───────────────────────▼──────────────▼───────────┐
-│ mcp_server.py —— 11 个工具的薄适配层（无业务逻辑）            │
+│ mcp_server.py —— 13 个工具的薄适配层（无业务逻辑）            │
 ├──────────────────────────────────────────────────────────────┤
 │ 核心层（Python，可脱离 MCP 独立使用）                         │
 │  account   登录态/账号发现（pgrep + lsof，只读）              │
@@ -149,7 +149,7 @@ agent-wechat/
 |---|---|
 | [INSTALL.md](docs/INSTALL.md) | 环境要求、依赖、权限、微信适配、MCP 配置 |
 | [USAGE.md](docs/USAGE.md) | 典型场景、工作流、命令示例 |
-| [TOOLS.md](docs/TOOLS.md) | 11 个 MCP 工具的参数/返回/错误 |
+| [TOOLS.md](docs/TOOLS.md) | 13 个 MCP 工具的参数/返回/错误 |
 | [ARCHITECTURE.md](docs/ARCHITECTURE.md) | 模块划分、数据流、设计决策 |
 | [DATA_MODEL.md](docs/DATA_MODEL.md) | 表结构、去重与增量策略 |
 | [SECURITY.md](docs/SECURITY.md) | 隐私、密钥安全、法律风险 |

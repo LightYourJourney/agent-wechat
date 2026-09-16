@@ -9,13 +9,14 @@ import inspect
 import json
 import pathlib
 import re
+import sqlite3
 import time
 from types import SimpleNamespace
 
 import pytest
 
-from agent_wechat import (account, errors, export, media, mcp_server, paths, reader,
-                          tasks, usecases)
+from agent_wechat import (account, errors, export, media, messages, mcp_server, paths,
+                          reader, store, tasks, usecases)
 # 合成微信目录（真实 sqlcipher 解密链路；路径全部指向 tmp_path，绝不碰真实数据）
 from test_reader_export_pipeline import ACCT, drift_tree, env, wechat  # noqa: F401
 
@@ -45,9 +46,11 @@ def _call(fn, **kwargs):
     ("export_chat_media", {"contact": "张三"}),
     ("export_moments", {}),
     ("get_message_media", {"contact": "张三"}),
+    ("export_chat", {"contact": "张三"}),
+    ("get_message_parts", {"contact": "张三", "keys": "acct|deadbeef|message_0.db|1"}),
 ])
 def test_tools_with_missing_account_return_error_not_raise(name, kwargs):
-    """经 `usecases` 账号解析的这 8 个工具：account 不存在时必须返回 error 信封，零异常逃逸。"""
+    """经 `usecases` 账号解析的这 10 个工具：account 不存在时必须返回 error 信封，零异常逃逸。"""
     res = _call(getattr(mcp_server, name), account=BOGUS, **kwargs)
     assert isinstance(res, dict) and res.get("error"), res
     assert "账号目录不存在" in res["error"]
@@ -62,6 +65,8 @@ def test_tools_with_missing_account_return_error_not_raise(name, kwargs):
     ("export_chat_media", {"contact": "张三"}),
     ("export_moments", {}),
     ("get_message_media", {"contact": "张三"}),
+    ("export_chat", {"contact": "张三"}),
+    ("get_message_parts", {"contact": "张三", "keys": "acct|deadbeef|message_0.db|1"}),
 ])
 def test_errors_reach_the_agent_through_call_tool(name, args):
     """端到端：经 SDK 的 `call_tool` 也必须拿到中文信封、is_error=False。
@@ -133,7 +138,8 @@ def test_every_registered_tool_is_guarded():
     for name in ("get_account_status", "list_contacts", "get_recent_messages",
                  "export_full_history", "get_task_status", "search_history",
                  "semantic_search", "build_vector_index", "export_chat_media",
-                 "export_moments", "get_message_media"):
+                 "export_moments", "get_message_media",
+                 "export_chat", "get_message_parts"):
         assert getattr(mcp_server, name).__wrapped__ is not None, f"{name} 缺 @_guard"
 
 
@@ -322,17 +328,17 @@ def test_msg_dict_carries_msg_key():
 
 # ---------- T7：get_message_media 的信封（spec §4.5） ----------
 
-def test_tool_count_is_eleven():
+def test_tool_count_is_thirteen():          # 原 test_tool_count_is_eleven 改名
     """工具数变了，README/TOOLS.md 的数法必须跟着变 —— 这条断言守的就是「别忘改文档」。
 
     两条断言各守一件事：注册表里的工具数（拿掉一个即红）与**活文档**里逐条计数
-    （把任一处退回「10 个工具」即红）。只扫活文档：CHANGELOG 的「5 个工具」「7 个工具」
+    （把任一处退回「11 个工具」即红）。只扫活文档：CHANGELOG 的「5 个工具」「7 个工具」
     是发布历史，永远不该被改成 11；TOOLS.md 末尾的「≤10 个任务」是**任务**数，故模式
     要求数字后面紧跟「工具」或「MCP 工具」。
     """
     tools = asyncio.run(mcp_server.server.list_tools())
-    assert len(tools) == 11
-    assert "get_message_media" in {t.name for t in tools}
+    assert len(tools) == 13
+    assert {"export_chat", "get_message_parts"} <= {t.name for t in tools}
     root = pathlib.Path(__file__).resolve().parent.parent
     for rel in ("README.md", "docs/TOOLS.md", "docs/ARCHITECTURE.md"):
         text = (root / rel).read_text(encoding="utf-8")
@@ -450,3 +456,269 @@ def test_get_message_media_empty_index_carries_hint(env, monkeypatch):
     # 答案本身不变：hint 是附加说明，不是错误信封
     assert res["counts"] == {"none": 0, "exported": 0, "exportable": 0, "gone": 0}
     assert "error" not in res
+
+
+# ---------- T11：export_chat（第 12 个工具）的信封 ----------
+
+def test_export_chat_envelope_has_paths_counts_and_no_body(monkeypatch):
+    """信封 = {chat_id, out_dir, files, counts, truncated, unparsed, rejected, degraded}，
+    **不回传正文**（沿用 export_chat_media 的既定原则：信封不回传大结果——正文在产物里）。
+    顺带钉参数编组（months/format 拆列表、limit/out_dir/account 透传）。
+
+    回归：把 `format` 拆列表那一步删掉（原样透传字符串），seen 与形式都红。
+    """
+    seen: dict = {}
+
+    def fake_chat_export(contact, **kw):
+        seen.update(kw, contact=contact)
+        return usecases.ChatExportResult(
+            chat_id="wxid_target", out_dir="/tmp/c/4f2a",
+            files=("/tmp/c/4f2a/chat/index.html", "/tmp/c/4f2a/chat/index.md"),
+            counts={"text": 3, "appmsg": 1}, truncated=True, unparsed=1, rejected=2,
+            degraded=(usecases.Degradation(
+                "msg_parts", "index.db", "msg_parts", (),
+                "msg_parts 未回填，appmsg 会显示成 `[appmsg: 标题]`；"
+                "运行 `agent-wechat appmsg rebuild` 补齐"),))
+
+    monkeypatch.setattr(usecases, "chat_export", fake_chat_export)
+    res = _call(mcp_server.export_chat, contact="张三", months="2026-08, 2026-09",
+                limit=10, format="md, html", out_dir="/tmp/out", account="acct")
+    assert res == {"chat_id": "wxid_target", "out_dir": "/tmp/c/4f2a",
+                   "files": ["/tmp/c/4f2a/chat/index.html", "/tmp/c/4f2a/chat/index.md"],
+                   "counts": {"text": 3, "appmsg": 1}, "truncated": True,
+                   "unparsed": 1, "rejected": 2,
+                   "degraded": [{"capability": "msg_parts",
+                                 "effect": "msg_parts 未回填，appmsg 会显示成 `[appmsg: 标题]`；"
+                                           "运行 `agent-wechat appmsg rebuild` 补齐"}]}
+    assert seen == {"contact": "张三", "months": ["2026-08", "2026-09"], "limit": 10,
+                    "formats": ("md", "html"), "out_dir": "/tmp/out", "account": "acct"}
+
+
+def test_export_chat_defaults_and_wire_params_frozen(monkeypatch):
+    """wire 契约冻结：参数名与默认值（`format` 默认 "html,md"、limit 500）。
+    months 省略 → None（不得对 None 调 split）；format 拆成元组（chatview 只认元组/序列）；
+    degraded 恒存在（空数组）。"""
+    seen: dict = {}
+
+    def fake_chat_export(contact, **kw):
+        seen.update(kw, contact=contact)
+        return usecases.ChatExportResult(chat_id="wxid_target", out_dir="/tmp/c/4f2a",
+                                         files=(), counts={}, truncated=False,
+                                         unparsed=0, rejected=0)
+
+    monkeypatch.setattr(usecases, "chat_export", fake_chat_export)
+    res = _call(mcp_server.export_chat, contact="张三")
+    assert seen == {"contact": "张三", "months": None, "limit": 500,
+                    "formats": ("html", "md"), "out_dir": None, "account": None}
+    assert res["files"] == [] and res["degraded"] == [] and res["truncated"] is False
+    sig = inspect.signature(mcp_server.export_chat)
+    assert list(sig.parameters) == ["contact", "months", "limit", "format", "out_dir",
+                                    "account"]
+    assert sig.parameters["limit"].default == 500
+    assert sig.parameters["format"].default == "html,md"
+
+
+def test_export_chat_need_confirm_passthrough(monkeypatch):
+    """歧义原样透传成 need_confirm 信封（与 recent/search/export 同形），不猜。"""
+    monkeypatch.setattr(usecases, "chat_export", lambda *a, **k: usecases.NeedConfirm(
+        [usecases.Candidate("wxid_a", "张三01", "direct"),
+         usecases.Candidate("888@chatroom", "张三（群）", "group")]))
+    res = _call(mcp_server.export_chat, contact="张三")
+    assert res == {"need_confirm": [
+        {"username": "wxid_a", "display": "张三01", "kind": "direct"},
+        {"username": "888@chatroom", "display": "张三（群）", "kind": "group"}]}
+
+
+# ---------- T11：get_message_parts（第 13 个工具）的信封 ----------
+
+class _StubCtx:
+    """替掉 `usecases.ChatContext`：一把桩供两处用——`appmsg rebuild` 夹具要的
+    `reader.iter_parts_input`，以及工具本身要的 `account` + `resolve`。不碰真实数据。"""
+
+    def __init__(self, *, account="acct", rows=(), chat_id=None, candidates=()):
+        self.account = account
+        self._rows = list(rows)
+        self._chat_id = chat_id
+        self._candidates = list(candidates)
+
+    @property
+    def reader(self):
+        return SimpleNamespace(iter_parts_input=lambda: iter(self._rows))
+
+    def resolve(self, contact):
+        if self._candidates:
+            return usecases.NeedConfirm([usecases.Candidate(*c) for c in self._candidates])
+        return self._chat_id
+
+
+def _backfill(rows, monkeypatch, *, account="acct", chat_id="wxid_friend",
+              candidates=()):
+    """种夹具：**走生产路径**（`usecases.appmsg_rebuild_parts`）把载荷写进索引库，
+    形态（zlib 压缩的规范化 XML）与真机回填后的表同源——夹具形态不符是上周期最贵的一类
+    缺陷。索引库由 conftest 的 autouse 闸指到 tmp_path，`store.open()` 走默认路径即可。
+    """
+    monkeypatch.setattr(usecases, "ChatContext",
+                        lambda acct=None: _StubCtx(account=account, rows=rows,
+                                                   chat_id=chat_id, candidates=candidates))
+    usecases.appmsg_rebuild_parts(account=account)
+
+
+QUOTE_XML = ('<msg><appmsg><title>回复</title><type>57</type><refermsg>'
+             '<svrid>1001</svrid><displayname>李四</displayname><content>明天开会</content>'
+             '<createtime>1789000000</createtime><fromusr>wxid_friend02</fromusr>'
+             '</refermsg></appmsg></msg>')
+LINK_XML = ('<msg><appmsg><title>一篇文章</title><type>5</type>'
+            '<url>https://example.invalid/a</url><des>摘要</des>'
+            '<sources><source>合成来源</source></sources></appmsg></msg>')
+FILE_XML = ('<msg><appmsg><title>报表.xlsx</title><type>6</type><appattach>'
+            '<fileext>xlsx</fileext><totallen>2048</totallen>'
+            '<md5>0123456789abcdef0123456789abcdef</md5></appattach></appmsg></msg>')
+TRANSFER_XML = ('<msg><appmsg><title>微信转账</title><type>2000</type><wcpayinfo>'
+                '<paysubtype>1</paysubtype><feedesc>¥88.00</feedesc><pay_memo>午饭</pay_memo>'
+                '<payer_username>wxid_friend02</payer_username>'
+                '<receiver_username>wxid_t_a1b2</receiver_username>'
+                '<transcationid>10000000000000000000000</transcationid>'
+                '<transferid>t1</transferid><begintransfertime>1789000000</begintransfertime>'
+                '<effectivedate>1789086400</effectivedate><invalidtime>1789600000</invalidtime>'
+                '</wcpayinfo></appmsg></msg>')
+MINIPROGRAM_XML = ('<msg><appmsg><title>某小程序</title><type>33</type>'
+                   '<appid>wx0123456789abcdef</appid><pagepath>pages/index</pagepath>'
+                   '</appmsg></msg>')
+
+
+def _parts_fixture(monkeypatch):
+    """一次种齐五个 kind（四个具名块各一 + 一个未具名建模的），返回 `(key, foreign)`。
+
+    - `key(i)`：本会话（`wxid_friend`）的 msg_key。
+    - `foreign`：**另一个会话**里一条**真实存在**的 appmsg 行——会话过滤那条夹具要有东西
+      可滤才有意义（第一版它只是构造了一个库里没有的 key，于是「删掉过滤」照样全绿，变异
+      实测抓出来的）。
+    第 1 条是**被引用的原文**（无 appmsg 载荷，只有 server_id），让引用那条能解出回指。
+    """
+    cm = messages.chat_md5("wxid_friend")
+    key = lambda i: messages.row_key("acct", cm, "message_0.db", i)  # noqa: E731
+    foreign = messages.row_key("acct", messages.chat_md5("wxid_someone_else"),
+                               "message_0.db", 2)
+    _backfill([(1001, key(1), None), (None, key(2), QUOTE_XML), (None, key(3), LINK_XML),
+               (None, key(4), FILE_XML), (None, key(5), TRANSFER_XML),
+               (None, key(6), MINIPROGRAM_XML), (None, foreign, LINK_XML)], monkeypatch)
+    return key, foreign
+
+
+def test_get_message_parts_envelope_shape(monkeypatch):
+    """信封 = {parts: [...], degraded}，每条十个键、按 keys 顺序、**四个具名块按 kind 择一非空**。
+    夹具五个 kind 各一：引用 57 / 链接 5 / 文件 6 / 转账 2000 / 小程序 33（未具名建模）。
+
+    回归：删掉 `kind_name`、把 `fields` 换成非点分路径、少给任何一个具名块，这条都会红。
+    """
+    key, _foreign = _parts_fixture(monkeypatch)
+    res = _call(mcp_server.get_message_parts, contact="张三",
+                keys=",".join(key(i) for i in (2, 3, 4, 5, 6)))
+    assert set(res) == {"parts", "degraded"}          # 已回填：不带 hint（hint 只在未回填时给）
+    assert [p["msg_key"] for p in res["parts"]] == [key(i) for i in (2, 3, 4, 5, 6)]
+    assert [p["kind"] for p in res["parts"]] == [57, 5, 6, 2000, 33]
+    assert [p["kind_name"] for p in res["parts"]] == ["引用", "链接", "文件", "转账", "小程序"]
+    for part, filled in zip(res["parts"], ["quote", "link", "file", "transfer", None]):
+        assert set(part) == {"msg_key", "kind", "kind_name", "title", "fields", "quote",
+                             "link", "file", "transfer", "ref_msg_key"}, part
+        blocks = [b for b in ("quote", "link", "file", "transfer") if part[b] is not None]
+        assert blocks == ([filled] if filled else []), part
+    quote, link, file, transfer, mini = res["parts"]
+    assert quote["title"] == "回复" and quote["ref_msg_key"] == key(1)
+    # 字段名是 Python 侧的（`from_usr`），不是 XML 标签（`fromusr`）——具名块用 dataclass 带出
+    assert quote["quote"] == {"svrid": 1001, "displayname": "李四", "content": "明天开会",
+                              "create_time": 1789000000, "from_usr": "wxid_friend02"}
+    # 链接的 url/des 是具名块的兄弟叶子：不得在字段表里重复出现（appmsg._NAMED_LEAVES）
+    assert link["link"] == {"url": "https://example.invalid/a", "title": "一篇文章",
+                            "des": "摘要"}
+    assert link["fields"] == [["sources.source", "合成来源"]]
+    # 文件的 appattach 是具名子树：同上，字段表里应当是空的
+    assert file["file"] == {"title": "报表.xlsx", "fileext": "xlsx", "totallen": 2048,
+                            "md5": "0123456789abcdef0123456789abcdef"}
+    assert file["fields"] == []
+    # 未具名建模的类型：只有字段表，四个具名块全为 null
+    assert mini["fields"] == [["appid", "wx0123456789abcdef"], ["pagepath", "pages/index"]]
+    assert transfer["fields"] == [] and transfer["ref_msg_key"] is None
+    assert res["degraded"] == []                       # 已回填：没有降级
+
+
+def test_get_message_parts_returns_transfer_fields_verbatim(monkeypatch):
+    """用户 2026-09-16 裁定：**照实返回**转账的金额 / 备注 / 双方用户名 / 交易号，
+    不为转账单开例外（与 search_history 已在信封返回正文一致）。
+
+    回归：给 `Transfer` 的任一字段加遮蔽（置 None、打码、丢掉），这条会红——整份 dict 相等。
+    """
+    key, _foreign = _parts_fixture(monkeypatch)
+    res = _call(mcp_server.get_message_parts, contact="张三", keys=key(5))
+    assert res["parts"][0]["transfer"] == {
+        "paysubtype": "1", "amount_desc": "¥88.00", "memo": "午饭",
+        "payer": "wxid_friend02", "receiver": "wxid_t_a1b2",
+        "transaction_id": "10000000000000000000000", "transfer_id": "t1",
+        "begin_time": 1789000000, "effective_date": 1789086400,
+        "invalid_time": 1789600000, "is_red_envelope": False}
+
+
+def test_get_message_parts_answers_only_this_conversation(monkeypatch):
+    """只答**属于该会话**的 key：别的会话的 key 与索引里没有的 key 都静默略过
+    （与 §11 get_message_media 同一约定——答案里没有某个 key，不等于它不是 appmsg）。
+
+    夹具里 `foreign` 是**另一个会话里真实存在**的一条 appmsg（不是凭空造的 key）：只有它
+    在库里，删掉 `account|chat_md5|` 前缀过滤才会让它冒出来。
+    **回归：把前缀过滤删掉，这条会红**（变异 M5 实测：第一版夹具用了一个库里不存在的
+    foreign key，删掉过滤仍全绿——夹具与现实形态不符，是控制器复验抓出来的）。
+    """
+    key, foreign = _parts_fixture(monkeypatch)
+    res = _call(mcp_server.get_message_parts, contact="张三",
+                keys=f"{key(2)}, {foreign}, acct|deadbeef|message_0.db|99")
+    assert [p["msg_key"] for p in res["parts"]] == [key(2)]
+    assert res["degraded"] == []
+
+
+def test_get_message_parts_empty_index_carries_hint(monkeypatch):
+    """未回填时信封必须带 hint（并点名 `appmsg rebuild`）：否则那份「parts: []、
+    degraded: []」与「这些消息本来就没有可读内容」**逐字节相同**——丙 R23 同一个坑。
+
+    这里**不种任何 msg_parts 行**：conftest 的 autouse 闸已把索引库指到 tmp_path 的空库，
+    工具走的是真实的 `store.count_msg_parts`。
+    回归：删掉 hint（或 degraded 那条公告），这条会红。
+    """
+    monkeypatch.setattr(usecases, "ChatContext",
+                        lambda acct=None: _StubCtx(chat_id="wxid_friend"))
+    res = _call(mcp_server.get_message_parts, contact="张三",
+                keys="acct|deadbeef|message_0.db|1")
+    assert res["parts"] == []
+    assert res["degraded"] == [{"capability": "msg_parts",
+                                "effect": "msg_parts 未回填，取不到任何 appmsg 内容；"
+                                          "运行 `agent-wechat appmsg rebuild` 补齐"}]
+    assert "agent-wechat appmsg rebuild" in res["hint"]
+    assert "error" not in res                          # hint 是附加说明，不是错误信封
+
+
+def test_get_message_parts_need_confirm_passthrough(monkeypatch):
+    """歧义原样透传成 need_confirm 信封（与其余 contact 类工具同形），不猜。"""
+    _backfill((), monkeypatch,
+              candidates=[("wxid_a", "张三01", "direct"),
+                          ("888@chatroom", "张三（群）", "group")])
+    res = _call(mcp_server.get_message_parts, contact="张三", keys="x")
+    assert res == {"need_confirm": [
+        {"username": "wxid_a", "display": "张三01", "kind": "direct"},
+        {"username": "888@chatroom", "display": "张三（群）", "kind": "group"}]}
+
+
+def test_get_message_parts_index_unavailable_is_error_envelope(monkeypatch):
+    """索引库读不了是**错误**（有可执行的修复动作），不是「这些消息没有内容」的空答案。
+
+    回归：把 `except (sqlite3.Error, OSError)` 收窄成 `except OSError`，这条会红——不是
+    因为异常逃出（`@_guard` 的 `except Exception` 兜底还在，`_call` 也接得住），而是它退化成
+    `{"error": "内部错误: OperationalError: …"}`：**修复指引（hint）丢了**，且「库坏了」与
+    「我们的 bug」在信封里长得一样。实测如此（变异 M10）。
+    """
+    monkeypatch.setattr(usecases, "ChatContext",
+                        lambda acct=None: _StubCtx(chat_id="wxid_friend"))
+
+    def boom(*a, **k):
+        raise sqlite3.OperationalError("database disk image is malformed")
+
+    monkeypatch.setattr(store, "open", boom)
+    res = _call(mcp_server.get_message_parts, contact="张三", keys="x")
+    assert "本地检索库不可用" in res["error"]

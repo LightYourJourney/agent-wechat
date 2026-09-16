@@ -1,6 +1,6 @@
 # TOOLS — MCP 工具参考
 
-> 本文档逐个说明 agent-wechat MCP Server 暴露的 11 个工具：用途、参数、返回结构、
+> 本文档逐个说明 agent-wechat MCP Server 暴露的 13 个工具：用途、参数、返回结构、
 > 示例与错误。所有工具经 stdio JSON-RPC 调用；示例为 Agent 视角的调用与实际返回。
 
 通用约定：
@@ -489,6 +489,137 @@
 
 ---
 
+## 12. export_chat
+
+**用途**：把某会话导出成可读的时间线（HTML / Markdown），返回产物路径与计数。产物里 appmsg
+（引用 / 链接 / 文件 / 转账…）渲染成结构化块，媒体以相对路径引用**同级**的既有媒体树。
+与 §9 的分工：`export_chat_media` 只搬媒体文件，本工具产出的是**可读的会话正文**。
+
+| 参数 | 类型 | 必填 | 默认 | 说明 |
+|---|---|---|---|---|
+| `contact` | string | **是** | — | username（`wxid_*` / `*@chatroom` / `filehelper`）或展示名（歧义返回 `need_confirm`，形状见 §3；未命中返回 `{"error": "找不到联系人「XXX」，请用 list_contacts 查询"}`） |
+| `months` | string | 否 | null | 逗号分隔的月份（`YYYY-MM`），限定**一段连续窗口**。**必须按时间升序、相邻月首尾相接**：非连续（`2026-08,2026-10`）只能取包络、会把 9 月静默带进来，反序会得到倒置（或退化成空区间）的窗口——两者都返回 `{"error": "…"}`，**不静默产出空产物**；格式不符同理 |
+| `limit` | int | 否 | 500 | 封顶窗口内**最近的** N 条（非正值按 1 处理：`LIMIT -1` 在 SQLite 里是「不限量」） |
+| `format` | string | 否 | `"html,md"` | 逗号分隔，`html` / `md`；空串或未知格式返回 `{"error": "…"}`（「少写一个文件」与「格式名写错」长得一样，故不静默跳过） |
+| `out_dir` | string | 否 | null | 输出根；省略按 `~/.agent-wechat/media`。**必须与 §9 `export_chat_media` / CLI `media export` 用同一个根**——产物里的媒体是相对引用，换个根就全是死链 |
+| `account` | string | 否 | null | 同通用约定 |
+
+**成功返回**：
+
+```json
+{
+  "chat_id": "wxid_abc123def456",
+  "out_dir": "/Users/you/.agent-wechat/media/9f2c1a0b7d3e",
+  "files": ["/Users/you/.agent-wechat/media/9f2c1a0b7d3e/chat/index.html",
+            "/Users/you/.agent-wechat/media/9f2c1a0b7d3e/chat/index.md"],
+  "counts": { "text": 41, "image": 3, "appmsg": 12, "system": 2 },
+  "truncated": false,
+  "unparsed": 0,
+  "rejected": 0,
+  "degraded": []
+}
+```
+
+**说明**：
+- 信封**不回传正文与文件清单明细**（沿用 §9 的既定原则：大结果膨胀上下文），产物用文件系统
+  工具在 `out_dir` 下自行打开。`files` 只有**真正落盘**的那几个——写失败的不进列表，所以
+  「少了一行」本身就是信号。
+- `out_dir` 是**本会话的媒体树根**（`{--out}/{会话md5}`），产物在它的 `chat/` 子目录里
+  （`index.html` / `index.md`）。刻意不回传输出**根**：那需要重算一次会话 md5，而「两套路径
+  推导」的分歧就是产物里所有媒体引用的静默 404。
+- `counts` 是 `kind` → 条数：`text` / `image` / `voice` / `video` / `sticker` / `location` /
+  `status` / `system` / `revoke` / `appmsg`；未知类型回落成 `msg_type` 的数字字符串（不猜名字）。
+- `unparsed` 与 `rejected` 都是 appmsg 且**分开计数**：前者「解不开」，后者「主动拒绝」
+  （含 DTD / 实体声明的载荷，防 billion laughs）。两者非零时部分 appmsg 会回落成
+  `[appmsg: 标题]`，明细印在**产物顶部**。
+- `truncated=true` 表示触及 `limit`（只导了窗口内最近的这些）——它同时印在**产物顶部**，
+  不只回终端：产物会离开这次会话，只回终端的话读产物的人看不到。
+- `degraded` 键**恒存在**（形状同 §3 的 `{capability, effect}`），当前三个来源：
+  1. `msg_parts` 未回填 → appmsg 会显示成 `[appmsg: 标题]`，跑 CLI `agent-wechat appmsg
+     rebuild` 补齐（约 40 s、幂等）；
+  2. `msg_media` 媒体状态覆盖不足（媒体状态最多答 500 条）→ **没覆盖到的消息在产物里不会
+     出现媒体块**（`effect` 里给了「答了 N/M 条」）；
+  3. 显示名降级（`roster`，如 `contact.db` 漂移）→ 标题与发送者回落成原始标识。
+- **不联网、不写微信目录**：只往 `out_dir` 下写产物（目录 0700、文件 0600 的聊天原文）。
+
+---
+
+## 13. get_message_parts
+
+**用途**：取一批消息的 appmsg 结构化内容——引用 / 链接 / 文件 / 转账 / 其余类型。
+是 §11 的姊妹工具：那个答「有没有媒体、什么类型、在哪」，这个答「内容是什么」。由调用方给
+`keys` 自己缩小范围，故逐条回传明细不会膨胀上下文。
+
+**前提**：需先运行 **CLI `agent-wechat appmsg rebuild`**——内容读的是本地检索库的 `msg_parts`
+表。**未回填时每个 key 都答不出东西**，此时信封另带 `hint` 与 `degraded` 说明；**别把它当成
+「这些消息本来就没有可读内容」**（那种情况 `parts` 同样是空的，两者只靠这两个键区分）。
+
+| 参数 | 类型 | 必填 | 默认 | 说明 |
+|---|---|---|---|---|
+| `contact` | string | **是** | — | username（`wxid_*` / `*@chatroom` / `filehelper`）或展示名（歧义返回 `need_confirm`，形状见 §3；未命中返回 `{"error": "找不到联系人「XXX」，请用 list_contacts 查询"}`）。**`keys` 只答属于该会话的**：别的会话的 key 静默略过 |
+| `keys` | string | **是** | — | 逗号分隔的 `msg_key`（取自 §3 / §6 / §8 返回的 `msg_key` 字段）。msg_parts 里没有的 key（消息没导出、不是 appmsg、载荷解不开或被主动拒绝）**静默略过**——答案里没有某个 key，不等于它不是 appmsg；空串 → `parts: []` |
+| `account` | string | 否 | null | 同通用约定 |
+
+**成功返回**：
+
+```json
+{
+  "parts": [
+    { "msg_key": "wxid_abc123def456|9f2c1a0b7d3e|message_0.db|81234",
+      "kind": 57, "kind_name": "引用", "title": "回复",
+      "fields": [],
+      "quote": { "svrid": 81230, "displayname": "李四", "content": "明天开会",
+                 "create_time": 1789000000, "from_usr": "wxid_friend02" },
+      "link": null, "file": null, "transfer": null,
+      "ref_msg_key": "wxid_abc123def456|9f2c1a0b7d3e|message_0.db|81230" },
+    { "msg_key": "wxid_abc123def456|9f2c1a0b7d3e|message_0.db|81240",
+      "kind": 2000, "kind_name": "转账", "title": "微信转账",
+      "fields": [], "quote": null, "link": null, "file": null,
+      "transfer": { "paysubtype": "1", "amount_desc": "¥88.00", "memo": "午饭",
+                    "payer": "wxid_friend02", "receiver": "wxid_abc123def456",
+                    "transaction_id": "10000000000000000000000", "transfer_id": "t1",
+                    "begin_time": 1789000000, "effective_date": 1789086400,
+                    "invalid_time": 1789600000, "is_red_envelope": false },
+      "ref_msg_key": null }
+  ],
+  "degraded": []
+}
+```
+
+**说明**：
+- 每条恒有十个键：`msg_key` / `kind` / `kind_name` / `title` / `fields` / `quote` / `link` /
+  `file` / `transfer` / `ref_msg_key`。顺序按入参 `keys`（去重后、保序）。
+- `kind` 是 appmsg 的数字 `type`；`kind_name` 是中文名（引用 57 / 链接 5 / 文件 6 / 转账 2000 /
+  合并转发 19 / 小程序 33 / 视频号 51 / 接龙 53 / 表情 8）。**含义未经确认的类型回落成
+  `appmsg:<type>`——不猜**（如 4 / 62 / 87 / 36 / 2001）。
+- 四个具名块 **`quote` / `link` / `file` / `transfer` 按 `kind` 择一非空**，其余为 `null`：
+  57 → `quote`，5 → `link`，6 → `file`，2000 → `transfer`，其它类型四者全 `null`（内容在
+  `fields` 里）。
+- `fields` 是未具名建模的叶子字段，`[[点分路径, 值], …]`，文档序（如 `[["sources.source",
+  "weibo"]]`）。**密钥 / 凭据已剔除**：名字逐段命中 `aeskey|passphrase|token|key`，或值里
+  带 `?token=` / `&key=` 一类的凭据参数（链接的 `url` 同样过滤）。已具名建模的子树
+  （`refermsg` / `appattach` / `wcpayinfo`）与它们的兄弟叶子（`kind=5` 的 `url` / `des`）
+  **不在字段表里重复出现**——那些值在具名块里。
+- **转账（type 2000）照实返回**：金额 `amount_desc`、备注 `memo`、双方用户名 `payer` /
+  `receiver`、交易号 `transaction_id`，另加 `paysubtype`（中文语义无权威映射，原样给数字）、
+  `transfer_id`、三个时间戳与 `is_red_envelope`。`payer` 为空是常态（实测 61%），不是异常。
+  **这些内容会离开本机**（信封进 agent / LLM 上下文）——与 `search_history` 已在信封返回消息
+  正文一致，不为转账单开例外，见 SECURITY.md。
+- `ref_msg_key` 是引用（`kind=57`）的目标，**取的是回填那一刻的快照**：目标消息若后来才导出进
+  索引，重跑 `appmsg rebuild`（幂等）即刷新。解不到时是 `null`（**不是空串**）——「解不到」与
+  「没有引用」在渲染上同义，被引用的原文一直在 `quote.content` 里。
+- 未回填时 `degraded` 出现 `{"capability": "msg_parts", "effect": "…运行 `agent-wechat
+  appmsg rebuild` 补齐"}`，且信封带 `hint`（与 §11 的「本地索引为空」同一约定：空答案必须
+  自证是哪一种空）。
+- 索引库打不开 / 读不了（损坏、半拷贝的 WAL、权限）→ `{"error": "本地检索库不可用：…",
+  "hint": "索引库可能损坏；删除 index.db 后重跑 export_full_history 可重建"}`，**不是**一个空
+  `parts`——空答案会把「库坏了」谎报成「没有可读内容」。
+- **不联网、不写微信目录、不写任何产物**：只读本地检索库；`contact` 的解析要读一次
+  `contact.db`（只读，同其它 contact 类工具）。
+
+
+---
+
 ## 错误汇总
 
 | 现象 | 原因 | 处置 |
@@ -528,4 +659,4 @@ async def main():
 asyncio.run(main())
 ```
 
-期望输出包含 11 个工具名与 `get_account_status` 的 JSON。
+期望输出包含 13 个工具名与 `get_account_status` 的 JSON。
