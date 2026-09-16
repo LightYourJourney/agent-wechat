@@ -956,7 +956,7 @@ def appmsg_rebuild_parts(account: str | None = None, progress=None) -> dict:
       1. 一边把 server_id→msg_key 灌进 TEMP TABLE，一边把 appmsg 攒批写 msg_parts
       2. 一条 SQL 解析回指
 
-    实测整次约 40 s（读取 38 s + 写入 2 s）。
+    实测整次 37.5–38.7 s；同轮 `index.db` 增长 +232.8 MB（本机实测）。
 
     计数口径（**两组不同的分母**，别并排当同一个读）：
       - `parts` / `rejected` / `malformed` = **本轮扫描**的条数（`parts` 是成功解析并落库

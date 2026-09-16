@@ -22,6 +22,7 @@
 | 🖼️ 媒体导出 | 按会话导出图片（dat 解密）/ 语音（SILK → WAV）/ 视频（定位明文）；产物在 `~/.agent-wechat/media/`（0700） |
 | 🧩 媒体与消息关联 | 按消息回答「有没有媒体、什么类型、本机在不在、在哪」：MCP `get_message_media` / CLI `media locate` 同一套四态（`none` / `exported` / `exportable` / `gone`），检索命中用稳定标识 `msg_key` 指名 |
 | 📱 朋友圈导出 | 读取本账号可见的动态 / 评论 / 点赞，渲染成单文件 HTML 时间线；**默认零网络**，`--with-media` 才下载远程媒体本体 |
+| 📄 会话时间线导出 | 把某会话导成可读的**时间线**（HTML / Markdown 双格式，可搬走）：appmsg（引用 / 链接 / 文件 / 转账）渲染成结构化块、引用可跳转到原消息（HTML 侧）、已导出的媒体以相对路径在位；appmsg 原始载荷由 `appmsg rebuild` 一次性回填（`chat export` / `chat index`，MCP `export_chat` / `get_message_parts`） |
 | 🤖 Agent 集成 | MCP Server（13 个工具）+ Claude Code Skill + 同源 CLI |
 
 ## 适用场景
@@ -116,7 +117,19 @@ agent-wechat/
 │   ├── decrypt.py         快照与解密
 │   ├── errors.py          统一错误契约
 │   ├── messages.py        messages 行契约
+│   ├── appmsg.py          appmsg 原始载荷的规范化与解析
+│   ├── roster.py          显示名规则（群昵称/备注/昵称优先级）
+│   ├── schema.py          微信库结构声明与能力探测
 │   ├── reader.py          消息读取与解码
+│   ├── media.py           媒体导出（图片解密 / 语音 SILK→WAV / 视频定位）
+│   ├── moments.py         朋友圈解析（sns.db，只读不联网）
+│   ├── sns_media.py       朋友圈远程媒体下载与解密（唯一联网模块，默认关）
+│   ├── moments_html.py    朋友圈渲染（单文件 HTML）
+│   ├── chat_text.py       两个会话模板共享的措辞与纯函数
+│   ├── chatview.py        会话时间线组装与落盘
+│   ├── chat_html.py       会话时间线的 HTML 模板
+│   ├── chat_md.py         会话时间线的 Markdown 模板
+│   ├── chat_index.py      会话索引页模板
 │   ├── export.py          导出管道与水位线续跑
 │   ├── store.py           本地检索库
 │   ├── search.py          检索路由
