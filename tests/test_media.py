@@ -1031,3 +1031,65 @@ def test_export_media_unwritable_out_dir_raises_media_output_error(tmp_path, mon
         media.export_media(account, ["c@chatroom"], kinds=["video"],
                            months=["2026-09"], out_dir=bad)
     assert str(bad) in str(ei.value) and ei.value.hint
+
+
+# ---------- 已导出产物的路径推导（spec: 2026-09-16-media-message-link §2.3） ----------
+
+def test_exported_path_image_globs_any_ext(tmp_path):
+    """image 的扩展名不定（jpg/png/gif/webp/wxgf），必须 glob 而不是写死。"""
+    root = tmp_path / "out"
+    d = root / ("a" * 32) / "image" / "2026-09"
+    d.mkdir(parents=True)
+    (d / "beef.png").write_bytes(b"x")
+    ts = int(datetime.datetime(2026, 9, 15, 12, 0).timestamp())
+    got = media.exported_path(root, chat_md5="a" * 32, kind="image", ts=ts,
+                              file_key="beef")
+    assert got is not None and got.name == "beef.png"
+
+
+def test_exported_path_image_ignores_unlisted_ext(tmp_path):
+    """不能 glob 到什么算什么：非媒体扩展名（如 .dat）不得被认成产物。"""
+    root = tmp_path / "out"
+    d = root / ("a" * 32) / "image" / "2026-09"
+    d.mkdir(parents=True)
+    (d / "beef.dat").write_bytes(b"x")
+    ts = int(datetime.datetime(2026, 9, 15, 12, 0).timestamp())
+    assert media.exported_path(root, chat_md5="a" * 32, kind="image", ts=ts,
+                               file_key="beef") is None
+
+
+def test_exported_path_video_is_mp4_only(tmp_path):
+    root = tmp_path / "out"
+    d = root / ("b" * 32) / "video" / "2026-09"
+    d.mkdir(parents=True)
+    (d / "cafe.mp4").write_bytes(b"x")
+    ts = int(datetime.datetime(2026, 9, 15, 12, 0).timestamp())
+    assert media.exported_path(root, chat_md5="b" * 32, kind="video", ts=ts,
+                               file_key="cafe").name == "cafe.mp4"
+
+
+def test_exported_path_voice_wav_wins_over_slk(tmp_path):
+    """pilk 缺失时导出的是 .slk；两者都在时 .wav 优先。"""
+    root = tmp_path / "out"
+    d = root / ("c" * 32) / "voice" / "2026-09"
+    d.mkdir(parents=True)
+    ts = int(datetime.datetime(2026, 9, 15, 12, 0).timestamp())
+    (d / f"{ts}_7.slk").write_bytes(b"x")
+    assert media.exported_path(root, chat_md5="c" * 32, kind="voice", ts=ts,
+                               local_id=7).name == f"{ts}_7.slk"
+    (d / f"{ts}_7.wav").write_bytes(b"x")
+    assert media.exported_path(root, chat_md5="c" * 32, kind="voice", ts=ts,
+                               local_id=7).name == f"{ts}_7.wav"
+
+
+def test_exported_path_missing_returns_none(tmp_path):
+    """目录不存在、文件不存在、参数不全 —— 一律 None，不抛。"""
+    root = tmp_path / "nowhere"
+    ts = int(datetime.datetime(2026, 9, 15, 12, 0).timestamp())
+    assert media.exported_path(root, chat_md5="d" * 32, kind="image", ts=ts,
+                               file_key="dead") is None
+    assert media.exported_path(root, chat_md5="d" * 32, kind="voice", ts=ts,
+                               local_id=1) is None
+    # image 缺 file_key / voice 缺 local_id：参数不全，不是「没导出」，但结果同为 None
+    assert media.exported_path(root, chat_md5="d" * 32, kind="image", ts=ts) is None
+    assert media.exported_path(root, chat_md5="d" * 32, kind="voice", ts=ts) is None

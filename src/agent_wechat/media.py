@@ -440,6 +440,44 @@ def _save(out_root: pathlib.Path, cm: str, kind: str, mon: str,
     return p
 
 
+# 导出产物的扩展名白名单，**从 MAGICS 派生**而不是另抄一份——
+# 本仓库已经有过 `_sniff_ext` 与 MAGICS 重复的账（终审 Minor），不再添第二份。
+_EXPORT_EXTS: tuple[str, ...] = tuple(dict.fromkeys(ext for _, ext in MAGICS))
+
+
+def exported_path(out_root: pathlib.Path, *, chat_md5: str, kind: str, ts: int,
+                  file_key: str | None = None,
+                  local_id: int | None = None) -> pathlib.Path | None:
+    """已导出产物的路径；没导出过返回 None。**纯探测，不建目录、不写盘。**
+
+    布局与 `_dest` 同源：`{out_root}/{chat_md5}/{kind}/{YYYY-MM}/{stem}.{ext}`
+    - image: stem=file_key，扩展名不定 → 按 `_EXPORT_EXTS` 逐个试
+    - video: stem=file_key，扩展名恒 mp4
+    - voice: stem=f"{ts}_{local_id}"，.wav 优先（pilk 缺失时落的是 .slk）
+
+    参数不全（image 无 file_key / voice 无 local_id）→ None。
+    """
+    if kind == "voice":
+        if local_id is None:
+            return None
+        stems, exts = (f"{ts}_{local_id}",), ("wav", "slk")
+    elif file_key is None:
+        return None
+    elif kind == "video":
+        stems, exts = (file_key,), ("mp4",)
+    elif kind == "image":
+        stems, exts = (file_key,), _EXPORT_EXTS
+    else:
+        return None
+    d = out_root / chat_md5 / kind / month_of(ts)
+    for stem in stems:
+        for ext in exts:
+            p = d / f"{stem}.{ext}"
+            if p.exists():
+                return p
+    return None
+
+
 def export_media(account: str, chat_ids: list[str], *, kinds: list[str],
                  months: list[str] | None = None, out_dir: pathlib.Path | None = None,
                  max_files: int = 2000, progress=None) -> MediaReport:
