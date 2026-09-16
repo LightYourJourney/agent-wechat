@@ -255,6 +255,18 @@ def cmd_media_rebuild_refs(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_appmsg_rebuild(args: argparse.Namespace) -> int:
+    from . import usecases
+
+    def progress(n: int) -> None:
+        print(f"  已回填 {n} 条 appmsg…", flush=True)
+
+    res = usecases.appmsg_rebuild_parts(account=args.account, progress=progress)
+    print(f"完成：msg_parts {res['parts']} 条；回指解析 {res['resolved']} / "
+          f"未解析 {res['unresolved']}；拒绝 {res['rejected']}；解不开 {res['malformed']}")
+    return 0
+
+
 def cmd_media_locate(args: argparse.Namespace) -> int:
     """按消息列出媒体归属。与 MCP get_message_media 同一个用例，只是渲染成人类可读。
 
@@ -545,6 +557,12 @@ def main(argv: list[str] | None = None) -> None:
     esp.add_argument("--limit", type=int, default=2000, help="最多导出动态数（1-2000）")
     esp.add_argument("--account", help="账号目录名")
     esp.set_defaults(fn=cmd_moments_export)
+
+    sp = sub.add_parser("appmsg", help="appmsg 原始载荷（引用/链接/文件/转账…）")
+    asp = sp.add_subparsers(dest="appmsg_cmd", required=True)
+    rsp = asp.add_parser("rebuild", help="全量重扫微信库回填 msg_parts")
+    rsp.add_argument("--account", default=None)
+    rsp.set_defaults(fn=cmd_appmsg_rebuild)
 
     args = p.parse_args(argv)
     if args.cmd == "purge":

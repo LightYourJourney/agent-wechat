@@ -10,6 +10,7 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import sqlite3
+from collections.abc import Iterator
 from dataclasses import dataclass, asdict
 
 from . import decrypt, errors, keys, media, messages, paths, roster, schema, store
@@ -439,3 +440,35 @@ class MessageReader:
                             refs = []
                     if rows:
                         yield rows, refs
+
+    def iter_parts_input(self) -> Iterator[tuple[int | None, str, str | None]]:
+        """为 msg_parts 回填供料：**全量扫描**，逐条 yield `(server_id, msg_key, appmsg_raw)`。
+
+        `appmsg_raw` 仅在 `msg_type == 49` 时非 None —— 其余类型**不解压**，所以不付
+        zstd 的代价（实测全量扫描 38 s，其中大头正是解压这 6 万余条 appmsg）。
+
+        为什么是全量而不是只扫 appmsg：引用回指需要一张**账号级**的
+        `server_id → msg_key` 表，而被引用的原文大多是普通文本消息。只扫 appmsg
+        会让绝大部分 svrid 解析不出来。
+
+        **刻意不调 `md5_map()`**（`iter_all` 要它，是因为 `_decode_row` 得反查会话名）：
+        本方法的产物里没有 chat_id，调它只是白白把 session / contact 与各分片的
+        Name2Id 全解一遍密。
+
+        `server_id` 照原样带出，`0` 与 `NULL` 都可能（实测 15 个 0）——丢不丢是调用方
+        的事：`sid_map` 的主键放不下「没有 server_id」这件事，两者都不该进去。
+        """
+        for shard in paths.message_shards(self.acct):
+            with self._open(f"message/{shard.name}") as con:
+                tables = self._shard_tables(con, None)
+                if tables:          # 空 = 该分片里没有匹配的表，**不是**漂移（spec §4）
+                    self._check("messages", f"message/{shard.name}", con, table=tables[0])
+                for table in tables:
+                    md5hex = table[4:]
+                    for lid, ltype, sid, mc, ct in con.execute(
+                            f"SELECT local_id, local_type, server_id, message_content, "
+                            f"WCDB_CT_message_content FROM '{table}'"):
+                        raw = (_decode_content(mc, ct)
+                               if (ltype & 0xffffffff) == messages.TYPE_APPMSG
+                               and mc is not None else None)
+                        yield sid, messages.row_key(self.acct, md5hex, shard.name, lid), raw

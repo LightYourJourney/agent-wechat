@@ -18,11 +18,12 @@ import hashlib
 import pathlib
 import re
 import sqlite3
+import zlib
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from . import account as acc_mod
-from . import errors, export, keys, messages, paths, reader, search, store, tasks, vector
+from . import appmsg, errors, export, keys, messages, paths, reader, search, store, tasks, vector
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -590,6 +591,86 @@ def media_rebuild_refs(account: str | None = None, progress=None) -> int:
             if progress and n and n % 20_000 < store.BATCH:
                 progress(n)
     return n
+
+
+def appmsg_rebuild_parts(account: str | None = None, progress=None) -> dict:
+    """全量重扫微信库回填 msg_parts（spec §4.1）。幂等；**只写 msg_parts**——
+    不碰 messages / FTS / 向量 / 水位线。
+
+    两阶段，因为引用可以跨分片（实测分片内命中 99.86% 是下界）：
+      1. 一边把 server_id→msg_key 灌进 TEMP TABLE，一边把 appmsg 攒批写 msg_parts
+      2. 一条 SQL 解析回指
+
+    实测整次约 40 s（读取 38 s + 写入 2 s）。
+
+    计数口径：`parts` = 成功解析并落库的条数（**解析失败的不落库**，所以它不等于
+    「扫到的 appmsg 条数」）；`resolved` / `unresolved` = 有 `ref_svrid` 的行里
+    回指解出来 / 没解出来的条数，两者之和就是引用总数。
+    """
+    ctx = ChatContext(account)
+    prefix = f"{ctx.account}|"
+    parts = rejected = malformed = 0
+    with store.open() as con:
+        con.execute("CREATE TEMP TABLE sid_map("
+                    "server_id INTEGER PRIMARY KEY, msg_key TEXT NOT NULL)")
+        sid_buf: list[tuple[int, str]] = []
+        part_buf: list[tuple[str, int, int | None, str | None, bytes]] = []
+
+        def flush(wrote_parts: bool) -> None:
+            """把两批攒下的行落库。**同一批里一起写**：`sid_map` 与 `msg_parts` 都只是
+            缓冲，谁先落都不影响结果（阶段 2 在全部扫完之后才跑）。"""
+            if sid_buf:
+                # `OR IGNORE`：`server_id` 实测全局唯一（846,785 个、重复 0 次），但那是
+                # 上一次测量的结论，而消息还在不断进来。真撞上重复时该丢的是这一条映射
+                # （引用仍能解到先出现的那条），而不是让整次回填以裸 IntegrityError 崩掉。
+                con.executemany("INSERT OR IGNORE INTO sid_map VALUES (?,?)", sid_buf)
+                sid_buf.clear()
+            if part_buf:
+                store.upsert_msg_parts(con, part_buf)
+                part_buf.clear()
+            if wrote_parts and progress:
+                progress(parts)
+
+        for sid, key, raw in ctx.reader.iter_parts_input():
+            # `if sid` 一次挡掉两种「没有 server_id」：NULL 与 0（实测 15 个 0）。
+            # 它们是哨兵而不是可用标识，进 sid_map 会让 `ref_svrid=0` 的引用被错解。
+            if sid:
+                sid_buf.append((sid, key))
+            if raw is not None:
+                res = appmsg.parse(raw)
+                if res.reason == "rejected":
+                    rejected += 1
+                elif res.reason == "malformed":
+                    malformed += 1
+                else:
+                    # `quote` 仅 kind=57 才非 None；`svrid` 在 XML 里是字符串，转不出 int
+                    # 时 `_to_int` 已经给了 None（**不抛**）。给 None 的那条**照样落库**，
+                    # 否则它的正文也跟着没了。
+                    svrid = res.appmsg.quote.svrid if res.appmsg.quote else None
+                    part_buf.append((key, res.appmsg.kind, svrid, None,
+                                     zlib.compress(appmsg.normalize(raw).encode(), 6)))
+                    parts += 1
+            if len(sid_buf) >= store.BATCH or len(part_buf) >= store.BATCH:
+                flush(bool(part_buf))
+        flush(False)
+
+        # 阶段 2：一条 SQL 解析回指。**按账号前缀限定**——sid_map 只装了本账号的
+        # server_id，不限定的话别的账号里恰好同号的引用会被接到本账号的消息上。
+        # 前缀比对而非 LIKE：wxid 里含 `_`，LIKE 的 `_` 是单字符通配符（同
+        # `count_msg_parts`）。
+        con.execute(
+            "UPDATE msg_parts SET ref_msg_key = (SELECT msg_key FROM sid_map "
+            "WHERE server_id = msg_parts.ref_svrid) "
+            "WHERE ref_svrid IS NOT NULL AND substr(msg_key, 1, ?) = ?",
+            (len(prefix), prefix))
+        # 计数从**表的状态**算（而不是 UPDATE 的 changes）：两条查询同源，和必等于引用
+        # 总数，也不会把上一次回填留下的行算进来或漏掉。
+        refs, resolved = (
+            con.execute("SELECT count(*), count(ref_msg_key) FROM msg_parts "
+                        "WHERE ref_svrid IS NOT NULL AND substr(msg_key, 1, ?) = ?",
+                        (len(prefix), prefix)).fetchone())
+    return {"parts": parts, "resolved": resolved, "unresolved": refs - resolved,
+            "rejected": rejected, "malformed": malformed}
 
 
 def search_history(query: str, contact: str | None = None, limit: int = 20,
