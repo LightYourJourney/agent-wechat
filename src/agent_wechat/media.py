@@ -673,6 +673,49 @@ def _voice_db_paths(account: str) -> list[pathlib.Path]:
     return _safe_iter(paths.db_storage(account) / "message", "media_*.db")
 
 
+def voice_body_keys(account: str) -> frozenset[tuple[str, int]] | None:
+    """本机**有本体**的语音消息集合：{(chat_md5, local_id)}。
+
+    判定依据是 VoiceInfo 行的存在 + voice_data 非空（实测 7,390 行 voice_data 全部非空）。
+    本函数**不解码 SILK**，只读索引列，所以很轻。
+
+    三个返回值的语义必须分清：
+    - `frozenset()`：确定没有语音本体
+    - 非空集合：这些 (chat, local_id) 有本体
+    - `None`：**语音库读不到**（分片损坏/密钥缺失/HOME 建不出来）——调用方必须降级，
+      不能把 None 当成空集合，否则「读不到」会被谎报成「本机没有」。
+
+    与 `_export_voices_from` 同样只读 `media_*.db`；不碰微信的其它目录。
+    """
+    try:
+        passphrase = keys_mod.get_passphrase(account)
+    except errors.AgentWeChatError:
+        return None
+    out: set[tuple[str, int]] = set()
+    for db in _voice_db_paths(account):
+        try:
+            with decrypt.decrypted(db, passphrase) as plain:
+                con = sqlite3.connect(f"file:{plain}?mode=ro", uri=True)
+                con.text_factory = bytes
+                try:
+                    n2i = {rid: (u.decode("utf-8", "replace")
+                                 if isinstance(u, bytes) else u)
+                           for rid, u in con.execute("SELECT rowid, user_name FROM Name2Id")}
+                    for cid, lid in con.execute(
+                            "SELECT chat_name_id, local_id FROM VoiceInfo "
+                            "WHERE voice_data IS NOT NULL"):
+                        u = n2i.get(cid)
+                        if u:
+                            out.add((messages.md5_of(u), lid))
+                finally:
+                    con.close()
+        except (errors.AgentWeChatError, sqlite3.Error, OSError):
+            # 与 _export_voices 同一口径：任一分片打不开 → 整体判为「读不到」，
+            # 不做部分可信（半个集合会被上层当成完整事实）。
+            return None
+    return frozenset(out)
+
+
 def _export_voices(account, chat_ids, out_root, report, want, is_full, bump, progress) -> None:
     """语音：Name2Id rowid → VoiceInfo(chat_name_id, create_time) → pilk 解码 24kHz WAV。
     pilk 缺失 → 原始 .slk（微信原始形态，`\\x02` 前缀保留）。单库打不开则跳过该分片、

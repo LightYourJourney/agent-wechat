@@ -1191,3 +1191,20 @@ def test_exported_path_missing_args_are_guarded_not_lucky(tmp_path):
     (root / cm / "voice" / "2026-09" / f"{ts}_None.wav").write_bytes(b"x")
     assert media.exported_path(root, chat_md5=cm, kind="image", ts=ts) is None
     assert media.exported_path(root, chat_md5=cm, kind="voice", ts=ts) is None
+
+
+# ---------- 语音本体存在集合（spec: 2026-09-16-media-message-link §2.3） ----------
+
+def test_voice_body_keys_none_when_no_shards(tmp_path, monkeypatch):
+    """一条语音分片都没有 → 空集合（不是 None）：「确定没有」与「读不到」是两回事。"""
+    root, account = make_tree(tmp_path, monkeypatch)
+    got = media.voice_body_keys(account)
+    assert got == frozenset()
+
+
+def test_voice_body_keys_unreadable_shard_is_none(tmp_path, monkeypatch):
+    """分片存在但打不开（这里是空文件，不是合法 sqlite）→ None = 读不到，调用方据此降级。"""
+    root, account = make_tree(tmp_path, monkeypatch)
+    d = paths.db_storage(account) / "message"
+    (d / "media_0.db").write_bytes(b"not a database")
+    assert media.voice_body_keys(account) is None
