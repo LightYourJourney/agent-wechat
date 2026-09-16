@@ -1208,3 +1208,30 @@ def test_voice_body_keys_unreadable_shard_is_none(tmp_path, monkeypatch):
     d = paths.db_storage(account) / "message"
     (d / "media_0.db").write_bytes(b"not a database")
     assert media.voice_body_keys(account) is None
+
+
+def test_voice_body_keys_reads_the_query_body(tmp_path, monkeypatch):
+    """**这条才碰到查询主体**：前两条都停在退化出口（零分片 / 打不开的分片），
+    把 `with decrypt.decrypted(...)` 整段换成 `pass` 它们照样绿 —— 集合的内容无人守护。
+
+    断言同时钉住三件事：Name2Id 的方向（rid → user_name，反了就对不上）、
+    md5 的输入（会话 username）、以及 local_id 被原样带出。
+    """
+    import hashlib
+    root, account = make_tree(tmp_path, monkeypatch)
+    _voice_fixture(account, [(1, 1700000000, 7, b"silky"),
+                             (1, 1700000001, 8, b"silky")])
+    _passthrough_decrypted(monkeypatch)
+    want = hashlib.md5(b"chatA@chatroom").hexdigest()
+    assert media.voice_body_keys(account) == frozenset({(want, 7), (want, 8)})
+
+
+def test_voice_body_keys_skips_rows_without_voice_data(tmp_path, monkeypatch):
+    """`voice_data IS NULL` 的行不计入 —— 这一条守的是 WHERE 里唯一的那个谓词。"""
+    import hashlib
+    root, account = make_tree(tmp_path, monkeypatch)
+    _voice_fixture(account, [(1, 1700000000, 7, b"silky"),
+                             (1, 1700000001, 8, None)])
+    _passthrough_decrypted(monkeypatch)
+    want = hashlib.md5(b"chatA@chatroom").hexdigest()
+    assert media.voice_body_keys(account) == frozenset({(want, 7)})
