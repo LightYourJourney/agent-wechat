@@ -640,6 +640,25 @@ def test_chat_index_escapes_the_label_it_reads_from_the_index(con, chat_env):
     assert "&lt;script&gt;" in page
 
 
+def test_chat_index_reports_a_write_failure_as_a_project_error(con, chat_env, monkeypatch):
+    """写不进去时逃出来的必须是 `AgentWeChatError` 子类，**不是裸 `OSError`**（core 层的错误契约）。
+
+    删掉 `except OSError → MediaOutputError` 那段 → 逃出来的是裸 `OSError`（磁盘满/只读挂载
+    时用户看到 traceback），这条红。手法照 `test_chat_export_reports_only_the_files_it_actually_wrote`
+    那一半：单文件写失败。**索引页只有一个产物，故这里不沿用 `chatview.write` 的「吞掉、不进列表」**
+    ——吞掉就是「退出码 0、什么都没有」，同 `moments_export` 的取舍。
+    """
+    _seed(con)
+    usecases.chat_export("wxid_testacct02", out_dir=str(chat_env), account="acct")
+
+    def boom(self, *a, **kw):                     # 补丁在 chat_export 之后才打
+        raise OSError(28, "No space left on device", str(self))
+
+    monkeypatch.setattr(pathlib.Path, "write_text", boom)
+    with pytest.raises(errors.MediaOutputError):
+        usecases.chat_index(out_dir=str(chat_env), account="acct")
+
+
 def test_chat_index_cli_on_empty_out_dir_is_not_an_error(tmp_path, capsys):
     """一个产物都没有时：印提示、**退出码 0**（这不是错误）。
 
