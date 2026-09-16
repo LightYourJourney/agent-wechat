@@ -122,6 +122,11 @@ def test_messages_in_range_takes_the_most_recent_n_not_the_oldest(con, monkeypat
     rows, truncated = search.messages_in_range(
         "wxid_testacct02", account="acct", limit=3)
     assert truncated is True
+    # **必须**是普通 dict，不是 `sqlite3.Row`：T6 的 `chatview.build` 要 dict
+    # （`json.dumps` 序列化、`.get()`、`{**r}` 三样 `Row` 都不支持）。
+    # 少了这条，把 `[dict(r) for r in ...]` 简化成 `list(reversed(...))` 会让本文件三条用例
+    # **全绿**，而故障推迟到 T6 才爆（T5 审阅者实测：改完 3 passed）。
+    assert type(rows[0]) is dict, "必须是 dict，不是 sqlite3.Row"
     assert [r["content"] for r in rows] == ["m8", "m9", "m10"]     # 正序，且是最新的三条
 
 
@@ -133,7 +138,7 @@ def test_messages_in_range_filters_and_reports_not_truncated(con):
     **初稿这条写错过，值得记下来**：原写 `after_ts=1004` 期望 `["m5","m6","m7"]`，
     那**只有独占下界才成立**（含下界会多带回 m4）。而独占下界与本仓三处已落地事实矛盾：
     `search.py:39` 同名参数用 `>=`、`usecases.py:460` 的月份筛选是
-    `(m.ts >= ? AND m.ts < ?)`、`tests/test_media.py:134` 把 `month_bounds` 钉成
+    `(m.ts >= ? AND m.ts < ?)`、`tests/test_media.py:143` 把 `month_bounds` 钉成
     `[lo, hi)`「下界含、相邻月首尾相接无缝隙」。**而 T6 把 `month_bounds` 的值直接喂给
     `after_ts`/`before_ts`** —— 照初稿写就是给 `chat export --months` 的**每月第一秒开一个
     静默数据丢失的缝**。（T5 实施者发现并拒绝改断言，标 `xfail(strict=True)` 请裁定。）
@@ -176,4 +181,4 @@ def test_messages_in_range_is_scoped_to_one_account_and_one_chat(con):
     from agent_wechat import search
     rows, truncated = search.messages_in_range("wxid_testacct02", account="acct")
     assert [r["content"] for r in rows] == ["本会话"]
-    assert truncated is False   # 独立钉住 truncated 的「假」这一半（探针 D：此前无人钉）
+    assert truncated is False   # truncated 的「假」这一半（修复轮后 filters_and_reports 也钉它）

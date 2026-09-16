@@ -86,7 +86,9 @@ def messages_in_range(chat_id: str, *, account: str,
                       limit: int = 500) -> tuple[list[dict], bool]:
     """范围内**最近的** limit 条（时间正序返回），以及 truncated。
 
-    `truncated` 的含义是「范围内还有更早的没进来」——取的是最近的一端，不是最早的一端，
+    `truncated` 是「**可能**还有更早的没进来」——`len(rows) == limit` 只在一个方向成立：
+    范围内**恰好** `limit` 条时它同样是 `True`（**假阳性**，其实一条都没被丢）。
+    取的是最近的一端，不是最早的一端，
     取向写反会让产物看起来「从很久以前开始」，而用户以为自己拿到了最近的消息（spec §4.4）。
     `after_ts` 含下界、`before_ts` 不含上界（与 `search` / `media.month_bounds` 的 [lo, hi) 一致）。
 
