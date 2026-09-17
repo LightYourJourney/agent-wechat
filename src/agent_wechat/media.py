@@ -466,12 +466,47 @@ def _safe_iter(d: pathlib.Path, pattern: str | None = None) -> list[pathlib.Path
         return []
 
 
+def _out_path(out_root: pathlib.Path, cm: str, kind: str, mon: str,
+              stem: str, ext: str) -> pathlib.Path:
+    """导出终路径的**纯计算**——不建目录、不写盘、不 stat。
+
+    与 `_dest` 是同一条路径的两种用法：`_dest` 先 `ensure_tree` 再拼名（写盘用），
+    本函数只拼名（**探测**用）。探测若走 `_dest`，一次 skip 判定就会在 `out_root`
+    下凭空造出空目录树。
+    """
+    return out_root / cm / kind / mon / f"{stem}.{ext}"
+
+
+def _out_candidates(kind: str, base: str) -> tuple[tuple[str, str], ...]:
+    """基准名 → 写盘可能落的 `(stem, ext)`，**顺序即优先级**（首个命中即用）。
+
+    这是「一个基准名能落成哪些文件」的**唯一出处**：写侧（`export_media` 的跳过探测）、
+    读侧（`exported_path`）都从它派生。分两份写就会出现「读侧说已导出、写侧说没有」
+    那类静默 404。
+
+    `base` 的口径按 kind 不同——就是三处调用点各自的实参：
+      - `image`：源 dat 的 stem（`{file_key}{_hd|_h||_b|_t}`）。写盘**保留原 stem**，
+        扩展名由**解密后的内容**决定，故扩展名全枚举。
+      - `video`：`file_key`。写盘用**源文件**的 stem，真实语料里有 `{K}` / `{K}_raw`
+        两个变体，无缝体时落 `{K}_thumb.jpg`。
+      - `voice`：`{ts}_{local_id}`。pilk 可用写 `.wav`，缺失回退 `.slk`。
+    """
+    if kind == "image":
+        return tuple((base, e) for e in _EXPORT_EXTS)
+    if kind == "video":
+        return ((base, "mp4"), (f"{base}_raw", "mp4"), (f"{base}_thumb", "jpg"))
+    if kind == "voice":
+        return ((base, "wav"), (base, "slk"))
+    raise ValueError(f"未知媒体类型: {kind}")
+
+
 def _dest(out_root: pathlib.Path, cm: str, kind: str, mon: str,
           stem: str, ext: str) -> pathlib.Path:
     """导出终路径（`out_root/cm/kind/mon` 逐级 0700，含已存在的 out_root）。
-    与 _save 共用：wxgf 转码要先拿路径才能直写。"""
-    d = ensure_tree(out_root, cm, kind, mon)
-    return d / f"{stem}.{ext}"
+    与 _save 共用：wxgf 转码要先拿路径才能直写。
+    路径拼法取自 `_out_path`（探测侧的同源对应物）。"""
+    ensure_tree(out_root, cm, kind, mon)
+    return _out_path(out_root, cm, kind, mon, stem, ext)
 
 
 def _save(out_root: pathlib.Path, cm: str, kind: str, mon: str,
@@ -521,29 +556,27 @@ def exported_path(out_root: pathlib.Path, *, chat_md5: str, kind: str, ts: int,
         if local_id is None:
             return None
         months = (month_of(ts),)          # 语音写盘用的就是 month_of(create_time)，无需 ±1
-        cands = [(f"{ts}_{local_id}", "wav"), (f"{ts}_{local_id}", "slk")]
+        cands = _out_candidates(kind, f"{ts}_{local_id}")
     elif kind == "image":
         if file_key is None:
             return None
         months = _month_window(ts)
         # 与 resolve_image 的后缀优先级一致：写盘用的是**源文件**的 stem（`_save(..., dat.stem, ...)`），
         # 而源文件可能是 K_hd.dat —— 只探裸 K 会漏掉真正存在的那份产物。
-        cands = [(f"{file_key}{suf}", ext)
-                 for suf in _SUFFIX_PRIORITY for ext in _EXPORT_EXTS]
+        cands = [c for suf in _SUFFIX_PRIORITY
+                 for c in _out_candidates(kind, f"{file_key}{suf}")]
     elif kind == "video":
         if file_key is None:
             return None
         months = _month_window(ts)
         # 与 resolve_video / 视频导出分支一致：mp4 优先，_raw 变体次之，
         # 最后才是同一目录里的 _thumb.jpg（无缝体时导出写下的就是它）。
-        cands = [(file_key, "mp4"), (f"{file_key}_raw", "mp4"),
-                 (f"{file_key}_thumb", "jpg")]
+        cands = _out_candidates(kind, file_key)
     else:
         return None
     for mon in months:                     # 月份外层、候选内层 —— 与 resolve_* 的嵌套顺序一致
-        d = out_root / chat_md5 / kind / mon
         for stem, ext in cands:
-            p = d / f"{stem}.{ext}"
+            p = _out_path(out_root, chat_md5, kind, mon, stem, ext)
             if p.exists():
                 return p
     return None
