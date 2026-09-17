@@ -333,7 +333,7 @@ def media_export(contact: str, *, kinds: list[str], months: list[str] | None = N
     的会话头上——错归属比缺归属更坏。
 
     `limit` 是**本次最多新增**的条数：已存在的产物会被跳过（可通过 `force=True` 重建），
-    故重跑同一条命令即可补齐剩余部分。
+    故重跑同一条命令即可继续。
     """
     from . import media                       # 惰性：media 顶层拉起 cryptography
     ctx = ChatContext(account)

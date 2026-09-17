@@ -683,7 +683,8 @@ def test_media_export_renders_counts_and_degraded_to_stderr(monkeypatch, capsys)
             report=media.MediaReport(
                 # remaining 必须非 0：truncated 只在本会导出的条目**真被上限挡下**时才置位，
                 # 夹具里 `truncated=True` + `remaining=0` 是生产不可能出现的组合，留着就等于
-                # 把「还有 0 个未导出」这种荒唐话钉成期望输出。skipped 同理给非 0，
+                # 把「还有 0 个未导出」这种荒唐话钉成期望输出。skipped 同理：图片给 5、
+                # 语音给 1（这两行足够让「写死 skipped=0」在断言上变红；视频行留默认 0），
                 # 否则新键只被断言了「存在于格式里」而没被断言「真的印出来」。
                 image=media.Counts(ok=3, failed=1, skipped=5, remaining=7),
                 voice=media.Counts(ok=2, raw_only=1, skipped=1, remaining=2),

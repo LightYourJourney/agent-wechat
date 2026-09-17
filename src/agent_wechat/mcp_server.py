@@ -199,7 +199,7 @@ def export_chat_media(contact: str, kinds: str = "image,voice,video",
     **新增**数：已存在的产物会被跳过（force=true 则全部重做），故重复调用会推进而不是
     从头再来——触及 limit 时 truncated=true，counts 里的 remaining 是还有多少个**未导出**
     （不只是「续跑必然新增」：被上限挡下的条目里，续跑时仍会失败的那些也计入），
-    **重跑同一条命令即可补齐**。
+    **重跑同一条命令即可继续**。
     """
     res = usecases.media_export(
         contact, kinds=[k.strip() for k in kinds.split(",") if k.strip()],
