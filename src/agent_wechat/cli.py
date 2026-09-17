@@ -613,7 +613,7 @@ def main(argv: list[str] | None = None) -> None:
     esp.add_argument("--with-media", action="store_true",
                      help="联网下载远程媒体本体（默认关闭，不联网）")
     esp.add_argument("--out", help="输出目录（默认 $AGENT_WECHAT_HOME/moments）")
-    esp.add_argument("--limit", type=int, default=2000, help="最多导出动态数（1-2000）")
+    esp.add_argument("--limit", type=int, default=2000, help="最多导出动态数（下界 1，无上界）")
     esp.add_argument("--account", help="账号目录名")
     esp.set_defaults(fn=cmd_moments_export)
 

@@ -208,7 +208,7 @@ agent-wechat moments export --limit 5 --with-media
 | `--months 2026-01,…` | 逗号分隔的 `YYYY-MM`，按动态时间过滤；省略不限 |
 | `--with-media` | **默认关**。开启才向微信 CDN 下载并解密媒体本体 |
 | `--out DIR` | 输出目录（默认 `$AGENT_WECHAT_HOME/moments`）；目录 0700、文件 0600 |
-| `--limit N` | 动态条数上限（1-2000，默认 2000）；触顶时 stderr 多一行「注意：触及 --limit，本次被截断」。截断按**时间倒序**留最新的那些 |
+| `--limit N` | 动态条数上限（下界 1，无上界；默认 2000）；触顶时 stderr 多一行「注意：触及 --limit，还有 N 条更早的动态没进来」。截断按**时间倒序**留最新的那些 |
 
 **产物与代价**：
 
@@ -336,12 +336,12 @@ agent-wechat appmsg rebuild
 ### media（导出图片 / 语音 / 视频）
 
 ```bash
-# 导出某会话的媒体（默认三类全导、不限月份，上限 2000 个文件）
+# 导出某会话的媒体（默认三类全导、不限月份；--limit 默认 2000，数的是本次**新增**的文件）
 agent-wechat media export --chat 小李
 # 会话 wxid_abc123def456
-# 图片   ok=12  failed=1  missing=0
-# 语音   ok=8  failed=0  raw_only=2
-# 视频   ok=3  thumb=1  missing=0
+# 图片   ok=12  skipped=0  failed=1  missing=0
+# 语音   ok=8  skipped=0  failed=0  raw_only=2
+# 视频   ok=3  skipped=0  thumb=1  missing=0
 # 输出目录: /Users/you/.agent-wechat/media
 
 # 只导图片、限定月份、限制数量
@@ -363,9 +363,15 @@ agent-wechat media rebuild-refs
 - **能导出的远少于会话里的媒体消息数**：微信按需下载并定期清理本地媒体，`missing` 大
   是常态而不是错误（本机实测：84.1 万条索引里 39,344 条图片消息，磁盘上只剩 198 个 dat）
 - 计数含义：`failed` = 解密/未知格式/落盘失败；`raw_only` = pilk 缺失时导出的原始 `.slk` 数；
-  `thumb` = 视频本体不在、回退缩略图的数量；触及 `--limit` 时会多印一行
-  「（达到 --limit 上限，已提前收手）」，说明还有没导完的，可按 `--months` 分批重跑补齐。
-  `image.missing` 恒为 0（图片按目录枚举，不按消息清点）
+  `thumb` = 视频本体不在、回退缩略图的数量；`skipped` = 本次因产物已存在而跳过的**文件**数
+  （**按文件**计，不是消息条数）；`remaining` = 撞上 `--limit` 时还有多少个**未导出**
+  （CLI 印的是三类之和）。`image.missing` 恒为 0（图片按目录枚举，不按消息清点）
+- **`--limit` 只数本次新增**（已存在的产物不计），而且**只封顶写入、不封顶扫描**：撞顶后仍会
+  stat 完所有剩余条目才返回——大语料上表现为「还在跑」，不是卡住。触及 `--limit` 时会多印
+  一行「（达到 --limit 上限，还有 N 个未导出 —— 重跑同一条命令即可继续）」。这个 `N` 含
+  续跑时**仍会失败**的那些条目（dat 读不出、本体不存在），故它不等于「续跑一定多出 N 个文件」。
+- 重跑同一条命令会跳过已存在的产物、从断点向前推进；要把已存在的产物全部重做用 `--force`
+  ——它**不**补缩略图：本体已在产物里的视频不会再生成 `{K}_thumb.jpg`。
 - **依赖的边界要分清**：媒体密钥推导本身不需要特权（图片密钥是纯磁盘推导的）；但与其他
   命令一样，`media export` 需要 passphrase 缓存——会话消歧要读 `contact.db`。缺缓存时
   命令**整体失败**（报错指向 bootstrap），不存在「只退图片、语音照常」的部分可用形态。

@@ -159,7 +159,7 @@ def test_export_limit_keeps_the_newest(env):
 
     变异：删掉 `iter_posts` 的 `out.sort(...)` → 留下 P1（最旧）→ 红。
     """
-    _add_post(SECOND_XML)                                  # tid 更大、时间更早
+    _add_post(SECOND_XML)                                  # tid 更大、时间更晚
     res = usecases.moments_export(account=ACCT, limit=1)
     assert res.report.truncated is True
     assert res.report.window == (1735776000, 1735776000)   # 留下的是**新**那条（P2）

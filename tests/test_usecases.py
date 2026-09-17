@@ -274,7 +274,7 @@ def test_export_without_contact_keeps_full_scope(stub):
     assert stub.get("readers") is None
 
 
-# ---------- media_export：单会话 + limit 夹取（T6，MCP T7 共用此入口） ----------
+# ---------- media_export：单会话 + limit 只余下界（CLI 与 MCP 共用此入口） ----------
 
 def test_media_export_wires_single_chat_and_passes_limit_through(stub, monkeypatch):
     """media_export：消歧后以**单元素** chat_ids 交 export_media，`limit` **原样透传**

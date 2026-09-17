@@ -301,7 +301,8 @@
 | `contact` | string | **是** | — | username（`wxid_*` / `*@chatroom` / `filehelper`）或展示名（歧义返回 `need_confirm`，形状见 §3；未命中返回 `{"error": "找不到联系人「XXX」，请用 list_contacts 查询"}`） |
 | `kinds` | string | 否 | `"image,voice,video"` | 逗号分隔的媒体类型（`image` / `voice` / `video`）；含未知值报错 |
 | `months` | string | 否 | null | 逗号分隔的月份（`YYYY-MM`），按消息时间过滤；省略不限 |
-| `limit` | int | 否 | 500 | 导出文件数上限（1-2000，超出按边界处理） |
+| `limit` | int | 否 | 500 | 本次最多**新增**的文件数（下界 1，无上界；产物已存在的不计） |
+| `force` | bool | 否 | `false` | `true` = 忽略已存在的产物全部重做（默认跳过已存在的） |
 | `account` | string | 否 | null | 同通用约定 |
 
 **成功返回**：
@@ -311,9 +312,9 @@
   "chat_id": "wxid_abc123def456",
   "out_dir": "/Users/you/.agent-wechat/media",
   "counts": {
-    "image": { "ok": 12, "failed": 1, "missing": 0 },
-    "voice": { "ok": 8, "failed": 0, "raw_only": 2 },
-    "video": { "ok": 3, "thumb": 1, "missing": 0 }
+    "image": { "ok": 12, "failed": 1, "missing": 0, "skipped": 0, "remaining": 0 },
+    "voice": { "ok": 8, "failed": 0, "raw_only": 2, "skipped": 0, "remaining": 0 },
+    "video": { "ok": 3, "thumb": 1, "missing": 0, "skipped": 0, "remaining": 0 }
   },
   "degraded": [],
   "truncated": false
@@ -350,7 +351,13 @@
      不写消息**，对这种索引永远修不好）；
   4. 索引库打不开或读不了（如损坏）→ **本次不导视频**，其余类型照常——**不会**退回旧的
      账号级枚举：那会把账号视频树里的**全部**文件写进本次请求的会话目录（错归属比缺归属更坏）。
-- `truncated=true` 表示触及 `limit` 提前收手，结果不完整——可按 `months` 分批重跑补齐。
+- `counts[*].skipped` 是本次因产物已存在而跳过的**文件**数（**按文件**计，不是消息条数）；
+  它不吃 `limit` 预算。`counts[*].remaining` 是撞上 `limit` 时还有多少个**未导出**（CLI 印的是
+  三类之和）。
+- `truncated=true` 表示触及 `limit` 提前收手，结果不完整——`remaining` 含续跑时**仍会失败**的
+  那些条目（dat 读不出、本体不存在），故它不等于「续跑一定多出这么多文件」。已存在的产物会被
+  跳过，**重跑同一条命令即可继续**；要全部重做用 `force=true`——它**不**补缩略图：本体已在产物
+  里的视频不会再生成 `{K}_thumb.jpg`。
 - 存量历史回填（`media rebuild-refs`）是一次性运维动作，仅提供 CLI（见 USAGE.md），
   MCP 侧无对应工具。
 
@@ -367,7 +374,7 @@
 | `contact` | string | 否 | null | 按**作者**筛选（username 或展示名）；省略 = 全部好友。歧义返回 `need_confirm`（形状见 §3），未命中返回 `{"error": "找不到联系人「XXX」，请用 list_contacts 查询"}` |
 | `months` | string | 否 | null | 逗号分隔的月份（`YYYY-MM`），按动态时间过滤；省略不限 |
 | `with_media` | bool | 否 | `false` | **是否联网下载并解密媒体本体**。`false`（默认）= 零网络；`true` = 向微信 CDN 发起请求（见下方「联网边界」） |
-| `limit` | int | 否 | 500 | 动态条数上限（1-2000，超出按边界处理）。截断留下的是**最新**的那些动态 |
+| `limit` | int | 否 | 500 | 动态条数上限（下界 1，无上界）。截断留下的是**最新**的那些动态 |
 | `account` | string | 否 | null | 同通用约定 |
 
 **成功返回**：
@@ -376,7 +383,7 @@
 {
   "out_dir": "/Users/you/.agent-wechat/moments",
   "counts": {
-    "posts": 500, "comments": 312, "likes": 288, "failed": 0,
+    "posts": 500, "comments": 312, "likes": 288, "remaining": 0, "failed": 0,
     "media_downloaded": 0, "media_not_downloaded": 1204, "media_failed": 0
   },
   "window": { "earliest": 1360159626, "latest": 1789046525 },
@@ -409,6 +416,8 @@
 - 联系方式里的回复（「A 回复 B」）显示的是 **B 的昵称**：XML 里只有 B 的 wxid
   （`ref_username`），昵称按 `username` 在**同一条动态**的互动里反查；查不到时省略
   「回复 B」那段，不拿 wxid 顶替。
+- `truncated=true` 表示触及 `limit` 提前收手，此时 `counts.remaining` 报出还有多少条**更早**
+  的动态没进来（留下的是最新的那些）。
 - `media_not_downloaded` 涵盖两种情形：「未开启 `with_media`」与「该媒体没有 `token`，
   构造不出下载地址」。
 - 表情评论只渲染 `[表情评论]` 占位，本体不下载；分享链接自带的第三方缩略图不是
@@ -481,7 +490,7 @@
   形状见 §3 的约定）。当前来源是语音库读不到（`message/media_*.db` 漂移）——此时**尚未导出**
   的语音一律按 `gone` 呈现（已导出的语音仍照实报 `exported`），不会假装成 `exportable`。
 - `truncated=true` 表示触及 `limit` 提前收手——此时 `counts` / `by_kind` 只是**答完的
-  这些**，不是全量；可按 `months` 分批重跑补齐。
+  这些**，不是全量；可按 `months` 分批重跑。
 - **不写微信目录、不写 `out_dir`、不联网**——判定只做 `pathlib` 探测与索引只读查询。
   唯一的磁盘写入是**语音本体判定**：要解密 `media_*.db`，明文只在 `~/.agent-wechat/tmp/`（0700）
   短暂存在、用后即焚（与解密管道是同一个机制，见 SECURITY.md §4「临时文件」）。
