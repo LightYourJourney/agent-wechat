@@ -340,7 +340,7 @@ def cmd_moments_export(args: argparse.Namespace) -> int:
     print(f"媒体：已下载 {r.media_downloaded} / 未下载 {r.media_not_downloaded}"
           f" / 失败 {r.media_failed}")
     if r.truncated:
-        print("注意：触及 --limit，本次被截断", file=sys.stderr)
+        print(f"注意：触及 --limit，还有 {r.remaining} 条更早的动态没进来", file=sys.stderr)
     _render_degradations(r.degraded)
     print(f"产物：{res.out_dir}/index.html")
     return 0

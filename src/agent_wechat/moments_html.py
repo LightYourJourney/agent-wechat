@@ -84,7 +84,8 @@ def _notice(report: moments.MomentsReport, n: int) -> str:
         # 不写在这里，整页看起来就是一次成功的空导出。
         rows.append(f"<b>解析失败 {report.failed} 条</b>（XML 结构不符，已跳过）。")
     if report.truncated:
-        rows.append("<b>本次导出被 limit 截断</b>，可调大 --limit 重跑。")
+        rows.append(f"<b>本次导出被 limit 截断</b>，还有 {report.remaining} 条更早的动态"
+                    "没进来 —— 调大 --limit 重跑。")
     for d in report.degraded:
         rows.append(f"降级：{_esc(d)}")
     return '<div class="notice">' + "<br>".join(rows) + "</div>"

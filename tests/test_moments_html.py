@@ -128,5 +128,14 @@ def test_degraded_section_lists_reasons():
 
 
 def test_truncated_is_disclosed():
-    t = _text_of(moments_html.render([_mk()], _rep(truncated=True)))
+    """截断必须**带条数**（只说「被截断」用户无从判断差多少）。
+
+    夹具给非 0 的 `remaining`：`truncated=True` + `remaining=0` 在生产里不可能出现
+    （`remaining += 1` 就写在置位那两行里），照默认值写等于把「还有 0 条更早的动态没进来」
+    这种荒唐话钉成期望输出。
+
+    变异：`_notice` 里把 `{report.remaining}` 写死成 0 → 红。
+    """
+    t = _text_of(moments_html.render([_mk()], _rep(truncated=True, remaining=3)))
     assert "截断" in t or "truncated" in t.lower()
+    assert "还有 3 条更早的动态" in t

@@ -16,6 +16,9 @@ XML = """<SnsDataItem><TimelineObject><id>P1</id><username>u</username>
 # 畸形 createTime → `moments._ts` 归 0（正确），但 CLI 不许把它印成 1970-01。
 BAD_TS_XML = XML.replace("<createTime>1735689600</createTime>",
                          "<createTime>99999999999999999999</createTime>")
+# 第二条动态（createTime 更晚）：只为 limit 造对照组，共享夹具仍只插一条。
+SECOND_XML = XML.replace("<id>P1</id>", "<id>P2</id>").replace(
+    "<createTime>1735689600</createTime>", "<createTime>1735776000</createTime>")
 
 
 @contextlib.contextmanager
@@ -108,6 +111,26 @@ def test_unparseable_create_time_is_not_printed_as_1970(env, capsys):
     out = capsys.readouterr().out
     assert "1970-01" not in out
     assert "覆盖：? ~ ?" in out
+
+
+def test_truncated_run_tells_how_many_are_left(env, capsys):
+    """触顶的 stderr 行必须带条数：只说「本次被截断」用户无从判断差多少。
+
+    文案说「**更早**」是有依据的：`iter_posts` 按 createTime 降序产出、cap 留最新，
+    于是被挡下的正是更早的那些。
+
+    变异：把 `{r.remaining}` 写死成 0 → 红。
+    """
+    con = sqlite3.connect(paths.db_storage(ACCT) / "sns" / "sns.db")
+    con.execute("INSERT INTO SnsTimeLine(tid, user_name, content) VALUES (2,'u',?)",
+                (SECOND_XML,))
+    con.commit()
+    con.close()
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["moments", "export", "--account", ACCT, "--limit", "1"])
+    assert ei.value.code == 0
+    err = capsys.readouterr().err
+    assert "还有 1 条更早的动态没进来" in err
 
 
 def test_with_media_flag_defaults_off(env, monkeypatch):

@@ -297,7 +297,7 @@ def export_moments(contact: str | None = None, months: str | None = None,
     改了动态的 XML 结构——此时不要把它当成「这个账号没有朋友圈」。window 给出动态的
     时间跨度——**注意这是微信本地缓存的窗口，不是完整历史**（本机实测 1,923 条覆盖
     2013-02~2026-09，密度极不均）。触及 limit 时 truncated=true，留下的是**最新**的
-    那些动态。
+    那些动态，counts.remaining 报出还有多少条**更早**的没进来。
     """
     res = usecases.moments_export(
         contact,
@@ -308,6 +308,7 @@ def export_moments(contact: str | None = None, months: str | None = None,
     r = res.report
     return {"out_dir": res.out_dir,
             "counts": {"posts": r.posts, "comments": r.comments, "likes": r.likes,
+                       "remaining": r.remaining,
                        "failed": r.failed,
                        "media_downloaded": r.media_downloaded,
                        "media_not_downloaded": r.media_not_downloaded,

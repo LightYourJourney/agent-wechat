@@ -206,6 +206,57 @@ def test_export_limit_sets_truncated(env):
     assert full.report.posts == 2
 
 
+def test_export_reports_remaining_after_limit(env):
+    """截断要带条数：「被 limit 截断」不带数量，用户无从判断差多少。
+
+    变异：把 `report.remaining += 1` 删掉 → remaining=0 → 红。
+    """
+    _add_post(SECOND_XML)
+    capped = usecases.moments_export(account=ACCT, limit=1)
+    assert capped.report.truncated is True
+    assert capped.report.remaining == 1          # 夹具共 2 条，留下 1 条
+
+
+def test_export_capped_posts_are_counted_not_fetched(env):
+    """撞上限后只计数、**不得**再调 `_resolve_media`：那个调用在 with_media=True 时会联网。
+
+    变异：把 cap 分支里的 `continue` 挪到 `_resolve_media` 之后 → 被丢下的那条也下载
+    （calls 由 1 变 2）→ 红。注意本条在改动**之前**就绿（旧代码是 `break`，同样不抓）：
+    它守的是 `continue` 的位置，不是「本次改动做没做」。
+    """
+    _add_post(_md5_xml("00112233445566778899aabbccddeeff"))   # 更新的那条，媒体可下载
+    calls = []
+
+    def fetch(m, **kw):
+        calls.append(m)
+        return _jpeg()
+
+    res = usecases.moments_export(account=ACCT, with_media=True, fetch=fetch, limit=1)
+    assert res.report.truncated is True
+    assert res.report.remaining == 1
+    assert len(calls) == 1                        # 只有被留下的那条抓了媒体
+    assert res.report.media_downloaded == 1
+
+
+def test_moments_export_limit_is_not_capped(env, monkeypatch):
+    """`--limit 5000` 不被压成 2000（硬顶已放开）。
+
+    变异：把 `clamp_limit(limit)` 改回 `clamp_limit(limit, (1, 2000))` → 捕获到的返回值
+    为 2000 → 红。断言的是 `clamp_limit` 的**实参**与**返回值**两样，缺一样都拦不住。
+    """
+    caps = []
+    real = usecases.clamp_limit
+
+    def spy(n, bounds=usecases.LIMIT_UNBOUNDED):
+        got = real(n, bounds)
+        caps.append((n, bounds, got))
+        return got
+
+    monkeypatch.setattr(usecases, "clamp_limit", spy)
+    usecases.moments_export(account=ACCT, limit=5000)
+    assert caps == [(5000, usecases.LIMIT_UNBOUNDED, 5000)]
+
+
 def test_export_rejects_bad_month(env):
     with pytest.raises(errors.SearchInputError):
         usecases.moments_export(account=ACCT, months=["2025-13"])

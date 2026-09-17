@@ -22,6 +22,11 @@ XML = f"""<SnsDataItem><TimelineObject><id>P1</id><username>u</username>
 <LocalExtraInfo><nickname>老王</nickname></LocalExtraInfo></SnsDataItem>"""
 
 
+# 第二条动态（createTime 更晚）：只为 limit 造对照组，共享夹具仍只插一条。
+SECOND_XML = XML.replace("<id>P1</id>", "<id>P2</id>").replace(
+    "<createTime>1735689600</createTime>", "<createTime>1735776000</createTime>")
+
+
 @contextlib.contextmanager
 def _passthrough(db_path, passphrase, tmpdir=None):
     yield db_path
@@ -55,8 +60,9 @@ def env(tmp_path, monkeypatch):
 def test_envelope_shape(env):
     d = mcp_server.export_moments(account=ACCT)
     assert set(d) == {"out_dir", "counts", "window", "degraded", "truncated"}
-    assert set(d["counts"]) == {"posts", "comments", "likes", "failed", "media_downloaded",
-                                "media_not_downloaded", "media_failed"}
+    assert set(d["counts"]) == {"posts", "comments", "likes", "remaining", "failed",
+                                "media_downloaded", "media_not_downloaded", "media_failed"}
+    assert d["counts"]["remaining"] == 0                # 未触顶时恒为 0，不是缺席
     assert d["counts"]["posts"] == 1
     assert d["counts"]["failed"] == 0                   # 解析失败与媒体失败各算各的
     assert d["window"] == {"earliest": 1735689600, "latest": 1735689600}
@@ -96,6 +102,22 @@ def test_envelope_reports_parse_failures(env):
     assert d["counts"]["posts"] == 0
     assert d["counts"]["failed"] == 1
     assert any("解析失败" in x for x in d["degraded"])
+
+
+def test_envelope_reports_remaining_when_truncated(env):
+    """触顶时信封要报出还有多少条没进来——「truncated: true」不带数量是一句没有数字的话。
+
+    变异：把信封里的 `"remaining": r.remaining` 写死成 0（或删掉该键 → 上一条的键集断言红）→ 红。
+    """
+    con = sqlite3.connect(paths.db_storage(ACCT) / "sns" / "sns.db")
+    con.execute("INSERT INTO SnsTimeLine(tid, user_name, content) VALUES (2,'u',?)",
+                (SECOND_XML,))
+    con.commit()
+    con.close()
+    d = mcp_server.export_moments(account=ACCT, limit=1)
+    assert d["truncated"] is True
+    assert d["counts"]["posts"] == 1
+    assert d["counts"]["remaining"] == 1         # 夹具共 2 条，留下最新的 1 条
 
 
 def test_need_confirm_passthrough(env, monkeypatch):

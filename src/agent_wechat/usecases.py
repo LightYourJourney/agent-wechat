@@ -1142,7 +1142,7 @@ def moments_export(contact: str | None = None, *, months: list[str] | None = Non
     bad_months = [m for m in (months or []) if not MONTH_RE.fullmatch(m)]
     if bad_months:
         raise errors.SearchInputError(f"月份格式应为 YYYY-MM：{', '.join(bad_months)}")
-    cap = clamp_limit(limit, (1, 2000))
+    cap = clamp_limit(limit)          # 不再硬卡 2000
     do_fetch = fetch if fetch is not None else sns_media.fetch
 
     out_root = media.ensure_tree(
@@ -1154,7 +1154,8 @@ def moments_export(contact: str | None = None, *, months: list[str] | None = Non
                                 report=report):
         if len(kept) >= cap:
             report.truncated = True
-            break
+            report.remaining += 1
+            continue                  # 只计数：**不得**再调 _resolve_media（它会联网）
         lo = p.create_time if lo is None else min(lo, p.create_time)
         hi = p.create_time if hi is None else max(hi, p.create_time)
         report.comments += sum(1 for c in p.comments if c.kind == moments.CMT_COMMENT)
