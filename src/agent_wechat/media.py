@@ -321,7 +321,7 @@ class Counts:
     missing: int = 0
     raw_only: int = 0      # voice 专属：pilk 缺失时导出原始 .slk 的数量
     thumb: int = 0         # video 专属：回退缩略图数量
-    skipped: int = 0       # **按文件**计（有本体+缩略图的视频重跑记 2）；不吃 --limit 预算
+    skipped: int = 0       # 本次因产物已存在而跳过的**文件**数（视频的缩略图随本体一起算，不另计）；不吃 --limit 预算
     remaining: int = 0     # 撞上 --limit 后本会导出的条数（只计数，不落盘）
 
 
