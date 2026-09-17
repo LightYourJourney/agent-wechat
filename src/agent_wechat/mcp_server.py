@@ -186,7 +186,7 @@ def build_vector_index(rebuild: bool = False, account: str | None = None) -> dic
 @_guard
 def export_chat_media(contact: str, kinds: str = "image,voice,video",
                       months: str | None = None, limit: int = 500,
-                      account: str | None = None) -> dict:
+                      force: bool = False, account: str | None = None) -> dict:
     """导出某会话的媒体文件到本机（图片解密 / 语音转 WAV / 视频复制），返回计数与输出目录。
 
     contact 可以是 username（wxid / xxx@chatroom）或展示名（备注/昵称），歧义返回
@@ -195,13 +195,16 @@ def export_chat_media(contact: str, kinds: str = "image,voice,video",
     （默认 ~/.agent-wechat/media，目录 0700），用文件系统工具自行取用——信封不回传
     文件清单（大结果膨胀上下文）。历史媒体大多未被微信保留，counts 里的 missing
     是常态，不是错误。图片依赖磁盘密钥推导，失败时 degraded 会说明且语音/视频
-    不受影响；其余能力级降级也汇总在 degraded（未降级为空数组）。触及 limit 时
-    truncated=true，可分月份重跑补齐。
+    不受影响；其余能力级降级也汇总在 degraded（未降级为空数组）。limit 是本次最多
+    **新增**数：已存在的产物会被跳过（force=true 则全部重做），故重复调用会推进而不是
+    从头再来——触及 limit 时 truncated=true，counts 里的 remaining 是还有多少个**未导出**
+    （不只是「续跑必然新增」：被上限挡下的条目里，续跑时仍会失败的那些也计入），
+    **重跑同一条命令即可补齐**。
     """
     res = usecases.media_export(
         contact, kinds=[k.strip() for k in kinds.split(",") if k.strip()],
         months=[m.strip() for m in months.split(",") if m.strip()] if months else None,
-        limit=limit, account=account)
+        limit=limit, force=force, account=account)
     if isinstance(res, usecases.NeedConfirm):
         return _need_confirm(res)
     d = res.report.to_dict()

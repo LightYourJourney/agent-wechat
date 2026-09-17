@@ -276,8 +276,9 @@ def test_export_without_contact_keeps_full_scope(stub):
 
 # ---------- media_export：单会话 + limit 夹取（T6，MCP T7 共用此入口） ----------
 
-def test_media_export_wires_single_chat_and_clamped_limit(stub, monkeypatch):
-    """media_export：消歧后以**单元素** chat_ids 交 export_media，limit 夹到 1-2000，
+def test_media_export_wires_single_chat_and_passes_limit_through(stub, monkeypatch):
+    """media_export：消歧后以**单元素** chat_ids 交 export_media，`limit` **原样透传**
+    （不再夹到 2000 —— 夹取曾使 `--limit 99999` 静默变成 2000），
     结果 out_dir 直取 report.out_dir（media.py 赋的实际输出根，入口不重算）。
 
     不导视频时**不开索引库**（`con=None`）——索引只有视频归属用得上，不给图片/语音
@@ -288,16 +289,17 @@ def test_media_export_wires_single_chat_and_clamped_limit(stub, monkeypatch):
     seen: dict = {}
 
     def fake_export_media(account, chat_ids, *, kinds, months, out_dir, max_files,
-                          progress=None, con=None):
+                          force=False, progress=None, con=None):
         seen.update(account=account, chat_ids=chat_ids, kinds=kinds, months=months,
-                    out_dir=out_dir, max_files=max_files, con=con)
+                    out_dir=out_dir, max_files=max_files, force=force, con=con)
         return media.MediaReport(image=media.Counts(ok=1), out_dir="/default/media")
 
     monkeypatch.setattr(media, "export_media", fake_export_media)
     res = usecases.media_export("张三", kinds=["image"], months=["2026-09"],
                                 out_dir=None, limit=99999)
     assert seen == {"account": "acct", "chat_ids": ["wxid_target"], "kinds": ["image"],
-                    "months": ["2026-09"], "out_dir": None, "max_files": 2000, "con": None}
+                    "months": ["2026-09"], "out_dir": None, "max_files": 99999,
+                    "force": False, "con": None}
     assert res.chat_id == "wxid_target" and res.out_dir == "/default/media"
     assert res.report.image.ok == 1
 
@@ -314,7 +316,7 @@ def test_media_export_opens_index_for_video(stub, monkeypatch):
     seen: dict = {}
 
     def fake_export_media(account, chat_ids, *, kinds, months, out_dir, max_files,
-                          progress=None, con=None):
+                          force=False, progress=None, con=None):
         seen["con"] = con
         seen["refs"] = con.execute("SELECT count(*) FROM media_refs").fetchone()[0]
         return media.MediaReport(out_dir="/default/media")
@@ -337,7 +339,7 @@ def test_media_export_unavailable_index_skips_video_and_degrades_loudly(stub, mo
     seen: dict = {}
 
     def fake_export_media(account, chat_ids, *, kinds, months, out_dir, max_files,
-                          progress=None, con=None):
+                          force=False, progress=None, con=None):
         # 用例层的硬不变量：没有索引连接时绝不请求视频导出
         assert con is not None or "video" not in kinds
         seen["kinds"], seen["con"] = kinds, con
@@ -353,6 +355,36 @@ def test_media_export_unavailable_index_skips_video_and_degrades_loudly(stub, mo
     assert seen["con"] is None                 # 本来就没连接（不是「拿老路子凑」）
     assert len(res.report.degraded) == 1
     assert "索引库不可用" in res.report.degraded[0] and "未导出任何视频" in res.report.degraded[0]
+
+
+def test_media_export_passes_large_limit_through(stub, monkeypatch):
+    """`--limit 5000` 必须原样透到 `media.export_media`（不再被夹成 2000）。
+
+    变异：把 `clamp_limit(limit)` 改回 `clamp_limit(limit, (1, 2000))` → 期望 5000 得到 2000 → 红。
+    """
+    from agent_wechat import media
+    _unique(stub)
+    seen: dict = {}
+
+    def fake_export_media(account, chat_ids, *, kinds, months, out_dir, max_files,
+                          force=False, progress=None, con=None):
+        seen.update(max_files=max_files, force=force)
+        return media.MediaReport()
+
+    monkeypatch.setattr(media, "export_media", fake_export_media)
+    usecases.media_export("张三", kinds=["voice"], limit=5000)
+    assert seen == {"max_files": 5000, "force": False}
+
+
+def test_media_export_force_is_passed_through(stub, monkeypatch):
+    """`force=True` 必须透传（CLI `--force` → usecases → media），断链就在这条。"""
+    from agent_wechat import media
+    _unique(stub)
+    seen: dict = {}
+    monkeypatch.setattr(media, "export_media",
+                        lambda account, chat_ids, **kw: seen.update(kw) or media.MediaReport())
+    usecases.media_export("张三", kinds=["voice"], force=True)
+    assert seen["force"] is True
 
 
 def test_media_export_rejects_bad_months(stub):

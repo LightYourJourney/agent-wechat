@@ -681,8 +681,13 @@ def test_media_export_renders_counts_and_degraded_to_stderr(monkeypatch, capsys)
         return usecases.MediaExportResult(
             chat_id="wxid_target", out_dir="/tmp/out/media",
             report=media.MediaReport(
-                image=media.Counts(ok=3, failed=1), voice=media.Counts(ok=2, raw_only=1),
-                video=media.Counts(ok=1, thumb=2, missing=1),
+                # remaining 必须非 0：truncated 只在本会导出的条目**真被上限挡下**时才置位，
+                # 夹具里 `truncated=True` + `remaining=0` 是生产不可能出现的组合，留着就等于
+                # 把「还有 0 个未导出」这种荒唐话钉成期望输出。skipped 同理给非 0，
+                # 否则新键只被断言了「存在于格式里」而没被断言「真的印出来」。
+                image=media.Counts(ok=3, failed=1, skipped=5, remaining=7),
+                voice=media.Counts(ok=2, raw_only=1, skipped=1, remaining=2),
+                video=media.Counts(ok=1, thumb=2, missing=1, remaining=1),
                 degraded=["pilk 不可用：语音导出为原始 .slk"],
                 truncated=True))
 
@@ -691,13 +696,14 @@ def test_media_export_renders_counts_and_degraded_to_stderr(monkeypatch, capsys)
         cli.main(["media", "export", "--chat", "张三", "--out", "/tmp/out"])
     assert ei.value.code == 0
     assert seen == {"contact": "张三", "kinds": ["image", "voice", "video"],
-                    "months": None, "out_dir": "/tmp/out", "limit": 2000, "account": None}
+                    "months": None, "out_dir": "/tmp/out", "limit": 2000,
+                    "force": False, "account": None}
     out, err = capsys.readouterr()
     assert out == ("会话 wxid_target\n"
-                   "图片   ok=3  failed=1  missing=0\n"
-                   "语音   ok=2  failed=0  raw_only=1\n"
-                   "视频   ok=1  thumb=2  missing=1\n"
-                   "（达到 --limit 上限，已提前收手）\n"
+                   "图片   ok=3  skipped=5  failed=1  missing=0\n"
+                   "语音   ok=2  skipped=1  failed=0  raw_only=1\n"
+                   "视频   ok=1  skipped=0  thumb=2  missing=1\n"
+                   "（达到 --limit 上限，还有 10 个未导出 —— 重跑同一条命令即可继续）\n"
                    "输出目录: /tmp/out/media\n")
     assert err == "⚠️  pilk 不可用：语音导出为原始 .slk\n"
 

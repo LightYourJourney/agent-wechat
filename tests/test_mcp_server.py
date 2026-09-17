@@ -288,7 +288,8 @@ def test_export_chat_media_envelope(monkeypatch):
                                         "skipped": 0, "remaining": 0}},
                    "degraded": ["pilk 不可用：语音导出为原始 .slk"], "truncated": True}
     assert seen == {"contact": "张三", "kinds": ["image", "voice"],
-                    "months": ["2026-08", "2026-09"], "limit": 10, "account": "acct"}
+                    "months": ["2026-08", "2026-09"], "limit": 10, "force": False,
+                    "account": "acct"}
 
 
 def test_export_chat_media_defaults_split_cleanly(monkeypatch):
@@ -304,7 +305,7 @@ def test_export_chat_media_defaults_split_cleanly(monkeypatch):
     monkeypatch.setattr(usecases, "media_export", fake_media_export)
     res = _call(mcp_server.export_chat_media, contact="张三")
     assert seen == {"contact": "张三", "kinds": ["image", "voice", "video"],
-                    "months": None, "limit": 500, "account": None}
+                    "months": None, "limit": 500, "force": False, "account": None}
     assert res["counts"] == {"image": {"ok": 0, "failed": 0, "missing": 0,
                                        "skipped": 0, "remaining": 0},
                              "voice": {"ok": 0, "failed": 0, "raw_only": 0,

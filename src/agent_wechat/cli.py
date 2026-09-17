@@ -226,19 +226,23 @@ def cmd_media_export(args: argparse.Namespace) -> int:
     months = ([m.strip() for m in args.months.split(",") if m.strip()]
               if args.months else None)
     res = usecases.media_export(args.chat, kinds=kinds, months=months,
-                                out_dir=args.out, limit=args.limit, account=args.account)
+                                out_dir=args.out, limit=args.limit, force=args.force,
+                                account=args.account)
     if isinstance(res, usecases.NeedConfirm):
         return _need_confirm(args.chat, res)
     rep = res.report.to_dict()
     print(f"会话 {res.chat_id}")
-    print(f"图片   ok={rep['image']['ok']}  failed={rep['image']['failed']}"
-          f"  missing={rep['image']['missing']}")
-    print(f"语音   ok={rep['voice']['ok']}  failed={rep['voice']['failed']}"
-          f"  raw_only={rep['voice']['raw_only']}")
-    print(f"视频   ok={rep['video']['ok']}  thumb={rep['video']['thumb']}"
-          f"  missing={rep['video']['missing']}")
+    print(f"图片   ok={rep['image']['ok']}  skipped={rep['image']['skipped']}"
+          f"  failed={rep['image']['failed']}  missing={rep['image']['missing']}")
+    print(f"语音   ok={rep['voice']['ok']}  skipped={rep['voice']['skipped']}"
+          f"  failed={rep['voice']['failed']}  raw_only={rep['voice']['raw_only']}")
+    print(f"视频   ok={rep['video']['ok']}  skipped={rep['video']['skipped']}"
+          f"  thumb={rep['video']['thumb']}  missing={rep['video']['missing']}")
+    # remaining 是「未导出」而不是「续跑一定新增 N 个」：被上限挡下的条目里，续跑时
+    # 仍会失败的（dat 读不出、blob is None）也计入，故只能说「还有 N 个未导出」。
+    left = sum(rep[k]["remaining"] for k in ("image", "voice", "video"))
     if rep["truncated"]:
-        print("（达到 --limit 上限，已提前收手）")
+        print(f"（达到 --limit 上限，还有 {left} 个未导出 —— 重跑同一条命令即可继续）")
     print(f"输出目录: {res.out_dir}")
     _render_degradations(res.report.degraded)
     return 0
@@ -584,7 +588,9 @@ def main(argv: list[str] | None = None) -> None:
                      help="逗号分隔：image,voice,video（默认全部）")
     msp.add_argument("--months", default=None, help="逗号分隔的 YYYY-MM（默认不限）")
     msp.add_argument("--out", default=None, help="输出目录（默认 ~/.agent-wechat/media/）")
-    msp.add_argument("--limit", type=int, default=2000, help="最多导出文件数（1-2000）")
+    msp.add_argument("--limit", type=int, default=2000, help="本次最多新增文件数（已存在的不计）")
+    msp.add_argument("--force", action="store_true",
+                     help="忽略已存在的产物，全部重做（默认跳过）")
     msp.add_argument("--account")
     msp.set_defaults(fn=cmd_media_export)
     msp = media_sub.add_parser("locate", help="按消息列出媒体归属（不写微信目录、不写 --out、不联网）")

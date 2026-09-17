@@ -320,7 +320,7 @@ class MediaExportResult:
 
 
 def media_export(contact: str, *, kinds: list[str], months: list[str] | None = None,
-                 out_dir=None, limit: int = 2000,
+                 out_dir=None, limit: int = 2000, force: bool = False,
                  account: str | None = None) -> MediaExportResult | NeedConfirm:
     """媒体导出用例：会话消歧 + 交 media.export_media。kinds/months 由入口解析成列表。
 
@@ -331,6 +331,9 @@ def media_export(contact: str, *, kinds: list[str], months: list[str] | None = N
     定位本体——视频树本身没有会话维度）。索引打不开时**本次不导视频**并如实降级，绝不退回
     `export_media` 的 `con=None`（账号级枚举）：那会把账号级视频树里的全部文件算到本次请求
     的会话头上——错归属比缺归属更坏。
+
+    `limit` 是**本次最多新增**的条数：已存在的产物会被跳过（可通过 `force=True` 重建），
+    故重跑同一条命令即可补齐剩余部分。
     """
     from . import media                       # 惰性：media 顶层拉起 cryptography
     ctx = ChatContext(account)
@@ -361,7 +364,9 @@ def media_export(contact: str, *, kinds: list[str], months: list[str] | None = N
                 index_note = errors.redact(str(exc))
                 kinds_to_export = [k for k in kinds if k != "video"]
         report = media.export_media(ctx.account, [chat_id], kinds=kinds_to_export, months=months,
-                                    out_dir=out_dir, max_files=clamp_limit(limit, (1, 2000)),
+                                    out_dir=out_dir,
+                                    max_files=clamp_limit(limit),   # 不再硬卡 2000
+                                    force=force,
                                     con=con)
     if index_note is not None:
         report.degraded.append(
