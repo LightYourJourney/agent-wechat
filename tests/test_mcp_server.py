@@ -268,8 +268,11 @@ def test_export_chat_media_envelope(monkeypatch):
         return usecases.MediaExportResult(
             chat_id="wxid_target", out_dir="/tmp/out/media",
             report=media.MediaReport(
-                image=media.Counts(ok=3, failed=1, missing=2),
-                voice=media.Counts(ok=4, raw_only=1),
+                # truncated 只在本会导出的条目**真被上限挡下**时才置位，故夹具必须给一个
+                # 真实的 remaining（`truncated=True` + `remaining=0` 在生产里不可能出现）；
+                # skipped 也给非 0，否则新键只被断言了「存在」而没被断言「真的透出来」。
+                image=media.Counts(ok=3, failed=1, missing=2, skipped=3, remaining=4),
+                voice=media.Counts(ok=4, raw_only=1, remaining=2),
                 video=media.Counts(ok=1, thumb=2, missing=5),
                 degraded=["pilk 不可用：语音导出为原始 .slk"], truncated=True))
 
@@ -277,9 +280,12 @@ def test_export_chat_media_envelope(monkeypatch):
     res = _call(mcp_server.export_chat_media, contact="张三", kinds="image,voice",
                 months="2026-08, 2026-09", limit=10, account="acct")
     assert res == {"chat_id": "wxid_target", "out_dir": "/tmp/out/media",
-                   "counts": {"image": {"ok": 3, "failed": 1, "missing": 2},
-                              "voice": {"ok": 4, "failed": 0, "raw_only": 1},
-                              "video": {"ok": 1, "thumb": 2, "missing": 5}},
+                   "counts": {"image": {"ok": 3, "failed": 1, "missing": 2,
+                                        "skipped": 3, "remaining": 4},
+                              "voice": {"ok": 4, "failed": 0, "raw_only": 1,
+                                        "skipped": 0, "remaining": 2},
+                              "video": {"ok": 1, "thumb": 2, "missing": 5,
+                                        "skipped": 0, "remaining": 0}},
                    "degraded": ["pilk 不可用：语音导出为原始 .slk"], "truncated": True}
     assert seen == {"contact": "张三", "kinds": ["image", "voice"],
                     "months": ["2026-08", "2026-09"], "limit": 10, "account": "acct"}
@@ -299,9 +305,12 @@ def test_export_chat_media_defaults_split_cleanly(monkeypatch):
     res = _call(mcp_server.export_chat_media, contact="张三")
     assert seen == {"contact": "张三", "kinds": ["image", "voice", "video"],
                     "months": None, "limit": 500, "account": None}
-    assert res["counts"] == {"image": {"ok": 0, "failed": 0, "missing": 0},
-                             "voice": {"ok": 0, "failed": 0, "raw_only": 0},
-                             "video": {"ok": 0, "thumb": 0, "missing": 0}}
+    assert res["counts"] == {"image": {"ok": 0, "failed": 0, "missing": 0,
+                                       "skipped": 0, "remaining": 0},
+                             "voice": {"ok": 0, "failed": 0, "raw_only": 0,
+                                       "skipped": 0, "remaining": 0},
+                             "video": {"ok": 0, "thumb": 0, "missing": 0,
+                                       "skipped": 0, "remaining": 0}}
     assert res["degraded"] == [] and res["truncated"] is False
 
 

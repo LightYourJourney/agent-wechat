@@ -321,6 +321,8 @@ class Counts:
     missing: int = 0
     raw_only: int = 0      # voice 专属：pilk 缺失时导出原始 .slk 的数量
     thumb: int = 0         # video 专属：回退缩略图数量
+    skipped: int = 0       # **按文件**计（有本体+缩略图的视频重跑记 2）；不吃 --limit 预算
+    remaining: int = 0     # 撞上 --limit 后本会导出的条数（只计数，不落盘）
 
 
 @dataclass
@@ -334,11 +336,14 @@ class MediaReport:
 
     def to_dict(self) -> dict:
         return {"image": {"ok": self.image.ok, "failed": self.image.failed,
-                          "missing": self.image.missing},
+                          "missing": self.image.missing,
+                          "skipped": self.image.skipped, "remaining": self.image.remaining},
                 "voice": {"ok": self.voice.ok, "failed": self.voice.failed,
-                          "raw_only": self.voice.raw_only},
+                          "raw_only": self.voice.raw_only,
+                          "skipped": self.voice.skipped, "remaining": self.voice.remaining},
                 "video": {"ok": self.video.ok, "thumb": self.video.thumb,
-                          "missing": self.video.missing},
+                          "missing": self.video.missing,
+                          "skipped": self.video.skipped, "remaining": self.video.remaining},
                 "degraded": list(self.degraded), "truncated": self.truncated}
 
 
@@ -584,7 +589,7 @@ def exported_path(out_root: pathlib.Path, *, chat_md5: str, kind: str, ts: int,
 
 def export_media(account: str, chat_ids: list[str], *, kinds: list[str],
                  months: list[str] | None = None, out_dir: pathlib.Path | None = None,
-                 max_files: int = 2000, progress=None,
+                 max_files: int = 2000, progress=None, force: bool = False,
                  con: sqlite3.Connection | None = None) -> MediaReport:
     """按会话导出媒体。图片解密（MediaKeyError → 能力级降级不抛）；语音见 Task 3；视频明文复制
     （refs 驱动：给 `con` 时按 media_refs 归属，任意会话数都成立；`con=None` 时退回账号级枚举，
@@ -608,6 +613,17 @@ def export_media(account: str, chat_ids: list[str], *, kinds: list[str],
         report.degraded.append(f"输出目录权限未能收紧到 0700（明文媒体可能被他人读到）：{out_root}")
     want = set(months) if months else None
     produced = 0
+
+    def already(cm: str, kind: str, mon: str, base: str) -> bool:
+        """目标文件已在 → 本轮跳过。**在解密之前判**——省掉的正是真正的开销。
+
+        候选名与读侧 `exported_path` 同源（见 `_out_candidates`）：判定比读侧严格就会
+        出现「读侧说已导出、写侧说没有」的漂移。
+        """
+        if force:
+            return False
+        return any(_out_path(out_root, cm, kind, mon, s, e).exists()
+                   for s, e in _out_candidates(kind, base))
 
     def full() -> bool:
         return produced >= max_files
@@ -644,6 +660,9 @@ def export_media(account: str, chat_ids: list[str], *, kinds: list[str],
                         continue
                     wxgf_warned = False
                     for dat in _safe_iter(img_dir, "*.dat"):
+                        if already(cm, "image", mon, dat.stem):
+                            report.image.skipped += 1
+                            continue
                         if full():
                             report.truncated = True
                             break
@@ -725,6 +744,9 @@ def export_media(account: str, chat_ids: list[str], *, kinds: list[str],
                 for ts, file_key in refs_by_chat.get(chat, ()):
                     if want is not None and month_of(ts) not in want:
                         continue                     # 月份外的条目本来就不导出，不算「因上限收手」
+                    if already(cm, "video", month_of(ts), file_key):
+                        report.video.skipped += 1
+                        continue
                     # 上限检查排在月份过滤之后（与语音同一个口径）：只有**本会导出**的条目
                     # 被上限挡下，truncated 才成立；反过来的话 `--limit` 恰好用尽时会把一条
                     # 本来就跳过的条目当成「已提前收手」，那是假话。
@@ -771,6 +793,9 @@ def export_media(account: str, chat_ids: list[str], *, kinds: list[str],
                         continue
                     mp4_stems = set()
                     for f in _safe_iter(month_dir, "*.mp4"):
+                        if already(cm, "video", mon, f.stem):
+                            report.video.skipped += 1
+                            continue
                         if full():
                             report.truncated = True
                             break
@@ -790,6 +815,13 @@ def export_media(account: str, chat_ids: list[str], *, kinds: list[str],
                     for f in _safe_iter(month_dir, "*_thumb.jpg"):
                         if f.stem.removesuffix("_thumb") in mp4_stems:
                             continue               # 有本体的不再存缩略图
+                        # 基准名必须是**裸 file_key**：`_out_candidates` 的候选集是围绕它
+                        # 设计的（`{K}.mp4` / `{K}_raw.mp4` / `{K}_thumb.jpg`）。传 `{K}_thumb`
+                        # 会得到 `{K}_thumb_thumb.jpg` 这种永不存在的名字 —— 本行于是永不命中，
+                        # 缩略图每轮重写并吃 `--limit`（Task 3 落地后还会让 remaining 恒 >0）。
+                        if already(cm, "video", mon, f.stem.removesuffix("_thumb")):
+                            report.video.skipped += 1
+                            continue
                         # 顺序有意义：先判「本来就不导出」再判上限。反过来的话，`--limit`
                         # 恰好用尽时会把一条**本来就跳过**的缩略图当成「因上限跳过」，
                         # truncated 就成了假话。
@@ -811,7 +843,8 @@ def export_media(account: str, chat_ids: list[str], *, kinds: list[str],
     if "voice" in kinds:
         if _PILK is None:
             report.degraded.append("pilk 不可用：语音导出为原始 .slk（`uv add pilk` 后可转 WAV）")
-        _export_voices(account, chat_ids, out_root, report, want, full, bump, progress)
+        _export_voices(account, chat_ids, out_root, report, want, full, bump, progress,
+                       already)
     return report
 
 
@@ -878,7 +911,8 @@ def voice_body_keys(account: str) -> frozenset[tuple[str, int]] | None:
     return frozenset(out)
 
 
-def _export_voices(account, chat_ids, out_root, report, want, is_full, bump, progress) -> None:
+def _export_voices(account, chat_ids, out_root, report, want, is_full, bump, progress,
+                   already) -> None:
     """语音：Name2Id rowid → VoiceInfo(chat_name_id, create_time) → pilk 解码 24kHz WAV。
     pilk 缺失 → 原始 .slk（微信原始形态，`\\x02` 前缀保留）。单库打不开则跳过该分片、
     在 report.degraded 里公告一次，不中断。
@@ -897,7 +931,7 @@ def _export_voices(account, chat_ids, out_root, report, want, is_full, bump, pro
                 con.text_factory = bytes
                 try:
                     _export_voices_from(con, chat_ids, out_root, report,
-                                        want, is_full, bump, progress)
+                                        want, is_full, bump, progress, already)
                 finally:
                     con.close()
         except (errors.AgentWeChatError, sqlite3.Error, OSError) as exc:
@@ -915,7 +949,7 @@ def _export_voices(account, chat_ids, out_root, report, want, is_full, bump, pro
 
 
 def _export_voices_from(con, chat_ids, out_root, report, want, is_full, bump,
-                        progress) -> None:
+                        progress, already) -> None:
     name2id = {u.decode("utf-8", "replace") if isinstance(u, bytes) else u: rid
                for rid, u in con.execute("SELECT rowid, user_name FROM Name2Id")}
     for chat in chat_ids:
@@ -929,6 +963,9 @@ def _export_voices_from(con, chat_ids, out_root, report, want, is_full, bump,
             mon = month_of(ts)
             if want is not None and mon not in want:
                 continue                     # 月份外的条目本来就不导出，不算「因上限收手」
+            if already(cm, "voice", mon, f"{ts}_{lid}"):
+                report.voice.skipped += 1
+                continue
             # 上限检查排在这两条之后：只有**本会导出**的条目被上限挡下，truncated 才成立。
             if is_full():
                 report.truncated = True

@@ -291,9 +291,9 @@ def test_report_to_dict_envelope_shape():
     rep = media.MediaReport(image=media.Counts(ok=3, failed=1), voice=media.Counts(raw_only=2),
                             video=media.Counts(ok=1, thumb=4), degraded=["x"])
     d = rep.to_dict()
-    assert d["image"] == {"ok": 3, "failed": 1, "missing": 0}
-    assert d["voice"] == {"ok": 0, "failed": 0, "raw_only": 2}
-    assert d["video"] == {"ok": 1, "thumb": 4, "missing": 0}
+    assert d["image"] == {"ok": 3, "failed": 1, "missing": 0, "skipped": 0, "remaining": 0}
+    assert d["voice"] == {"ok": 0, "failed": 0, "raw_only": 2, "skipped": 0, "remaining": 0}
+    assert d["video"] == {"ok": 1, "thumb": 4, "missing": 0, "skipped": 0, "remaining": 0}
     assert d["truncated"] is False
 
 
@@ -1388,3 +1388,127 @@ def test_voice_body_keys_skips_rows_without_voice_data(tmp_path, monkeypatch):
     _passthrough_decrypted(monkeypatch)
     want = hashlib.md5(b"chatA@chatroom").hexdigest()
     assert media.voice_body_keys(account) == frozenset({(want, 7)})
+
+
+# ---------- 续跑：已导出即跳过 ----------
+
+def test_export_media_skips_already_exported(tmp_path, monkeypatch):
+    """重跑必须推进：第二次跑同一条命令，已导出的被跳过、且**不吃** --limit 预算。
+
+    改前 `_save` 无条件覆写、`full()` 只认 produced —— 第二次跑会走**同一顺序**
+    （`_safe_iter` 用 sorted、语音 `ORDER BY create_time, local_id`、执行序固定
+    image→video→voice），在同一处撞顶，一条都不多。真机症状：2239 条语音跑了 1923
+    条后再跑还是 1923 条。
+    """
+    root, account = make_tree(tmp_path, monkeypatch)
+    ts = int(datetime.datetime(2026, 9, 15, 12, 0).timestamp())
+    mon = media.month_of(ts)
+    _voice_fixture(account, [(1, ts, i, _silk_blob()) for i in (7, 8, 9)])
+    _passthrough_decrypted(monkeypatch)
+    out = root / "home" / "media"
+
+    first = media.export_media(account, ["chatA@chatroom"], kinds=["voice"],
+                               months=[mon], out_dir=out, max_files=2)
+    assert (first.voice.ok, first.voice.skipped) == (2, 0)
+
+    second = media.export_media(account, ["chatA@chatroom"], kinds=["voice"],
+                                months=[mon], out_dir=out, max_files=2)
+    assert (second.voice.ok, second.voice.skipped) == (1, 2)
+
+
+def test_export_media_force_ignores_existing(tmp_path, monkeypatch):
+    """`--force` 忽略已存在：跑两次，第二次 skipped 仍为 0、ok 仍是满额。
+
+    变异：`already()` 里删掉 `if force: return False` → 第二次 skipped=2 → 红。
+    """
+    root, account = make_tree(tmp_path, monkeypatch)
+    ts = int(datetime.datetime(2026, 9, 15, 12, 0).timestamp())
+    mon = media.month_of(ts)
+    _voice_fixture(account, [(1, ts, i, _silk_blob()) for i in (7, 8)])
+    _passthrough_decrypted(monkeypatch)
+    out = root / "home" / "media"
+
+    media.export_media(account, ["chatA@chatroom"], kinds=["voice"],
+                       months=[mon], out_dir=out, max_files=5)
+    again = media.export_media(account, ["chatA@chatroom"], kinds=["voice"],
+                               months=[mon], out_dir=out, max_files=5, force=True)
+    assert (again.voice.ok, again.voice.skipped) == (2, 0)
+
+
+def test_export_media_video_thumb_only_rerun_is_skipped(tmp_path, monkeypatch):
+    """账号级枚举路径（`con=None`）下，已导出的**缩略图**重跑必须跳过、不许再吃 --limit。
+
+    视频树里只有 `{K}_thumb.jpg`（无缝体：本体不在磁盘）时，缩略图循环是唯一会写盘的入口。
+    基准名必须是**裸 file_key** `{K}`——`_out_candidates("video", base)` 的候选集是围绕它
+    设计的（`{K}.mp4` / `{K}_raw.mp4` / `{K}_thumb.jpg`）；传 `{K}_thumb` 只会得到
+    `{K}_thumb_thumb.jpg` 这种永不存在的名字，判定于是永不命中，缩略图每轮重写（Task 3
+    落地后还会让 remaining 恒 >0，CLI 永远印「还有 N 个未导出」）。
+
+    变异：把本处基准名改回 `f.stem` → 第二次 `thumb=1 skipped=0` → 红。
+    """
+    root, account = make_tree(tmp_path, monkeypatch)
+    ts = int(datetime.datetime(2026, 9, 15, 12, 0).timestamp())
+    mon = media.month_of(ts)
+    vdir = paths.XWECHAT_FILES / account / "msg/video" / mon
+    vdir.mkdir(parents=True)
+    (vdir / "abcd_thumb.jpg").write_bytes(b"t" * 8)   # 只有缩略图：本体不在磁盘
+    out = root / "home" / "media"
+
+    first = media.export_media(account, ["c@chatroom"], kinds=["video"],
+                               months=[mon], out_dir=out)
+    assert (first.video.thumb, first.video.skipped) == (1, 0)
+
+    second = media.export_media(account, ["c@chatroom"], kinds=["video"],
+                                months=[mon], out_dir=out)
+    assert (second.video.thumb, second.video.skipped) == (0, 1)
+
+
+def test_export_media_image_rerun_skips_before_decrypting(tmp_path, monkeypatch):
+    """image 路径的重跑：跳过已导出的，**且不再解密**。
+
+    两条断言各守一件事：
+    - `ok == 0 and skipped == N`：跳过确实生效（image 是三种媒体之一，此前零覆盖）
+    - `decrypt_dat` 调用 **0 次**：「在解密之前跳过」是本任务的核心价值 —— 把 `already()`
+      挪到 `decrypt_dat` 之后，上面那条计数断言**依然通过**，而收益归零。
+
+    变异：把 image 的 `already()` 挪到 `decrypt_dat` 调用之后 → 解密计数 > 0 → 红。
+    """
+    root, account = make_tree(tmp_path, monkeypatch)
+    code = "999999"
+    (paths.CONTAINER / "app_data/net/kvcomm/key_999999_1_2_3_4_5_input.statistic").write_bytes(b"")
+    cm = hashlib.md5("chatA@chatroom".encode()).hexdigest()
+    aes = hashlib.md5((code + paths.bare_wxid(account)).encode()).hexdigest()[:16].encode()
+    # 取样目录：derive_keys 要靠它统计 xorKey 并验证 aesKey（月份不在 want 里，不参与导出）
+    sdir = paths.XWECHAT_FILES / account / "msg/attach" / cm / "2026-03" / "Img"
+    sdir.mkdir(parents=True)
+    samples = [sdir / f"sam{i}.dat" for i in range(4)]
+    for p in samples:
+        p.write_bytes(build_v2_dat(jpeg_like(64), b"\x33" * 8 + b"\xff\xd9", aes, FAKE_XOR))
+    monkeypatch.setattr(media, "_attach_dats", lambda acct: iter(samples))
+    img = paths.XWECHAT_FILES / account / "msg/attach" / cm / "2026-09" / "Img"
+    img.mkdir(parents=True)
+    for stem in ("aaaa", "bbbb", "cccc"):
+        (img / f"{stem}.dat").write_bytes(
+            build_v2_dat(jpeg_like(256), b"\x11" * 8 + b"\xff\xd9", aes, FAKE_XOR))
+    out = root / "home" / "media"
+
+    real = media.decrypt_dat
+    sample_blobs = {p.read_bytes() for p in samples}
+    decrypted: list[bytes] = []                      # 只记「解密图片」，样本验证那一次不算
+
+    def counting(data, keys):
+        if data not in sample_blobs:
+            decrypted.append(data)
+        return real(data, keys)
+
+    monkeypatch.setattr(media, "decrypt_dat", counting)
+    first = media.export_media(account, ["chatA@chatroom"], kinds=["image"],
+                               months=["2026-09"], out_dir=out)
+    assert (first.image.ok, first.image.skipped) == (3, 0)
+    assert len(decrypted) == 3                       # 首轮三张图都真解了
+
+    decrypted.clear()
+    second = media.export_media(account, ["chatA@chatroom"], kinds=["image"],
+                                months=["2026-09"], out_dir=out)
+    assert (second.image.ok, second.image.skipped) == (0, 3)
+    assert decrypted == []                           # 跳过发生在解密**之前**
