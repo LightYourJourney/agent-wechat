@@ -103,10 +103,18 @@ class MessageReader:
         self._drift: list[errors.SchemaDrift] = []        # 本次实例见过的漂移（T5 读）
 
     def _contacts_all_cached(self) -> list[dict]:
-        """全量联系人。同一 reader 生命周期内只解密一次 contact.db
-        （resolve_chat + display_name 常在同一次工具调用里先后执行）。"""
+        """**全量**联系人（不带 `LIMIT`）。同一 reader 生命周期内只解密一次 contact.db
+        （resolve_chat + display_name 常在同一次工具调用里先后执行）。
+
+        **必须全量**：真机 contact 表 12,799 行，而 `resolve_chat` / `display_name` 都扫它。
+        取前 5000 行（按 `remark, nick_name` 排序）会让窗口外的 **61%** 联系人按真名解析不出来
+        ——`recent --contact X` / `search --contact X` / `chat export --chat X` 全线失效，
+        展示名静默回落裸 id。与 `roster()` 同源同理由（见它那句「**不带 limit**」）。
+
+        （原实现是 `contacts(limit=5000)`，而 docstring 已自称「全量」——名与实不符。）
+        """
         if self._contacts_all is None:
-            self._contacts_all = self.contacts(limit=5000)
+            self._contacts_all = self.contacts(limit=None)   # **必须显式传 None**：不传就是默认 200
         return self._contacts_all
 
     @contextlib.contextmanager
@@ -212,8 +220,13 @@ class MessageReader:
         """md5(chat_username) -> chat_username。"""
         return {messages.md5_of(u): u for u in self.username_pool()}
 
-    def contacts(self, query: str | None = None, limit: int = 200) -> list[dict]:
-        """联系人搜索：备注/昵称/微信号模糊匹配。"""
+    def contacts(self, query: str | None = None, limit: int | None = 200) -> list[dict]:
+        """联系人搜索：备注/昵称/微信号模糊匹配。
+
+        `limit=None` → **不拼 `LIMIT`**（取全量）。`_contacts_all_cached` 用它：真机 contact 表
+        有 12,799 行，而 `resolve_chat` / `display_name` 都扫这份数据——取窗口会让**窗口外的
+        联系人按真名解析不出来**（实测窗口外抽 40 条，`resolve_one` 命中 0）。
+        """
         with self._open("contact/contact.db") as con:
             self._check("contacts", "contact/contact.db", con)
             sql = ("SELECT username, alias, remark, nick_name FROM contact "
@@ -222,8 +235,10 @@ class MessageReader:
             if query:
                 sql += " AND (remark LIKE ? OR nick_name LIKE ? OR alias LIKE ? OR username LIKE ?)"
                 args = [f"%{query}%"] * 4
-            sql += " ORDER BY remark, nick_name LIMIT ?"
-            args.append(limit)
+            sql += " ORDER BY remark, nick_name"
+            if limit is not None:            # None = 全量（见 docstring）
+                sql += " LIMIT ?"
+                args.append(limit)
             out = []
             for u, alias, remark, nick in con.execute(sql, args):
                 u, remark, nick, alias = _s(u), _s(remark), _s(nick), _s(alias)

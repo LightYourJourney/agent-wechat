@@ -493,6 +493,38 @@ def test_roster_does_not_use_the_search_limit(env, tmp_path, monkeypatch):
     assert len(private) == n, f"联系人被截断了：拿到 {len(private)}，应为 {n}"
 
 
+def test_contact_lookup_does_not_use_the_search_limit(env, tmp_path, monkeypatch):
+    """**同一个坑的另一半**：`_contacts_all_cached()` 走 `contacts(limit=5000)`，
+    而 `display_name` 与 `resolve_chat` 都扫这个窗口——**窗口外的联系人按真名解析不出来**。
+
+    真机实测（contact 表 12,799 行、窗口 5,000）：抽 40 个窗口外的联系人按真名 `resolve_one`
+    **命中 0**。也就是 `recent --contact 张三` / `search --contact 张三` / `chat export --chat 张三`
+    这条主路径，对 61% 的联系人是失效的。
+
+    与 `test_roster_does_not_use_the_search_limit` 同源同形：**必须真的超过 5000 行**
+    才测得出 LIMIT 的存在，小数据代不了。
+
+    回归：把 `_contacts_all_cached` 改回 `contacts(limit=5000)`，这条会红。
+    """
+    n = 5001
+    root = tmp_path / "bulkwx"
+    enc_db(root / ACCT / "db_storage" / "contact" / "contact.db", {
+        "name2id": ("CREATE TABLE name2id (username TEXT)", [(FRIEND,)]),
+        "contact": ("CREATE TABLE contact (username TEXT, alias TEXT, remark TEXT, "
+                    "nick_name TEXT, delete_flag INTEGER)",
+                    [(f"wxid_bulk{i:05d}", None, f"名字{i:05d}", None, None)
+                     for i in range(n)]),
+        "chat_room": ("CREATE TABLE chat_room (id INTEGER PRIMARY KEY, username TEXT, "
+                      "owner TEXT, ext_buffer BLOB)", []),
+    })
+    monkeypatch.setattr(paths, "XWECHAT_FILES", root)
+    r = reader.MessageReader(ACCT)
+
+    # 排序是 (remark, nick_name)，升序；`名字05000` 是第 5001 行 → 窗口**外**
+    assert r.display_name("wxid_bulk05000") == "名字05000", "窗口外的联系人拿不到展示名"
+    assert r.resolve_one("名字05000")[0] == "wxid_bulk05000", "窗口外的联系人按真名解析不出来"
+
+
 def test_recent_uses_display_names(env):
     """实时路径（recent）用内存名册换名——它不走索引库，join 覆盖不到（spec §2.4）。"""
     r = reader.MessageReader(ACCT)
