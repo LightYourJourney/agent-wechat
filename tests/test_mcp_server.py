@@ -315,6 +315,20 @@ def test_export_chat_media_defaults_split_cleanly(monkeypatch):
     assert res["degraded"] == [] and res["truncated"] is False
 
 
+def test_export_chat_media_force_is_forwarded(monkeypatch):
+    """force=true 必须透到用例层（同 CLI 那条：写死 force=False 时既有测试全绿）。"""
+    seen: dict = {}
+
+    def fake_media_export(contact, **kw):
+        seen.update(kw, contact=contact)
+        return usecases.MediaExportResult(chat_id="wxid_target", out_dir="/tmp/out/media",
+                                          report=media.MediaReport())
+
+    monkeypatch.setattr(usecases, "media_export", fake_media_export)
+    _call(mcp_server.export_chat_media, contact="张三", force=True)
+    assert seen["force"] is True
+
+
 def test_export_chat_media_need_confirm_passthrough(monkeypatch):
     """歧义原样透传成 need_confirm 信封（与 recent/search/export 同形），不猜。"""
     monkeypatch.setattr(usecases, "media_export", lambda *a, **k: usecases.NeedConfirm(

@@ -708,6 +708,26 @@ def test_media_export_renders_counts_and_degraded_to_stderr(monkeypatch, capsys)
     assert err == "⚠️  pilk 不可用：语音导出为原始 .slk\n"
 
 
+def test_media_export_force_flag_is_forwarded(monkeypatch):
+    """`--force` 必须一路透到用例层。
+
+    变异测试实测：把 `cmd_media_export` 里的 `force=args.force` 写死成 `force=False`，
+    既有那条（走默认值）仍然全绿——开关是不是个摆设，只有这条能看出来。
+    """
+    seen: dict = {}
+
+    def fake_media_export(contact, **kw):
+        seen.update(kw, contact=contact)
+        return usecases.MediaExportResult(chat_id="wxid_target", out_dir="/tmp/out/media",
+                                          report=media.MediaReport())
+
+    monkeypatch.setattr(usecases, "media_export", fake_media_export)
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["media", "export", "--chat", "张三", "--force"])
+    assert ei.value.code == 0
+    assert seen["force"] is True
+
+
 def test_media_rebuild_refs_prints_total(monkeypatch, capsys):
     """进度行与总数行都到 stdout（media_rebuild_refs 打桩，不打真库）。"""
 
