@@ -321,7 +321,7 @@ class Counts:
     missing: int = 0
     raw_only: int = 0      # voice 专属：pilk 缺失时导出原始 .slk 的数量
     thumb: int = 0         # video 专属：回退缩略图数量
-    skipped: int = 0       # 本次因产物已存在而跳过的**文件**数（视频的缩略图随本体一起算，不另计）；不吃 --limit 预算
+    skipped: int = 0       # 本次因产物已存在而跳过的**文件**数（有本体的视频，其缩略图不再另写，故不另计）；不吃 --limit 预算
     remaining: int = 0     # 撞上 --limit 后本会导出的条数（只计数，不落盘）
 
 
@@ -523,6 +523,10 @@ def _save(out_root: pathlib.Path, cm: str, kind: str, mon: str,
         p.write_bytes(data)
         p.chmod(0o600)                         # 导出的是明文媒体：除了属主谁也读不到
     except OSError:
+        try:
+            p.unlink(missing_ok=True)          # 写了一半的产物比没有更坏：skip 判定会把它当成品
+        except OSError:
+            pass                               # 清理本身失败不该盖过「这次没写成功」
         return None
     return p
 

@@ -403,6 +403,31 @@ def test_video_export_attributes_across_two_chats(tmp_path, monkeypatch):
             / media.month_of(ts) / f"{fk}.mp4").read_bytes() == b"video-bytes"
 
 
+def test_video_export_refs_rerun_is_skipped(tmp_path, monkeypatch):
+    """**生产路径**（带 `con`）重跑必须 ok=0/skipped=1：`usecases.media_export` 恒传 `con`，
+    真机上的「重跑即推进」只由 refs 循环里那一处 skip 判定兜着。
+
+    与 `con=None` 那条（`test_export_media_video_thumb_only_rerun_is_skipped`）是两条不同的路：
+    账号级枚举的覆盖碰不到这里——refs 路径先跑，`con is None` 那两个 continue 把枚举整个挡住。
+
+    变异：删掉 refs 循环里 `already(...)` 那三行 → 第二次 `ok=1 skipped=0`（无条件重写）→ 红。
+    """
+    root, account = make_tree(tmp_path, monkeypatch)
+    ts = int(datetime.datetime(2026, 9, 15, 12, 0).timestamp())
+    fk = "ab" * 16
+    vdir = paths.XWECHAT_FILES / account / "msg/video" / media.month_of(ts)
+    vdir.mkdir(parents=True)
+    (vdir / f"{fk}.mp4").write_bytes(b"video-bytes")
+    con = _video_index(tmp_path, account, [("wxid_a", 1, ts, fk)])
+    out = root / "home" / "media"
+
+    first = media.export_media(account, ["wxid_a"], kinds=["video"], out_dir=out, con=con)
+    assert (first.video.ok, first.video.skipped) == (1, 0)
+
+    second = media.export_media(account, ["wxid_a"], kinds=["video"], out_dir=out, con=con)
+    assert (second.video.ok, second.video.skipped, second.video.remaining) == (0, 1, 0)
+
+
 def test_video_export_degrades_when_no_refs(tmp_path, monkeypatch):
     """索引为空 → 明确降级，不静默产出 0 条（否则「没建索引」与「本机没有视频」不可区分）。"""
     root, account = make_tree(tmp_path, monkeypatch)
@@ -919,6 +944,52 @@ def test_export_media_image_write_error_counts_failed(tmp_path, monkeypatch):
     rep = media.export_media(account, ["chatA@chatroom"], kinds=["image"],
                              months=["2026-09"], out_dir=root / "home" / "media")
     assert rep.image.ok == 0 and rep.image.failed == 1
+
+
+def test_export_media_partial_write_is_unlinked(tmp_path, monkeypatch):
+    """写到一半失败（磁盘满）不许留下半成品：否则下一轮的 skip 判定把它当成品，永久坏且报健康。
+
+    `exported_path` 只探测**存在性**：改前 `_save` 的 except 不清盘，残留文件会让之后每一轮都
+    `skipped += 1`、`failed=0` —— 唯一出路是 `--force`，而没有任何输出会告诉用户这件事。
+    （改前每次无条件覆写，这类残留会自愈；本分支引入 skip 后它变成永久的。）与
+    `_wxgf_to_jpeg` 的「不留坏文件」是同一条约定。
+
+    变异：删掉 `_save` except 分支里的 `p.unlink(...)` → 下面三条断言全红。
+    """
+    root, account = make_tree(tmp_path, monkeypatch)
+    code = "999999"
+    (paths.CONTAINER / "app_data/net/kvcomm/key_999999_1_2_3_4_5_input.statistic").write_bytes(b"")
+    cm = hashlib.md5("chatA@chatroom".encode()).hexdigest()
+    aes = hashlib.md5((code + paths.bare_wxid(account)).encode()).hexdigest()[:16].encode()
+    sdir = paths.XWECHAT_FILES / account / "msg/attach" / cm / "2026-03" / "Img"
+    sdir.mkdir(parents=True)
+    samples = [sdir / f"sam{i}.dat" for i in range(4)]
+    for p in samples:
+        p.write_bytes(build_v2_dat(jpeg_like(64), b"\x33" * 8 + b"\xff\xd9", aes, FAKE_XOR))
+    monkeypatch.setattr(media, "_attach_dats", lambda acct: iter(samples))
+    img = paths.XWECHAT_FILES / account / "msg/attach" / cm / "2026-09" / "Img"
+    img.mkdir(parents=True)
+    (img / "beef.dat").write_bytes(
+        build_v2_dat(jpeg_like(1024), b"\x11" * 50 + b"\xff\xd9", aes, FAKE_XOR))
+    real_write = pathlib.Path.write_bytes
+
+    def fake(self, data):
+        if self.name == "beef.jpg":
+            self.open("wb").write(data[: len(data) // 2])   # 半成品先落盘：磁盘满正是这个形态
+            raise OSError(28, "No space left on device", str(self))
+        return real_write(self, data)
+
+    monkeypatch.setattr(pathlib.Path, "write_bytes", fake)
+    out = root / "home" / "media"
+    dest = out / cm / "image" / "2026-09" / "beef.jpg"
+
+    assert media._save(out, cm, "image", "2026-09", "beef", "jpg", b"x" * 8) is None
+    assert not dest.exists()                     # 半成品必须已被清掉
+
+    rep = media.export_media(account, ["chatA@chatroom"], kinds=["image"],
+                             months=["2026-09"], out_dir=out)
+    assert rep.image.ok == 0 and rep.image.failed == 1
+    assert not dest.exists()                     # 导出路径同样不留
 
 
 def test_export_media_video_write_error_counts_missing(tmp_path, monkeypatch):

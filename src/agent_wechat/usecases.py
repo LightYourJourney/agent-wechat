@@ -332,7 +332,7 @@ def media_export(contact: str, *, kinds: list[str], months: list[str] | None = N
     `export_media` 的 `con=None`（账号级枚举）：那会把账号级视频树里的全部文件算到本次请求
     的会话头上——错归属比缺归属更坏。
 
-    `limit` 是**本次最多新增**的条数：已存在的产物会被跳过（可通过 `force=True` 重建），
+    `limit` 是**本次最多新增**的文件数：已存在的产物会被跳过（可通过 `force=True` 重建），
     故重跑同一条命令即可继续。
     """
     from . import media                       # 惰性：media 顶层拉起 cryptography
