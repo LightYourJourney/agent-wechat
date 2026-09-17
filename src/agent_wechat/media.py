@@ -650,8 +650,6 @@ def export_media(account: str, chat_ids: list[str], *, kinds: list[str],
                 for month_dir in _safe_iter(base):
                     if not month_dir.is_dir():
                         continue
-                    if full():
-                        break
                     mon = month_dir.name
                     if want is not None and mon not in want:
                         continue
@@ -665,7 +663,8 @@ def export_media(account: str, chat_ids: list[str], *, kinds: list[str],
                             continue
                         if full():
                             report.truncated = True
-                            break
+                            report.image.remaining += 1
+                            continue
                         try:
                             buf = decrypt_dat(dat.read_bytes(), mk)
                         except (errors.DecryptError, OSError):
@@ -752,7 +751,8 @@ def export_media(account: str, chat_ids: list[str], *, kinds: list[str],
                     # 本来就跳过的条目当成「已提前收手」，那是假话。
                     if full():
                         report.truncated = True
-                        break
+                        report.video.remaining += 1
+                        continue
                     got = resolve_video(account, ts, file_key)
                     if got is None:
                         report.video.missing += 1        # 有 ref 但本体不在磁盘（被清理）
@@ -791,14 +791,22 @@ def export_media(account: str, chat_ids: list[str], *, kinds: list[str],
                     mon = month_dir.name
                     if want is not None and mon not in want:
                         continue
+                    # 本轮的「本体有着落」集合：不只是**写进盘的**，已存在的、被上限挡下的也算。
+                    # 缩略图的唯一意义是补没有本体的视频；本体有着落还写一份只是冗余文件、白吃
+                    # `--limit`。被上限挡下的必须一并记：它的本体已计进 remaining，这里不记的话
+                    # 同一视频的缩略图会再计一次，remaining 就比「真正还差的文件数」多报。
+                    # 缺失（读不到 / 写不出）**不记**：那时缩略图是唯一的退路，必须照写。
                     mp4_stems = set()
                     for f in _safe_iter(month_dir, "*.mp4"):
                         if already(cm, "video", mon, f.stem):
                             report.video.skipped += 1
+                            mp4_stems.add(f.stem.removesuffix("_raw"))
                             continue
                         if full():
                             report.truncated = True
-                            break
+                            report.video.remaining += 1
+                            mp4_stems.add(f.stem.removesuffix("_raw"))
+                            continue
                         try:
                             buf = f.read_bytes()
                         except OSError:
@@ -827,7 +835,8 @@ def export_media(account: str, chat_ids: list[str], *, kinds: list[str],
                         # truncated 就成了假话。
                         if full():
                             report.truncated = True
-                            break
+                            report.video.remaining += 1
+                            continue
                         try:
                             buf = f.read_bytes()
                         except OSError:
@@ -969,7 +978,8 @@ def _export_voices_from(con, chat_ids, out_root, report, want, is_full, bump,
             # 上限检查排在这两条之后：只有**本会导出**的条目被上限挡下，truncated 才成立。
             if is_full():
                 report.truncated = True
-                return
+                report.voice.remaining += 1
+                continue
             if blob is None:
                 report.voice.failed += 1
                 continue

@@ -791,6 +791,77 @@ def test_export_media_voice_respects_max_files(tmp_path, monkeypatch):
     assert [p.name for p in (out / cm / "voice" / mon).iterdir()] == [f"{ts}_7.wav"]
 
 
+# ---------- 撞上限后继续扫描：remaining 计数 ----------
+
+def test_export_media_reports_remaining_after_cap(tmp_path, monkeypatch):
+    """撞顶后要如实报出「还剩几条」，否则「已提前收手」是一句没有数量的空话。
+
+    变异：把 `if is_full()` 分支里的 `report.voice.remaining += 1` 行删掉 → remaining=0 → 红。
+    """
+    root, account = make_tree(tmp_path, monkeypatch)
+    ts = int(datetime.datetime(2026, 9, 15, 12, 0).timestamp())
+    mon = media.month_of(ts)
+    _voice_fixture(account, [(1, ts, i, _silk_blob()) for i in (7, 8, 9)])
+    _passthrough_decrypted(monkeypatch)
+
+    rep = media.export_media(account, ["chatA@chatroom"], kinds=["voice"],
+                             months=[mon], out_dir=root / "home" / "media", max_files=1)
+    assert (rep.voice.ok, rep.voice.remaining, rep.truncated) == (1, 2, True)
+
+
+def test_export_media_skip_does_not_consume_limit(tmp_path, monkeypatch):
+    """skip 不吃预算：已存在 2 条 + 余下 3 条 + max_files=3 → ok=3、skipped=2、remaining=0。
+
+    变异：让 skip 分支也走 `bump()` → ok 掉到 1、remaining=2 → 红。
+    """
+    root, account = make_tree(tmp_path, monkeypatch)
+    ts = int(datetime.datetime(2026, 9, 15, 12, 0).timestamp())
+    mon = media.month_of(ts)
+    _voice_fixture(account, [(1, ts, i, _silk_blob()) for i in (5, 6, 7, 8, 9)])
+    _passthrough_decrypted(monkeypatch)
+    out = root / "home" / "media"
+
+    media.export_media(account, ["chatA@chatroom"], kinds=["voice"],
+                       months=[mon], out_dir=out, max_files=2)      # 先落 5、6
+    rep = media.export_media(account, ["chatA@chatroom"], kinds=["voice"],
+                             months=[mon], out_dir=out, max_files=3)
+    assert (rep.voice.ok, rep.voice.skipped, rep.voice.remaining) == (3, 2, 0)
+    assert rep.truncated is False
+
+
+def test_export_media_image_remaining_counts_every_month(tmp_path, monkeypatch):
+    """`image.remaining` 必须把**所有**月份数完：月份层留一处 `if full(): break`，
+    撞顶后月份循环立刻退出，第一个月之后再也不访问 —— remaining 少报，而其余测试全绿。
+
+    变异：在 `for month_dir in _safe_iter(base):` 里把它下面的 `if full(): break` 加回去
+    → remaining 从 5 掉到 2（只数到第一个月）→ 红。
+    """
+    root, account = make_tree(tmp_path, monkeypatch)
+    code = "999999"
+    (paths.CONTAINER / "app_data/net/kvcomm/key_999999_1_2_3_4_5_input.statistic").write_bytes(b"")
+    cm = hashlib.md5("chatA@chatroom".encode()).hexdigest()
+    aes = hashlib.md5((code + paths.bare_wxid(account)).encode()).hexdigest()[:16].encode()
+    # 取样目录（月份不在 want 里，不参与导出），只为 derive_keys 的 xorKey 统计与 aesKey 验证
+    sdir = paths.XWECHAT_FILES / account / "msg/attach" / cm / "2026-03" / "Img"
+    sdir.mkdir(parents=True)
+    samples = [sdir / f"sam{i}.dat" for i in range(4)]
+    for p in samples:
+        p.write_bytes(build_v2_dat(jpeg_like(64), b"\x33" * 8 + b"\xff\xd9", aes, FAKE_XOR))
+    monkeypatch.setattr(media, "_attach_dats", lambda acct: iter(samples))
+    months = ("2026-08", "2026-09")
+    for mon in months:
+        img = paths.XWECHAT_FILES / account / "msg/attach" / cm / mon / "Img"
+        img.mkdir(parents=True)
+        for i in range(3):
+            (img / f"im{i}.dat").write_bytes(
+                build_v2_dat(jpeg_like(256), b"\x11" * 8 + b"\xff\xd9", aes, FAKE_XOR))
+
+    rep = media.export_media(account, ["chatA@chatroom"], kinds=["image"],
+                             months=list(months), out_dir=root / "home" / "media", max_files=1)
+    # 6 张图、上限 1：出 1 张，剩 5 张 —— 两个月份的 3+3 都要数到
+    assert (rep.image.ok, rep.image.remaining, rep.truncated) == (1, 5, True)
+
+
 # ---------- Ruling 19：中间明文不得落系统 TMPDIR ----------
 
 def test_export_media_voice_plaintext_stays_in_home_tmp(tmp_path, monkeypatch):
@@ -1461,6 +1532,41 @@ def test_export_media_video_thumb_only_rerun_is_skipped(tmp_path, monkeypatch):
     second = media.export_media(account, ["c@chatroom"], kinds=["video"],
                                 months=[mon], out_dir=out)
     assert (second.video.thumb, second.video.skipped) == (0, 1)
+
+
+def test_export_media_video_remaining_equals_the_files_a_resume_adds(tmp_path, monkeypatch):
+    """`remaining` 不是「上限分支走了几次」，是**还差几个文件**：续跑新增的文件数必须等于它。
+
+    两个视频各带本体 + 缩略图、`max_files=1`。撞顶那轮把第二个视频的本体计进 remaining 后，
+    若**不**把它记进 `mp4_stems`，它的缩略图会再走一遍 `full()` 又被计一次 —— 于是报「还剩 2」
+    而实际上只差 1 个文件（缩略图在「本体已存在」时从来不会写：见缩略图循环开头那道 continue）。
+
+    断言取最强的形态「续跑新增文件数 == 上一轮的 remaining」，而不是「remaining == 1」——
+    后者换了夹具也能以错误的理由通过。
+    """
+    root, account = make_tree(tmp_path, monkeypatch)
+    mon = "2026-09"
+    vdir = paths.XWECHAT_FILES / account / "msg/video" / mon
+    vdir.mkdir(parents=True)
+    for stem in ("aaaa", "bbbb"):
+        (vdir / f"{stem}.mp4").write_bytes(b"m" * 8)
+        (vdir / f"{stem}_thumb.jpg").write_bytes(b"t" * 8)
+    out = root / "home" / "media"
+    chat_dir = out / hashlib.md5("c@chatroom".encode()).hexdigest() / "video" / mon
+
+    def files_on_disk() -> int:
+        return sum(1 for p in chat_dir.rglob("*") if p.is_file()) if chat_dir.is_dir() else 0
+
+    capped = media.export_media(account, ["c@chatroom"], kinds=["video"],
+                                months=[mon], out_dir=out, max_files=1)
+    before = files_on_disk()
+    assert (capped.video.ok, capped.video.thumb, capped.truncated) == (1, 0, True)
+
+    resumed = media.export_media(account, ["c@chatroom"], kinds=["video"],
+                                 months=[mon], out_dir=out, max_files=50)
+    assert files_on_disk() - before == capped.video.remaining   # 报几，就真差几个
+    assert resumed.video.remaining == 0                         # 续跑把账结清
+    assert (resumed.video.ok, resumed.video.thumb) == (1, 0)    # 缩略图不该被冗余写一次
 
 
 def test_export_media_image_rerun_skips_before_decrypting(tmp_path, monkeypatch):
