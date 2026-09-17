@@ -373,8 +373,10 @@
   的开关：本体已在产物里的视频不会再生成 `{K}_thumb.jpg`
 - **两处 2000 硬顶移除**：`media export` 与 `moments export` 的 `--limit` 此前被静默夹到 2000
   （`--limit 99999` 实际只导 2000），现在只保留下界 1；两处 CLI 帮助文案同步订正
-- **新增 `skipped` / `remaining` 计数**：两个 MCP 信封（`export_chat_media` / `export_moments`）的
-  `counts` 恒含两者；CLI 每类印 `skipped`，`remaining` 只在触及 `--limit` 的那一行印（三类之和）。
+- **新增 `skipped` / `remaining` 计数**：`export_chat_media` 的 `counts` 三个类目（`image` / `voice` /
+  `video`）恒含两者；`export_moments` 的 `counts` **只带 `remaining`**——朋友圈每次全量重渲染，
+  没有「产物已存在即跳过」这回事，故无 `skipped`。CLI 每类印 `skipped`，`remaining` 只在触及
+  `--limit` 的那一行印（三类之和）。
   `skipped` 是本次因产物已存在而跳过的**文件**数（**按文件**计，不是消息条数）；`remaining` 是
   撞上 `--limit` 时还有多少个**未导出**——它含续跑时仍会失败的条目（dat 读不出、本体不存在），
   所以不等于「续跑一定多出这么多文件」
