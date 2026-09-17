@@ -209,12 +209,18 @@ def test_export_limit_sets_truncated(env):
 def test_export_reports_remaining_after_limit(env):
     """截断要带条数：「被 limit 截断」不带数量，用户无从判断差多少。
 
-    变异：把 `report.remaining += 1` 删掉 → remaining=0 → 红。
+    夹具**故意多于两条**：3 条 + limit=1 → 丢 2 条。只有这个数字能把 `+= 1` 与 `= 1`
+    分开——「丢 1 条」的夹具对报恒定 1 的实现同样是绿的，而那正是本计划要消灭的那类
+    会撒谎的数字（media 侧 `test_export_media_reports_remaining_after_cap` 同此口径）。
+
+    变异：把 `report.remaining += 1` 删掉 → 0 → 红；改成 `report.remaining = 1`
+    → 丢的 2 条只报 1 条 → 红。
     """
     _add_post(SECOND_XML)
+    _add_post(NO_TOKEN_XML, tid=3)               # 第三条只为凑出「丢 2 条」
     capped = usecases.moments_export(account=ACCT, limit=1)
     assert capped.report.truncated is True
-    assert capped.report.remaining == 1          # 夹具共 2 条，留下 1 条
+    assert capped.report.remaining == 2          # 夹具共 3 条，留下 1 条
 
 
 def test_export_capped_posts_are_counted_not_fetched(env):
