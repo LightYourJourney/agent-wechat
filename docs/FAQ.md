@@ -35,8 +35,9 @@
 （MCP 对应 `export_chat_media`）把某会话的图片 / 语音 / 视频落到 `~/.agent-wechat/media/`。
 能导出的通常远少于会话里的媒体消息数——微信按需下载并定期清理。计数口径见 TOOLS.md §9：
 `video.missing` 是常态，而 `image.missing` **恒为 0**（图片按目录枚举，不按消息逐条清点）。
-**朋友圈**（`agent-wechat moments export`）的媒体全在远程，默认不下载；要拿到本体需显式加
-`--with-media`（MCP 对应 `with_media=True`），这会联网——见 Q7。
+**朋友圈**（`agent-wechat moments export`）的媒体**本工具只从远程取**（本机虽有朋友圈缓存图
+`cache/*/Sns/Img/`，但文件名与动态对不上，不参与——所以别指望导出产物能替代本地备份），
+默认不下载；要拿到本体需显式加 `--with-media`（MCP 对应 `with_media=True`），这会联网——见 Q7。
 
 **Q7：数据会上传云端吗？**
 **默认全程零网络，没有任何数据会被上传**：解密、索引、embedding（本地 ONNX 推理）、
@@ -49,8 +50,9 @@ MCP（stdio）均无网络路径，MCP 只在你的 Agent 客户端与本地 Ser
 2. **朋友圈媒体下载**：只有显式指定 `--with-media`（CLI）/ `with_media=True`
    （MCP `export_moments`）时才发起请求，且**只连微信 CDN**——后缀 `*.qpic.cn` /
    `*.video.qq.com`，加精确主机 `wxapp.tc.qq.com`（**不含子域**）；不指定则一个网络
-   请求都不发。请求只携带微信自己签发的媒体 `token` 与固定 `User-Agent`，**不含本机
-   任何聊天 / 索引内容**；**不使用代理**，一律直连。
+   请求都不发。请求只携带微信自己签发的媒体 `token`、固定 `User-Agent`
+   （`MicroMessenger Client`）与 `Accept: */*`，**不含本机任何聊天 / 索引内容**，无请求体；
+   **不使用代理**，一律直连。⚠️ 目标主机受白名单约束，但**端口不受约束**（见 SECURITY.md §1）。
 
 第 2 条是本项目零网络红线上**本次新增的**显式例外，详见 SECURITY.md §1「零网络例外」。
 

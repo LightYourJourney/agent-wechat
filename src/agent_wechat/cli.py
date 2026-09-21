@@ -425,7 +425,7 @@ def cmd_purge(args: argparse.Namespace) -> int:
     """销毁本地产物。**默认 dry-run**：不带 --yes 只打印计划，一个字节不删。
 
     --all 的语义是「整个 HOME_DIR」（超集），不是三个具名范围的并集——这样才扫得掉
-    `decrypt --out` 落在 HOME_DIR 下的散落明文（SECURITY.md:13 标为极高敏感）。
+    `decrypt --out` 落在 HOME_DIR 下的散落明文（SECURITY.md §1 标为极高敏感）。
     """
     from . import purge
 
@@ -608,11 +608,11 @@ def main(argv: list[str] | None = None) -> None:
     sp = sub.add_parser("moments", help="朋友圈读取与导出")
     msp = sp.add_subparsers(dest="moments_cmd", required=True)
     esp = msp.add_parser("export", help="导出朋友圈为 HTML 时间线")
-    esp.add_argument("--chat", help="按作者筛选（名字或 wxid；省略=全部好友）")
+    esp.add_argument("--chat", help="按作者筛选（名字或 wxid；省略=不限作者，含自己的动态）")
     esp.add_argument("--months", help="逗号分隔的 YYYY-MM，限定月份")
     esp.add_argument("--with-media", action="store_true",
                      help="联网下载远程媒体本体（默认关闭，不联网；开启后本机媒体总量约 1.5 GiB，"
-                          "其中本期新增约 0.65 GiB）")
+                          "其中本期新增约 0.62 GiB）")
     esp.add_argument("--out", help="输出目录（默认 $AGENT_WECHAT_HOME/moments）")
     esp.add_argument("--limit", type=int, default=2000, help="最多导出动态数（下界 1，无上界）")
     esp.add_argument("--account", help="账号目录名")

@@ -192,7 +192,8 @@ CREATE TABLE watermark (
 ## 6. 朋友圈数据源（sns.db）
 
 朋友圈**不进本地检索库**：`moments export` 直接从微信的 `db_storage/sns/sns.db`
-（sqlcipher，复用同一套 passphrase）读取，只产出单文件 HTML 时间线，不写 `index.db`。
+（sqlcipher，复用同一套 passphrase）读取，产出单文件 HTML 时间线（默认档；开 `--with-media`
+后另写同级 `media/` 目录），不写 `index.db`。
 产物落 `~/.agent-wechat/moments/`（目录 0700、文件 0600）。
 
 源头是一张表：
@@ -216,6 +217,8 @@ SnsTimeLine(tid, user_name, content, pack_info_buf)
 | `TimelineObject/ContentObject/type` | `15` = 视频动态 |
 | `ContentObject/mediaList/media` | 媒体引用；`media/type`：`2`=图片、`6`=视频、其余归「未分类」 |
 | `media/url@token`、`@key`、`@md5`、`@enc_idx` | **属性，不是子元素**——只看元素文本会漏掉全部鉴权信息（踩过的坑）。**`@token` 不是「能不能下」的判据**：`type=15`（小视频）的 token 在 **URL 查询串**里，`type=7` **根本没有**；两者都判 `AUTH_READY`（URL 已完整，原样 GET） |
+| `media/url`（**元素文本**） | URL 本体本身（上面那行是挂在它上面的鉴权属性） |
+| `media/thumb`（**元素文本**） | 视频**封面**的 URL——`KIND_VIDEO` 的那条媒体据此另下一张 `{stem}_thumb.jpg`（本期新增，落盘在 `usecases._resolve_media`，同样受白名单约束）。**与下面视频号的 `thumbUrl` 不是一回事**，别混 |
 | `media/enc` | 加密标记与密钥：元素文本 `1` ⟺ 有 `enc@key`；`@key` 为 `'0'` 是「无密钥」哨兵（真机 312 次），按无密钥处理 |
 | `media/videoDuration` | 视频时长（秒，可缺省） |
 | `ContentObject/finderFeed/nickname`、`desc`、`mediaList/media/videoPlayDuration` | 视频号卡片的作者昵称 / 描述 / 时长。这类动态的 `ContentObject/mediaList` 多为空，媒体在 `finderFeed` 下 |
@@ -225,6 +228,11 @@ SnsTimeLine(tid, user_name, content, pack_info_buf)
 | `LocalExtraInfo/comment_user_list/user_comment` | 评论（`type=2`；带 `ref_username` 即「A 回复 B」，见下方⚠️） |
 | `LocalExtraInfo/like_user_list/user_comment` | 点赞（`type=1`，只有昵称、无正文） |
 | `LocalExtraInfo/with_user_list/user_comment` | `type=4`，与评论同归一类 |
+| `user_comment/username` | 互动者 wxid——评论与点赞都读它；回复的 `ref_username` 也靠它在**同一条动态**里反查昵称 |
+| `user_comment/content` | 评论正文（点赞没有；**为空时渲染成 `[表情评论]` 占位**，判据是「空」而不是「是不是表情」） |
+| `user_comment/create_time` | 互动时间（解析了，但当前无渲染消费点） |
+| `user_comment/is_rich_text` | 是否富文本（同上，解析了但无消费点） |
+| `SnsDataItem`（根） | 解析入口。⚠️ `<user_comment>` 挂在这个根下的 `LocalExtraInfo` 里，**不在** `TimelineObject` 内——取错根节点**不报错**，只会静默得 0 条互动 |
 
 ⚠️ **`<user_comment>` 在 `LocalExtraInfo` 下，不在 `TimelineObject` 内**：本机 2,450 条
 互动全部落在 `comment_user_list`(1,289) / `like_user_list`(1,157) / `with_user_list`(4)，

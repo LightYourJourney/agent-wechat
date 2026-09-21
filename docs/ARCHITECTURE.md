@@ -160,16 +160,17 @@ moments.iter_posts(account, report=…)       # 复用 passphrase 解密 sns/sns
   → SnsTimeLine.content 的 TimelineObject XML → SnsPost（正文/媒体引用/评论/点赞）
   → 按 chat_filter（作者）与 months（本地月份）过滤，产出**最新在前**（createTime 降序）
        ↓ with_media=False（默认，零网络）
-  → 远程媒体一律在产物里标「远程，未下载」
+  → 未下载的媒体以占位说明标注：图片 / 视频标「远程，未下载」，`kind=other` 标「外部链接媒体」
        ↓ with_media=True（本次新增的联网例外）
   → sns_media.build_url → 直连（不走代理）微信 CDN 白名单（后缀 `*.qpic.cn` / `*.video.qq.com`
      + 精确主机 `wxapp.tc.qq.com`）→ WX-ISAAC64 解密
-  → moments_html.render → 单文件 HTML 落 ~/.agent-wechat/moments/index.html
+  → moments_html.render → 单文件 HTML 落 $AGENT_WECHAT_HOME/moments/index.html（`--out` 可改）
 ```
 
 产物页首固定标注「这是微信本地缓存窗口，不是完整历史」——`createTime` 覆盖的只是
-微信滚动缓存的窗口。单条媒体失败只计入计数与降级区，不中断整次导出；单条动态解析失败
-同理（计入 `failed`），因为「XML 一条都读不懂」与「这个账号没有朋友圈」必须分得开。
+微信滚动缓存的窗口。单条媒体失败只计入**计数行**（解密后不是已知图片格式的那一类另进
+降级区），不中断整次导出；单条动态解析失败同理（计入 `failed`），因为「XML 一条都读不懂」
+与「这个账号没有朋友圈」必须分得开。
 
 ## 4. 关键设计决策与取舍
 

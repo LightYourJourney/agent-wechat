@@ -13,7 +13,7 @@
 | uv | 最新版 | `curl -LsSf https://astral.sh/uv/install.sh \| sh` |
 | sqlcipher CLI | 4.x（`brew install sqlcipher`） | 用于数据库解密导出 |
 | Xcode Command Line Tools | 提供 lldb | `xcode-select --install` |
-| FileVault | **建议开启** | 本地索引库为明文，依赖全盘加密保护（见 SECURITY.md） |
+| FileVault | **必须开启**（安装前提） | 本地索引库为明文，依赖全盘加密保护；代码不校验也不阻断，需自行用 `fdesetup status` 确认（见 SECURITY.md） |
 
 > 💡 检查环境：`csrutil status`（SIP 保持 enabled 即可，**不需要关闭 SIP**）；
 > `fdesetup status`（FileVault）；`sqlcipher -version`。

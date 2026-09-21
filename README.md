@@ -21,7 +21,7 @@
 | 🧠 向量语义检索 | 本地嵌入（fastembed + bge-small-zh-v1.5，聊天内容零外发）+ sqlite-vec KNN；关键词记不全时按语义找（`semantic_search`） |
 | 🖼️ 媒体导出 | 按会话导出图片（dat 解密）/ 语音（SILK → WAV）/ 视频（定位明文）；产物在 `~/.agent-wechat/media/`（0700） |
 | 🧩 媒体与消息关联 | 按消息回答「有没有媒体、什么类型、本机在不在、在哪」：MCP `get_message_media` / CLI `media locate` 同一套四态（`none` / `exported` / `exportable` / `gone`），检索命中用稳定标识 `msg_key` 指名 |
-| 📱 朋友圈导出 | 读取本账号可见的动态 / 评论 / 点赞，渲染成单文件 HTML 时间线；**默认零网络**，`--with-media` 才下载远程媒体本体 |
+| 📱 朋友圈导出 | 读取本账号可见的动态 / 评论 / 点赞，渲染成单文件 HTML 时间线；正文里的**外链**、**视频号**卡片（昵称 / 描述 / 封面）、**小视频**与 `type=7` 公开图都能出（此前这四类读不到或取不到）；**只覆盖微信本地缓存窗口，不是完整历史**；**默认零网络**，`--with-media` 才下载远程媒体本体（本机约 1.5 GiB） |
 | 📄 会话时间线导出 | 把某会话导成可读的**时间线**（HTML / Markdown 双格式，可搬走）：appmsg（引用 / 链接 / 文件 / 转账）渲染成结构化块、引用可跳转到原消息（HTML 侧）、已导出的媒体以相对路径在位；appmsg 原始载荷由 `appmsg rebuild` 一次性回填（`chat export` / `chat index`，MCP `export_chat` / `get_message_parts`） |
 | 🤖 Agent 集成 | MCP Server（13 个工具）+ Claude Code Skill + 同源 CLI |
 
@@ -123,7 +123,7 @@ agent-wechat/
 │   ├── reader.py          消息读取与解码
 │   ├── media.py           媒体导出（图片解密 / 语音 SILK→WAV / 视频定位）
 │   ├── moments.py         朋友圈解析（sns.db，只读不联网）
-│   ├── sns_media.py       朋友圈远程媒体下载与解密（唯一联网模块，默认关）
+│   ├── sns_media.py       朋友圈远程媒体下载与解密（唯一直接发 HTTP 请求的模块，默认关）
 │   ├── moments_html.py    朋友圈渲染（单文件 HTML）
 │   ├── chat_text.py       两个会话模板共享的措辞与纯函数
 │   ├── chatview.py        会话时间线组装与落盘

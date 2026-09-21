@@ -8,7 +8,7 @@
 | 数据 | 位置 | 敏感度 |
 |---|---|---|
 | 数据库密钥 passphrase（32 字节） | 内存（微信进程）→ `~/.agent-wechat/passphrase.json` | 极高 |
-| 聊天数据库（加密） | 微信容器目录 | 高（本工具不解密落盘存储它） |
+| 聊天数据库（加密） | 微信容器目录 | 高（常规流程只做只读快照、不落盘存储；**唯一例外**是 `decrypt --out`，见下表） |
 | 解密后的消息明文 | `~/.agent-wechat/tmp/`（临时）→ `index.db`（持久） | 极高 |
 | 解密后的媒体明文（图片/语音 WAV/视频）与**会话时间线产物**（HTML / Markdown 明文，含引用 / 链接 / 转账内容） | `~/.agent-wechat/media/`（持久） | 极高 |
 | 朋友圈正文 / 评论 / 点赞 / 媒体明文（`moments export` 产物） | `~/.agent-wechat/moments/`（持久；目录 0700、文件 0600） | 极高 |
@@ -53,6 +53,11 @@
   `wxapp.tc.qq.com`（**不含子域**）；代码里两部分都在，且**跨重定向也成立**；
   其余主机一个请求都不发（`build_url` 前置判 host，直接标「不去取」），
   请求不会被引向别处。
+  - 匹配**不区分大小写**（`https://SHMMSNS.QPIC.CN/x` 通过）；末尾带点（`qpic.cn.`）被拒；
+    裸域名 `qpic.cn` 本身**不在**白名单内（`*.qpic.cn` 要求至少一级子域）。
+  - ⚠️ **端口不受约束**：`https://shmmsns.qpic.cn:22/x` 这类地址会通过白名单并真的向
+    该端口发起连接（实测）。目标主机仍限白名单，**不构成越权**，但恶意 XML 可借此对这几台
+    微信 CDN 主机做端口探测——若你对此敏感，可在网络层限制出站端口。
 - **发送内容**：请求只携带微信自己签发的媒体 `token` 与固定 `User-Agent`
   （`MicroMessenger Client`），**不含本机任何聊天 / 索引 / 密钥内容**，无请求体。
 - **不走代理**：一律直连，不读 `http_proxy` 等环境变量。
@@ -94,11 +99,11 @@
 | 控制项 | 措施 |
 |---|---|
 | 文件权限 | `~/.agent-wechat/` 全目录 `0700`，passphrase 缓存 `0600`（仅当前用户可读） |
-| 全盘加密 | 索引明文依赖 **FileVault**（安装前提，见 INSTALL.md）；未开 FileVault 的机器不应使用本项目的导出功能 |
+| 全盘加密 | 索引明文依赖 **FileVault**（**安装前提**，见 INSTALL.md）；未开 FileVault 的机器不应使用本项目的导出功能。⚠️ **代码不校验也不阻断**，需自行用 `fdesetup status` 确认 |
 | 备份排除 | 首次使用时代码自动执行 `tmutil addexclusion ~/.agent-wechat`（可用 `tmutil isexcluded` 验证）；失败时请手动执行，防止明文档案绕过 FileVault 进入备份盘 |
 | 临时文件 | 解密明文仅在 `tmp/`（0700）短暂存在，单分片、用后即焚——**按消息查媒体归属（`media locate` / `get_message_media`）的语音本体判定也走这一条**；唯一例外是 `decrypt --out` 显式导出的明文库（见上表） |
 | 传输 | MCP 走 stdio；无网络监听、无云同步路径 |
-| 销毁 | `agent-wechat purge --all --yes` 一键清除全部敏感数据（密钥 + 索引）；不加 `--yes` 只预览，删完给出残留核查。手工 `rm -rf ~/.agent-wechat` 仍是等价后备 |
+| 销毁 | `agent-wechat purge --all --yes` 清除**整个 `~/.agent-wechat/` 超集**——不只是「密钥 + 索引」，还包括 `media/`、`moments/`、`models/`、`tasks.json`、`tmp/` 等全部产物；不加 `--yes` 只预览，删完给出残留核查。手工 `rm -rf ~/.agent-wechat` 仍是等价后备 |
 
 > **按消息查媒体归属**（`media locate` / MCP `get_message_media`）**不新增任何例外**：不联网、
 > 不写微信目录、不写产物根。但它**不是「零磁盘活动」**——判定语音本体要解密 `media_*.db`，
