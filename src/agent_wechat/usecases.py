@@ -1233,7 +1233,8 @@ def _resolve_media(p: "moments.SnsPost", out_root, report, with_media: bool,
 
             # 封面。只在 KIND_VIDEO 且 AUTH_READY 时下——实测 181 条视频媒体全是 AUTH_READY。
             # 白名单外的封面（真机上 158/181 在 vweixinthumb.tc.qq.com，证书名不匹配）会由
-            # `build_url`/`fetch` 拦下，落回 not_downloaded，如实。
+            # `build_url` 拦下——**静默跳过，一个计数器都不加**（`media_not_downloaded` 只对
+            # `p.media` 的成员累加，封面不是）。Task 10 的 A4 恒等式正建立在这个认识上。
             thumb_local = None
             if m.kind == moments.KIND_VIDEO and m.thumb and m.auth == moments.AUTH_READY:
                 # `key`/`encrypted` **必须一起带过去**：小视频封面是**加密**的，且用的就是
