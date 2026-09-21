@@ -19,7 +19,7 @@ KIND_IMAGE, KIND_VIDEO, KIND_OTHER = "image", "video", "other"
 CMT_LIKE, CMT_COMMENT = "like", "comment"
 
 
-def split_url(url: str | None):
+def split_url(url: str | None) -> urllib.parse.SplitResult | None:
     """安全的 `urllib.parse.urlsplit`：`None` 或畸形输入返回 `None`，**不抛**。
 
     `urlsplit("https://[::1/x")` → `ValueError: Invalid IPv6 URL`（实测）。URL 全部来自

@@ -220,7 +220,7 @@ def fetch(m: moments.SnsMedia, *, timeout: float = 20.0, attempts: int = 3,
     if url is None:
         raise SnsMediaError("该媒体没有 token 或 url，无法下载")
     if not host_allowed(url):
-        host = urllib.parse.urlsplit(url).hostname or "?"
+        host = moments.safe_host(url) or "?"
         raise SnsMediaError(f"拒绝非微信 CDN 域名：{host}")
     if not https_allowed(url):
         # 域已在上一行确认过，走到这里的唯一可能就是 scheme 不对。第一跳同样卡 scheme：
