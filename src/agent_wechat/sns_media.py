@@ -109,28 +109,42 @@ class WxIsaac64:
 
 
 def build_url(m: moments.SnsMedia) -> str | None:
-    """构造可下载 URL：http→https、图片末段尺寸标识改 `/0`、拼接 token。
+    """构造**可下载**的 URL。返回 `None` == 「本项目不会去取它」（不计失败）。
 
-    无 `url` 或无 `token` → None（**不可下载**，调用方按此标注，不要猜）。
-    视频的 token 必须放在参数**最前**（实测视频 URL 自带 10 个查询参数，
-    位置错了服务端不认）。
+    无 `url`、kind 不在白名单内、或宿主不在白名单内 → `None`，调用方按此标注，不要猜。
+    老路径（`AUTH_SNS`）才拼 `token`/`idx=1`，并把图片 URL 末段尺寸标识改 `/0`（`_SIZE_SEG`）。
+    视频的 token 必须放在参数**最前**（实测视频 URL 自带 10 个查询参数，位置错了服务端不认）。
     """
-    if not m.url or not m.token:
-        return None
-    if m.kind not in (moments.KIND_IMAGE, moments.KIND_VIDEO):
+    if not m.url or m.kind not in (moments.KIND_IMAGE, moments.KIND_VIDEO):
         # 白名单而非黑名单：KIND_OTHER（type 3/4/0）语义未实测，图片分支（尺寸段改 /0）
         # 与视频分支（token 前置）对它都是猜测；将来新增的 kind 也会落到这里，
         # 而不是静默走图片分支构造出看似可下载的 URL。宁可标为不可下载，也不猜形态。
         return None
-    url = m.url.replace("http://", "https://")
-    tok = urllib.parse.quote(m.token, safe="")
-    if m.kind == moments.KIND_VIDEO:
-        head, sep, query = url.partition("?")
-        extra = f"&{query}" if sep else ""
-        return f"{head}?token={tok}&idx=1{extra}"
-    head, sep, query = url.partition("?")
-    url = _SIZE_SEG.sub("/0", head) + (sep + query if sep else "")
-    return f"{url}{'&' if '?' in url else '?'}token={tok}&idx=1"
+
+    if m.auth == moments.AUTH_READY:
+        # 原样返回，只做 http→https。**不拼 idx=1、不做尺寸段归一**：实测 type=7 的路径
+        # 尾段本就是 /0，视频号 thumbUrl 的路径无尺寸段——加工是多余的，还会让签名失效。
+        # 沿用既有的 `.replace`（不是新 helper）以与 AUTH_SNS 分支同形：它只替换**小写**
+        # `http://`，`HTTP://…` 原样过关，而 urllib 会把 scheme 归一成小写。这一跳由
+        # `fetch` 里的 `https_allowed` 挡住（判据与重定向的每一跳共用）。
+        out = m.url.replace("http://", "https://")
+    else:
+        if not m.token:
+            return None
+        url = m.url.replace("http://", "https://")
+        tok = urllib.parse.quote(m.token, safe="")
+        if m.kind == moments.KIND_VIDEO:
+            head, sep, query = url.partition("?")
+            extra = f"&{query}" if sep else ""
+            out = f"{head}?token={tok}&idx=1{extra}"
+        else:
+            head, sep, query = url.partition("?")
+            url = _SIZE_SEG.sub("/0", head) + (sep + query if sep else "")
+            out = f"{url}{'&' if '?' in url else '?'}token={tok}&idx=1"
+
+    # 宿主不在白名单 → 「不去取」。不这样收口，usecases 会把它计进 media_failed
+    # （fetch 的 host_allowed 在重试循环之前抛），而真相是「不去取」。
+    return out if host_allowed(out) else None
 
 
 def host_allowed(url: str) -> bool:

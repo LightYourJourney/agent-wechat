@@ -380,3 +380,50 @@ def test_fetch_rejects_malformed_url_without_leaking_valueerror():
     with pytest.raises(sns_media.SnsMediaError):
         sns_media.fetch(_m(url="https://[::1/x", token="T"), opener=op)
     assert op.calls == []
+
+
+def test_build_url_ready_returns_url_verbatim():
+    """AUTH_READY 原样返回，**不拼 idx=1、不做尺寸段归一**。
+
+    逐字符断言：`type=7` 的路径尾段本就是 /0、视频号 thumbUrl 无尺寸段——
+    任何加工都是多余的，且会让签名失效。
+    """
+    m = _m(auth=moments.AUTH_READY, token=None, key=None,
+           url="http://szmmsns.qpic.cn/mmsns/XYZ/0")
+    assert sns_media.build_url(m) == "https://szmmsns.qpic.cn/mmsns/XYZ/0"
+
+
+def test_build_url_ready_keeps_query_untouched():
+    """查询串里的签名参数一个都不能动、不能重排。"""
+    m = _m(auth=moments.AUTH_READY, token=None, key=None,
+           url="http://shzjwxsns.video.qq.com/102/20202/snsvideodownload?encfilekey=E&token=T&idx=1")
+    assert sns_media.build_url(m) == (
+        "https://shzjwxsns.video.qq.com/102/20202/snsvideodownload?encfilekey=E&token=T&idx=1")
+
+
+def test_build_url_none_when_host_not_allowlisted():
+    """白名单外的主机返回 None——「项目不会去取它」，不是「取失败」。
+
+    不这样做，usecases 会把它们计进 media_failed（fetch 的 host_allowed 在重试循环
+    之前抛），而真相是「不去取」。真机上有四类会踩到：第三方网页地址 54 条、
+    vweixinthumb 封面 158 条、mmsns.c2c.wechat.com 34 条、wx.qlogo.cn 1 条
+    （**后两类共 35 条是既有的误计**，不是本期引入的，本期一并修）。
+    """
+    for bad in ("https://y.music.163.com/a.jpg", "https://vweixinthumb.tc.qq.com/a",
+                "https://mmsns.c2c.wechat.com/a", "https://wx.qlogo.cn/a",
+                "https://b23.tv/x"):
+        m = _m(auth=moments.AUTH_READY, token=None, key=None, url=bad)
+        assert sns_media.build_url(m) is None, bad
+
+
+def test_allowlist_exact_host_not_subtree():
+    """wxapp.tc.qq.com 是**精确主机**，不是子树。"""
+    assert sns_media.host_allowed("https://wxapp.tc.qq.com/a") is True
+    assert sns_media.host_allowed("https://evil.wxapp.tc.qq.com/a") is False
+    assert sns_media.host_allowed("https://vweixinthumb.tc.qq.com/a") is False
+    assert sns_media.host_allowed("https://tc.qq.com/a") is False
+    assert sns_media.host_allowed("https://wxapp.tc.qq.com./a") is False
+    assert sns_media.host_allowed("https://wxapp.tc.qq.com.evil.net/a") is False
+    # 既有后缀仍然覆盖子域
+    assert sns_media.host_allowed("https://finder.video.qq.com/a") is True
+    assert sns_media.host_allowed("https://a.b.qpic.cn/a") is True
