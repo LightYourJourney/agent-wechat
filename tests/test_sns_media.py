@@ -362,3 +362,21 @@ def test_host_allowed_survives_malformed_url():
     """host_allowed 是既有的裸 urlsplit 调用点——畸形输入不得抛。"""
     assert sns_media.host_allowed("https://[::1/x") is False
     assert sns_media.https_allowed("https://[::1/x") is False
+
+
+def test_fetch_rejects_malformed_url_without_leaking_valueerror():
+    """畸形 URL 走到 fetch 的拒绝分支时，抛的是 SnsMediaError，不是裸 ValueError。
+
+    这道分支的取 host 一度是裸 `urlsplit`——而它执行的充要条件恰恰是
+    `host_allowed` 为假，于是畸形输入必然在这里抛 `ValueError: Invalid IPv6 URL`，
+    穿透 usecases/cli 打 traceback。
+
+    变异：把 `host = moments.safe_host(url) or "?"` 改回
+    `urllib.parse.urlsplit(url).hostname or "?"` → 本条红。
+
+    拒绝早于 opener 构造，故一个请求都不会发。
+    """
+    op = _Opener([])
+    with pytest.raises(sns_media.SnsMediaError):
+        sns_media.fetch(_m(url="https://[::1/x", token="T"), opener=op)
+    assert op.calls == []
