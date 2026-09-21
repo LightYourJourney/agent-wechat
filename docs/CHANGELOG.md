@@ -399,7 +399,10 @@
     **URL 查询串**里，不在属性上。现判 `AUTH_READY`（URL 已完整，原样 GET）并下载视频本体
   - **`type=7`**（61 卡片 / 62 媒体）：无签名公开图，同样被 token 前置条件挡掉，现可下载
 - **视频封面**：`KIND_VIDEO` 的媒体额外下载封面（落 `{stem}_thumb.jpg`）。封面是**加密**的，
-  用的就是同一个 `media` 元素的 `enc@key`
+  用的就是同一个 `media` 元素的 `enc@key`。封面**同样受 CDN 白名单约束**：宿主不在白名单的
+  封面（真机 158/181 在 `vweixinthumb.tc.qq.com`）**静默跳过，不计任何计数器**——既不算
+  `media_failed`，也不算 `media_not_downloaded`（与下面「白名单外的媒体改为『不去取』」那条
+  **不同**：那条针对 `p.media` 的成员，封面不是）
 - **`auth` 语义**：`AUTH_READY` = URL 已完整（自带签名或无签名公开），`build_url` 原样返回、
   只做 `http→https`，**不拼 `idx=1`、不做尺寸段归一**；`AUTH_SNS` = 老路径。
   **无 `token` 不再意味着「不可下载」**

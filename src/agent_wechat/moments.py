@@ -380,7 +380,7 @@ class MomentsReport:
     media_downloaded: int = 0         # 本轮联网下载成功
     media_failed: int = 0             # 下载或解密失败
     media_garbage: int = 0            # 其中「解密后不是已知图片格式」的条数（降级行带它）
-    media_not_downloaded: int = 0     # 未开启联网，或该媒体不可下载
+    media_not_downloaded: int = 0     # 未开启联网，或「不去取」（无 url / 宿主不在白名单）；封面不算
     window: tuple[int, int] | None = None      # (最早, 最新) 时间戳
     degraded: list[str] = dataclasses.field(default_factory=list)
     remaining: int = 0                # 撞上 limit 后本会导出、但没进来的动态条数
