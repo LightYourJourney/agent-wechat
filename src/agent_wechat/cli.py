@@ -611,7 +611,8 @@ def main(argv: list[str] | None = None) -> None:
     esp.add_argument("--chat", help="按作者筛选（名字或 wxid；省略=全部好友）")
     esp.add_argument("--months", help="逗号分隔的 YYYY-MM，限定月份")
     esp.add_argument("--with-media", action="store_true",
-                     help="联网下载远程媒体本体（默认关闭，不联网；开启后本机全量约 0.65 GB）")
+                     help="联网下载远程媒体本体（默认关闭，不联网；开启后本机媒体总量约 1.5 GiB，"
+                          "其中本期新增约 0.65 GiB）")
     esp.add_argument("--out", help="输出目录（默认 $AGENT_WECHAT_HOME/moments）")
     esp.add_argument("--limit", type=int, default=2000, help="最多导出动态数（下界 1，无上界）")
     esp.add_argument("--account", help="账号目录名")

@@ -213,6 +213,9 @@ agent-wechat moments export --limit 5 --with-media
 **产物与代价**：
 
 - 产物是 `index.html`（单文件自包含，内联 CSS）+ `media/<类型>/<月份>/<md5>.<ext>`。
+  视频多一份**封面**，与本体**同目录**：`media/video/<月份>/<md5>_thumb.jpg`（本体下载成功
+  且封面也拿到时才落盘；命名与聊天媒体那边的 `{file_key}_thumb.jpg` 同形，落盘点在
+  `usecases._resolve_media`）。
 - **耗时与体积（本机实测）**：1,923 条**离线**导出约 10 秒、HTML 约 650 KB。`--with-media` 是
   **逐条顺序**下载（不并发），耗时随媒体数线性增长——实测 22 张约 17 秒。**本期起下载量
   多出约 0.65 GB**（小视频 622.8 + 视频号 10.5 MiB，加封面数十 MB；此前这批是 0）。
