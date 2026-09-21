@@ -21,7 +21,12 @@ padding:12px;margin-bottom:16px;font-size:13px}
 .media img{max-width:100%;border-radius:6px;margin:4px 0}
 .ph{background:#eee;border-radius:6px;padding:8px;color:#666;font-size:12px;margin:4px 0}
 .likes,.cmts{margin-top:8px;padding-top:8px;border-top:1px solid #eee;font-size:13px}
-.likes{color:#576b95}.empty{color:#999}"""
+.likes{color:#576b95}.empty{color:#999}
+.link{margin:8px 0;padding:8px;background:#f2f6ff;border-radius:6px;font-size:14px}
+.link a{color:#576b95;text-decoration:none}
+.link .host{color:#999;font-size:12px;margin-left:8px}
+.finder{margin:8px 0;color:#576b95;font-size:13px;font-weight:600}
+.fdesc{color:#666;font-size:13px;margin:2px 0 8px}"""
 
 
 def _esc(v: str | None) -> str:
@@ -35,10 +40,42 @@ def _when(ts: int) -> str:
 def _media_block(m: moments.SnsMedia) -> str:
     if m.local:
         if m.kind == moments.KIND_VIDEO:
-            return f'<div class="media"><video src="{_esc(m.local)}" controls></video></div>'
+            block = f'<div class="media"><video src="{_esc(m.local)}" controls></video></div>'
+            if m.thumb_local:
+                block += (f'<div class="media"><img src="{_esc(m.thumb_local)}" '
+                          f'loading="lazy" alt=""></div>')
+            return block
         return f'<div class="media"><img src="{_esc(m.local)}" loading="lazy" alt=""></div>'
     why = "远程，未下载" if m.kind != moments.KIND_OTHER else "外部链接媒体"
     return f'<div class="ph">[{why}：{_esc(m.kind)}]</div>'
+
+
+def _link_block(link: moments.SnsLink) -> str:
+    """外链块——本模块唯一有真实安全面的渲染。
+
+    `html.escape` 挡不住 scheme（`javascript:alert(1)` 转义后仍是可执行链接），
+    也挡不住**主机名里的反斜杠或非 ASCII**：Python 的 `urlsplit().hostname` 不把 `\\`
+    当分隔符，浏览器按 WHATWG 会——`https://evil.com\\.mp.weixin.qq.com/x` 显示成
+    `evil.com\\.mp.weixin.qq.com`，点下去却落到 `evil.com`。「让用户看得见去哪」
+    这道防线必须建立在两套 URL 语义一致的输入上，否则它本身就是骗人的。
+    """
+    s = moments.split_url(link.url)
+    host = (s.hostname or "").lower() if s is not None else ""
+    if (s is None or s.scheme not in ("http", "https") or not host
+            or "\\" in host or not host.isascii()):
+        return f'<div class="ph">[链接：{_esc(link.url)}]</div>'
+    title = _esc(link.title) or _esc(link.url)
+    return (f'<div class="link"><a href="{_esc(link.url)}" target="_blank" '
+            f'rel="noopener noreferrer nofollow">{title}</a>'
+            f'<span class="host">{_esc(host)}</span></div>')
+
+
+def _finder_block(f: moments.SnsFinder) -> str:
+    """视频号块：封面已由 `_media_block` 渲染，这里只补元数据。"""
+    out = [f'<div class="finder">视频号 · {_esc(f.nickname)}</div>']
+    if f.desc:
+        out.append(f'<div class="fdesc">{_esc(f.desc)}</div>')
+    return "".join(out)
 
 
 def _comments_block(cs: tuple[moments.SnsComment, ...]) -> str:
@@ -97,10 +134,12 @@ def render(posts: Iterable[moments.SnsPost], report: moments.MomentsReport) -> s
     for p in items:
         media = "".join(_media_block(m) for m in p.media)
         text = f'<div class="text">{_esc(p.text)}</div>' if p.text else ""
+        link = _link_block(p.link) if p.link else ""
+        finder = _finder_block(p.finder) if p.finder else ""
         body.append(
             f'<div class="post"><div><span class="who">{_esc(p.nickname or p.username)}</span>'
             f'<span class="when">{_when(p.create_time)}</span></div>'
-            f"{text}{media}{_comments_block(p.comments)}</div>")
+            f"{text}{media}{link}{finder}{_comments_block(p.comments)}</div>")
     if not items:
         body.append('<div class="post empty">没有匹配的动态。</div>')
     return ("<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">"

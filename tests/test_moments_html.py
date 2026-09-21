@@ -15,11 +15,12 @@ class _P(html.parser.HTMLParser):
         self.text.append(d)
 
 
-def _mk(media=(), comments=(), text="正文"):
+def _mk(media=(), comments=(), text="正文", link=None, finder=None):
     m = moments.SnsMedia(kind=moments.KIND_IMAGE, url="http://x", token="T", key="1")
     return moments.SnsPost(tid="T", post_id="P", username="wxid_a", nickname="老王",
                            create_time=1735689600, text=text, is_video_post=False,
-                           media=tuple(media), comments=tuple(comments))
+                           media=tuple(media), comments=tuple(comments),
+                           link=link, finder=finder)
 
 
 def _rep(**kw):
@@ -139,3 +140,100 @@ def test_truncated_is_disclosed():
     t = _text_of(moments_html.render([_mk()], _rep(truncated=True, remaining=3)))
     assert "截断" in t or "truncated" in t.lower()
     assert "还有 3 条更早的动态" in t
+
+
+def test_video_cover_renders():
+    m = moments.SnsMedia(kind=moments.KIND_VIDEO, local="media/video/2025-01/A.mp4",
+                         thumb_local="media/video/2025-01/A_thumb.jpg")
+    doc = moments_html.render([_mk(media=(m,))], _rep())
+    assert 'src="media/video/2025-01/A.mp4"' in doc
+    assert 'src="media/video/2025-01/A_thumb.jpg"' in doc
+
+
+def test_video_without_cover_renders_only_the_video():
+    m = moments.SnsMedia(kind=moments.KIND_VIDEO, local="media/video/2025-01/A.mp4")
+    doc = moments_html.render([_mk(media=(m,))], _rep())
+    assert 'src="media/video/2025-01/A.mp4"' in doc
+    assert "_thumb" not in doc
+
+
+def test_external_link_renders_with_visible_host():
+    link = moments.SnsLink(url="https://mp.weixin.qq.com/s/X", title="文章标题")
+    doc = moments_html.render([_mk(link=link)], _rep())
+    assert 'href="https://mp.weixin.qq.com/s/X"' in doc
+    assert "文章标题" in doc
+    assert 'class="host">mp.weixin.qq.com<' in doc       # host 必须可见
+    assert 'rel="noopener noreferrer nofollow"' in doc
+    assert 'target="_blank"' in doc
+
+
+def test_javascript_scheme_is_not_rendered_as_link():
+    """`html.escape` 挡不住 scheme：`javascript:alert(1)` 转义后仍是可执行链接。
+
+    **但要说清是哪一重拦住它的**：`javascript:alert(1)` 没有 authority，
+    `urlsplit().hostname` 是 `None` → 拦下它的是**更早的 `not host`**，
+    **不是** scheme 白名单。所以本条**单独抓不住**「删掉 scheme 白名单」——
+    变异实测：删掉那一行，本条照样绿。
+    真正锁住 scheme 那一行的是下一条（`ftp://`，有主机且非 http(s)）。
+    """
+    doc = moments_html.render(
+        [_mk(link=moments.SnsLink(url="javascript:alert(1)", title="x"))], _rep())
+    assert "<a href" not in doc
+    assert "javascript:alert(1)" in doc                   # 降级为纯文本，信息不丢
+
+
+def test_non_web_scheme_with_host_is_not_rendered_as_link():
+    """**有主机但 scheme 不是 http(s)** → 必须由 scheme 白名单拦下。
+
+    这是 `s.scheme not in ("http", "https")` 那一行**唯一**的护栏：
+    `javascript:` / `data:` 那类没有 authority，在更早的 `not host` 就被拦了，
+    验不到它。变异实测：删掉 scheme 那一行 → 本条红。
+    """
+    doc = moments_html.render(
+        [_mk(link=moments.SnsLink(url="ftp://evil.example.com/x", title="x"))], _rep())
+    assert "<a href" not in doc
+    assert "ftp://evil.example.com/x" in doc
+
+
+def test_backslash_host_is_not_rendered_as_link():
+    r"""Python 的 urlsplit 不把 `\` 当分隔符，浏览器按 WHATWG 会——显示与落地会不一致。
+
+    实测：`https://evil.com\.mp.weixin.qq.com/x` 在 node 里 host=evil.com，
+    在 Python 里 hostname=`evil.com\.mp.weixin.qq.com`。显示哪一个是骗人的。
+    """
+    doc = moments_html.render(
+        [_mk(link=moments.SnsLink(url="https://evil.com\\.mp.weixin.qq.com/x", title="t"))],
+        _rep())
+    assert "<a href" not in doc
+
+
+def test_non_ascii_host_is_not_rendered_as_link():
+    """IDN 同形字：显示与浏览器实际落地（punycode）可以不是同一个。"""
+    doc = moments_html.render(
+        [_mk(link=moments.SnsLink(url="https://mp.weıxin.qq.com/x", title="t"))], _rep())
+    assert "<a href" not in doc
+
+
+def test_finder_block_renders_nickname_and_desc():
+    f = moments.SnsFinder(nickname="视频号昵称", desc="#话题#说明", duration=128)
+    doc = moments_html.render([_mk(finder=f)], _rep())
+    assert "视频号 · 视频号昵称" in doc
+    assert "#话题#说明" in doc
+
+
+def test_finder_block_omits_desc_when_absent():
+    doc = moments_html.render(
+        [_mk(finder=moments.SnsFinder(nickname="N", desc=None, duration=None))], _rep())
+    assert "视频号 · N" in doc
+    assert 'class="fdesc"' not in doc
+
+
+def test_new_css_classes_are_present():
+    """四个新 CSS 类必须真的写进产物。
+
+    **本任务自己写了「不补 CSS 产物仍能渲染，只是这几块没样式——『能跑但不像样』
+    容易被漏」，却没补断言**（变异实测：把 `_CSS` 里这几条全删掉，一条测试都不红）。
+    """
+    doc = moments_html.render([_mk()], _rep())
+    for sel in (".link{", ".link a{", ".link .host{", ".finder{", ".fdesc{"):
+        assert sel in doc, f"CSS 缺 {sel}"
