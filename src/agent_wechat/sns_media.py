@@ -236,7 +236,7 @@ def fetch(m: moments.SnsMedia, *, timeout: float = 20.0, attempts: int = 3,
     """
     url = build_url(m)
     if url is None:
-        raise SnsMediaError("该媒体无法下载：没有 url/token，或宿主不在微信 CDN 白名单内")
+        raise SnsMediaError("该媒体无法下载：没有 url/token、宿主不在微信 CDN 白名单内，或媒体类型不支持")
     if not host_allowed(url):
         host = moments.safe_host(url) or "?"
         raise SnsMediaError(f"拒绝非微信 CDN 域名：{host}")
