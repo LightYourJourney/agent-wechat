@@ -402,7 +402,9 @@
   用的就是同一个 `media` 元素的 `enc@key`。封面**同样受 CDN 白名单约束**：宿主不在白名单的
   封面（真机 158/181 在 `vweixinthumb.tc.qq.com`）**静默跳过，不计任何计数器**——既不算
   `media_failed`，也不算 `media_not_downloaded`（与下面「白名单外的媒体改为『不去取』」那条
-  **不同**：那条针对 `p.media` 的成员，封面不是）
+  **不同**：那条针对 `p.media` 的成员，而**视频封面**不是 `p.media` 成员——它由本体那条媒体
+  派生、与本体同目录。**别推广到视频号封面**：那是 `_finder_media` 产出的一条 `p.media`
+  成员，照常计进各桶）
 - **`auth` 语义**：`AUTH_READY` = URL 已完整（自带签名或无签名公开），`build_url` 原样返回、
   只做 `http→https`，**不拼 `idx=1`、不做尺寸段归一**；`AUTH_SNS` = 老路径。
   **无 `token` 不再意味着「不可下载」**

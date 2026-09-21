@@ -217,7 +217,10 @@ agent-wechat moments export --limit 5 --with-media
   且封面也拿到时才落盘；命名与聊天媒体那边的 `{file_key}_thumb.jpg` 同形，落盘点在
   `usecases._resolve_media`）。封面**同样受 CDN 白名单约束**：宿主不在白名单的封面
   （真机 158/181 在 `vweixinthumb.tc.qq.com`）**静默跳过，一个计数器都不进**——既不算
-  `media_failed`，也不算 `media_not_downloaded`（各桶只数 `p.media` 的成员，封面不是）。
+  `media_failed`，也不算 `media_not_downloaded`（各桶只数 `p.media` 的成员，而**视频封面**
+  不是——它由本体那条媒体派生，不在 `p.media` 里）。**别把两种封面混为一谈**：
+  **视频号封面**由 `_finder_media` 产成一条 `AUTH_READY` 媒体、**是 `p.media` 的成员**，
+  照常计进各桶（下载成功算 `media_downloaded`，宿主不在白名单算 `media_not_downloaded`）。
 - **耗时与体积（本机实测）**：1,923 条**离线**导出约 10 秒、HTML 约 650 KB。`--with-media` 是
   **逐条顺序**下载（不并发），耗时随媒体数线性增长——实测 22 张约 17 秒。**本期起下载量
   多出约 0.65 GiB**（小视频 622.8 + type=7 10.5 MiB，加封面数十 MiB；此前这批是 0）。

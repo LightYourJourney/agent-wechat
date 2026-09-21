@@ -518,7 +518,7 @@ FINDER_XML = """<SnsDataItem><TimelineObject>
    <username>v2_060000231003b20fB</username><authIconType>2</authIconType>
    <mediaList><media><mediaType>4</mediaType>
     <url>http://wxapp.tc.qq.com/251/20302/stodownload?encfilekey=E&amp;token=T&amp;idx=1</url>
-    <thumbUrl>http://wxapp.tc.qq.com/251/20304/stodownload?encfilekey=E&amp;token=T&amp;idx=1</thumbUrl>
+    <thumbUrl>http://finder.video.qq.com/251/20304/stodownload?encfilekey=E&amp;token=T&amp;idx=1</thumbUrl>
     <width>720.0</width><height>544.0</height>
     <coverUrl>http://wxapp.tc.qq.com/251/20304/stodownload?encfilekey=E&amp;token=T&amp;idx=1</coverUrl>
     <videoPlayDuration>128</videoPlayDuration>
@@ -545,14 +545,21 @@ LINK_XML = """<SnsDataItem><TimelineObject>
 
 
 def test_parse_post_reads_finder_feed_cover():
-    """视频号：ContentObject/mediaList 为空，媒体全在 finderFeed 下（真机 27/29 如此）。"""
+    """视频号：ContentObject/mediaList 为空，媒体全在 finderFeed 下（真机 27/29 如此）。
+
+    **取的是 `<thumbUrl>`，不是 `<coverUrl>`**：夹具特意让两者不同（真机 30 条
+    finderFeed media 里 7 条如此，其中一条连主机都不同——thumbUrl 在
+    `finder.video.qq.com`、coverUrl 在 `wxapp.tc.qq.com`）。两份 URL 写成同一个值时，
+    `_finder_media` 改读 `coverUrl` 也全绿——那是**夹具编码了本不存在的形态**。
+    变异实测：把 `_text(mm, "thumbUrl")` 改成 `coverUrl` → 本条红。
+    """
     p = moments.parse_post("P4", FINDER_XML)
     assert len(p.media) == 1
     m = p.media[0]
     assert m.kind == moments.KIND_IMAGE
     assert m.auth == moments.AUTH_READY
     assert m.token is None
-    assert m.url == ("http://wxapp.tc.qq.com/251/20304/stodownload?"
+    assert m.url == ("http://finder.video.qq.com/251/20304/stodownload?"
                      "encfilekey=E&token=T&idx=1")
     assert p.finder is not None
     assert p.finder.nickname == "视频号昵称"

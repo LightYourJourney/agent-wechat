@@ -111,7 +111,9 @@ class WxIsaac64:
 def build_url(m: moments.SnsMedia) -> str | None:
     """构造**可下载**的 URL。返回 `None` == 「本项目不会去取它」（不计失败）。
 
-    无 `url`、kind 不在白名单内、或宿主不在白名单内 → `None`，调用方按此标注，不要猜。
+    返回 `None` 有四个出口：无 `url`、kind 不在白名单内、老路径（`AUTH_SNS`）无 `token`、
+    或宿主不在白名单内（最后这条是**两个分支共用的收口**，`AUTH_READY` 也照样落 `None`）。
+    调用方按此标注，不要猜。
     老路径（`AUTH_SNS`）才拼 `token`/`idx=1`，并把图片 URL 末段尺寸标识改 `/0`（`_SIZE_SEG`）。
     视频的 token 必须放在参数**最前**（实测视频 URL 自带 10 个查询参数，位置错了服务端不认）。
     """

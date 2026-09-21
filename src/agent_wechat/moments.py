@@ -380,7 +380,11 @@ class MomentsReport:
     media_downloaded: int = 0         # 本轮联网下载成功
     media_failed: int = 0             # 下载或解密失败
     media_garbage: int = 0            # 其中「解密后不是已知图片格式」的条数（降级行带它）
-    media_not_downloaded: int = 0     # 未开启联网，或「不去取」（无 url / 宿主不在白名单）；封面不算
+    # 未开启联网，或「不去取」（无 url / 宿主不在白名单）。封面分两种，别混为一谈：
+    # **视频封面**（与本体同目录的 `{stem}_thumb.jpg`）由本体那条媒体派生、**不是**
+    # `p.media` 的成员，不进任何桶；**视频号封面**由 `_finder_media` 产成一条 `p.media`
+    # 成员，照常进桶。
+    media_not_downloaded: int = 0
     window: tuple[int, int] | None = None      # (最早, 最新) 时间戳
     degraded: list[str] = dataclasses.field(default_factory=list)
     remaining: int = 0                # 撞上 limit 后本会导出、但没进来的动态条数

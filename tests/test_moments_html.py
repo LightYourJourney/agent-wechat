@@ -3,6 +3,8 @@ import dataclasses
 import datetime
 import html.parser
 
+import pytest
+
 from agent_wechat import moments, moments_html
 
 
@@ -228,6 +230,59 @@ def test_backslash_in_userinfo_is_not_rendered_as_link():
         [_mk(link=moments.SnsLink(url="https://evil.com\\@mp.weixin.qq.com/x", title="t"))],
         _rep())
     assert "<a href" not in doc
+
+
+@pytest.mark.parametrize("host", [
+    "2852039166",        # 十进制整数 —— node: 169.254.169.254（link-local / 云 metadata）
+    "3232235777",        # 十进制整数 —— node: 192.168.1.1
+    "0x7f000001",        # 十六进制 —— node: 127.0.0.1
+    "0X7F000001",        # 同上，`0X` 大小写不敏感 —— node: 127.0.0.1
+    "017700000001",      # 前导零按八进制 —— node: 127.0.0.1
+    "0x",                # node: 0.0.0.0（Linux 上连的就是本机）
+    "0",                 # 单段数字 —— node: 0.0.0.0
+    "1",                 # node: 0.0.0.1
+    "1.2",               # 少于四段也照样解析 —— node: 1.0.0.2
+    "192.168.1.1",       # 裸 IPv4：真机外链都是域名，保守降级不损失什么
+    "192.168.1.1.",      # 末尾点是绝对域名形式，node 照样落到 192.168.1.1
+    "2852039166%2e",     # 百分号编码的 `.` —— node: 169.254.169.254
+])
+def test_host_that_whatwg_resolves_as_ipv4_is_not_rendered_as_link(host):
+    """WHATWG 会把这个 host 当 IPv4 解析，Python 的 `urlsplit` 不会——徽章与落地不一致。
+
+    实测（node 的 `new URL(u).hostname`，逐条见参数表）：徽章会显示 `2852039166`，
+    浏览器实际去 **169.254.169.254**。这正是 spec §7.4 那条守卫自己的设计理由所禁止的
+    ——「两套 URL 语义不一致…它本身就是骗人的」。
+
+    两处判据各自 load-bearing，**分别删都会红**（变异实测）：
+      · 删 `_whatwg_ipv4(host)` → 前 11 条红；
+      · 删 `"%" in host` → 最后一条（`2852039166%2e`）红——只查数字会被它绕过。
+
+    二进制 `0b101` 不在判据内：node 的 `new URL("https://0b101/x").hostname` 就是
+    `0b101`，WHATWG 不认它（已实测，故不必为它降级）。
+    """
+    url = f"https://{host}/promo"
+    doc = moments_html.render([_mk(link=moments.SnsLink(url=url, title="t"))], _rep())
+    assert "<a href" not in doc
+    assert url in doc                                     # 降级为纯文本，信息不丢
+
+
+@pytest.mark.parametrize("url,host", [
+    ("https://mp.weixin.qq.com/s/X", "mp.weixin.qq.com"),
+    ("https://wxapp.tc.qq.com/251/20304/stodownload", "wxapp.tc.qq.com"),
+    ("https://shzjwxsns.video.qq.com/150/20250/x", "shzjwxsns.video.qq.com"),
+    ("https://szmmsns.qpic.cn/mmsns/XYZ/0", "szmmsns.qpic.cn"),
+    ("https://mp.weixin.qq.com:8443/s/X", "mp.weixin.qq.com"),          # 带端口
+    ("https://user:pass@mp.weixin.qq.com/s/X", "mp.weixin.qq.com"),     # 正常 userinfo
+])
+def test_normal_domains_still_render_as_links(url, host):
+    """反面对照：数字判据**不得**误伤真机上会出现的外链形态。
+
+    没有这一条，「整类拒掉」可以退化成「全拒」而没人发现——降级分支同样不出
+    `<a href`，上面那组只断言「没有 `<a href`」的用例会全绿。
+    """
+    doc = moments_html.render([_mk(link=moments.SnsLink(url=url, title="t"))], _rep())
+    assert f'href="{url}"' in doc
+    assert f'class="host">{host}<' in doc
 
 
 def test_empty_host_is_not_rendered_as_link():

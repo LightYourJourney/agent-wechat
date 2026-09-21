@@ -443,6 +443,15 @@ VIDEO15_XML = """<SnsDataItem><TimelineObject>
  </ContentObject>
 </TimelineObject><LocalExtraInfo><nickname>张三</nickname></LocalExtraInfo></SnsDataItem>"""
 
+# 上面那条的变体：**封面宿主不在白名单**（真机 158/181 的视频封面就在
+# `vweixinthumb.tc.qq.com`），本体仍在白名单内（`shzjwxsns.video.qq.com`）。
+# 由 `VIDEO15_XML` 派生而不是就地复制一份：`<thumb>` 的 URL 一旦改动，这里的
+# replace 会**失配**——不报错，但 `test_video_cover_outside_allowlist_is_skipped_silently`
+# 立刻变红（那时封面会被当成白名单内的封面下载、落出一张 `*_thumb.jpg`），不会静默绿。
+VIDEO15_THUMB_OFFLIST_XML = VIDEO15_XML.replace(
+    "http://shzjwxsns.video.qq.com/150/20250/snsvideodownload",
+    "http://vweixinthumb.tc.qq.com/150/20250/snsvideodownload")
+
 # spec §8.3 夹具 ④（副本）
 LINK_XML = """<SnsDataItem><TimelineObject>
  <id>P5</id><username>wxid_friend</username><createTime>1735776000</createTime>
@@ -548,6 +557,30 @@ def test_cover_failure_counts_failed_but_not_losing_the_body(env):
     res = usecases.moments_export(account=ACCT, with_media=True, fetch=fetch)
     assert res.report.media_downloaded == 2     # 基线 + 本体（本体仍算成功）
     assert res.report.media_failed == 1         # 封面失败不静默
+    assert not list(pathlib.Path(res.out_dir).rglob("*_thumb.jpg"))
+
+
+def test_video_cover_outside_allowlist_is_skipped_silently(env):
+    """封面宿主不在白名单 → **静默跳过**：本体照常下载、封面不落盘，
+    `media_failed` 与 `media_not_downloaded` **都不因该封面增加**。
+
+    守的是 `_resolve_media` 里那行 `if sns_media.build_url(tcover) is not None:`。
+    它是 A4 恒等式（`media_downloaded + media_failed + media_not_downloaded` 对上
+    `p.media` 的成员数）唯一的支点：封面若被送进任何一条计数分支，账目就对不上；
+    真机 158/181 的视频封面宿主是 `vweixinthumb.tc.qq.com`（证书名不匹配、不在白名单），
+    所以这条不是理论情形。
+
+    变异实测：把这行守卫改成 `if True:`（或删掉 if，直接无条件试取）→ 封面被 fetch
+    并落盘 → 本条**两条**断言同时红（多一次请求 + 多一张 `*_thumb.jpg`）。
+    """
+    _add_post(VIDEO15_THUMB_OFFLIST_XML)
+    calls = []
+    res = usecases.moments_export(account=ACCT, with_media=True,
+                                  fetch=lambda m, **kw: (calls.append(m), _jpeg())[1])
+    assert res.report.media_downloaded == 2          # 基线的图 + 小视频本体
+    assert res.report.media_failed == 0
+    assert res.report.media_not_downloaded == 0      # 跳过≠「不去取」，封面不该进这个桶
+    assert [m for m in calls if "vweixinthumb" in (m.url or "")] == []   # 一个请求都不发
     assert not list(pathlib.Path(res.out_dir).rglob("*_thumb.jpg"))
 
 

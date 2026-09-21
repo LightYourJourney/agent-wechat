@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import datetime
 import html
+import re
 from typing import Iterable
 
 from . import moments
@@ -50,6 +51,26 @@ def _media_block(m: moments.SnsMedia) -> str:
     return f'<div class="ph">[{why}：{_esc(m.kind)}]</div>'
 
 
+# WHATWG 把「末段是数字」的 host 当 IPv4 试解析（纯十进制、`0x…` 十六进制、前导零按
+# 八进制）；Python 的 `urlsplit` 只管切字符串。于是 `https://2852039166/promo` 徽章上
+# 写着 `2852039166`，浏览器实际去 **169.254.169.254**（云 metadata / link-local）。
+_NUMERIC_LABEL = re.compile(r"^(?:[0-9]+|0[xX][0-9a-fA-F]*)\Z")
+
+
+def _whatwg_ipv4(host: str) -> bool:
+    """这个 host 会被 WHATWG 当 IPv4 解析吗（而徽章会把它原样显示出来）。
+
+    判据是 WHATWG「ends in a number」那一步的**超集**：末段是纯数字或 `0x`/`0X`
+    开头的十六进制即为真——前导零的八进制（`017700000001` → 127.0.0.1）也是纯数字，
+    裸 IPv4（`192.168.1.1`）同样命中；真机上外链都是域名，一并降级不损失什么。
+    先去掉末尾的点：`192.168.1.1.` 是绝对域名形式，浏览器照样落到 192.168.1.1。
+    二进制 `0b101` 不在判据内——实测 node 的 `new URL("https://0b101/x").hostname`
+    就是 `0b101`，WHATWG 不认它。
+    """
+    label = host.rstrip(".").rsplit(".", 1)[-1]
+    return bool(_NUMERIC_LABEL.match(label))
+
+
 def _link_block(link: moments.SnsLink) -> str:
     """外链块——本模块唯一有真实安全面的渲染。
 
@@ -62,11 +83,18 @@ def _link_block(link: moments.SnsLink) -> str:
     反斜杠**必须查 `netloc` 而不是 `hostname`**：`hostname` 已经把 userinfo 丢掉，
     而 WHATWG 先按 `\\` 切一刀——`https://evil.com\\@mp.weixin.qq.com/x` 的 `hostname`
     是干干净净的 `mp.weixin.qq.com`，徽章显示它，浏览器却落到 `evil.com`。
+
+    同一族里还有第三类：**WHATWG 会当 IPv4 解析的 host**（`_whatwg_ipv4`）与
+    **含 `%` 的 host**。`urlsplit` 不解百分号编码，WHATWG 解——
+    `https://2852039166%2e/promo` 的 `hostname` 是 `2852039166%2e`（看着不像地址），
+    浏览器解码成 `2852039166.` 后照样落到 169.254.169.254。**只加数字判据挡不住它**，
+    故 `%` 一并拒掉（合法主机名里没有 `%`，正常域名/IPv6 字面量都不含）。
     """
     s = moments.split_url(link.url)
     host = (s.hostname or "").lower() if s is not None else ""
     if (s is None or s.scheme not in ("http", "https") or not host
-            or "\\" in s.netloc or not host.isascii()):
+            or "\\" in s.netloc or not host.isascii()
+            or "%" in host or _whatwg_ipv4(host)):
         return f'<div class="ph">[链接：{_esc(link.url)}]</div>'
     title = _esc(link.title) or _esc(link.url)
     return (f'<div class="link"><a href="{_esc(link.url)}" target="_blank" '
