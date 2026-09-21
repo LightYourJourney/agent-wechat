@@ -288,7 +288,7 @@ def export_moments(contact: str | None = None, months: str | None = None,
     **默认不联网**：with_media=False 时全程零网络，产物里的媒体一律标注
     「远程，未下载」。设为 True 才会下载并解密媒体本体——这会向微信 CDN（后缀
     `*.qpic.cn` / `*.video.qq.com`，加精确主机 `wxapp.tc.qq.com`）发起请求
-    （本项目零网络红线上本次新增的显式例外），且耗时随媒体数量增长，**下载量约 +0.65 GB**
+    （本项目零网络红线上本次新增的显式例外），且耗时随媒体数量增长，**下载量约 +0.65 GiB**
     （小视频 / 视频号 / 视频封面这批内容此前不下载）。
     产物落 out_dir 的 index.html（目录 0700），用文件系统工具自行打开；
     信封不回传文件清单。
