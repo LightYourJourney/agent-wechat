@@ -136,6 +136,9 @@ def build_url(m: moments.SnsMedia) -> str | None:
 def host_allowed(url: str) -> bool:
     """只允许白名单内主机——防止恶意 XML 把请求引向任意主机。
 
+    **只判 host、不判 scheme**：完整判据是 `https_allowed`。两者分开只为让「域不对」与
+    「域对但 scheme 不对」在错误文案里分得开。
+
     后缀匹配（`.qpic.cn` / `.video.qq.com`）覆盖全部子域；`ALLOWED_HOSTS` 是**精确相等**，
     **不含子域**（spike 只验过 `wxapp.tc.qq.com` 本身）。判据用 `moments.safe_host`：
     裸 `urlsplit` 对畸形输入抛 `ValueError`，会逃出 core。
@@ -147,7 +150,12 @@ def host_allowed(url: str) -> bool:
 
 
 def https_allowed(url: str) -> bool:
-    """白名单内主机 **且** https——第一跳与每一跳重定向共用这个判据。"""
+    """白名单内主机 **且** https——第一跳与每一跳重定向共用这个判据。
+
+    域对了但 scheme 不对同样是洞：只查 host 时，`*.qpic.cn` 上一个 302 到
+    `http://shmmsns.qpic.cn/…`（**同一个域**）会被照常跟随，第二跳是明文，
+    而这条请求带着 token。
+    """
     s = moments.split_url(url)
     return s is not None and s.scheme == "https" and host_allowed(url)
 
