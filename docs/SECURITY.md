@@ -99,7 +99,7 @@
 | 控制项 | 措施 |
 |---|---|
 | 文件权限 | `~/.agent-wechat/` 全目录 `0700`，passphrase 缓存 `0600`（仅当前用户可读） |
-| 全盘加密 | 索引明文依赖 **FileVault**（**安装前提**，见 INSTALL.md）；未开 FileVault 的机器不应使用本项目的导出功能。⚠️ **代码不校验也不阻断**，需自行用 `fdesetup status` 确认 |
+| 全盘加密 | 索引明文依赖 **FileVault**（**建议开启**，见 INSTALL.md）；未开 FileVault 的机器不建议使用本项目的导出功能。⚠️ **代码不校验也不阻断**，建议自行用 `fdesetup status` 确认 |
 | 备份排除 | 首次使用时代码自动执行 `tmutil addexclusion ~/.agent-wechat`（可用 `tmutil isexcluded` 验证）；失败时请手动执行，防止明文档案绕过 FileVault 进入备份盘 |
 | 临时文件 | 解密明文仅在 `tmp/`（0700）短暂存在，单分片、用后即焚——**按消息查媒体归属（`media locate` / `get_message_media`）的语音本体判定也走这一条**；唯一例外是 `decrypt --out` 显式导出的明文库（见上表） |
 | 传输 | MCP 走 stdio；无网络监听、无云同步路径 |
