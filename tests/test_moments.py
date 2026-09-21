@@ -483,6 +483,20 @@ def test_media_of_takes_key_from_enc_element_when_encrypted():
     assert m.thumb is not None                   # 封面地址保留
 
 
+def test_media_of_keeps_encrypted_true_when_enc_key_missing():
+    """`<enc>` 文本 '1' 却没有 `enc@key`：`encrypted` 仍须为 True。
+
+    `encrypted` 忠实反映**XML 说了什么**，不是「我们能不能解开」。若有人为了「修好
+    不变量」把它改成 `... and key is not None`，`fetch` 里那条早退就永远不触发，
+    「声明已加密但无密钥」会退回静默存密文——这条就是拦那个的。
+    """
+    xml = VIDEO15_XML.replace('<enc key="20260918">1</enc>', "<enc>1</enc>")
+    assert "<enc>1</enc>" in xml                          # 前提：替换确实发生了
+    m = moments.parse_post("P3", xml).media[0]
+    assert m.encrypted is True
+    assert m.key is None
+
+
 def test_media_of_keeps_sns_path_when_token_attribute_present():
     """有 url@token ⟹ AUTH_SNS，密钥仍取自 url@key。"""
     m = moments.parse_post("P1", AUTH_SNS_XML).media[0]

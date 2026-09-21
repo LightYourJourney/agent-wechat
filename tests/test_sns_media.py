@@ -242,6 +242,24 @@ def test_fetch_rejects_plaintext_url_without_request():
     assert op.calls == []                                 # 一个请求都没发
 
 
+def test_fetch_rejects_encrypted_without_key_before_request():
+    """`<enc>` 文本 '1' 却没有 `enc@key`：XML 自相矛盾，必须**在发请求之前**出声。
+
+    不能放行——放行会靠 `if m.key and (...)` 短路成「返回密文」，落盘后 `_sniff_ext`
+    判不出来，最终报成「解密后不是已知图片格式」，与「密钥错」混为一谈。
+
+    断言的是**早退身份**（那条具体消息）而非仅异常类型：删掉这条早退后，
+    `m.key` 为 None 会让 `if m.key and (...)` 短路、**照样返回密文且不抛**，
+    只写 `pytest.raises(SnsMediaError)` 对这个变异是假绿。
+    """
+    m = _m(key=None, encrypted=True)
+    op = _Opener([b"ciphertext"])
+    with pytest.raises(sns_media.SnsMediaError) as ei:
+        sns_media.fetch(m, opener=op)
+    assert "enc@key" in str(ei.value)                     # 早退那条消息，而非重试耗尽那条
+    assert op.calls == []                                 # 判据只看 XML，请求不必发
+
+
 def test_https_allowed_requires_both():
     assert sns_media.https_allowed("https://shmmsns.qpic.cn/x")
     assert not sns_media.https_allowed("http://shmmsns.qpic.cn/x")

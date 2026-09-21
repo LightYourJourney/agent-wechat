@@ -248,6 +248,17 @@ def fetch(m: moments.SnsMedia, *, timeout: float = 20.0, attempts: int = 3,
         # 而 urllib 会把 scheme 归一成小写——域名白名单对此无感，于是第一跳走明文、
         # token 跟着明文出去。判据与重定向的每一跳共用同一个 `https_allowed`。
         raise SnsMediaError("拒绝非 https 的媒体地址")
+    if m.encrypted and not m.key:
+        # XML 自相矛盾：`<enc>` 文本是 '1'（声明已加密）却没有 `enc@key`。真机 5087 个
+        # media 零例外，且那 312 个 `'0'` 哨兵全是 `<enc>0</enc>`——这里本不该触发，
+        # 一旦触发就是微信改了形态，必须**出声**。
+        # 不能放行：原先靠 `if m.key and (...)` 短路成「返回密文」，落盘后 `_sniff_ext`
+        # 判不出来，最终报成「解密后不是已知图片格式」——与「密钥错」「密钥缺失」混为
+        # 一谈，排查会被引向错方向。
+        # 放在重试循环**之前**：判据只看 XML、与响应无关，请求回来也解不开；放进循环
+        # 还会被 `except Exception` 吞掉重试，三次后只剩「下载失败（重试 3 次）」，
+        # 真正的原因反而丢了。
+        raise SnsMediaError("媒体已加密但 XML 未给出密钥（enc@key 缺失）")
 
     op = opener if opener is not None else _default_opener()
     last: Exception | None = None
