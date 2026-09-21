@@ -26,15 +26,15 @@ SECOND_XML = """<SnsDataItem><TimelineObject>
  <contentDesc>第二条</contentDesc>
 </TimelineObject><LocalExtraInfo><nickname>老王</nickname></LocalExtraInfo></SnsDataItem>"""
 
-# 无 token 的媒体（实况照片形态）：build_url → None，不可下载，联网时也不该白发请求。
+# 白名单外的宿主：build_url 返回 None，「不去取」，一个请求都不发。
 NO_TOKEN_XML = """<SnsDataItem><TimelineObject>
  <id>P3</id><username>wxid_friend</username><createTime>1735776000</createTime>
- <contentDesc>实况照片</contentDesc>
- <ContentObject><type>2</type><mediaList><media>
+ <contentDesc>站外图</contentDesc>
+ <ContentObject><type>1</type><contentSubStyle>0</contentSubStyle><mediaList><media>
    <id>m3</id><type>2</type>
-   <url type="1" md5="00112233445566778899aabbccddeeff">http://shmmsns.qpic.cn/sns/u/3</url>
+   <url type="1" md5="00112233445566778899aabbccddeeff">https://y.music.163.com/x.jpg</url>
  </media></mediaList></ContentObject>
-</TimelineObject><LocalExtraInfo><nickname>老王</nickname></LocalExtraInfo></SnsDataItem>"""
+</TimelineObject><LocalExtraInfo><nickname>张三</nickname></LocalExtraInfo></SnsDataItem>"""
 
 
 def _md5_xml(bad_md5: str) -> str:
@@ -392,19 +392,35 @@ def test_export_save_failure_is_counted_and_isolated(env, monkeypatch):
 
 
 def test_export_undownloadable_media_is_not_fetched(env):
-    """`with_media=True` 不等于「见媒体就下载」：无 token 的媒体本地不可下载，
-    不该白发一次必然失败的请求（且要如实计入 not_downloaded）。"""
+    """`with_media=True` 不等于「见媒体就下载」：**白名单外**的媒体不去取，
+    不该白发一次必然失败的请求（且要如实计入 not_downloaded）。
+
+    `calls` 里会有**一条基线**动态的请求（`env` 夹具顶部的 `XML`，宿主
+    `shmmsns.qpic.cn` 在白名单内），所以按 URL 过滤，**不能**断言 `calls == []`。
+    """
     _add_post(NO_TOKEN_XML)
     calls = []
+    res = usecases.moments_export(account=ACCT, with_media=True,
+                                  fetch=lambda m, **kw: (calls.append(m), _jpeg())[1])
+    assert res.report.media_not_downloaded == 1
+    assert res.report.media_downloaded == 1                  # 基线那条
+    assert [m for m in calls if "y.music.163.com" in (m.url or "")] == []
 
-    def fetch(m, **kw):
-        calls.append(m)
-        return _jpeg()
 
-    res = usecases.moments_export(account=ACCT, with_media=True, fetch=fetch)
-    assert res.report.media_not_downloaded == 1         # 无 token 那条
-    assert res.report.media_downloaded == 1             # 有 token 那条
-    assert len(calls) == 1                              # 只发了一次请求
+def test_export_downloads_image_without_token_when_host_allowed(env):
+    """**本期推翻的旧语义**：无 `token` ≠ 不可下载。
+
+    `type=7` 的 61 条就是「无 token 但在微信 CDN 上、公开可下」。旧测试的注释
+    「无 token 的媒体联网时也不该白发请求」正是本期要改掉的那条假设。
+    计数同样含基线那条。
+    """
+    _add_post(NO_TOKEN_XML.replace("https://y.music.163.com/x.jpg",
+                                   "http://szmmsns.qpic.cn/mmsns/XYZ/0"))
+    calls = []
+    res = usecases.moments_export(account=ACCT, with_media=True,
+                                  fetch=lambda m, **kw: (calls.append(m), _jpeg())[1])
+    assert len(calls) == 2                       # 基线 + 新增那条
+    assert res.report.media_downloaded == 2      # 同上
 
 
 # spec §8.3 夹具 ②（副本；逐字与 tests/test_moments.py 的同名夹具一致）

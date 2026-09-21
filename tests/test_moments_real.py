@@ -74,8 +74,13 @@ def test_real_media_download_decrypts_one_image():
     """
     try:
         acc = account.resolve_account(None)
+        # 只挑真的走解密的老路径媒体。改动后 `build_url` 对 AUTH_READY 也返回非 None，
+        # 候选集会混进「下载一张明文图再嗅探」的输入——那样这条本项目唯一的端到端
+        # 解密断言会**永远绿**，`decrypt_stream` 全坏了也不红。
         cands = [m for p in moments.iter_posts(acc) for m in p.media
-                 if m.kind == moments.KIND_IMAGE and sns_media.build_url(m)]
+                 if m.kind == moments.KIND_IMAGE
+                 and m.auth == moments.AUTH_SNS
+                 and sns_media.build_url(m)]
     except _UNAVAILABLE as e:
         pytest.skip(f"本机不可用：{type(e).__name__}")
     if len(cands) < 2:

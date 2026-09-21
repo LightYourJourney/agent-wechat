@@ -198,11 +198,17 @@ def test_fetch_error_never_echoes_token():
 
 
 def test_fetch_rejects_foreign_host_before_any_request():
-    """恶意 XML 可能把 URL 指向任意主机——白名单必须在发请求之前拦住。"""
+    """恶意 XML 可能把 URL 指向任意主机——白名单必须在发请求之前拦住。
+
+    Task 3 起「宿主不在白名单」在 `build_url` 就判为「不去取」（返回 `None`），
+    于是 `fetch` 走的是**更早**的早退分支，消息里不再有域名。断言**两个真正的守卫**
+    （`build_url` 返回 `None`、一个请求都没发），而不是消息文本——那是实现细节。
+    """
+    m = _m(url="http://evil.example.com/x.jpg", token="T")
     op = _Opener([])
-    with pytest.raises(sns_media.SnsMediaError) as ei:
-        sns_media.fetch(_m(url="http://evil.example.com/x.jpg", token="T"), opener=op)
-    assert "evil.example.com" in str(ei.value)
+    assert sns_media.build_url(m) is None
+    with pytest.raises(sns_media.SnsMediaError):
+        sns_media.fetch(m, opener=op)
     assert op.calls == []                      # 一个请求都没发
 
 
