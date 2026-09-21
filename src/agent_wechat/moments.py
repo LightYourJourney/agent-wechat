@@ -376,7 +376,6 @@ class MomentsReport:
     comments: int = 0
     likes: int = 0
     failed: int = 0                   # 解析失败被跳过的动态条数（与 media_failed 无关）
-    media_local: int = 0              # 使用了本地缓存图
     media_downloaded: int = 0         # 本轮联网下载成功
     media_failed: int = 0             # 下载或解密失败
     media_garbage: int = 0            # 其中「解密后不是已知图片格式」的条数（降级行带它）

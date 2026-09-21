@@ -26,7 +26,7 @@ def _mk(media=(), comments=(), text="正文", link=None, finder=None):
 
 
 def _rep(**kw):
-    base = dict(posts=1, comments=0, likes=0, media_local=0, media_downloaded=0,
+    base = dict(posts=1, comments=0, likes=0, media_downloaded=0,
                 media_failed=0, media_not_downloaded=0, window=(1735689600, 1735689600))
     base.update(kw)
     return moments.MomentsReport(**base)
@@ -44,6 +44,18 @@ def test_html_is_parseable_and_has_window_notice():
     t = _text_of(doc)
     assert "缓存窗口" in t and "不是完整历史" in t
     assert "老王" in t and "正文" in t
+
+
+def test_header_has_no_phantom_local_counter():
+    """页首不得出现「媒体：本地 N」。
+
+    这个计数曾经出现、且**恒为 0**：`MomentsReport.media_local` 全仓无写入点，
+    而本工具从不读本机缓存图（`cache/*/Sns/Img/` 的文件名与动态对不上）。印出来
+    读着像「查过了，本机没有」，实际是「根本没查」——比不印更坏。
+    """
+    t = _text_of(moments_html.render([_mk()], _rep()))
+    assert "媒体：本地" not in t
+    assert "媒体：已下载" in t                        # 守住该行其余部分，防止靠删整行通过
 
 
 def test_text_is_escaped():

@@ -144,7 +144,7 @@ def _notice(report: moments.MomentsReport, n: int) -> str:
     rows = [
         f"本产物覆盖 <b>{lo} ~ {hi}</b>，共 <b>{n}</b> 条动态。",
         "<b>这是微信本地缓存窗口，不是完整历史</b>——更早的动态不在本机。",
-        (f"媒体：本地 {report.media_local} · 已下载 {report.media_downloaded} · "
+        (f"媒体：已下载 {report.media_downloaded} · "
          f"未下载 {report.media_not_downloaded} · 失败 {report.media_failed}。"),
         f"互动：评论 {report.comments} · 点赞 {report.likes}。",
     ]
