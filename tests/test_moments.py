@@ -382,3 +382,21 @@ def test_video_duration_accepts_float(raw, want):
     """
     assert moments.parse_post(
         "T1", VIDEO_DURATION_XML.format(dur=raw)).media[0].video_duration == want
+
+
+def test_split_url_never_raises_on_hostile_input():
+    """畸形 URL 必须返回 None，不得抛。
+
+    `urlsplit("https://[::1/x")` 实测抛 `ValueError: Invalid IPv6 URL`——而 contentUrl
+    是好友可控的 XML，裸 ValueError 会逃出 core 层（同 `_ts` / `_duration` 已收口的类）。
+    """
+    for bad in ("https://[::1/x", "http://[abc/", "https://[", "http://]", "https://[a/b]"):
+        assert moments.split_url(bad) is None, bad
+        assert moments.safe_host(bad) is None, bad
+
+
+def test_split_url_normal_cases():
+    assert moments.safe_host("https://Example.COM/p?q=1") == "example.com"
+    assert moments.split_url(None) is None
+    assert moments.split_url("") is not None          # 空串是合法输入，不是畸形
+    assert moments.safe_host("") is None              # 但没有 host

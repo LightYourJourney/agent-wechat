@@ -356,3 +356,9 @@ def test_redirect_to_same_host_is_followed():
     assert sns_media.fetch(_m(), opener=op, attempts=1) == b"\xff\xd8\xffok"
     assert len(t.calls) == 2
     assert t.calls[1].full_url == "https://shmmsns.qpic.cn/sns/yyy/0?token=TOK&idx=1"
+
+
+def test_host_allowed_survives_malformed_url():
+    """host_allowed 是既有的裸 urlsplit 调用点——畸形输入不得抛。"""
+    assert sns_media.host_allowed("https://[::1/x") is False
+    assert sns_media.https_allowed("https://[::1/x") is False

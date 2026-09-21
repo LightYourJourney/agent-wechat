@@ -1,7 +1,8 @@
 """朋友圈远程媒体：URL 构造 / 下载 / WX-ISAAC64 解密。
 
 **本模块是零网络红线上本次新增的显式例外**（spec §6）：只有 `fetch()` 会发请求，
-且只连微信 CDN 两个域；调用方默认不启用（`--with-media` / `with_media=True`）。
+且只连白名单内的微信 CDN 主机（`*.qpic.cn` / `*.video.qq.com` 后缀，外加**精确**主机
+`wxapp.tc.qq.com`）；调用方默认不启用（`--with-media` / `with_media=True`）。
 """
 from __future__ import annotations
 
@@ -19,6 +20,7 @@ GOLDEN = 0x9E3779B97F4A7C13
 VIDEO_HEAD = 128 * 1024
 USER_AGENT = "MicroMessenger Client"
 ALLOWED_SUFFIXES = (".qpic.cn", ".video.qq.com")
+ALLOWED_HOSTS = ("wxapp.tc.qq.com",)
 _SIZE_SEG = re.compile(r"/(?:150|200|480)$")
 
 
@@ -132,23 +134,22 @@ def build_url(m: moments.SnsMedia) -> str | None:
 
 
 def host_allowed(url: str) -> bool:
-    """只允许微信 CDN 两个域——防止恶意 XML 把请求引向任意主机。
+    """只允许白名单内主机——防止恶意 XML 把请求引向任意主机。
 
-    **只判 host、不判 scheme**：完整判据是 `https_allowed`。两者分开只为让「域不对」与
-    「域对但 scheme 不对」在错误文案里分得开。
+    后缀匹配（`.qpic.cn` / `.video.qq.com`）覆盖全部子域；`ALLOWED_HOSTS` 是**精确相等**，
+    **不含子域**（spike 只验过 `wxapp.tc.qq.com` 本身）。判据用 `moments.safe_host`：
+    裸 `urlsplit` 对畸形输入抛 `ValueError`，会逃出 core。
     """
-    host = (urllib.parse.urlsplit(url).hostname or "").lower()
-    return any(host.endswith(sfx) for sfx in ALLOWED_SUFFIXES)
+    host = moments.safe_host(url)
+    if host is None:
+        return False
+    return host in ALLOWED_HOSTS or any(host.endswith(sfx) for sfx in ALLOWED_SUFFIXES)
 
 
 def https_allowed(url: str) -> bool:
-    """微信 CDN 域名 **且** https——第一跳与每一跳重定向共用这个判据。
-
-    域对了但 scheme 不对同样是洞：只查 host 时，`*.qpic.cn` 上一个 302 到
-    `http://shmmsns.qpic.cn/…`（**同一个域**）会被照常跟随，第二跳是明文，
-    而这条请求带着 token。
-    """
-    return urllib.parse.urlsplit(url).scheme == "https" and host_allowed(url)
+    """白名单内主机 **且** https——第一跳与每一跳重定向共用这个判据。"""
+    s = moments.split_url(url)
+    return s is not None and s.scheme == "https" and host_allowed(url)
 
 
 def decrypt_stream(data: bytes, key: str, *, video: bool = False) -> bytes:

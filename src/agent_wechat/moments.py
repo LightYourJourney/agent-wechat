@@ -7,6 +7,7 @@ from __future__ import annotations
 import dataclasses
 import math
 import sqlite3
+import urllib.parse
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from typing import Iterator
@@ -16,6 +17,33 @@ from . import decrypt, errors, keys, media, paths
 TYPE_VIDEO_POST = 15
 KIND_IMAGE, KIND_VIDEO, KIND_OTHER = "image", "video", "other"
 CMT_LIKE, CMT_COMMENT = "like", "comment"
+
+
+def split_url(url: str | None):
+    """安全的 `urllib.parse.urlsplit`：`None` 或畸形输入返回 `None`，**不抛**。
+
+    `urlsplit("https://[::1/x")` → `ValueError: Invalid IPv6 URL`（实测）。URL 全部来自
+    好友可控的 XML，裸 `ValueError` 不是 `AgentWeChatError`，会一路穿透到 CLI 打
+    traceback（契约见 errors.py 开篇）。同 `_ts` / `_duration` 已收口的那一类。
+
+    `None`（调用方根本没拿到 URL）→ `None`；`""` 是**合法输入** → 空的 `SplitResult`。
+    **不要写成 `urlsplit(url or "")`**：那会把 `None` 并进空串，`split_url(None)` 就
+    返回 `SplitResult` 而不是 `None`（`test_split_url_normal_cases` 会红）。
+    """
+    if url is None:
+        return None
+    try:
+        return urllib.parse.urlsplit(url)
+    except ValueError:
+        return None
+
+
+def safe_host(url: str | None) -> str | None:
+    """URL → 小写主机名；畸形输入或没有主机时返回 `None`。"""
+    s = split_url(url)
+    if s is None:
+        return None
+    return (s.hostname or "").lower() or None
 
 
 @dataclass(frozen=True)
