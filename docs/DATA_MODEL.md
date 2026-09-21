@@ -215,9 +215,13 @@ SnsTimeLine(tid, user_name, content, pack_info_buf)
 | `TimelineObject/contentDesc` | 动态正文（可空；本机 1,718/1,923 非空） |
 | `TimelineObject/ContentObject/type` | `15` = 视频动态 |
 | `ContentObject/mediaList/media` | 媒体引用；`media/type`：`2`=图片、`6`=视频、其余归「未分类」 |
-| `media/url@token`、`@key`、`@md5`、`@enc_idx` | **属性，不是子元素**——只看元素文本会漏掉全部鉴权信息（踩过的坑） |
+| `media/url@token`、`@key`、`@md5`、`@enc_idx` | **属性，不是子元素**——只看元素文本会漏掉全部鉴权信息（踩过的坑）。**`@token` 不是「能不能下」的判据**：`type=15`（小视频）的 token 在 **URL 查询串**里，`type=7` **根本没有**；两者都判 `AUTH_READY`（URL 已完整，原样 GET） |
+| `media/enc` | 加密标记与密钥：元素文本 `1` ⟺ 有 `enc@key`；`@key` 为 `'0'` 是「无密钥」哨兵（真机 312 次），按无密钥处理 |
 | `media/videoDuration` | 视频时长（秒，可缺省） |
-| `media/LivePhoto/liveMedia/url`、`enc@key` | 实况照片；其主 `url` 无 `token` → 不可下载 |
+| `ContentObject/finderFeed/nickname`、`desc`、`mediaList/media/videoPlayDuration` | 视频号卡片的作者昵称 / 描述 / 时长。这类动态的 `ContentObject/mediaList` 多为空，媒体在 `finderFeed` 下 |
+| `finderFeed/mediaList/media/thumbUrl` | 视频号**封面** → 当作一条 `AUTH_READY` 图片进 `media`（`<url>` 是视频本体，不取） |
+| `ContentObject/contentUrl`、同级 `ContentObject/title` | 正文里的外链与其标题。`contentUrl` 是 `support.weixin.qq.com` 桩（「微信版本不支持此内容」）时不算外链 |
+| `media/LivePhoto/liveMedia/url`、`enc@key` | 实况照片；**`live_url` / `live_key` 不进下载路径**（`build_url` / `_resolve_media` 都不读），故本机不可下载。**理由不是「无 `token`」**——无 `token` 只意味着 `AUTH_READY` |
 | `LocalExtraInfo/comment_user_list/user_comment` | 评论（`type=2`；带 `ref_username` 即「A 回复 B」，见下方⚠️） |
 | `LocalExtraInfo/like_user_list/user_comment` | 点赞（`type=1`，只有昵称、无正文） |
 | `LocalExtraInfo/with_user_list/user_comment` | `type=4`，与评论同归一类 |

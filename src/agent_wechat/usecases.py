@@ -1209,7 +1209,11 @@ def _resolve_media(p: "moments.SnsPost", out_root, report, with_media: bool,
             out.append(m)
             continue
         if sns_media.build_url(m) is None:
-            report.media_not_downloaded += 1          # 无 token（如实况照片）→ 不可下载
+            # `build_url` 返回 None == 「本项目不去取」：无 url、kind 不在白名单内，
+            # 或**宿主不在 CDN 白名单**。**理由不是「无 token」**——本期之后无 token
+            # 只意味着 `AUTH_READY`（URL 已完整，照样可下）；实况照片落在这里是因为
+            # `live_url` 不进下载路径。
+            report.media_not_downloaded += 1
             out.append(m)
             continue
         try:

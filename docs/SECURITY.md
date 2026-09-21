@@ -49,8 +49,10 @@
 - **触发条件**：只有用户显式指定 `--with-media`（CLI `moments export`）或
   `with_media=True`（MCP `export_moments`）时才成立。两者默认都是 `False`
   ——不加则整次导出一个网络请求都不发。
-- **目标域**：只连微信 CDN 的 `*.qpic.cn` 与 `*.video.qq.com`（代码里是后缀白名单，
-  跨重定向也成立）；其余主机一律拒绝，请求不会被引向别处。
+- **目标域**：只连微信 CDN——后缀 `*.qpic.cn` / `*.video.qq.com`，加精确主机
+  `wxapp.tc.qq.com`（**不含子域**）；代码里两部分都在，且**跨重定向也成立**；
+  其余主机一个请求都不发（`build_url` 前置判 host，直接标「不去取」），
+  请求不会被引向别处。
 - **发送内容**：请求只携带微信自己签发的媒体 `token` 与固定 `User-Agent`
   （`MicroMessenger Client`），**不含本机任何聊天 / 索引 / 密钥内容**，无请求体。
 - **不走代理**：一律直连，不读 `http_proxy` 等环境变量。

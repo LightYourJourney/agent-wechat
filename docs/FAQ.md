@@ -47,9 +47,10 @@ MCP（stdio）均无网络路径，MCP 只在你的 Agent 客户端与本地 Ser
 1. 首次构建向量索引时下载约 95MB 的模型文件（fastembed + `bge-small-zh-v1.5`）到
    `~/.agent-wechat/models`；模型就位后嵌入与检索完全离线（见 Q15）。
 2. **朋友圈媒体下载**：只有显式指定 `--with-media`（CLI）/ `with_media=True`
-   （MCP `export_moments`）时才发起请求，且**只连微信 CDN 两个域**（`*.qpic.cn`、
-   `*.video.qq.com`）；不指定则一个网络请求都不发。请求只携带微信自己签发的媒体
-   `token` 与固定 `User-Agent`，**不含本机任何聊天 / 索引内容**；**不使用代理**，一律直连。
+   （MCP `export_moments`）时才发起请求，且**只连微信 CDN**——后缀 `*.qpic.cn` /
+   `*.video.qq.com`，加精确主机 `wxapp.tc.qq.com`（**不含子域**）；不指定则一个网络
+   请求都不发。请求只携带微信自己签发的媒体 `token` 与固定 `User-Agent`，**不含本机
+   任何聊天 / 索引内容**；**不使用代理**，一律直连。
 
 第 2 条是本项目零网络红线上**本次新增的**显式例外，详见 SECURITY.md §1「零网络例外」。
 
