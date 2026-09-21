@@ -1230,8 +1230,38 @@ def _resolve_media(p: "moments.SnsPost", out_root, report, with_media: bool,
                 out.append(m)
                 continue
             report.media_downloaded += 1
-            out.append(dataclasses.replace(
-                m, local=str(saved.relative_to(out_root))))
+
+            # 封面。只在 KIND_VIDEO 且 AUTH_READY 时下——实测 181 条视频媒体全是 AUTH_READY。
+            # 白名单外的封面（真机上 158/181 在 vweixinthumb.tc.qq.com，证书名不匹配）会由
+            # `build_url`/`fetch` 拦下，落回 not_downloaded，如实。
+            thumb_local = None
+            if m.kind == moments.KIND_VIDEO and m.thumb and m.auth == moments.AUTH_READY:
+                # `key`/`encrypted` **必须一起带过去**：小视频封面是**加密**的，且用的就是
+                # 同一个 media 元素的 `enc@key`（真机实测 d1a867dd → ffd8ffe0）。
+                # 清掉它们会把能拿到的封面全变成乱码。临时对象让 fetch 的职责不变。
+                tcover = dataclasses.replace(m, url=m.thumb)
+                if sns_media.build_url(tcover) is not None:
+                    try:
+                        cdata = do_fetch(tcover)
+                        cext = _sniff_ext(cdata)
+                        # 扩展名固定 jpg：`media._out_candidates("video", base)` 只声明了
+                        # `_thumb.jpg`，判成 png/webp 会与声明不符（将来接 skip 探测时探不到）。
+                        if cext != "jpg":
+                            report.media_failed += 1
+                            if cext is None:
+                                report.media_garbage += 1
+                        else:
+                            csaved = media._save(out_root, "media", m.kind,
+                                                 media.month_of(p.create_time),
+                                                 f"{stem}_thumb", cext, cdata)
+                            if csaved is None:
+                                report.media_failed += 1
+                            else:
+                                thumb_local = str(csaved.relative_to(out_root))
+                    except sns_media.SnsMediaError:
+                        report.media_failed += 1
+            out.append(dataclasses.replace(m, local=str(saved.relative_to(out_root)),
+                                           thumb_local=thumb_local))
         except sns_media.SnsMediaError:
             report.media_failed += 1
             out.append(m)

@@ -405,3 +405,143 @@ def test_export_undownloadable_media_is_not_fetched(env):
     assert res.report.media_not_downloaded == 1         # 无 token 那条
     assert res.report.media_downloaded == 1             # 有 token 那条
     assert len(calls) == 1                              # 只发了一次请求
+
+
+# spec §8.3 夹具 ②（副本；逐字与 tests/test_moments.py 的同名夹具一致）
+# 封面宿主特意取可达的 shzjwxsns.video.qq.com——取占多数的 vweixinthumb.tc.qq.com
+# 会让 build_url 返回 None，下面两条封面断言就永远走不到分支（假护栏）。
+VIDEO15_XML = """<SnsDataItem><TimelineObject>
+ <id>P3</id><username>wxid_friend</username><createTime>1735776000</createTime>
+ <ContentObject><title>微信小视频</title><type>15</type><contentSubStyle>0</contentSubStyle>
+  <contentUrl>https://support.weixin.qq.com/cgi-bin/mmsupport-bin/readtemplate?a=1</contentUrl>
+  <mediaList><media>
+   <id>13000000000000000001</id><type>6</type><sub_type>0</sub_type>
+   <title>张三的文案</title><description>张三的文案</description>
+   <thumb type="1" key="0" enc_idx="0">http://shzjwxsns.video.qq.com/150/20250/snsvideodownload?encfilekey=E&amp;token=T&amp;idx=1</thumb>
+   <url type="1" md5="aabbccddeeff00112233445566778899" key="0" enc_idx="0" videomd5="aabbccddeeff00112233445566778899">http://shzjwxsns.video.qq.com/102/20202/snsvideodownload?encfilekey=E&amp;token=T&amp;idx=1</url>
+   <size width="288" height="512" totalSize="12871"/>
+   <videoDuration>9.66600037</videoDuration>
+   <enc key="20260918">1</enc>
+   <predownload_percent>0</predownload_percent><predown_net_type>0</predown_net_type>
+  </media></mediaList>
+ </ContentObject>
+</TimelineObject><LocalExtraInfo><nickname>张三</nickname></LocalExtraInfo></SnsDataItem>"""
+
+# spec §8.3 夹具 ④（副本）
+LINK_XML = """<SnsDataItem><TimelineObject>
+ <id>P5</id><username>wxid_friend</username><createTime>1735776000</createTime>
+ <ContentObject><title>文章标题</title>
+  <contentUrl>https://mp.weixin.qq.com/s/AbCdEf</contentUrl>
+  <type>3</type><contentSubStyle>0</contentSubStyle>
+  <mediaList><media>
+   <id>13000000000000000003</id><type>2</type><sub_type>0</sub_type>
+   <thumb type="1" token="TOK" key="1234567890" enc_idx="0">http://shmmsns.qpic.cn/mmsns/D/150</thumb>
+   <url type="1" token="TOK" key="1234567890" enc_idx="0" md5="aabbccddeeff00112233445566778899">http://shmmsns.qpic.cn/mmsns/D/0</url>
+   <size width="1080" height="1440" totalSize="203118"/>
+   <videoDuration>0</videoDuration>
+   <enc>0</enc>
+   <predownload_percent>0</predownload_percent><predown_net_type>0</predown_net_type>
+  </media></mediaList></ContentObject>
+</TimelineObject><LocalExtraInfo><nickname>张三</nickname></LocalExtraInfo></SnsDataItem>"""
+
+
+def _mp4_plain() -> bytes:
+    return b"\x00\x00\x00\x20ftypisom" + b"\x00" * 4088
+
+
+def _isaac_wrap(plain: bytes, seed: str) -> bytes:
+    """合成密文：用项目的 `WxIsaac64` 加密（流密码自反）。不碰任何真机材料。"""
+    ks = sns_media.WxIsaac64(int(seed)).keystream(len(plain))
+    return bytes(a ^ b for a, b in zip(plain, ks))
+
+
+def _url_opener(body_for):
+    """按 URL 分派响应体的假 opener——真实的 `fetch` 只调 `op.open(req)`。"""
+    class _Resp:
+        # `__enter__`/`__exit__` **必须定义在类上**：Python 的 `with` 只在**类型**上查
+        # 这两个协议方法，赋在实例上无效——会抛 TypeError，被 `fetch` 的
+        # `except Exception` 吞掉、重试 3 次、最终抛 `SnsMediaError`，
+        # 症状是 `media_downloaded == 0` 且 `media_failed == 2`（已实测踩过）。
+        def __init__(self, body: bytes):
+            self._body, self.headers = body, {}
+        def read(self) -> bytes:
+            return self._body
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+
+    class _Op:
+        def open(self, req, timeout=None):
+            return _Resp(body_for(req.full_url))
+    return _Op()
+
+
+def test_video_cover_is_downloaded_and_decrypted(env, monkeypatch):
+    """**真实（非注入）的解密链路**——spec §8.1 #8 的硬要求。
+
+    spec 原话：「首稿的 #8 用**注入的假 fetch**，它绕过真解密——于是『封面被误解密』
+    这个 bug **单测全绿**。守着一个函数的输入输出，不等于守着它的语义。」
+
+    所以这里**不传** `fetch=`，改把 `sns_media._default_opener` 换成假 opener：
+    真实的 `sns_media.fetch` 与 `decrypt_stream` 全程运行，**只有网络是假的**。
+    断言「落盘字节 == 明文原文」——把 `key`/`encrypted` 传丢、或把解密判据改坏，都会红。
+
+    封面与本体共用**同一个 `enc@key`**（真机 szzjwxsns 实测 `d1a867dd` → `ffd8ffe0`）。
+
+    **计数断言要把 `env` 的基线动态算进去**：`env` 夹具自己插了一条（见顶部 `XML`），
+    它带一个可下载的 `AUTH_SNS` 媒体（`token="TK"`、宿主 `shmmsns.qpic.cn` 在白名单内），
+    且无 `<enc>`、响应也无 `x-enc` 头 → **不解密**，故它的响应体给明文。
+    """
+    _add_post(VIDEO15_XML)
+    plain_v, plain_c = _mp4_plain(), _jpeg()
+    seed = "20260918"                       # 与 VIDEO15_XML 的 <enc key="…"> 一致
+
+    def body_for(url: str) -> bytes:
+        if "150/20250" in url:              # 小视频封面：密文
+            return _isaac_wrap(plain_c, seed)
+        if "shzjwxsns.video.qq.com" in url:  # 小视频本体：密文
+            return _isaac_wrap(plain_v, seed)
+        return plain_c                      # env 基线的 AUTH_SNS 图：明文
+
+    monkeypatch.setattr(sns_media, "_default_opener", lambda: _url_opener(body_for))
+
+    res = usecases.moments_export(account=ACCT, with_media=True)
+    assert res.report.media_downloaded == 2     # 基线的图 + 小视频本体
+    assert res.report.media_failed == 0
+    thumbs = list(pathlib.Path(res.out_dir).rglob("*_thumb.jpg"))
+    assert len(thumbs) == 1
+    assert thumbs[0].read_bytes() == plain_c    # **解出来的等于原文**（真解密）
+    # 路径是 {out}/media/{kind}/{月}/{stem}.{ext}（media._out_path）——「与本体同目录」
+    # 要退**两级**：parent 是月份目录，parent.parent 才是 kind 目录。
+    assert thumbs[0].parent.parent.name == "video"
+
+
+def test_cover_failure_counts_failed_but_not_losing_the_body(env):
+    """本体成功、封面失败 → `media_failed +1` **且**本体仍计 downloaded。
+
+    封面失败被静默吞掉正是「产物有缺陷而报表健康」那一类。
+    """
+    _add_post(VIDEO15_XML)
+    def fetch(m, **kw):
+        if "shzjwxsns.video.qq.com" not in m.url:
+            return _jpeg()                       # env 基线动态
+        if "150/20250" in m.url:
+            raise sns_media.SnsMediaError("封面挂了")
+        return _mp4_plain()                      # 本体：明文（同 _jpeg 的契约）
+    res = usecases.moments_export(account=ACCT, with_media=True, fetch=fetch)
+    assert res.report.media_downloaded == 2     # 基线 + 本体（本体仍算成功）
+    assert res.report.media_failed == 1         # 封面失败不静默
+    assert not list(pathlib.Path(res.out_dir).rglob("*_thumb.jpg"))
+
+
+def test_media_outside_allowlist_is_not_downloaded_not_failed(env):
+    """白名单外的媒体计 `not_downloaded`——「不去取」，不是「取失败」。"""
+    _add_post(LINK_XML.replace("http://shmmsns.qpic.cn/mmsns/D/0",
+                               "https://y.music.163.com/x.jpg"))
+    calls = []
+    res = usecases.moments_export(account=ACCT, with_media=True,
+                                  fetch=lambda m, **kw: (calls.append(m), _jpeg())[1])
+    assert res.report.media_failed == 0
+    assert [m for m in calls if "y.music.163.com" in m.url] == []   # 站外那条一个请求都不发
+    assert res.report.media_not_downloaded == 1
