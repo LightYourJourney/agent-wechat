@@ -18,6 +18,11 @@ TYPE_VIDEO_POST = 15
 KIND_IMAGE, KIND_VIDEO, KIND_OTHER = "image", "video", "other"
 CMT_LIKE, CMT_COMMENT = "like", "comment"
 
+# URL 的「取法」。差异做成**数据**而不是代码分支：新增一种 CDN 形态 = 加一个枚举值，
+# 而不是在 build_url 里加一条分支（分支多了，白名单校验就会有人忘记做）。
+AUTH_SNS = "sns"        # 老路径：token/key 在 url 元素属性；URL 需拼 idx=1、尺寸段归一
+AUTH_READY = "ready"    # URL 已完整可用（自带签名或无签名公开）；原样 GET，仅 http→https
+
 
 def split_url(url: str | None) -> urllib.parse.SplitResult | None:
     """安全的 `urllib.parse.urlsplit`：`None` 或畸形输入返回 `None`，**不抛**。
@@ -50,11 +55,14 @@ def safe_host(url: str | None) -> str | None:
 class SnsMedia:
     """一条媒体引用。`token`/`key` 是鉴权材料——repr 恒隐藏（同 MediaKeys 规则）。"""
     kind: str
+    auth: str = AUTH_SNS            # 「怎么取 URL」；默认值 = 老路径
     url: str | None = None
     token: str | None = None
-    key: str | None = None
+    key: str | None = None          # 解密种子：AUTH_SNS 取自 url@key；AUTH_READY 取自 enc@key
     enc_idx: str | None = None
     thumb: str | None = None
+    thumb_local: str | None = None  # 封面落盘后的相对路径（由导出编排赋值；解析层恒 None）
+    encrypted: bool = False         # XML <enc> 文本 == '1'
     video_duration: int | None = None
     live_url: str | None = None
     live_key: str | None = None
@@ -139,23 +147,40 @@ def _ts(v: str | None) -> int:
     return n if 0 < n <= _MAX_TS else 0
 
 
+def _nz(v: str | None) -> str | None:
+    """`'0'` 是「无密钥」哨兵（真机 312 次出现）。原先它会被当字符串传进
+    `decrypt_stream` → `ISAAC64(0)` → 乱码。"""
+    return v if v and v != "0" else None
+
+
 def _media_of(m: ET.Element) -> SnsMedia:
     t = _text(m, "type")
     kind = KIND_VIDEO if t == "6" else KIND_IMAGE if t == "2" else KIND_OTHER
     u, th = m.find("url"), m.find("thumb")
     lmu = m.find("LivePhoto/liveMedia/url")
     lmk = m.find("LivePhoto/liveMedia/enc")
+    enc_el = m.find("enc")
+    # `<enc>` 文本 '1' ⟺ enc@key 有值 ⟺ 卡片 type=15（真机 5087 个 media 零例外）
+    encrypted = enc_el is not None and (enc_el.text or "").strip() == "1"
     return SnsMedia(
         kind=kind,
+        # 无 url@token ⟹ URL 已完整（查询串签名 / 无签名公开），不需要拼
+        auth=AUTH_SNS if (u is not None and u.get("token")) else AUTH_READY,
         url=(u.text or "").strip() or None if u is not None else None,
         # token/key/enc_idx 是**属性**不是子元素——实测踩过的坑
         token=u.get("token") if u is not None else None,
-        key=u.get("key") if u is not None else None,
+        key=_nz(enc_el.get("key")) if encrypted else _nz(u.get("key") if u is not None else None),
         enc_idx=u.get("enc_idx") if u is not None else None,
         md5=u.get("md5") if u is not None else None,
         thumb=(th.text or "").strip() or None if th is not None else None,
+        encrypted=encrypted,
         video_duration=_duration(_text(m, "videoDuration")),
-        # 实况照片：url 无 token → 本机不可下载（spec §8）；密钥在 liveMedia/enc@key
+        # 实况照片：本机不可下载（spec §8 的非目标）；密钥在 liveMedia/enc@key。
+        # **理由不是「无 token」**——本期之后无 token 只意味着 `AUTH_READY`（可下）。
+        # 真正的原因是这两个字段**从不进 `build_url`/`_resolve_media` 的路径**：
+        # 除了 `__repr__`（`live_url is not None`）与 `tests/test_moments.py:174-175`
+        # 的解析断言，没有任何消费点。将来若要把实况照片接进下载链路，
+        # 得从引入消费点开始，而不是改 token 判定。
         live_url=(lmu.text or "").strip() or None if lmu is not None else None,
         live_key=lmk.get("key") if lmk is not None else None,
     )

@@ -5,7 +5,7 @@ import sqlite3
 
 import pytest
 
-from agent_wechat import keys, media, moments, moments_html, paths
+from agent_wechat import keys, media, moments, moments_html, paths, sns_media
 
 ACCT = "wxid_testacct01_ab12"
 
@@ -400,3 +400,103 @@ def test_split_url_normal_cases():
     assert moments.split_url(None) is None
     assert moments.split_url("") is not None          # 空串是合法输入，不是畸形
     assert moments.safe_host("") is None              # 但没有 host
+
+
+# ---------- Task 2：SnsMedia.auth / encrypted（取法变成数据） ----------
+
+# spec §8.3 夹具 ⑤：普通图片（老路径）。token/key 是 url 的属性，无 contentUrl、无 finderFeed。
+AUTH_SNS_XML = """<SnsDataItem><TimelineObject>
+ <id>P1</id><username>wxid_friend</username><createTime>1735776000</createTime>
+ <contentDesc>普通图</contentDesc>
+ <ContentObject><type>1</type><contentSubStyle>0</contentSubStyle><mediaList><media>
+  <id>13000000000000000004</id><type>2</type><sub_type>0</sub_type>
+  <thumb type="1" token="TOK" key="1234567890" enc_idx="0">http://shmmsns.qpic.cn/mmsns/ABC/150</thumb>
+  <url type="1" token="TOK" key="1234567890" enc_idx="0" md5="00112233445566778899aabbccddeeff">http://shmmsns.qpic.cn/mmsns/ABC/0</url>
+  <size width="1440" height="1080" totalSize="318204"/>
+  <videoDuration>0</videoDuration>
+  <enc>0</enc>
+  <predownload_percent>0</predownload_percent><predown_net_type>0</predown_net_type>
+ </media></mediaList></ContentObject>
+</TimelineObject><LocalExtraInfo><nickname>张三</nickname></LocalExtraInfo></SnsDataItem>"""
+
+
+def test_char_existing_sns_path_build_url_unchanged():
+    """characterization：老路径的 build_url 输出**逐字符不变**。
+
+    这是本期唯一能证明「既有行为零变化」的手段——否则「全量测试绿」只能证明
+    没人碰过测试。**必须在动 auth 字段之前跑绿**，改完仍要绿。
+    """
+    m = moments.parse_post("P1", AUTH_SNS_XML).media[0]
+    assert sns_media.build_url(m) == (
+        "https://shmmsns.qpic.cn/mmsns/ABC/0?token=TOK&idx=1")
+
+
+# spec §8.3 夹具 ③：type=7，url 与 thumb 同址、零 token、<enc> 文本为 "0"
+TYPE7_XML = """<SnsDataItem><TimelineObject>
+ <id>P2</id><username>wxid_friend</username><createTime>1735776000</createTime>
+ <ContentObject><type>7</type><contentSubStyle>0</contentSubStyle><mediaList><media>
+  <id>13000000000000000002</id><type>2</type><sub_type>0</sub_type>
+  <thumb type="1" key="0" enc_idx="0">http://szmmsns.qpic.cn/mmsns/XYZ/0</thumb>
+  <url   type="1" key="0" enc_idx="0">http://szmmsns.qpic.cn/mmsns/XYZ/0</url>
+  <size width="960" height="960" totalSize="124101"/>
+  <videoDuration>0</videoDuration>
+  <enc>0</enc>
+  <predownload_percent>0</predownload_percent><predown_net_type>0</predown_net_type>
+ </media></mediaList></ContentObject>
+</TimelineObject><LocalExtraInfo><nickname>张三</nickname></LocalExtraInfo></SnsDataItem>"""
+
+# spec §8.3 夹具 ②：小视频。url@key 是哨兵 '0'，真密钥在 enc@key；token 在查询串
+VIDEO15_XML = """<SnsDataItem><TimelineObject>
+ <id>P3</id><username>wxid_friend</username><createTime>1735776000</createTime>
+ <ContentObject><title>微信小视频</title><type>15</type><contentSubStyle>0</contentSubStyle>
+  <contentUrl>https://support.weixin.qq.com/cgi-bin/mmsupport-bin/readtemplate?a=1</contentUrl>
+  <mediaList><media>
+   <id>13000000000000000001</id><type>6</type><sub_type>0</sub_type>
+   <title>张三的文案</title><description>张三的文案</description>
+   <thumb type="1" key="0" enc_idx="0">http://shzjwxsns.video.qq.com/150/20250/snsvideodownload?encfilekey=E&amp;token=T&amp;idx=1</thumb>
+   <url type="1" md5="aabbccddeeff00112233445566778899" key="0" enc_idx="0" videomd5="aabbccddeeff00112233445566778899">http://shzjwxsns.video.qq.com/102/20202/snsvideodownload?encfilekey=E&amp;token=T&amp;idx=1</url>
+   <size width="288" height="512" totalSize="12871"/>
+   <videoDuration>9.66600037</videoDuration>
+   <enc key="20260918">1</enc>
+   <predownload_percent>0</predownload_percent><predown_net_type>0</predown_net_type>
+  </media></mediaList>
+ </ContentObject>
+</TimelineObject><LocalExtraInfo><nickname>张三</nickname></LocalExtraInfo></SnsDataItem>"""
+
+
+def test_media_of_marks_ready_when_no_token_attribute():
+    """无 url@token ⟹ AUTH_READY，且 token 必为 None（spec §3.4 的不变式）。"""
+    m = moments.parse_post("P2", TYPE7_XML).media[0]
+    assert m.auth == moments.AUTH_READY
+    assert m.token is None
+    assert m.encrypted is False
+    assert m.key is None
+
+
+def test_media_of_takes_key_from_enc_element_when_encrypted():
+    """url@key 是哨兵 '0' 时，密钥取自 enc@key（真机 180/180 都是这形态）。"""
+    m = moments.parse_post("P3", VIDEO15_XML).media[0]
+    assert m.auth == moments.AUTH_READY          # url@token 不存在
+    assert m.encrypted is True                   # <enc> 文本 == '1'
+    assert m.key == "20260918"                   # 来自 enc@key，不是 '0'
+    assert m.kind == moments.KIND_VIDEO
+    assert m.thumb is not None                   # 封面地址保留
+
+
+def test_media_of_keeps_sns_path_when_token_attribute_present():
+    """有 url@token ⟹ AUTH_SNS，密钥仍取自 url@key。"""
+    m = moments.parse_post("P1", AUTH_SNS_XML).media[0]
+    assert m.auth == moments.AUTH_SNS
+    assert m.encrypted is False
+    assert m.key == "1234567890"
+
+
+def test_zero_key_sentinel_is_not_used_as_key():
+    """`'0'` 是「无密钥」哨兵——原先会被当字符串传给 ISAAC64(0) 解出乱码。
+
+    只换 url 的 key 属性；`<enc>` 文本保持 '0'（真机这 312 条里没有一条同时满足
+    `x-enc: 1`，故既有行为零变化，新增的保护是哨兵不再被当密钥）。
+    """
+    xml = AUTH_SNS_XML.replace('key="1234567890"', 'key="0"')
+    m = moments.parse_post("P1", xml).media[0]
+    assert m.key is None
