@@ -427,3 +427,64 @@ def test_allowlist_exact_host_not_subtree():
     # 既有后缀仍然覆盖子域
     assert sns_media.host_allowed("https://finder.video.qq.com/a") is True
     assert sns_media.host_allowed("https://a.b.qpic.cn/a") is True
+
+
+def _jpeg_plain() -> bytes:
+    return bytes.fromhex("ffd8ffe000104a46494600010100000100010000") + b"\x00" * 4080
+
+
+def _isaac_wrap(plain: bytes, seed: str) -> bytes:
+    """用项目的 WxIsaac64 **加密**（流密码自反）——三元组完全合成，不碰真机材料。"""
+    ks = sns_media.WxIsaac64(int(seed)).keystream(len(plain))
+    return bytes(a ^ b for a, b in zip(plain, ks))
+
+
+class _FakeResp:
+    def __init__(self, body: bytes, headers: dict[str, str]):
+        self._body, self.headers = body, headers
+    def read(self) -> bytes:
+        return self._body
+    def __enter__(self):
+        return self
+    def __exit__(self, *a):
+        return False
+
+
+class _FakeOpener:
+    def __init__(self, body: bytes, headers: dict[str, str]):
+        self._r = _FakeResp(body, headers)
+    def open(self, req, timeout=None):
+        return self._r
+
+
+def test_fetch_decrypts_when_xml_says_encrypted_even_without_header():
+    """**本期最重要的一条**：type=15 的响应**没有 `x-enc` 头**，但内容是密文。
+
+    只看响应头会静默存下 9MB 损坏视频。真机实测：不解密 → `moov atom not found`；
+    只解前 128KB → ffmpeg 全解码零错误。
+    """
+    plain = _jpeg_plain()
+    m = _m(auth=moments.AUTH_READY, token=None, key="20260918", encrypted=True,
+           url="https://shzjwxsns.video.qq.com/x?token=T")
+    got = sns_media.fetch(m, opener=_FakeOpener(_isaac_wrap(plain, "20260918"), {}),
+                          attempts=1)
+    assert got == plain
+
+
+def test_fetch_does_not_decrypt_when_xml_says_plain():
+    """XML 说没加密、头也没有 → 原样返回（`type=7` 的形态）。"""
+    plain = _jpeg_plain()
+    m = _m(auth=moments.AUTH_READY, token=None, key=None, encrypted=False,
+           url="https://szmmsns.qpic.cn/mmsns/XYZ/0")
+    got = sns_media.fetch(m, opener=_FakeOpener(plain, {}), attempts=1)
+    assert got == plain
+
+
+def test_fetch_still_honours_xenc_header():
+    """老路径：XML 文本是 '0'，靠响应头决定解密（真机 4775 条是这样）。"""
+    plain = _jpeg_plain()
+    m = _m(key="1234567890", encrypted=False,
+           url="http://shmmsns.qpic.cn/mmsns/ABC/0")
+    got = sns_media.fetch(m, opener=_FakeOpener(_isaac_wrap(plain, "1234567890"),
+                                                {"x-enc": "1"}), attempts=1)
+    assert got == plain

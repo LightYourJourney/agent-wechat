@@ -229,6 +229,10 @@ def fetch(m: moments.SnsMedia, *, timeout: float = 20.0, attempts: int = 3,
 
     注意 `x-enc: 1` 只说明「响应体是加密的」，**不代表解出来的是有效媒体**：
     密钥错误或越界时 `decrypt_stream` 会静默产出乱码而非抛错，调用方须自行嗅探校验。
+
+    解密判据取「响应头 `x-enc` **或** XML `<enc>` 文本」——两个信号都不完备：
+    `type=15` 的响应没有 `x-enc` 头却确实是密文，而 `type=1/54/3` 的 XML 文本是 `'0'`
+    却要靠响应头决定。
     """
     url = build_url(m)
     if url is None:
@@ -252,7 +256,11 @@ def fetch(m: moments.SnsMedia, *, timeout: float = 20.0, attempts: int = 3,
             with op.open(req, timeout=timeout) as resp:
                 raw = resp.read()
                 enc = str(resp.headers.get("x-enc") or "").strip()
-            if enc == "1" and m.key:
+            # 两个信号都不完备，**取或才完备**（真机 5087 个 media 零例外）：
+            #   · 响应头 `x-enc: 1` —— type=1/54/3（4775 条）靠它
+            #   · XML `<enc>` 文本 '1' —— type=15（180 条）**没有** `x-enc` 头，靠它
+            # 只信头会静默存下密文；只信 XML 会漏掉老路径。
+            if m.key and (enc == "1" or m.encrypted):
                 return decrypt_stream(raw, m.key,
                                       video=(m.kind == moments.KIND_VIDEO))
             return raw
