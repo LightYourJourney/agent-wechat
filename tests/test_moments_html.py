@@ -171,9 +171,9 @@ def test_javascript_scheme_is_not_rendered_as_link():
     """`html.escape` 挡不住 scheme：`javascript:alert(1)` 转义后仍是可执行链接。
 
     **但要说清是哪一重拦住它的**：`javascript:alert(1)` 没有 authority，
-    `urlsplit().hostname` 是 `None` → 拦下它的是**更早的 `not host`**，
-    **不是** scheme 白名单。所以本条**单独抓不住**「删掉 scheme 白名单」——
-    变异实测：删掉那一行，本条照样绿。
+    `urlsplit().hostname` 是 `None`，而 `s.scheme not in ("http", "https")` 同样为真
+    ——两条守卫对这个输入**互为冗余**，所以**单独删掉任一条**，本条都照样绿
+    （变异实测：删 scheme 行 → 绿；删 `not host` → 绿）。
     真正锁住 scheme 那一行的是下一条（`ftp://`，有主机且非 http(s)）。
     """
     doc = moments_html.render(
@@ -186,8 +186,8 @@ def test_non_web_scheme_with_host_is_not_rendered_as_link():
     """**有主机但 scheme 不是 http(s)** → 必须由 scheme 白名单拦下。
 
     这是 `s.scheme not in ("http", "https")` 那一行**唯一**的护栏：
-    `javascript:` / `data:` 那类没有 authority，在更早的 `not host` 就被拦了，
-    验不到它。变异实测：删掉 scheme 那一行 → 本条红。
+    `javascript:` / `data:` 那类没有 authority，被 **scheme 行短路**拦下
+    （`not host` 只是 backstop，对该输入验不到它）。变异实测：删掉 scheme 那一行 → 本条红。
     """
     doc = moments_html.render(
         [_mk(link=moments.SnsLink(url="ftp://evil.example.com/x", title="x"))], _rep())
@@ -212,6 +212,58 @@ def test_non_ascii_host_is_not_rendered_as_link():
     doc = moments_html.render(
         [_mk(link=moments.SnsLink(url="https://mp.weıxin.qq.com/x", title="t"))], _rep())
     assert "<a href" not in doc
+
+
+def test_backslash_in_userinfo_is_not_rendered_as_link():
+    r"""反斜杠必须查 `netloc`：`hostname` 已丢掉 userinfo，徽章会骗人。
+
+    `https://evil.com\@mp.weixin.qq.com/x` 实测（Python）`netloc` 是
+    `evil.com\@mp.weixin.qq.com`、`username` 是 `evil.com\`、而 `hostname` 是
+    **干干净净的** `mp.weixin.qq.com`——只说 `"\\" in host` 会放它过去，
+    渲染出徽章 `mp.weixin.qq.com` 而浏览器（WHATWG 先按 `\` 切一刀）落到 `evil.com`。
+
+    变异实测：把 `"\\" in s.netloc` 改回 `"\\" in host` → 本条红。
+    """
+    doc = moments_html.render(
+        [_mk(link=moments.SnsLink(url="https://evil.com\\@mp.weixin.qq.com/x", title="t"))],
+        _rep())
+    assert "<a href" not in doc
+
+
+def test_empty_host_is_not_rendered_as_link():
+    """`http:///x`：Python `hostname=None`（被 `not host` 拦下），浏览器落到主机 `x`。
+
+    变异实测：删掉 `not host` → 渲染成空徽章 `<span class="host"></span>`，
+    浏览器却落到 `x`——本条红。
+    """
+    doc = moments_html.render(
+        [_mk(link=moments.SnsLink(url="http:///x", title="t"))], _rep())
+    assert "<a href" not in doc
+    assert "http:///x" in doc                             # 降级为纯文本，信息不丢
+
+
+def test_link_url_and_title_are_escaped():
+    """外链块三处 `_esc` 都是 load-bearing：分别改裸插值，全量零红（无护栏）。
+
+    变异实测（三处各删一次，本条都红）。最坏的一处是 href——下面这条低于本条所用
+    输入的最坏情形：`url='https://e.com/a" onmouseover="alert(1)'` 裸插值 →
+    `<a href="https://e.com/a" onmouseover="alert(1)" target="_blank" …>` ——
+    `"` 提前闭合属性，payload 变成 `<a>` 上的**真事件属性**（真 XSS，非仅显示错乱）。
+    `url` / `title` 都是好友可控数据，漏一处就出这个。三条路径各锁一处。
+    """
+    # ① href + title：渲染成链接时
+    link = moments.SnsLink(url='https://e.com/a"b&c', title='" onmouseover="alert(1)"')
+    doc = moments_html.render([_mk(link=link)], _rep())
+    assert 'href="https://e.com/a&quot;b&amp;c"' in doc
+    assert 'onmouseover="alert(1)"' not in doc
+    # ② title 为空 → 回落用 url 当锚文本，回落那一处同样要转义
+    doc2 = moments_html.render(
+        [_mk(link=moments.SnsLink(url="https://e.com/a<script>x", title=None))], _rep())
+    assert "<script>x" not in doc2 and "&lt;script&gt;x" in doc2
+    # ③ 降级成纯文本的分支
+    doc3 = moments_html.render(
+        [_mk(link=moments.SnsLink(url="javascript:alert(<script>x)", title="t"))], _rep())
+    assert "<script>x" not in doc3 and "&lt;script&gt;x" in doc3
 
 
 def test_finder_block_renders_nickname_and_desc():

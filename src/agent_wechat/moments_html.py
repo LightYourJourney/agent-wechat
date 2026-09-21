@@ -54,15 +54,19 @@ def _link_block(link: moments.SnsLink) -> str:
     """外链块——本模块唯一有真实安全面的渲染。
 
     `html.escape` 挡不住 scheme（`javascript:alert(1)` 转义后仍是可执行链接），
-    也挡不住**主机名里的反斜杠或非 ASCII**：Python 的 `urlsplit().hostname` 不把 `\\`
-    当分隔符，浏览器按 WHATWG 会——`https://evil.com\\.mp.weixin.qq.com/x` 显示成
+    也挡不住**反斜杠或非 ASCII 主机**：Python 的 `urlsplit` 不把 `\\` 当分隔符，
+    浏览器按 WHATWG 会——`https://evil.com\\.mp.weixin.qq.com/x` 显示成
     `evil.com\\.mp.weixin.qq.com`，点下去却落到 `evil.com`。「让用户看得见去哪」
     这道防线必须建立在两套 URL 语义一致的输入上，否则它本身就是骗人的。
+
+    反斜杠**必须查 `netloc` 而不是 `hostname`**：`hostname` 已经把 userinfo 丢掉，
+    而 WHATWG 先按 `\\` 切一刀——`https://evil.com\\@mp.weixin.qq.com/x` 的 `hostname`
+    是干干净净的 `mp.weixin.qq.com`，徽章显示它，浏览器却落到 `evil.com`。
     """
     s = moments.split_url(link.url)
     host = (s.hostname or "").lower() if s is not None else ""
     if (s is None or s.scheme not in ("http", "https") or not host
-            or "\\" in host or not host.isascii()):
+            or "\\" in s.netloc or not host.isascii()):
         return f'<div class="ph">[链接：{_esc(link.url)}]</div>'
     title = _esc(link.title) or _esc(link.url)
     return (f'<div class="link"><a href="{_esc(link.url)}" target="_blank" '
