@@ -500,3 +500,91 @@ def test_zero_key_sentinel_is_not_used_as_key():
     xml = AUTH_SNS_XML.replace('key="1234567890"', 'key="0"')
     m = moments.parse_post("P1", xml).media[0]
     assert m.key is None
+
+
+# ---------- Task 5：finderFeed 封面与 contentUrl 外链 ----------
+
+# spec §8.3 夹具 ①：视频号。媒体在 finderFeed 下，ContentObject/mediaList 为空
+FINDER_XML = """<SnsDataItem><TimelineObject>
+ <id>P4</id><username>wxid_friend</username><createTime>1735776000</createTime>
+ <contentDesc>转发视频号</contentDesc>
+ <ContentObject><type>28</type><contentSubStyle>0</contentSubStyle>
+  <contentUrl>https://support.weixin.qq.com/update/?v=1</contentUrl>
+  <mediaList/>
+  <finderFeed><objectId>12000000000000000001</objectId>
+   <objectNonceId>11267274765907987420_0_25_0_0</objectNonceId><feedType>4</feedType>
+   <nickname>视频号昵称</nickname><avatar>https://wx.qlogo.cn/finderhead/A/0</avatar>
+   <desc>#话题#说明文字</desc><mediaCount>1</mediaCount>
+   <username>v2_060000231003b20fB</username><authIconType>2</authIconType>
+   <mediaList><media><mediaType>4</mediaType>
+    <url>http://wxapp.tc.qq.com/251/20302/stodownload?encfilekey=E&amp;token=T&amp;idx=1</url>
+    <thumbUrl>http://wxapp.tc.qq.com/251/20304/stodownload?encfilekey=E&amp;token=T&amp;idx=1</thumbUrl>
+    <width>720.0</width><height>544.0</height>
+    <coverUrl>http://wxapp.tc.qq.com/251/20304/stodownload?encfilekey=E&amp;token=T&amp;idx=1</coverUrl>
+    <videoPlayDuration>128</videoPlayDuration>
+   </media></mediaList></finderFeed>
+ </ContentObject>
+</TimelineObject><LocalExtraInfo><nickname>张三</nickname></LocalExtraInfo></SnsDataItem>"""
+
+# spec §8.3 夹具 ④：外链。contentUrl 是第三方网页；<url> 带 token（微信 CDN 配图）
+LINK_XML = """<SnsDataItem><TimelineObject>
+ <id>P5</id><username>wxid_friend</username><createTime>1735776000</createTime>
+ <ContentObject><title>文章标题</title>
+  <contentUrl>https://mp.weixin.qq.com/s/AbCdEf</contentUrl>
+  <type>3</type><contentSubStyle>0</contentSubStyle>
+  <mediaList><media>
+   <id>13000000000000000003</id><type>2</type><sub_type>0</sub_type>
+   <thumb type="1" token="TOK" key="1234567890" enc_idx="0">http://shmmsns.qpic.cn/mmsns/D/150</thumb>
+   <url type="1" token="TOK" key="1234567890" enc_idx="0" md5="aabbccddeeff00112233445566778899">http://shmmsns.qpic.cn/mmsns/D/0</url>
+   <size width="1080" height="1440" totalSize="203118"/>
+   <videoDuration>0</videoDuration>
+   <enc>0</enc>
+   <predownload_percent>0</predownload_percent><predown_net_type>0</predown_net_type>
+  </media></mediaList></ContentObject>
+</TimelineObject><LocalExtraInfo><nickname>张三</nickname></LocalExtraInfo></SnsDataItem>"""
+
+
+def test_parse_post_reads_finder_feed_cover():
+    """视频号：ContentObject/mediaList 为空，媒体全在 finderFeed 下（真机 27/29 如此）。"""
+    p = moments.parse_post("P4", FINDER_XML)
+    assert len(p.media) == 1
+    m = p.media[0]
+    assert m.kind == moments.KIND_IMAGE
+    assert m.auth == moments.AUTH_READY
+    assert m.token is None
+    assert m.url == ("http://wxapp.tc.qq.com/251/20304/stodownload?"
+                     "encfilekey=E&token=T&idx=1")
+    assert p.finder is not None
+    assert p.finder.nickname == "视频号昵称"
+    assert p.finder.desc == "#话题#说明文字"
+    assert p.finder.duration == 128
+
+
+def test_parse_post_support_stub_is_not_a_link():
+    """support 桩必须排除——真机带桩的卡片有 192 条，不排除会渲染出 192 个无用链接。"""
+    assert moments.parse_post("P4", FINDER_XML).link is None
+    assert moments.parse_post("P3", VIDEO15_XML).link is None
+
+
+def test_parse_post_reads_external_link():
+    p = moments.parse_post("P5", LINK_XML)
+    assert p.link is not None
+    assert p.link.url == "https://mp.weixin.qq.com/s/AbCdEf"
+    assert p.link.title == "文章标题"
+    # 配图仍是普通媒体，走老路径
+    assert len(p.media) == 1 and p.media[0].auth == moments.AUTH_SNS
+
+
+def test_parse_post_survives_malformed_content_url():
+    """畸形 contentUrl 不得让整次解析崩——裸 ValueError 会穿到 CLI 打 traceback。"""
+    xml = LINK_XML.replace("https://mp.weixin.qq.com/s/AbCdEf", "https://[::1/x")
+    p = moments.parse_post("P5", xml)
+    assert p is not None
+    assert p.link is None
+
+
+def test_finder_without_nickname_does_not_crash():
+    xml = FINDER_XML.replace("<nickname>视频号昵称</nickname>", "")
+    p = moments.parse_post("P4", xml)
+    assert p is not None and p.finder is not None
+    assert p.finder.nickname == ""

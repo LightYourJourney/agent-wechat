@@ -84,6 +84,26 @@ class SnsComment:
 
 
 @dataclass(frozen=True)
+class SnsLink:
+    """外链卡片的元数据。`url` 是**第三方网页地址**，本项目永不请求它。"""
+    url: str
+    title: str | None
+
+
+@dataclass(frozen=True)
+class SnsFinder:
+    """视频号卡片（`ContentObject/finderFeed`）。
+
+    封面作为一条 `AUTH_READY` 图片出现在 `media` 里——复用既有渲染/落盘/降级链路。
+    `objectNonceId`/`authIconType`/`megaVideo`/`liveId` 刻意不取（YAGNI：本期不做跳转
+    与认证徽标）。
+    """
+    nickname: str
+    desc: str | None
+    duration: int | None
+
+
+@dataclass(frozen=True)
 class SnsPost:
     tid: str
     post_id: str
@@ -94,6 +114,8 @@ class SnsPost:
     is_video_post: bool
     media: tuple[SnsMedia, ...]
     comments: tuple[SnsComment, ...]
+    link: SnsLink | None = None
+    finder: SnsFinder | None = None
 
 
 def _text(el: ET.Element | None, path: str) -> str | None:
@@ -186,6 +208,42 @@ def _media_of(m: ET.Element) -> SnsMedia:
     )
 
 
+_SUPPORT_HOSTS = {"support.weixin.qq.com"}
+
+
+def _is_external(url: str | None) -> bool:
+    """外链判据。必须排除 support 桩——真机上带桩的 `contentUrl` 有 192 条
+    （type15 178 + type28 12 + type3 1 + type34 1），不排除就会渲染出一堆
+    「微信版本不支持此内容」的无用链接。畸形 URL 当「没有外链」处理，不崩。"""
+    s = split_url(url)
+    if s is None:
+        return False
+    return (s.scheme in ("http", "https") and bool(s.hostname)
+            and s.hostname not in _SUPPORT_HOSTS)
+
+
+def _finder_media(feed: ET.Element) -> tuple[SnsMedia, ...]:
+    """视频号封面 → `AUTH_READY` 图片。只取 `<thumbUrl>`；`<url>`（视频本体）按
+    spec §2 非目标不使用。`<thumbUrl>` 缺失或为空则跳过该条（不产出占位媒体）。"""
+    out = []
+    for mm in feed.findall("mediaList/media"):
+        t = _text(mm, "thumbUrl")
+        if t:
+            out.append(SnsMedia(kind=KIND_IMAGE, auth=AUTH_READY, url=t))
+    return tuple(out)
+
+
+def _finder_of(feed: ET.Element) -> SnsFinder:
+    """`duration` 走 `_duration` 而不是 `int()`：`videoPlayDuration` 是好友可控 XML，
+    `int("abc")` 的 `ValueError` 会逃出 core（同 `_ts` / `_duration` 已收口的类）。"""
+    med = feed.find("mediaList/media")
+    return SnsFinder(
+        nickname=_text(feed, "nickname") or "",
+        desc=_text(feed, "desc"),
+        duration=_duration(_text(med, "videoPlayDuration") if med is not None else None),
+    )
+
+
 def _comments_of(root: ET.Element) -> tuple[SnsComment, ...]:
     """`<user_comment>` 同时出现在评论列表与 like_user_list 内，按 type 区分：
     1=点赞、2=评论、其余（4）按评论处理。
@@ -234,6 +292,13 @@ def parse_post(tid: str, xml_text: str) -> SnsPost | None:
     if tlo is None or tlo.findtext("id") is None:
         return None
     ctype = _text(tlo, "ContentObject/type")
+    feed = tlo.find("ContentObject/finderFeed")
+    media = tuple(_media_of(m) for m in tlo.findall("ContentObject/mediaList/media"))
+    if feed is not None:
+        # 视频号的媒体在 finderFeed 下——真机 27/29 的 ContentObject/mediaList 是空的，
+        # 旧解析对它完全不可见（不是「读到了没渲染」，是根本没读）。
+        media += _finder_media(feed)
+    cu = _text(tlo, "ContentObject/contentUrl")
     return SnsPost(
         tid=tid,
         post_id=(tlo.findtext("id") or "").strip(),
@@ -242,8 +307,10 @@ def parse_post(tid: str, xml_text: str) -> SnsPost | None:
         create_time=_ts(_text(tlo, "createTime")),
         text=_text(tlo, "contentDesc"),
         is_video_post=(ctype == str(TYPE_VIDEO_POST)),
-        media=tuple(_media_of(m) for m in tlo.findall("ContentObject/mediaList/media")),
+        media=media,
         comments=_comments_of(root),      # 整个 SnsDataItem：互动在 LocalExtraInfo 下，不在 tlo 内
+        link=SnsLink(cu, _text(tlo, "ContentObject/title")) if _is_external(cu) else None,
+        finder=_finder_of(feed) if feed is not None else None,
     )
 
 
