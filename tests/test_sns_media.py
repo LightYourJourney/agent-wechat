@@ -248,16 +248,37 @@ def test_https_allowed_requires_both():
     assert not sns_media.https_allowed("https://evil.example.com/x")
 
 
-def test_default_opener_ignores_proxies():
-    """实测走本机代理反而超时，设计取直连（环境里确有 http_proxy=127.0.0.1:7897）。
+def test_default_opener_ignores_proxies(monkeypatch):
+    """实测走本机代理反而超时，设计取直连。`ProxyHandler({})` 不是写错了——
+    它因不暴露 *_open 方法会被 OpenerDirector 丢弃，而**传了 handler** 又让
+    `build_opener` 跳过安装默认的 `ProxyHandler(getproxies())`；净效果正是「无代理处理」。
 
-    断言的是**净效果**：只要没有任何带非空 proxies 的 handler，请求就是直连的。
-    （`ProxyHandler({})` 因不暴露 *_open 方法会被 OpenerDirector 丢弃，
-     净效果正是「无代理处理」；不要把它当成写错了。）
+    **必须打桩 `getproxies`，不能靠运行环境**：
+    - macOS 上 `getproxies()` 只读系统设置、**完全忽略 `http_proxy` 等环境变量**，
+      所以设环境变量在 mac 上改不动它；
+    - 而一台根本没配代理的机器（CI、同事的机器）上它返回 `{}`，`build_opener()` 装的
+      `ProxyHandler({})` 同样被静默丢弃 —— 于是「简化成 `build_opener()`」**也能通过**。
+    打桩成非空之后，那个简化才会真的装上一个 ProxyHandler，断言才咬得住（已变异验证）。
     """
-    import urllib.request
+    monkeypatch.setattr(urllib.request, "getproxies",
+                        lambda: {"http": "http://127.0.0.1:7897",
+                                 "https": "http://127.0.0.1:7897"})
     op = sns_media._default_opener()
-    assert all(not getattr(h, "proxies", None) for h in op.handlers)
+    assert not any(isinstance(h, urllib.request.ProxyHandler) for h in op.handlers)
+
+
+def test_default_opener_uses_allowlisted_redirect():
+    """必须装 `_AllowlistedRedirect`，且**不得**是默认的 `HTTPRedirectHandler`。
+
+    `build_opener` 见到 `_AllowlistedRedirect`（默认 handler 的子类）会跳过安装默认那个。
+    一旦简化成 `build_opener()`，装回来的就是**无条件跟随重定向**的默认 handler——
+    而 `_AllowlistedRedirect` 这个类本身还在、它的单测也照样绿，**只是没人把它接上去**，
+    于是白名单只管得住第一跳。故这里断言的是「接线」，不是它的行为。
+    """
+    op = sns_media._default_opener()
+    assert any(isinstance(h, sns_media._AllowlistedRedirect) for h in op.handlers)
+    # 精确类型比对：`_AllowlistedRedirect` 是 HTTPRedirectHandler 的子类，isinstance 会误判
+    assert not any(type(h) is urllib.request.HTTPRedirectHandler for h in op.handlers)
 
 
 # ---------- 重定向：白名单必须跨跳成立 ----------
