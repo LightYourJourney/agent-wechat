@@ -187,7 +187,8 @@ def test_quote_without_a_displayname_prints_an_explicit_placeholder():
 
 def test_sticker_gone_says_encrypted_copy_exists():
     """贴纸的 `gone` **不许**用那句通用的 GONE——它说的是「本机找不到本体（已被清理，
-    或从未下载到本机）」，而贴纸的真相是**副本就在本机、只是解不开**。
+    或从未下载到本机）」，而贴纸取不出来是**微信侧把它存成加密格式、方案未破**
+    （spec 附录 C），与「本机找不找得到」无关。
 
     这条钉的是「产物里不许出现一句错话」。把实现改回共用 `chat_text.GONE` 它必红。
     """
@@ -208,3 +209,20 @@ def test_sticker_label_is_chinese():
     """
     from agent_wechat import chat_text
     assert chat_text.KIND_LABEL["sticker"] == "贴纸"
+
+
+def test_sticker_gone_makes_no_local_presence_claim():
+    """措辞**不许**断言本机有那份加密副本 —— 本机有没有是**未测的**。
+
+    `"本机有" not in …` 是这条规矩的**代名断言（proxy）**：它代理的真规矩是
+    「这句话必须对**本机副本可能不存在**的消息也成立」。为什么不能断言：实测只有
+    **38.3%** 的 type-47 消息本机有贴纸文件（spec §2.4：25,971 / 67,833），而收窄后的
+    T9 把 presence 写死成常量、本地支线 `resolve_sticker` 随 T7 一起挂起 —— 渲染这条时
+    **没有任何存在性信号**可依据。写成「本机有加密副本」对约 **62%** 会印出这一行的
+    消息是假话（初稿正是这么写的，被评审判掉）。改回那种写法 → 这条红。
+
+    它与上面那条守的**不是同一件事**：上面守「别是那句通用的」，这条守
+    「也不许换成另一个假话」。
+    """
+    from agent_wechat import chat_text
+    assert "本机有" not in chat_text.STICKER_GONE
