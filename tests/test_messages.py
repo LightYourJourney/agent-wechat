@@ -131,11 +131,26 @@ def test_sticker_display_without_name_uses_short_id():
     assert messages.sticker_display(md5, "") == "[贴纸#d0f46ed3]"
 
 
+def test_sticker_display_truncates_the_name_to_60():
+    """名字是**载荷可控**的：`_sticker_name` 的兜底支路扫整个解码串、返回无界的中文串，
+    不截就原样进 `messages.content`（→ trigram FTS → MCP 信封）。60 与 `appmsg_hint` 同口径。
+
+    **断言的是长度本身**（60 与 61 的边界都钉住），不是「看着不长」——后者把切片删掉也绿。
+    短 ID 支路不受影响（8 位十六进制），下面的往返一并确认截断后的串仍能被解析端认回来。
+    """
+    md5 = "d0f46ed3ce8bac33df5f7055656d8bd9"
+    assert messages.sticker_display(md5, "很" * 60) == "[贴纸:" + "很" * 60 + "]"
+    over = messages.sticker_display(md5, "很" * 200)
+    assert len(over) == len("[贴纸:") + 60 + 1        # 前缀 + 60 字 + "]"
+    assert over == "[贴纸:" + "很" * 60 + "]"
+    assert messages.sticker_name_of(over) == "很" * 60
+    assert messages.sticker_display(md5, None) == "[贴纸#d0f46ed3]"   # 短 ID 支路不受截断影响
+
+
 def test_sticker_display_short_id_is_stable_and_distinct():
     a = "d0f46ed3" + "0" * 24
     b = "d0f46ed3" + "f" * 24          # 前 8 位相同 → 短 ID 相同（可接受：实测 6,123 个贴纸）
     c = "1" * 32
-    assert messages.sticker_display(a, None) == messages.sticker_display(a, None)
     assert messages.sticker_display(a, None) == messages.sticker_display(b, None)
     assert messages.sticker_display(a, None) != messages.sticker_display(c, None)
 

@@ -110,7 +110,6 @@ def has_appmsg_title(text: str) -> bool:
 
 STICKER_PREFIX = "[贴纸:"
 STICKER_ID_PREFIX = "[贴纸#"
-STICKER_BARE = "[sticker]"          # reader 在没有 md5 时的兜底，**不变**
 
 
 def sticker_display(md5: str, name: str | None) -> str:
@@ -120,8 +119,15 @@ def sticker_display(md5: str, name: str | None) -> str:
     剩下九成靠它。它让 LLM 能分辨「同一贴纸被发了 5 次」与「5 个不同贴纸」——
     这是零成本的现成对话信号，比裸 `[sticker]` 多出一整层信息。
     取 8 位十六进制：对实测 6,123 个不同贴纸无碰撞之虞。
+
+    **名字截到 60 字，与 `appmsg_hint` 同一口径**：名字是**载荷可控的**——
+    `media._sticker_name` 的 `zh_cn` 那条支路有界（段长 ≤ 255 字节），但兜底支路会扫
+    整个解码串并返回**无界**的第一段中文，而它正是「没有 `zh_cn\\x12` 标记」时走的那条。
+    不截就原样进 `messages.content` → trigram FTS → MCP 信封。边界收在这里而不是解析器里：
+    解析器只负责「这条载荷说什么」，能写进库的长度是本层（字符串落库前最后一站）的规矩。
+    短 ID 支路不受影响（8 位十六进制）。
     """
-    return (f"{STICKER_PREFIX}{name}]" if name else f"{STICKER_ID_PREFIX}{md5[:8]}]")
+    return (f"{STICKER_PREFIX}{name[:60]}]" if name else f"{STICKER_ID_PREFIX}{md5[:8]}]")
 
 
 def is_sticker_display(text: str) -> bool:
