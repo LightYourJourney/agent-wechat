@@ -445,7 +445,7 @@ agent-wechat media locate --chat 小李
 #   [gone      ] image 1789045401
 #   [gone      ] sticker 1789045900
 #   [exportable] voice 1789046102
-# 汇总：exported=1 exportable=19 gone=34 none=3
+# 汇总：exported=1 exportable=19 gone=34 none=0
 #   按类型 image exported=1 exportable=0 gone=22
 #   按类型 video exported=0 exportable=0 gone=8
 #   按类型 voice exported=0 exportable=19 gone=0
@@ -470,7 +470,7 @@ agent-wechat media locate --chat 小李 --months 2026-08,2026-09 --limit 500
 
 | 状态 | 含义 |
 |---|---|
-| `none` | 不属于本功能覆盖的媒体类型：文件、位置、appmsg 等都归这里（按消息类型判，不依赖引用表）。**它不是「没有媒体」**。**贴纸不在此列**——它是有类型的媒体消息，见下 |
+| `none` | 不属于本功能覆盖的媒体类型：文件、位置、appmsg 等都归这里（按消息类型判，不依赖引用表）。**它不是「没有媒体」**。**贴纸不在此列**——它是有类型的媒体消息，见下。**只在显式给 `--keys` 时才可能非零**：不给 `--keys` 时 SQL 只取四类媒体消息，该计数恒为 0（上面示例里的 `none=0` 就是这么来的） |
 | `exported` | 产物已在产物根下，行尾给出**绝对路径** |
 | `exportable` | 有媒体、本体还在微信里，但还没导出到产物根。**贴纸永不产出这一态**（它没有产物可拿） |
 | `gone` | 有媒体，但本机找不到（未导出，或微信已清理本体）。**贴纸的 `gone` 是另一回事：它说的是「取不出来」**——微信把贴纸存成加密格式、解密方案未破，**与本机有没有那份文件无关**，所以下面「导出更多历史比修复有用」那句对贴纸**不成立**，CLI 会另印一行说明 |

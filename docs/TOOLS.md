@@ -486,7 +486,7 @@
 {
   "chat_id": "wxid_abc123def456",
   "out_dir": "/Users/you/.agent-wechat/media",
-  "counts": { "none": 3, "exported": 1, "exportable": 19, "gone": 34 },
+  "counts": { "none": 0, "exported": 1, "exportable": 19, "gone": 34 },
   "by_kind": { "voice": { "exportable": 19 }, "image": { "exported": 1, "gone": 22 },
                "video": { "gone": 8 }, "sticker": { "gone": 4 } },
   "truncated": false,
@@ -504,7 +504,11 @@
     appmsg 等都归这里。**它不是「这条消息没有媒体」**——索引自己也给位置 / appmsg 挂
     `[location]` / `[appmsg: …]` 之类的提示，只是本功能不覆盖这几类；`kind` 为 `null`。
     要判断这些类型，看消息信封里的 `type` / `content`。**贴纸不在此列**（它是有类型的媒体
-    消息，见下一条）
+    消息，见下一条）。
+    **`none` 只在给了 `keys` 时才可能非零**：省略 `keys` 时查询只取图片/视频/语音/贴纸
+    四种消息，而四者的 `kind` 都解得出来，所以 `counts.none` **恒为 0**（用 `keys` 指名
+    一条文本或 appmsg 消息才会看到 `none`）——判定只看 `msg_type`，与那条消息是不是媒体
+    无关
   - `exported` —— 产物已在 `out_dir` 下，`path` 是产物**绝对路径**
   - `exportable` —— 有媒体且**本体还在微信里**，但还没导出到 `out_dir`。**贴纸永远不产出
     这个状态**：它没有产物可拿，判成 `exportable` 会让用户以为有东西能导

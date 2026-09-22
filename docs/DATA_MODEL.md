@@ -200,7 +200,7 @@ CREATE TABLE watermark (
 | `local_type` 高位含标志位（如 244813135921） | `& 0xffffffff` 取真实类型 |
 | 群消息正文 `<sender_wxid>:\n<正文>` | 前缀拆出 `sender_id`/`sender_name`，正文归 content（`sender_name` 是原值，展示时由 `display_names` 名册覆盖） |
 | 非文本消息（图片/语音/appmsg XML…） | content = `[image]` / `[appmsg: 标题]` 等提示；**appmsg 的原始 XML 另存 `msg_parts.raw_xml`**（见 §3），其余类型的原始载荷不入库 |
-| 贴纸 `msg_type=47` 的 `<emoji>` XML | 读**只取三样**：`md5`、名称、`pack_id`——**原始 XML 不入库**（它满是凭据）。`content` = `[贴纸:名称]` / `[贴纸#md5前8位]`；名称先取 XML 的 `desc/emojiattr`，取不到再按 md5 查本机 `emoticon.db`（见 §7）；源 XML 无合法 md5 时不改 `content`，`media_hint` 与 `content` 都保持 `[sticker]` |
+| 贴纸 `msg_type=47` 的 `<emoji>` XML | 解析**只保留两样**：`md5` 与名称——**原始 XML 不入库**（它满是凭据）。`content` = `[贴纸:名称]` / `[贴纸#md5前8位]`；名称先取 XML 的 `desc/emojiattr`，取不到再按 md5 查本机 `emoticon.db`（见 §7）；源 XML 无合法 md5 时不改 `content`，`media_hint` 与 `content` 都保持 `[sticker]`。解析器还会返回 `pack_id`（包归属），但**解析后即丢弃、不落库**——没有任何列存它 |
 | `real_sender_id`（整数） | 经同库 `Name2Id` 表解析为 username |
 | 表 md5 无法反查会话名 | `chat_id = "md5:<hash>"`（数据不丢，展示降级） |
 | 图片 dat（V2：15B 头 + AES-128-ECB 段 + XOR 尾段） | `media export` 解密为明文图片，扩展名按解密后魔数判定（jpg/png/gif/webp/wxgf），落 `media/<会话md5>/image/<月份>/`（按 `msg/attach/<md5(会话)>/<月份>/Img/` 目录枚举定位） |

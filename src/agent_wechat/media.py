@@ -369,9 +369,11 @@ def extract_sticker_ref(local_type: int, content: str | None
     本函数只认贴纸（`TYPE_STICKER`）。两者互斥，调用方按 msg_type 择一。
 
     **只取三样东西，别的一律不要**：`md5`（文件定位与短 ID）、中文名（显示）、
-    `pack_id`（包归属，本设计只记录不使用）。XML 里还有 `cdnurl` / `aeskey` /
-    `encrypturl` 等凭据，**它们绝不进入返回值**——贴纸 XML 不落库是凭据问题的
-    结构性根治（spec §7.1），一旦把凭据带出去，那道防线就没了。
+    `pack_id`（包归属）。**注意 `pack_id` 只被返回、不被持久化**：调用方
+    （`reader._decode_row`）把它解包成 `_pack` 后即丢弃，`messages` / `media_refs` /
+    `msg_parts` 三张表都没有存它的列——别把它读成「已经记下了包归属」。
+    XML 里还有 `cdnurl` / `aeskey` / `encrypturl` 等凭据，**它们绝不进入返回值**——
+    贴纸 XML 不落库是凭据问题的结构性根治（spec §7.1），一旦把凭据带出去，那道防线就没了。
     """
     if local_type != messages.TYPE_STICKER or not content:
         return None
