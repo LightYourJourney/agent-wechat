@@ -1697,7 +1697,7 @@ _REAL_STICKER_XML = (
     'type="2" idbuffer="media:0_0" md5="d0f46ed3ce8bac33df5f7055656d8bd9" len="52492" '
     'productid="com.tencent.xin.emoticon.person.stiker_15375600770c986d2d929ebfa8" '
     'cdnurl="http://wxapp.tc.qq.com/262/20304/stodownload?m=d0f46ed3&amp;filekey=SECRET" '
-    'aeskey="fe8ccfcc3f48dfc3198610429bdf1e06" width="240" height="240" '
+    'aeskey="deadbeefdeadbeefdeadbeefdeadbeef" width="240" height="240" '
     'emojiattr="CgbosKLosKI=" '
     'desc="Cg8KBXpoX2NuEgbosKLosKIKCQoFemhfdHcSAAoLCgdkZWZhdWx0EgA="></emoji>'
     '<gameext type="0" content="0"></gameext></msg>'
@@ -1709,6 +1709,16 @@ def test_extract_sticker_ref_reads_md5_name_and_pack():
     assert md5 == "d0f46ed3ce8bac33df5f7055656d8bd9"
     assert name == "谢谢"          # desc 的 zh_cn
     assert pack == "com.tencent.xin.emoticon.person.stiker_15375600770c986d2d929ebfa8"
+
+
+def test_extract_sticker_ref_lowercases_md5():
+    """md5 大小写不敏感 → 一律折成小写（与 extract_media_ref 的 xml_md5 同口径）。
+
+    真机 md5 是小写，所以只有**大写**夹具钉得住 `.lower()`——全小写的夹具下删掉它
+    照样全绿（自审变异实测）。
+    """
+    xml = '<msg><emoji md5="' + "AB12" * 8 + '"></emoji></msg>'
+    assert media.extract_sticker_ref(messages.TYPE_STICKER, xml)[0] == "ab12" * 8
 
 
 def test_extract_sticker_ref_falls_back_to_emojiattr():
@@ -1779,7 +1789,11 @@ def test_extract_sticker_ref_returns_none_when_no_chinese():
     (messages.TYPE_STICKER, None),                # 无内容 → None
     (messages.TYPE_STICKER, ""),                  # 空串 → None
     (messages.TYPE_STICKER, "<msg><emoji></emoji></msg>"),   # 无 md5 → None
-    (messages.TYPE_STICKER, "<msg><emoji md5=\"short\"></emoji></msg>"),  # md5 长度不对 → None
+    (messages.TYPE_STICKER, "<msg><emoji md5=\"short\"></emoji></msg>"),  # md5 不是十六进制 → None
+    # 上一条钉的是**字符集**（"short" 里一个 hex 字符都没有）；本条钉的是**长度**——
+    # 31 位全是 hex，只有「必须恰好 32 位」才拦得住它。两条互为补集，都要留。
+    (messages.TYPE_STICKER, "<msg><emoji md5=\"" + "a" * 31
+                            + "\"></emoji></msg>"),   # md5 是 hex 但只有 31 位 → None
     (messages.TYPE_STICKER, "不是 XML"),           # 畸形 → None
     (messages.TYPE_STICKER, "<msg><emoji md5=\"" + "a" * 32
                             + "\" desc=\"!!!不是base64!!!\"></emoji></msg>"),  # 坏 Base64 → 名字 None，md5 仍在
