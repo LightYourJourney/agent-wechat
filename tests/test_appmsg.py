@@ -554,7 +554,15 @@ def test_opaque_base64_blob_is_not_a_leaf_field():
 def test_opaque_rule_does_not_eat_identifiers_or_urls():
     """反向用例：**过度剔除比漏剔更隐蔽**——字段表空掉没人报错。
 
-    实测 `newaa.billno`(96) / `lastgmsgid`(108) 是标识不是凭据，必须留下。
+    三个夹具都必须是**合成值**，不得超过 `_OPAQUE_MIN`(128)：`billno`/`lastgmsgid` 是
+    标识不是凭据，`url` 含 `://` `?` 不在 Base64 字母表内，三者都要留下。
+
+    **`lastgmsgid` 的取值是合成的**（44 字），形状照真机 protobuf
+    （`{1: 昵称, 2: wxid}`）但内容用受认可的占位符 `wxid_testacct01_ab12`。
+    初稿这里直接抄了实测输出里的真样本 —— 那会把一个**第三方真实 wxid**
+    以 Base64 形式带进仓库，而明文 grep 看不见它。
+    本仓库正因同类泄漏（25 处）重写过全部 git 历史（`CONTRIBUTING.md §4`）。
+    **从语料里抄样本前必须先解码看一眼**。
     """
     xml = _emoji_appmsg(kind=2000,
                         billno="85e4d29b6619924f9d92a2ecaba70cec37749cc78e4f",
