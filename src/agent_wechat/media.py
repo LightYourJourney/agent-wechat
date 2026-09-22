@@ -12,6 +12,8 @@ import reader（reader 可以 import 本模块）。唯一的 store 调用点是
 """
 from __future__ import annotations
 
+import base64
+import binascii
 import datetime
 import hashlib
 import pathlib
@@ -310,6 +312,80 @@ def extract_media_ref(local_type: int, content: str | None,
     if file_key is None:
         return None
     return (kind, file_key, xml_md5)
+
+
+# 贴纸 `<emoji>` 的属性取值。**用正则不用 XML 解析器**：与 extract_media_ref 对
+# `<img>`/`<videomsg>` 的处理同一手法，且对畸形载荷更耐操——本函数契约是
+# 「对任意 str 全定义、不抛」（载荷对手可控），解析器会抛。
+_STICKER_MD5 = re.compile(r'<emoji\b[^>]*?\smd5="([0-9a-fA-F]{32})"')
+_STICKER_ATTR = {a: re.compile(rf'<emoji\b[^>]*?\s{a}="([^"]*)"')
+                 for a in ("desc", "emojiattr", "productid")}
+# 两种载荷形态**不一样**，这是本函数最容易写错的地方（自审实测：写错过一次，
+# 三个真实夹具全部返回 None，整个名称特性会静默归零）：
+#
+#   desc      = `\x0a <len> <lang> \x12 <len> <text>` 的重复
+#               例：`\n\x0f` + (`\n\x05zh_cn\x12\x06谢谢`) + (`\n\x05zh_tw\x12\x00`) + …
+#   emojiattr = `\x0a <len> <text>`，**没有语言、也没有 \x12 分隔符**
+#               例：`\n\x06谢谢`
+#
+# 所以匹配 `zh_cn` 必须锚在 `\x12` 上（它只在 desc 形态里出现），
+# 而 emojiattr 走「整串找中文」的兜底。
+_PROTO_ZHCN = re.compile(rb"zh_cn\x12(.)", re.S)
+_CJK = re.compile(r"[一-鿿]+")
+
+
+def _sticker_name(raw_b64: str | None) -> str | None:
+    """`desc` / `emojiattr` 的 Base64 protobuf → 中文名。
+
+    **任何一步失败都返回 None，绝不抛**：Base64 非法、protobuf 形状不符、没有中文——
+    都只是「这一条拿不到名字」，不该把整条贴纸拖成 None。
+
+    `desc` 取 `zh_cn` 那一块。**长度前缀按字节切，不是按字符**：「谢谢」是 2 字符 6 字节，
+    按字符切会多吃 4 个字符。`zh_cn` 存在但为空（实测 zh_tw/default 可为空串）时同样
+    落到兜底，**不要**顺手取「zh_cn 之后第一个中文」——那会拿到下一个语言块的文本。
+    """
+    if not raw_b64:
+        return None
+    try:
+        blob = base64.b64decode(raw_b64 + "=" * (-len(raw_b64) % 4))
+    except (binascii.Error, ValueError):
+        return None
+    m = _PROTO_ZHCN.search(blob)
+    if m:
+        seg = blob[m.end():m.end() + m.group(1)[0]]
+        names = _CJK.findall(seg.decode("utf-8", "replace"))
+        if names:
+            return names[-1]
+    # 兜底：emojiattr（无语言标注）与 zh_cn 为空的情形——取整串第一个中文串。
+    names = _CJK.findall(blob.decode("utf-8", "replace"))
+    return names[0] if names else None
+
+
+def extract_sticker_ref(local_type: int, content: str | None
+                        ) -> tuple[str, str | None, str | None] | None:
+    """`(md5, name, pack_id)`；非 47 或 XML 里没有合法 md5 → None。**纯函数、不抛。**
+
+    与 `extract_media_ref` 的分工：那个只认图片/视频（`TYPE_IMAGE`/`TYPE_VIDEO`），
+    本函数只认贴纸（`TYPE_STICKER`）。两者互斥，调用方按 msg_type 择一。
+
+    **只取三样东西，别的一律不要**：`md5`（文件定位与短 ID）、中文名（显示）、
+    `pack_id`（包归属，本设计只记录不使用）。XML 里还有 `cdnurl` / `aeskey` /
+    `encrypturl` 等凭据，**它们绝不进入返回值**——贴纸 XML 不落库是凭据问题的
+    结构性根治（spec §7.1），一旦把凭据带出去，那道防线就没了。
+    """
+    if local_type != messages.TYPE_STICKER or not content:
+        return None
+    m = _STICKER_MD5.search(content)
+    if not m:
+        return None
+    md5 = m.group(1).lower()
+    name = None
+    for attr in ("desc", "emojiattr"):        # desc 优先：它是多语言的，更可能有 zh_cn
+        a = _STICKER_ATTR[attr].search(content)
+        if a and (name := _sticker_name(a.group(1))):
+            break
+    pk = _STICKER_ATTR["productid"].search(content)
+    return (md5, name, pk.group(1) if pk else None)
 
 
 # ---------- 导出 ----------

@@ -1689,3 +1689,106 @@ def test_export_media_image_rerun_skips_before_decrypting(tmp_path, monkeypatch)
                                 months=["2026-09"], out_dir=out)
     assert (second.image.ok, second.image.skipped) == (0, 3)
     assert decrypted == []                           # 跳过发生在解密**之前**
+
+
+# 真机样本（2026-09-22，已抹去 fromusername/tousername 与凭据）
+_REAL_STICKER_XML = (
+    '<msg><emoji fromusername="wxid_abc123def456" tousername="12345678@chatroom" '
+    'type="2" idbuffer="media:0_0" md5="d0f46ed3ce8bac33df5f7055656d8bd9" len="52492" '
+    'productid="com.tencent.xin.emoticon.person.stiker_15375600770c986d2d929ebfa8" '
+    'cdnurl="http://wxapp.tc.qq.com/262/20304/stodownload?m=d0f46ed3&amp;filekey=SECRET" '
+    'aeskey="fe8ccfcc3f48dfc3198610429bdf1e06" width="240" height="240" '
+    'emojiattr="CgbosKLosKI=" '
+    'desc="Cg8KBXpoX2NuEgbosKLosKIKCQoFemhfdHcSAAoLCgdkZWZhdWx0EgA="></emoji>'
+    '<gameext type="0" content="0"></gameext></msg>'
+)
+
+
+def test_extract_sticker_ref_reads_md5_name_and_pack():
+    md5, name, pack = media.extract_sticker_ref(messages.TYPE_STICKER, _REAL_STICKER_XML)
+    assert md5 == "d0f46ed3ce8bac33df5f7055656d8bd9"
+    assert name == "谢谢"          # desc 的 zh_cn
+    assert pack == "com.tencent.xin.emoticon.person.stiker_15375600770c986d2d929ebfa8"
+
+
+def test_extract_sticker_ref_falls_back_to_emojiattr():
+    """desc 缺失时取 emojiattr；两者都缺 → name 为 None，**不是空串**。"""
+    xml = '<msg><emoji md5="a' + "0" * 31 + '" emojiattr="CgbosKLosKI="></emoji></msg>'
+    assert media.extract_sticker_ref(messages.TYPE_STICKER, xml)[1] == "谢谢"
+    xml2 = '<msg><emoji md5="a' + "0" * 31 + '"></emoji></msg>'
+    assert media.extract_sticker_ref(messages.TYPE_STICKER, xml2)[1] is None
+
+
+# ── 以下 Base64 全部**程序生成并做过往返验证**，不要手敲 ──────────────────
+#
+# 生成器（三行，需要加新夹具时用它，不要凭想象拼字节）：
+#   def _f(n, p): return bytes([(n << 3) | 2, len(p)]) + p
+#   desc  = base64.b64encode(b"".join(_f(1, _f(1, l.encode()) + _f(2, t.encode()))
+#                                      for l, t in pairs)).decode()
+#   attr  = base64.b64encode(_f(1, text.encode())).decode()
+#
+# **为什么强调这个**：自审时手敲的两个 Base64 都错了——一个把「謝謝」打成了乱码
+# 「空殚」，另一个把「好」编码了两遍。手敲的字节串肉眼看不出来，但夹具一旦编码了
+# 现实里不存在的形态，代码与测试就会互相印证着一起错（本仓库最贵的那类缺陷）。
+_DESC_ZH_TW_THEN_ZH_CN = "Cg8KBXpoX3R3Egboh7rngaMKDwoFemhfY24SBuiwouiwog=="   # {zh_tw:臺灣}{zh_cn:谢谢}
+_DESC_ZH_CN_EMPTY = "CgkKBXpoX2NuEgAKDAoFemhfdHcSA+WlvQ=="                     # {zh_cn:""}{zh_tw:好}
+_DESC_NO_CJK = "Cg4KBXpoX2NuEgVzbWlsZQ=="                                     # {zh_cn:"smile"}
+_ATTR_JUST_TEXT = "CgbosKLosKI="                                              # emojiattr 形态：无语言
+
+
+def test_extract_sticker_ref_prefers_zh_cn_over_other_languages():
+    """desc 是多语言重复结构，取 zh_cn；**不取顺序上第一个**。
+
+    夹具里 zh_tw 在**前**且取值不同（臺灣 / 谢谢），所以「取第一个中文串」的实现
+    会返回「臺灣」而红。**这是本用例唯一的价值**——两个语言取同值的话它恒绿。
+    """
+    xml = ('<msg><emoji md5="a' + "0" * 31 + '" '
+           f'desc="{_DESC_ZH_TW_THEN_ZH_CN}"></emoji></msg>')
+    assert media.extract_sticker_ref(messages.TYPE_STICKER, xml)[1] == "谢谢"
+
+
+def test_extract_sticker_ref_falls_back_to_another_language_when_zh_cn_empty():
+    """zh_cn 为空串时，**允许**用整串里能找到的中文（可能是别的语言）。
+
+    这是**有意**的：`{zh_cn: "", zh_tw: "好"}` 里的「好」仍然是个名字，比裸短 ID
+    多出信息量，符合 D2 的降级链（有名给名字，无名给短 ID）。
+
+    **本用例钉得住的**：zh_cn 为空时**不会**让整条返回 None（那样会白白丢掉
+    一个可用的名字）。
+    **本用例钉不住的**：「按块取」与「取 zh_cn 之后第一个中文串」在本夹具下给出
+    同一个答案。两者在真实语料里的差别未被观测到，**不要**为它编一个用例——
+    编出来的夹具会编码现实里不存在的形态。
+    """
+    xml = ('<msg><emoji md5="a' + "0" * 31 + '" '
+           f'desc="{_DESC_ZH_CN_EMPTY}"></emoji></msg>')
+    assert media.extract_sticker_ref(messages.TYPE_STICKER, xml)[1] == "好"
+
+
+def test_extract_sticker_ref_returns_none_when_no_chinese():
+    """有 desc 但里面没有中文（英文名）→ name 为 None，**不是英文名**。
+
+    本设计只取中文名：短 ID 比一个英文标签更稳定（英文名会随语言包变）。
+    """
+    xml = ('<msg><emoji md5="a' + "0" * 31 + '" '
+           f'desc="{_DESC_NO_CJK}"></emoji></msg>')
+    assert media.extract_sticker_ref(messages.TYPE_STICKER, xml)[1] is None
+
+
+@pytest.mark.parametrize("lt,content", [
+    (messages.TYPE_TEXT, _REAL_STICKER_XML),      # 非贴纸类型 → None
+    (messages.TYPE_STICKER, None),                # 无内容 → None
+    (messages.TYPE_STICKER, ""),                  # 空串 → None
+    (messages.TYPE_STICKER, "<msg><emoji></emoji></msg>"),   # 无 md5 → None
+    (messages.TYPE_STICKER, "<msg><emoji md5=\"short\"></emoji></msg>"),  # md5 长度不对 → None
+    (messages.TYPE_STICKER, "不是 XML"),           # 畸形 → None
+    (messages.TYPE_STICKER, "<msg><emoji md5=\"" + "a" * 32
+                            + "\" desc=\"!!!不是base64!!!\"></emoji></msg>"),  # 坏 Base64 → 名字 None，md5 仍在
+])
+def test_extract_sticker_ref_is_total(lt, content):
+    """**载荷是对手可控的**：任何输入都不许抛。最后一条还要保住 md5——
+    名字解不出只是少了个标签，不该把整条贴纸拖成 None。"""
+    r = media.extract_sticker_ref(lt, content)
+    if lt == messages.TYPE_STICKER and content and "a" * 32 in content:
+        assert r is not None and r[0] == "a" * 32 and r[1] is None
+    else:
+        assert r is None
