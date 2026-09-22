@@ -566,3 +566,52 @@ def test_opaque_rule_does_not_eat_identifiers_or_urls():
     assert "appattach.lastgmsgid" in paths
     assert "appattach.url" in paths
     assert r.dropped_blobs == 0
+
+
+def _b64_of(n):
+    """生成长度**恰好** n 的 Base64 字母表字符串。**不要手敲**——数错一个字符
+    边界用例就失去意义，而它恰恰是唯一能钉住阈值的用例。"""
+    return ("QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVph" * (n // 32 + 1))[:n]
+
+
+def test_opaque_threshold_is_pinned_to_the_measured_gap():
+    """**阈值必须被钉在实测空档里**——这是本任务唯一能防住「随手调常数」的用例。
+
+    真机实测的两端（`msg_parts` 全语料）：
+      · 须保留的最大字段 `lastgmsgid`：68–108 字符
+      · 须剔除的最小载荷 `cdnthumburl`：168–202 字符
+    故 `_OPAQUE_MIN` 落在 `(108, 168]` 才正确。
+
+    **没有这条用例时，阈值从 45 到 1360 之间的任何取值都全绿**（实施期实测：
+    逐值跑 `tests/test_appmsg.py`，44 红、45–1360 全绿）——空档之外整整一个数量级的
+    范围无人看守，而计划注释却写着「别拍脑袋改」。**那就是假护栏**：
+    真机 `lastgmsgid` 会被静默误剔，没有任何测试会红。
+
+    第三个断言用真机 `cdnthumburl` 样本本身（240 字符，远在线之上）：它让那个实测
+    常量有人读，否则它是个「看起来在守边界、其实没人读」的死夹具。
+    """
+    kept = _b64_of(108)      # 实测须保留的最大长度
+    dropped = _b64_of(168)   # 实测须剔除的最小长度
+    r1 = appmsg.parse(_emoji_appmsg(kind=8, lastgmsgid=kept))
+    assert [p for p, _ in r1.appmsg.fields] == ["appattach.lastgmsgid"]
+    assert r1.dropped_blobs == 0
+    r2 = appmsg.parse(_emoji_appmsg(kind=8, cdnthumburl=dropped))
+    assert [p for p, _ in r2.appmsg.fields] == []
+    assert r2.dropped_blobs == 1
+    r3 = appmsg.parse(_emoji_appmsg(kind=8, cdnthumburl=_REAL_CDNTHUMBURL))
+    assert r3.dropped_blobs == 1
+
+
+def test_filter_order_credential_wins_over_blob():
+    """**顺序固定**：先 `_is_secret`，再 `_is_opaque_blob`。
+
+    一个既像凭据**又**是长 Base64 的值必须计入「被拦」，**不计入** `dropped_blobs`——
+    否则那个计数就不再是「剔掉了几个不透明块」，而是「剔掉了几样东西的混合」，
+    读它的人无从判断该不该去查凭据。
+
+    这条**只有计数戳得穿**：两种顺序下字段都被剔、字段表逐字相同（`fields == []`），
+    断言必须落在计数上。实施期实测：把 `parse` 里两支换序，本用例红在 `assert 1 == 0`。
+    """
+    r = appmsg.parse(_emoji_appmsg(kind=8, aeskey=_b64_of(200)))
+    assert r.dropped_blobs == 0
+    assert [p for p, _ in r.appmsg.fields] == []
