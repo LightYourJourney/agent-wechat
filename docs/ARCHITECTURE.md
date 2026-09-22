@@ -25,12 +25,13 @@ src/agent_wechat/
 ├── bootstrap.py    lldb 断点捕获 passphrase（唯一 sudo 环节）
 ├── decrypt.py      db+wal+shm 三元组快照 → sqlcipher raw-key 解密导出
 ├── errors.py       统一错误契约：core 只抛项目异常，适配层翻译成各自介质
-├── messages.py     messages 行契约：列清单、行构造器、两条哨兵编解码、类型词汇表
+├── messages.py     messages 行契约：列清单、行构造器、三条哨兵编解码（`md5:` 退化会话 id、
+│                   `[appmsg: 标题]` 提示、`[贴纸:名称]` / `[贴纸#短ID]` 显示串）、类型词汇表
 ├── appmsg.py       appmsg 原始载荷：三步规范化 + 危险载荷守卫 + 解析（纯函数，不碰 IO）
 ├── roster.py       显示名规则：ext_buffer 的 protobuf 解析 + 群昵称/备注/昵称优先级（纯逻辑，不碰 IO）
 ├── schema.py       微信库结构声明：能力 × 必需表/列 + 探测（纯数据，不碰 IO）
 ├── reader.py       消息读取：表发现、内容解码、流式产出（按语义**解码消息内容**的唯一模块——`inspect` 也会读库，但它只 dump 结构与样例行；结构与探测声明在 schema.py）
-├── media.py        媒体导出：图片 dat 解密（密钥纯磁盘推导 + 样本验证）、语音 SILK→WAV、视频定位（唯一接触媒体容器与媒体密钥的模块；reader import 它抽 `media_refs`，不反向）
+├── media.py        媒体导出：图片 dat 解密（密钥纯磁盘推导 + 样本验证）、语音 SILK→WAV、视频定位（唯一接触媒体容器与媒体密钥的模块；reader import 它抽 `media_refs`、并借 `extract_sticker_ref` 解析贴纸 XML 的**三个安全字段**，不反向）
 ├── moments.py      朋友圈解析：sns.db 的 `TimelineObject` XML → 结构化动态（纯读取，不联网）
 ├── sns_media.py    朋友圈远程媒体：URL 构造 → 下载 → WX-ISAAC64 解密（本项目**唯一直接向微信 CDN 发请求**的模块，隔离带）
 ├── moments_html.py 朋友圈渲染：单文件自包含 HTML 时间线（纯函数，不写文件、不联网）
@@ -212,7 +213,7 @@ moments.iter_posts(account, report=…)       # 复用 passphrase 解密 sns/sns
 | 1-2 字高频查询 | LIKE 兜底（限 contact 时够用） | 增加 bigram 影子 FTS 表（存储约 +2×，做成配置项） |
 | 更大规模（千万级） | 单文件 SQLite（百万级实测流畅） | 分库（按账号/年份）或迁移 PostgreSQL + pgvector |
 | 媒体导出 | 已实现：`media.py`（图片 dat 解密 / 语音 SILK→WAV / 视频定位）+ `media_refs` 映射 | 按会话导出与存量回填已就绪；按相册批量导出未做 |
-| 媒体与消息关联 | 已实现：CLI `media locate` / MCP `get_message_media` 按 `msg_key` 回答四态（`none` / `exported` / `exportable` / `gone`），信封另给 `counts` 与 `by_kind` 拆分 | 不写微信目录、不写 `out_dir`、不联网；判定做 `pathlib` 探测与索引只读查询，语音的本体判定要解密 `media_*.db`（明文只在 `tmp/` 短暂存在，见 SECURITY.md）。`exportable` 在本机实质上是语音专属——图片/视频本体只为**近期（尚未导出）**的消息保留（详见 TOOLS.md §11） |
+| 媒体与消息关联 | 已实现：CLI `media locate` / MCP `get_message_media` 按 `msg_key` 回答四态（`none` / `exported` / `exportable` / `gone`），信封另给 `counts` 与 `by_kind` 拆分（`image` / `video` / `voice` / `sticker` 四项） | 不写微信目录、不写 `out_dir`、不联网；判定做 `pathlib` 探测与索引只读查询，语音的本体判定要解密 `media_*.db`（明文只在 `tmp/` 短暂存在，见 SECURITY.md）。`exportable` 在本机实质上是语音专属——图片/视频本体只为**近期（尚未导出）**的消息保留；**贴纸是第四类且只可能 `gone`，那个 `gone` 的语义是「取不出来」**（微信把它存成加密格式、方案未破，与「本机有没有」无关；贴纸导出未实现，见 TOOLS.md §9 / §11） |
 | 会话时间线导出（appmsg 富文本） | 已实现：`appmsg.py`（三步规范化 + 解析）+ `msg_parts` 原始载荷表 + `chatview.py`（`ChatView` 组装与落盘）+ `chat_html.py` / `chat_md.py`（两个纯模板，措辞共享在 `chat_text.py`）+ `chat_index.py`（索引页）；CLI `chat export` / `chat index` / `appmsg rebuild`，MCP `export_chat` / `get_message_parts` | appmsg（引用 / 链接 / 文件 / 转账）渲染成结构化块，媒体以相对路径引用**同级**的既有媒体树（`chat export` 的 `--out` 必须与 `media export` 同根）；`appmsg rebuild` 是显式的一次性动作（幂等）；Markdown 有三处固有损失，**不假装与 HTML 等价**（见 USAGE.md §7） |
 | 朋友圈读取与导出 | 已实现：`moments.py`（离线解析 `sns.db`）+ `moments_html.py`（单文件 HTML）+ `sns_media.py`（远程媒体，默认关） | 远程媒体需联网——`--with-media` / `with_media=True` 显式开启，只连微信 CDN——后缀 `*.qpic.cn` / `*.video.qq.com`，加精确主机 `wxapp.tc.qq.com`（**不含子域**）；默认全程零网络；本地缓存图不参与（文件名与动态对不上）；发布 / 删除等写操作不做 |
 | 群成员显示名 | 已实现：索引库存 `display_names` 名册，查询时 join；实时路径 `recent` 用内存名册 | 群昵称在 `contact.db` 的 `chat_room.ext_buffer`（protobuf，字段 f2，可选），回落 `contact.remark` / `nick_name` |

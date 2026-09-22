@@ -64,6 +64,13 @@ MCP 与 CLI 两个入口共享的一层：参数归一化、账号/会话解析�
 非文本消息的正文占位；appmsg 带标题时形如 `[appmsg: 标题]`，无标题为 `[appmsg]`。
 出处：`messages.appmsg_hint` / `messages.has_appmsg_title`。
 
+## 贴纸显示串
+`msg_type=47` 的 `content`：有名 `[贴纸:名称]`，无名 `[贴纸#md5前8位]`（短 ID 让 LLM
+分得清「同一贴纸发了 5 次」与「5 个不同贴纸」）；源 XML 无合法 md5 时保持 `[sticker]`。
+**`media_hint` 不受影响，仍是 `[sticker]`**——两列语义不同。出处：
+`messages.sticker_display` / `messages.is_sticker_display` / `messages.sticker_name_of`、
+`media.extract_sticker_ref`。
+
 ## 任务注册表（tasks）
 长任务的内存记录 + `~/.agent-wechat/tasks.json` 持久化（首次使用时载入，所以重启后
 `get_task_status` 仍答得上来）。`rows` 有**两个写入方**：运行中 `tasks.update(rows=)`

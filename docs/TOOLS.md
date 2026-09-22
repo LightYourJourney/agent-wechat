@@ -10,6 +10,9 @@
   （省略表示索引全部账号，见 §7）。
 - 时间字段一律 **unix 秒**。
 - 非文本消息的 `content` 为 `[image]` / `[appmsg: 标题]` / `[voice]` 等提示。
+  **贴纸是刻意的例外**：它的 `content` 是可读标识 `[贴纸:名称]` / `[贴纸#md5前8位]`
+  （源 XML 里没有合法 md5 时回落成 `[sticker]`），而 `media_hint` **仍是 `[sticker]`**
+  ——两列语义不同，这是设计而不是不一致（见 §3、§6 与 DATA_MODEL.md §5）。
 - 错误一律以 `{"error": "中文说明"[, "hint": "可执行修复动作"]}` 信封返回；工具层统一
   捕获并翻译内部异常，**不会有任何异常逃到传输层**（包括会杀死常驻 stdio server 的
   `SystemExit`）。`hint` 仅在存在可执行修复动作时出现，文案已含指引则不重复。
@@ -96,7 +99,10 @@
       "type": "text", "content": "好啊，七点老地方？" },
     { "msg_key": "wxid_testacct01|0123456789abcdef0123456789abcdef|message_4.db|22417",
       "time": 1789045600, "sender": "wxid_abc123def456", "is_self": false,
-      "type": "image", "content": "[image]" }
+      "type": "image", "content": "[image]" },
+    { "msg_key": "wxid_testacct01|0123456789abcdef0123456789abcdef|message_4.db|22418",
+      "time": 1789045700, "sender": "我", "is_self": true,
+      "type": "sticker", "content": "[贴纸:滑稽]" }
   ],
   "degraded": []
 }
@@ -207,6 +213,10 @@
   可用于 `get_message_media` 指认消息。
 - `degraded` 键（§3）在显示名降级时非空：那时 `sender_name` 会回落成 wxid，
   **不要**当成真实姓名呈现
+- 命中里的 `content` 是消息在该索引里的正文投影。**贴纸（`msg_type=47`）的 `content` 与
+  `media_hint` 是分开的两列**：前者是可读标识 `[贴纸:名称]` / `[贴纸#md5前8位]`，
+  后者**恒为 `[sticker]`**——按 `media_hint` 判「这是不是贴纸」可以，按它判「哪个贴纸」
+  不行（见文件头的通用约定与 TOOLS.md §11）
 
 ---
 
@@ -337,6 +347,13 @@
   导出预留。
 - `kinds` 传空串（或全是逗号/空白）表示**不导任何类型**：不报错，成功返回且三类计数全为 0
   （只有 0700 权限等环境类 `degraded` 可能非空）。想导出全部请显式给 `image,voice,video`。
+- **`kinds` 的合法值只有 `image` / `voice` / `video`，没有 `sticker`**：贴纸**不可导出**，
+  传 `sticker` 得到 `{"error": "未知的媒体类型: ['sticker']（可用: image, voice, video）"}`。
+  **这不是「本轮没做」，是「今天做不了」**——本机那份贴纸文件是微信自己的加密格式，解密
+  方案未破（有证明级否定的 spike 结论）；CDN 那条路实测 15 次请求 **0 响应**（502 /
+  timeout，当天的贴纸也一样），而同一主机上**不带凭据**的 URL 返回 HTTP 200 + 明文 PNG
+  ——说明网络能到腾讯，是请求本身缺了签名 / 参数。所以**没有任何可验证的路径**能产出贴纸
+  文件。`get_message_media`（§11）因此把贴纸一律答 `gone`。
 - `degraded` 键**恒存在**（与 §3 同一惯例：降级不是错误），但此处每项是**中文字符串**
   （图片密钥推导失败、pilk 缺失、wxgf 未转 JPEG、输出目录权限未收紧、视频索引相关等），
   不是 `{capability, effect}`。图片密钥问题不影响语音/视频导出。
@@ -469,9 +486,9 @@
 {
   "chat_id": "wxid_abc123def456",
   "out_dir": "/Users/you/.agent-wechat/media",
-  "counts": { "none": 3, "exported": 1, "exportable": 19, "gone": 30 },
+  "counts": { "none": 3, "exported": 1, "exportable": 19, "gone": 34 },
   "by_kind": { "voice": { "exportable": 19 }, "image": { "exported": 1, "gone": 22 },
-               "video": { "gone": 8 } },
+               "video": { "gone": 8 }, "sticker": { "gone": 4 } },
   "truncated": false,
   "messages": [
     { "msg_key": "wxid_abc123def456|9f2c1a…|message_0.db|81234", "time": 1789046102,
@@ -483,24 +500,32 @@
 
 **说明**：
 - `status` 四态（判定顺序严格按此序）：
-  - `none` —— 不属于本功能覆盖的三类媒体（图片/视频/语音）：类型由消息类型判定（不依赖
-    引用表），贴纸、文件、位置、appmsg 等都归这里。**它不是「这条消息没有媒体」**——索引
-    自己对贴纸/位置/appmsg 也挂 `[sticker]` / `[location]` / `[appmsg: …]` 之类的提示，
-    只是本功能不覆盖这几类；`kind` 为 `null`。要判断这些类型，看消息信封里的 `type` /
-    `content`
+  - `none` —— 不属于本功能覆盖的媒体类型：类型由消息类型判定（不依赖引用表），文件、位置、
+    appmsg 等都归这里。**它不是「这条消息没有媒体」**——索引自己也给位置 / appmsg 挂
+    `[location]` / `[appmsg: …]` 之类的提示，只是本功能不覆盖这几类；`kind` 为 `null`。
+    要判断这些类型，看消息信封里的 `type` / `content`。**贴纸不在此列**（它是有类型的媒体
+    消息，见下一条）
   - `exported` —— 产物已在 `out_dir` 下，`path` 是产物**绝对路径**
-  - `exportable` —— 有媒体且**本体还在微信里**，但还没导出到 `out_dir`
-  - `gone` —— 有媒体，但本机找不到
+  - `exportable` —— 有媒体且**本体还在微信里**，但还没导出到 `out_dir`。**贴纸永远不产出
+    这个状态**：它没有产物可拿，判成 `exportable` 会让用户以为有东西能导
+  - `gone` —— 有媒体，但本机找不到。**贴纸的 `gone` 是另一回事，它说的是「取不出来」**：
+    微信把贴纸存成加密格式、解密方案未破，**与本机有没有那份文件无关**——所以下面
+    「导出更多历史比修复有用」那句对贴纸**不成立**（`media export` 也帮不上：
+    `kinds` 根本不收 `sticker`，见 §9）
 - **`gone` 是常态，不是错误**：微信只为**近期**消息保留媒体本体，而近期消息往往还没导出进本索引，
   所以本机能对上的极少。实测（2026-09-16）对索引内已有的消息：图片本体兑现率约 **0.005%**
   （2 / 39,307），视频 **0**（/ 4,404）；语音相反——本体存在 `media_*.db` 里、微信不清理，
   **7,390 条 100% 有**。所以 `exportable` 在本机**实质上是语音专属状态**。
+  **贴纸不在这句话的范围里**：它全归 `gone`，但那不是因为微信清理过什么（见上）。
 - **`gone` 也可能是「定位不了」，不是「本机没有」**：媒体消息拿不到引用（没有 `file_key`）时，
   产物探测拒绝猜文件名，于是即使磁盘上真有产物也答 `gone`——这一类的 `gone` 只说明「判不出来」。
-- **`by_kind` 是把 `counts` 按 `image` / `video` / `voice` 再拆一次**：三类的本机可得率
-  相差几个数量级，池化的 `counts` 会把「语音几乎全可导出」与「图片视频几乎全 `gone`」
-  加成一个数字，看起来像「这个会话的媒体大多没了」。`kind` 为 `null` 的 `none` 态没有
-  类型，只进 `counts`。
+  贴纸的 `gone` 又是第三种：既不靠引用表，也不看磁盘，只由 `msg_type` 判定——见上。
+- **`by_kind` 是把 `counts` 按 `image` / `video` / `voice` / `sticker` 四项再拆一次**：
+  四类的本机可得率相差几个数量级，池化的 `counts` 会把「语音几乎全可导出」与「图片视频
+  与贴纸几乎全 `gone`」加成一个数字，看起来像「这个会话的媒体大多没了」。`kind` 为
+  `null` 的 `none` 态没有类型，只进 `counts`。**`sticker` 那一格只会有 `gone`**——
+  它永不产出 `exported` / `exportable`。某个 kind 该会话一条都没有时**整个键不出现**
+  （不是「全 0 的字典」），所以 `by_kind` 里的项数随会话而变，最多四项。
 - **`exportable` 不保证本体可用**：视频只定位到缩略图时也算 `exportable`（本机只有一张
   jpg，`mp4` 本体不在）。
 - `counts` 四键**恒存在**（含 0）；`degraded` 键**恒存在**（每项是 `{capability, effect}`，
@@ -555,6 +580,8 @@
   推导」的分歧就是产物里所有媒体引用的静默 404。
 - `counts` 是 `kind` → 条数：`text` / `image` / `voice` / `video` / `sticker` / `location` /
   `status` / `system` / `revoke` / `appmsg`；未知类型回落成 `msg_type` 的数字字符串（不猜名字）。
+  它按**消息**计数，与「这类媒体能不能导出」**无关**——`sticker` 会在这里出现，但贴纸
+  不可导出（见 §9 与 §11）
 - `unparsed` 与 `rejected` 都是 appmsg 且**分开计数**：前者「解不开」，后者「主动拒绝」
   （含 DTD / 实体声明的载荷，防 billion laughs）。两者非零时部分 appmsg 会回落成
   `[appmsg: 标题]`，明细印在**产物顶部**。
@@ -625,6 +652,7 @@
   ],
   "unparsed": 0,
   "rejected": 0,
+  "dropped_blobs": 0,
   "degraded": []
 }
 ```
@@ -639,10 +667,18 @@
   57 → `quote`，5 → `link`，6 → `file`，2000 → `transfer`，其它类型四者全 `null`（内容在
   `fields` 里）。
 - `fields` 是未具名建模的叶子字段，`[[点分路径, 值], …]`，文档序（如 `[["sources.source",
-  "weibo"]]`）。**密钥 / 凭据已剔除**：名字逐段命中 `aeskey|passphrase|token|key`，或值里
-  带 `?token=` / `&key=` 一类的凭据参数（链接的 `url` 同样过滤）。已具名建模的子树
-  （`refermsg` / `appattach` / `wcpayinfo`）与它们的兄弟叶子（`kind=5` 的 `url` / `des`）
-  **不在字段表里重复出现**——那些值在具名块里。
+  "weibo"]]`）。**密钥 / 凭据已剔除**，两道规则——**名字**（路径逐段命中
+  `aeskey|passphrase|token|key`，匹配的是**段尾**，故 `aeskey` / `fileuploadtoken` 中招；
+  逐段而不是只看末段，是为了挡住 `<aeskey><value>…</value></aeskey>` 这种末段叫 `value`
+  的形态）与**值**（值里带凭据查询参数：参数名在 `[?&;,]` 之后、`=` 之前，**按同一份
+  规则**匹配，所以 `&filekey=` / `&xsec_token=` 这类**复合名**一并拦下；链接的 `url`
+  同样过滤。分隔符集含 `;` 与 `,`，实测 `http://c/x;token=…` 也拦得住）。
+  此外**长 Base64 块按形状剔除**（≥128 个 Base64 字符的值）：`emojiinfo` / `cdnthumburl`
+  这类名字干净、凭据被 Base64 包住的载荷靠上面两道规则看不见，只能按形状挡；剔掉的条数
+  报在顶层 `dropped_blobs` 里，**不静默丢**。真 URL 不受影响（`:` `/` `?` `=` 不在
+  Base64 字母表内）。
+  已具名建模的子树（`refermsg` / `appattach` / `wcpayinfo`）与它们的兄弟叶子
+  （`kind=5` 的 `url` / `des`）**不在字段表里重复出现**——那些值在具名块里。
   **内层 XML 载荷也不在**：`recorditem`（合并转发 19 的内层聊天记录，另一个 `refermsg`
   同族的载荷）**不是叶子值**——它是一整段**转义后嵌进来**的 XML 文本，实测中位 ~9.5 KB、
   最长 224,800 字符。同层的可读摘录（如 `<des>`）照常留在 `fields` 里；要看完整的子消息
@@ -655,10 +691,16 @@
 - `ref_msg_key` 是引用（`kind=57`）的目标，**取的是回填那一刻的快照**：目标消息若后来才导出进
   索引，重跑 `appmsg rebuild`（幂等）即刷新。解不到时是 `null`（**不是空串**）——「解不到」与
   「没有引用」在渲染上同义，被引用的原文一直在 `quote.content` 里。
-- `unparsed` / `rejected` **恒存在**，口径与 §12 `export_chat` 逐字同源（同一份解码）：
-  前者是「解压失败（半拷贝的 WAL / 手工改过的索引库）或 XML 解不开」，后者是「命中危险载荷
-  守卫被主动拒绝（DTD / 实体声明）」。两者**分开计**且都不进 `parts`——`parts` 里少一条时，
-  看这两个数才知道是「解不开」还是「本来就没有可读内容」。
+- `unparsed` / `rejected` / `dropped_blobs` **三个都恒存在**。前两个口径与 §12 `export_chat`
+  逐字同源（同一份解码）：`unparsed` 是「解压失败（半拷贝的 WAL / 手工改过的索引库）或 XML
+  解不开」，`rejected` 是「命中危险载荷守卫被主动拒绝（DTD / 实体声明）」。两者**分开计**
+  且都不进 `parts`——`parts` 里少一条时，看这两个数才知道是「解不开」还是「本来就没有可读
+  内容」。
+- **`dropped_blobs` 是第三个计数，和上两个不许并**：它数的是**解析成功**的消息里被形状规则
+  剔掉的**长 Base64 块**（实测主要是 `emojiinfo` / `cdnthumburl` 这类约 1.5 KB 的凭据载体：
+  对模型是纯噪声，且 Base64 一包就让值过滤失明）。所以它说的是**「按规则剔掉了」**，
+  不是「读不出来」——字段表少几行时靠它区分「本来就没有」与「被剔掉了」。**它不含
+  `unparsed` / `rejected` 的那些条**（那两条路径在字段过滤之前就早退了，恒为 0）。
 - 未回填时信封给**两条**、且**分工不复读**：`degraded` 给结构化记录
   （`capability: "msg_parts"`，`effect` 说清少了什么：「msg_parts 未回填：引用 / 链接 /
   文件 / 转账一律取不到内容」），`hint` 只给**可操作的那一句**「请先运行 CLI：

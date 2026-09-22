@@ -29,20 +29,29 @@ CREATE TABLE messages (
     local_id    INTEGER NOT NULL,         -- 分片内消息 id
     server_id   INTEGER,                  -- 预留字段：当前导出版本恒为 NULL
     ts          INTEGER NOT NULL,         -- unix 秒
-    msg_type    INTEGER NOT NULL,         -- 微信消息类型（已掩码，见 §3）
+    msg_type    INTEGER NOT NULL,         -- 微信消息类型（掩码规则见 §5）
     sender_id   TEXT,                     -- 发送者 username（Name2Id 解析）
     sender_name TEXT,                     -- 导出时从内容前缀取的原值（群聊为 <sender> 原文）；
                                           -- 查询时优先用 display_names 名册覆盖，本列是
                                           -- join 不上时的兜底
     is_self     INTEGER NOT NULL,         -- 1 = 本人发送
     content     TEXT,                     -- 文本正文；非文本为 [image] 等提示
-    media_hint  TEXT,                     -- 非文本类型的提示串
+                                          -- **贴纸例外**：msg_type=47 时为可读标识
+                                          -- [贴纸:名称] / [贴纸#md5前8位]，源 XML 无
+                                          -- 合法 md5 时回落 [sticker]（见 §5）
+    media_hint  TEXT,                     -- 非文本类型的提示串；**贴纸恒为 [sticker]**
+                                          -- （与上面那列分叉是刻意的，见 §5）
     exported_at INTEGER NOT NULL          -- 入库时间
 );
 ```
 
 **msg_type 常见值**（微信原始类型，已按低 32 位掩码）：
-`1` 文本 · `3` 图片 · `34` 语音 · `43` 视频 · `47` 表情 · `48` 位置 ·
+`1` 文本 · `3` 图片 · `34` 语音 · `43` 视频 ·
+`47` 贴纸（表情）——`content` 是**可读标识** `[贴纸:名称]` 或 `[贴纸#md5前8位]`
+（名称来自消息 XML 的 `<emoji>` 属性，取不到时用本机 `emoticon.db` 按 md5 反查，仍取不到
+才回落短 ID；源 XML 里没有合法 md5 时 `content` 保持 `[sticker]`），`media_hint` **恒为
+`[sticker]`**——两列分叉是刻意的 ·
+`48` 位置 ·
 `49` appmsg（引用/链接/文件/转账…；正文 XML 规范化后存 `msg_parts.raw_xml`，`content` 只存 `[appmsg: 标题]` 投影）·
 `10000` 系统消息 · `10002` 撤回。
 
@@ -78,8 +87,9 @@ CREATE VIRTUAL TABLE messages_fts USING fts5(
 ```sql
 CREATE TABLE IF NOT EXISTS media_refs (
     msg_key    TEXT PRIMARY KEY,   -- = messages.msg_key（account/chat_md5/ts 经 join 取回）
-    media_kind TEXT NOT NULL,      -- 'image' | 'video'
-    file_key   TEXT,               -- 文件名哈希（dat / mp4 的文件名，不含扩展名）
+    media_kind TEXT NOT NULL,      -- 'image' | 'video' | 'sticker'
+    file_key   TEXT,               -- 文件名哈希（dat / mp4 的文件名，不含扩展名）；
+                                   -- **sticker 行放的是贴纸 md5**（它才是该 kind 的定位键）
     xml_md5    TEXT                -- XML 里的 md5（兜底留证，与文件名无关）
 ) WITHOUT ROWID;
 ```
@@ -89,6 +99,13 @@ CREATE TABLE IF NOT EXISTS media_refs (
   仅当 packed 缺失且它恰好是 32-hex 时充当兜底，同时留证备查。
 - **语音不入此表**：语音文件由 `media_*.db` 的 `VoiceInfo(chat_name_id, create_time, local_id)`
   三元组直接命中，不需要按消息逐条建映射。
+- **贴纸也不按上面那条 `file_key` 语义填**：`media_kind='sticker'` 的行把**贴纸 md5** 放在
+  `file_key` 位（`xml_md5` 位留 `None`）——它不指向任何文件名，只是这个 kind 的身份键。
+  它与图片/视频的 `file_key` 同列不同义，是刻意的。
+  **但这一类行目前是「只写不读」的**：唯一会消费它的路径是贴纸导出，而贴纸导出未实现
+  （本地加密未破 + CDN 传输不通，见 TOOLS.md §9 / §11）。`_state_of` 的贴纸支**不看**
+  `ref`——`kind` 由 `msg_type` 判定，状态恒为 `gone`。所以别把这张表里的 sticker 行读成
+  「已经有贴纸定位功能了」。
 - 填充两条路径：导出管道与消息写入**同事务**顺带 upsert；本次功能之前的存量历史用
   `agent-wechat media rebuild-refs` 全量重扫回填（幂等，不重写 `messages`）。
 - **读路径有三条**（`store.media_refs_by_keys` / `media_refs_by_chat` / `count_media_refs`）：
@@ -183,6 +200,7 @@ CREATE TABLE watermark (
 | `local_type` 高位含标志位（如 244813135921） | `& 0xffffffff` 取真实类型 |
 | 群消息正文 `<sender_wxid>:\n<正文>` | 前缀拆出 `sender_id`/`sender_name`，正文归 content（`sender_name` 是原值，展示时由 `display_names` 名册覆盖） |
 | 非文本消息（图片/语音/appmsg XML…） | content = `[image]` / `[appmsg: 标题]` 等提示；**appmsg 的原始 XML 另存 `msg_parts.raw_xml`**（见 §3），其余类型的原始载荷不入库 |
+| 贴纸 `msg_type=47` 的 `<emoji>` XML | 读**只取三样**：`md5`、名称、`pack_id`——**原始 XML 不入库**（它满是凭据）。`content` = `[贴纸:名称]` / `[贴纸#md5前8位]`；名称先取 XML 的 `desc/emojiattr`，取不到再按 md5 查本机 `emoticon.db`（见 §7）；源 XML 无合法 md5 时不改 `content`，`media_hint` 与 `content` 都保持 `[sticker]` |
 | `real_sender_id`（整数） | 经同库 `Name2Id` 表解析为 username |
 | 表 md5 无法反查会话名 | `chat_id = "md5:<hash>"`（数据不丢，展示降级） |
 | 图片 dat（V2：15B 头 + AES-128-ECB 段 + XOR 尾段） | `media export` 解密为明文图片，扩展名按解密后魔数判定（jpg/png/gif/webp/wxgf），落 `media/<会话md5>/image/<月份>/`（按 `msg/attach/<md5(会话)>/<月份>/Img/` 目录枚举定位） |
@@ -255,7 +273,28 @@ SnsTimeLine(tid, user_name, content, pack_info_buf)
 与聊天图同一把钥匙、可解，但**文件名与动态对不上**（与 `url@md5`、`thumb@md5`、
 `media/id` 及 URL 的四种 md5 变体全部 0 命中），因此不参与导出。
 
-## 7. 面向 LLM 蒖馏的数据获取
+## 7. 贴纸名字的数据源（emoticon.db）
+
+贴纸**不进本地检索库的正文**（`content` 只是可读标识，见 §2、§5）。名字的来源有两个——
+**逐条的**消息 XML 与**账号级的**本机 `emoticon/emoticon.db`（后者用得着时才读）：
+
+```sql
+-- kStoreEmoticonCaptionsTable：md5 → 中文名。**列名全部带尾下划线**（微信自己的命名）
+SELECT md5_, caption_ FROM kStoreEmoticonCaptionsTable WHERE language_ = 'default';
+```
+
+- **优先级**：消息 XML 的 `desc` → XML 的 `emojiattr` → 本机这张表（按 md5 反查）
+  → 回落短 ID `[贴纸#md5前8位]`。实测名称总覆盖率只有**约 9%**：根因是贴纸来自
+  703 个不同表情包而本机只装了 5 个——微信只为**你主动添加**的包保留元数据。
+  所以九成的贴纸只会显示短 ID，那是**如实呈现**，不是解析失败。
+- `language_` 实测**全是 `'default'`**（925/925），与 XML 里 `desc` 的多语言结构
+  （`zh_cn`）不是一回事，筛的时候按 `'default'` 精确筛。
+- 与 `sns.db` 一样是**微信侧**的库（SQLCipher，同一套 `keys.py` 派生的 passphrase），
+  不进 `~/.agent-wechat/`。它只用来取名字，**与贴纸文件解密无关**。
+- **降级而非报错**：库缺失 / 结构漂移 / 解密失败一律返回空表，贴纸只是少个名字、
+  回落短 ID，绝不因此中断导出。表结构实测另见 [schema-4.1.13.md](schema-4.1.13.md) §emoticon.db。
+
+## 8. 面向 LLM 蒖馏的数据获取
 
 导出后的每条消息已是结构化字段（会话/发送者/是否本人/时间/类型/正文）。
 两种取用方式：
@@ -282,7 +321,7 @@ for chat, in con.execute("SELECT DISTINCT chat_id FROM messages"):
 > appmsg（引用/链接/文件/转账）的结构化正文在 `msg_parts`（见 §3），要读成可读时间线走
 > `agent-wechat chat export`（见 USAGE.md §7）。
 
-## 8. 备份与销毁
+## 9. 备份与销毁
 
 - 备份：拷贝 `index.db`（+`-wal`/`-shm`）即可；`~/.agent-wechat/` 已排除出 Time Machine
 - 销毁：`agent-wechat purge --all --yes`（密钥缓存与全部索引一并清除；微信源数据不受影响）。默认 dry-run，手工 `rm -rf ~/.agent-wechat` 仍是等价后备
