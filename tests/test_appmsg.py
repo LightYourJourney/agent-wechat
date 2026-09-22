@@ -461,3 +461,62 @@ def test_secret_value_separator_set_covers_semicolon_and_comma():
         assert appmsg.parse(
             f'<msg><appmsg><title>x</title><type>5</type><url>{url}</url></appmsg></msg>'
         ).appmsg.link.url is None
+
+
+@pytest.mark.parametrize("url", [
+    "http://x/y?m=abc&filekey=DEADBEEF",     # 本轮修的：复合名，key= 前面是 file
+    "http://x/y?filekey=DEADBEEF",
+    "http://x/y?fileuploadtoken=DEADBEEF",   # 同类：复合 token
+    "http://x/y?key=DEADBEEF",
+    "http://x/y&aeskey=DEADBEEF",
+    "http://x/y?token=DEADBEEF",
+    "http://x/y?a=1;token=DEAD",             # 分隔符 ; 是既有实测
+    "http://x/y?a=1,passphrase=DEAD",        # 分隔符 , 同上
+])
+def test_credential_param_names_are_dropped(url):
+    """参数名以 key/token/passphrase/aeskey 结尾的一律算凭据，**不管前面有无限定词**。
+
+    回归对象：`&filekey=` 曾整体放行（实测）。删掉 `_SECRET_PARAM` 那条分支必红。
+    """
+    assert appmsg._is_secret("some.field", url)
+
+
+def test_clean_url_is_not_a_credential():
+    """反向用例：不能把普通 URL 全判成凭据——过度剔除会让字段表变空。"""
+    assert not appmsg._is_secret("appattach.url", "http://x/y?m=abc&fileid=123&hy=SZ")
+
+
+@pytest.mark.parametrize("param", ["filekey", "xsec_token", "sharetoken", "searchkey",
+                                   "pxq_secret_key", "fileuploadtoken"])
+def test_link_url_is_subject_to_the_same_value_filter(param):
+    """**`Link.url` 是值闸门的第二处调用点**，且它走的是信封里的具名块
+    `link`，比 `fields` 更显眼。
+
+    回归对象：只改 `_is_secret` 而不改 `_link()` 时，这条红（`link.url` 照旧进信封）。
+    干跑实测：漏改这里 = `12 failed, 777 passed`。
+
+    参数名取自**真机实测**（`msg_parts` 里 3,293 条 type=5 链接，旧正则放行 279 条）：
+    `xsec_token` 227 / `sharetoken` 33 / `searchkey` 12 / `pxq_secret_key` 4 /
+    `share_token` 2 / `mmkey` 1。**不要只留 filekey 一个**——那样本用例退化成
+    「某个特定名字被拦」，而病根是**所有复合名**。
+
+    `url` 里那个裸 `&` 必须 `html_escape` 后再拼进载荷 —— XML 的裸 `&` 是非法引用，
+    会让 `parse` 返回 `malformed`（`appmsg is None`），断言退化成
+    `AttributeError`：**红了，但红在「解不开」而不是「凭据漏了」**，
+    永远绿不了（实施期实测：不转义时本用例在修复前后都红）。
+    """
+    url = f"https://example.com/x?m=abc&{param}=SECRETVALUE"
+    got = appmsg.parse(
+        f'<msg><appmsg><title>x</title><type>5</type><url>{html_escape(url)}</url></appmsg></msg>'
+    ).appmsg.link.url
+    assert got is None, f"{param} 未命中值过滤——凭据会进 MCP 信封的 link 块"
+
+
+def test_link_url_keeps_ordinary_links():
+    """反向：普通链接必须留下。**过度剔除比漏剔更隐蔽**——`link.url` 变 None 时
+    信封只是少一个字段，没人会报错。"""
+    url = "https://mp.weixin.qq.com/s/YnT7VqXaBcDeFgHiJkLmNoPq"
+    got = appmsg.parse(
+        f'<msg><appmsg><title>x</title><type>5</type><url>{url}</url></appmsg></msg>'
+    ).appmsg.link.url
+    assert got == url

@@ -139,13 +139,25 @@ _NAMED_LEAVES = {KIND_LINK: ("url", "des")}
 # 只锚末段会让**密钥值原样进字段表**（审阅发现、控制器复现，实测泄漏）。
 _SECRET_SEG = re.compile(r"(aeskey|passphrase|token|key)$", re.I)
 # 分隔符集含 `;` 与 `,`：实测 `http://c/x;token=…` 在只有 `?`/`&` 时不被丢。
-_SECRET_VALUE = re.compile(r"[?&;,](?:token|key|aeskey|passphrase)=", re.I)
+#
+# **参数名复用 `_SECRET_SEG`，不另写一张备选表**：此前写的是
+# `[?&;,](?:token|key|aeskey|passphrase)=`，要求参数名**紧跟分隔符**，于是
+# `&filekey=` 里 `key=` 前面是 `file`，正则从 `f` 处断开而**整体放行**（实测：
+# `?key=`/`&aeskey=`/`?token=` 拦得住，`&filekey=`/`?filekey=`/`&fileuploadtoken=`
+# 全部漏）。把 `filekey` 补进备选表是打地鼠——下一类复合名照漏。
+# 判「什么叫像密钥的名字」的规则全项目只应有**一份**，就是 `_SECRET_SEG`。
+_SECRET_PARAM = re.compile(r"[?&;,]([A-Za-z0-9_]+)=")
+
+
+def _has_credential_param(value: str) -> bool:
+    """值里是否带着凭据查询参数（`?filekey=…` / `;token=…`）。"""
+    return any(_SECRET_SEG.search(m.group(1)) for m in _SECRET_PARAM.finditer(value))
 
 
 def _is_secret(path: str, value: str) -> bool:
     """该字段是否为密材 —— 名字**逐段**命中，或值里带凭据参数。"""
     return (any(_SECRET_SEG.search(seg) for seg in path.split("."))
-            or bool(_SECRET_VALUE.search(value)))
+            or _has_credential_param(value))
 
 
 @dataclass(frozen=True)
@@ -301,7 +313,9 @@ def _link(appmsg_el: ET.Element) -> Link:
     `FileRef.md5` 是内容指纹不是凭据；`Transfer` 没有凭据字段。**不要顺手扩大。**
     """
     url = appmsg_el.findtext("url")
-    if url is not None and _SECRET_VALUE.search(url):
+    # 与 `fields` 的值过滤**同源**：同一个凭据走 fields 被丢、走 Link 却进信封，
+    # 这种不一致本身就是缺陷（本函数 docstring 已言明，此处只是把函数换掉）。
+    if url is not None and _has_credential_param(url):
         url = None
     return Link(url=url,
                 title=appmsg_el.findtext("title"),
