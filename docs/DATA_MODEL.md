@@ -102,10 +102,10 @@ CREATE TABLE IF NOT EXISTS media_refs (
 - **贴纸也不按上面那条 `file_key` 语义填**：`media_kind='sticker'` 的行把**贴纸 md5** 放在
   `file_key` 位（`xml_md5` 位留 `None`）——它不指向任何文件名，只是这个 kind 的身份键。
   它与图片/视频的 `file_key` 同列不同义，是刻意的。
-  **但这一类行目前是「只写不读」的**：唯一会消费它的路径是贴纸导出，而贴纸导出未实现
-  （本地加密未破 + CDN 传输不通，见 TOOLS.md §9 / §11）。`_state_of` 的贴纸支**不看**
-  `ref`——`kind` 由 `msg_type` 判定，状态恒为 `gone`。所以别把这张表里的 sticker 行读成
-  「已经有贴纸定位功能了」。
+  **这一类行现在有读路径了**（2026-09-23）：`media export --kinds sticker` 按它判定归属。
+  **但 `_state_of` 的贴纸支仍然不看 `ref`**——`kind` 由 `msg_type` 判定，状态只可能是
+  `gone` 或 `exported`（`exported` 由 `exported_path` 探测得出，与 `ref` 无关），
+  **永不 `exportable`**。别把这张表里的 sticker 行读成「贴纸状态是它算出来的」。
 - 填充两条路径：导出管道与消息写入**同事务**顺带 upsert；本次功能之前的存量历史用
   `agent-wechat media rebuild-refs` 全量重扫回填（幂等，不重写 `messages`）。
 - **读路径有三条**（`store.media_refs_by_keys` / `media_refs_by_chat` / `count_media_refs`）：

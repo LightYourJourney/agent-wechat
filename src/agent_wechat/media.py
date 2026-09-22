@@ -22,6 +22,10 @@ import sqlite3
 import stat
 import subprocess
 import tempfile
+import urllib.error
+from collections.abc import Sequence
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass, field
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
@@ -281,6 +285,30 @@ def resolve_video(account: str, ts: int, file_key: str) -> tuple[pathlib.Path, b
     return None
 
 
+def resolve_sticker(account: str, md5: str) -> tuple[pathlib.Path, bool] | None:
+    """贴纸本体 → `(路径, 是否缩略图)`；本机没有 → None。
+
+    目录布局实测（2026-09-22）：`business/emoticon/{Persist,Thumb}/<md5[:2]>/…`，
+    **按 md5 内容寻址**——同一个 md5 只有一份。Thumb 的文件带 `.thumb` 后缀，
+    Persist 的不带。
+
+    `Persist` 优先：它是本体，`Thumb` 是缩略图（实测中位 16,016 B vs 4,880 B）。
+    返回值第二位把这件事挑明，调用方**必须**把它透出去——与 video 命中缩略图时
+    算 `exportable` 同一个理由：不能让「只有一张小图」看起来像「本体在」。
+
+    **这里只做定位，不解密**（本机文件的加密方案两轮 spike 均未破，spec 附录 C/E.4）。
+    唯一的调用方拿它判「本机有没有那份加密副本」，用于 `degraded` 文案。
+    """
+    root = paths.XWECHAT_FILES / account / "business/emoticon"
+    p = root / "Persist" / md5[:2] / md5
+    if p.is_file():
+        return (p, False)
+    t = root / "Thumb" / md5[:2] / f"{md5}.thumb"
+    if t.is_file():
+        return (t, True)
+    return None
+
+
 # ---------- 消息 → 媒体引用（media_refs 的数据源） ----------
 
 # 实测（spec §2.6）：dat/mp4 文件名哈希在 packed_info_data 里（32-hex）；
@@ -317,9 +345,29 @@ def extract_media_ref(local_type: int, content: str | None,
 # 贴纸 `<emoji>` 的属性取值。**用正则不用 XML 解析器**：与 extract_media_ref 对
 # `<img>`/`<videomsg>` 的处理同一手法，且对畸形载荷更耐操——本函数契约是
 # 「对任意 str 全定义、不抛」（载荷对手可控），解析器会抛。
-_STICKER_MD5 = re.compile(r'<emoji\b[^>]*?\smd5="([0-9a-fA-F]{32})"')
-_STICKER_ATTR = {a: re.compile(rf'<emoji\b[^>]*?\s{a}="([^"]*)"')
-                 for a in ("desc", "emojiattr", "productid")}
+# **属性与 `=` 之间的空白因消息而异，必须容忍**：实测最新 400 条贴纸里 **193 条**
+# 把属性写成 `cdnurl = "…"` / `aeskey= "…"`，而且**同一个 XML 内还会混用**
+# （`md5="…"` 紧写、`cdnurl = "…"` 带空格）。写死 `attr="` 会**静默漏掉 48%**——
+# 2026-09-23 实测：`cdnurl` 与 `desc` 严格匹配 163/400、宽松 356/400。
+# 这正是本仓库最贵的那类缺陷：夹具编码了想象中的形态，代码与测试互相印证，全绿而功能为零。
+_ATTR_EQ = r'\s*=\s*'
+
+
+def _emoji_attr_re(name: str, value: str = r'[^"]*') -> re.Pattern[str]:
+    """`<emoji>` 上某个属性的取值。**唯一出处**——解析与 CDN 取件都从这里派生。
+
+    `value` 是该属性的**取值形态**：只有 `md5` 需要收紧成 32-hex（`extract_sticker_ref`
+    的契约要求非法 md5 一律返回 None，而通用 `[^"]*` 会把 `md5="short"` 也放进来）。
+    """
+    return re.compile(rf'<emoji\b[^>]*?\s{re.escape(name)}{_ATTR_EQ}"({value})"')
+
+
+# **不要叫 `_HEX32`**：本模块已有一个同名的**编译后**正则（`extract_media_ref` 在用），
+# 复用那个名字会把它遮蔽成一个字符串，静默打断 `extract_media_ref`（写完当场踩过一次）。
+_HEX32_PAT = r'[0-9a-fA-F]{32}'
+
+_STICKER_MD5 = _emoji_attr_re("md5", _HEX32_PAT)
+_STICKER_ATTR = {a: _emoji_attr_re(a) for a in ("desc", "emojiattr", "productid")}
 # 两种载荷形态**不一样**，这是本函数最容易写错的地方（自审实测：写错过一次，
 # 三个真实夹具全部返回 None，整个名称特性会静默归零）：
 #
@@ -408,6 +456,7 @@ class MediaReport:
     image: Counts = field(default_factory=Counts)
     voice: Counts = field(default_factory=Counts)
     video: Counts = field(default_factory=Counts)
+    sticker: Counts = field(default_factory=Counts)
     degraded: list[str] = field(default_factory=list)
     truncated: bool = False
     out_dir: str = ""      # 实际使用的输出根（export_media 赋值；CLI/MCP 信封从这取，不重算）
@@ -422,6 +471,10 @@ class MediaReport:
                 "video": {"ok": self.video.ok, "thumb": self.video.thumb,
                           "missing": self.video.missing,
                           "skipped": self.video.skipped, "remaining": self.video.remaining},
+                "sticker": {"ok": self.sticker.ok, "failed": self.sticker.failed,
+                            "missing": self.sticker.missing,
+                            "skipped": self.sticker.skipped,
+                            "remaining": self.sticker.remaining},
                 "degraded": list(self.degraded), "truncated": self.truncated}
 
 
@@ -580,6 +633,10 @@ def _out_candidates(kind: str, base: str) -> tuple[tuple[str, str], ...]:
         return ((base, "mp4"), (f"{base}_raw", "mp4"), (f"{base}_thumb", "jpg"))
     if kind == "voice":
         return ((base, "wav"), (base, "slk"))
+    if kind == "sticker":
+        # 源文件**没有扩展名**（`Persist/<md5>`），扩展名由**下载到的内容**决定，
+        # 与 image 同一个理由，故扩展名全枚举、顺序照 MAGICS。
+        return tuple((base, e) for e in _EXPORT_EXTS)
     raise ValueError(f"未知媒体类型: {kind}")
 
 
@@ -636,8 +693,11 @@ def exported_path(out_root: pathlib.Path, *, chat_md5: str, kind: str, ts: int,
     - video: 月份 `_month_window(ts)`；`{K}.mp4` > `{K}_raw.mp4`（真实语料里的变体）> `{K}_thumb.jpg`（无缝体时落的就是它）
     - voice: 月份恒 `month_of(ts)`（写盘用的就是它，与消息 ts 同源，**无 ±1**）；
       stem=f"{ts}_{local_id}"，.wav 优先（pilk 缺失时落的是 .slk）
+    - sticker: 月份恒 `month_of(ts)`（**同 voice，无 ±1**：贴纸的源 `business/emoticon/`
+      不按月分区，写入月份就是我们自己的 `month_of(ts)`，套窗口会让探测去相邻月找
+      永不可能存在的文件）；stem=`file_key`（就是 md5），扩展名逐个试 `_EXPORT_EXTS`
 
-    参数不全（image 无 file_key / voice 无 local_id）→ None。
+    参数不全（image/sticker 无 file_key / voice 无 local_id）→ None。
     """
     if kind == "voice":
         if local_id is None:
@@ -659,6 +719,15 @@ def exported_path(out_root: pathlib.Path, *, chat_md5: str, kind: str, ts: int,
         # 与 resolve_video / 视频导出分支一致：mp4 优先，_raw 变体次之，
         # 最后才是同一目录里的 _thumb.jpg（无缝体时导出写下的就是它）。
         cands = _out_candidates(kind, file_key)
+    elif kind == "sticker":
+        if file_key is None:                 # file_key 就是 md5，没有它无从定位
+            return None
+        # **月份只用 `month_of(ts)`，不用 `_month_window`**——见 `_month_window` 的注释：
+        # 那个 ±1 回退是为「写盘月份取自按月分区的源目录」的 image/video 而设。
+        # 贴纸的源不按月分区，写入月份就是我们自己的 `month_of(ts)`。
+        # 套用窗口会让探测去相邻月找永不可能存在的文件。**voice 同此先例。**
+        months = (month_of(ts),)
+        cands = _out_candidates(kind, file_key)
     else:
         return None
     for mon in months:                     # 月份外层、候选内层 —— 与 resolve_* 的嵌套顺序一致
@@ -672,7 +741,8 @@ def exported_path(out_root: pathlib.Path, *, chat_md5: str, kind: str, ts: int,
 def export_media(account: str, chat_ids: list[str], *, kinds: list[str],
                  months: list[str] | None = None, out_dir: pathlib.Path | None = None,
                  max_files: int = 2000, progress=None, force: bool = False,
-                 con: sqlite3.Connection | None = None) -> MediaReport:
+                 con: sqlite3.Connection | None = None,
+                 with_cdn: bool = False) -> MediaReport:
     """按会话导出媒体。图片解密（MediaKeyError → 能力级降级不抛）；语音见 Task 3；视频明文复制
     （refs 驱动：给 `con` 时按 media_refs 归属，任意会话数都成立；`con=None` 时退回账号级枚举，
     只有恰好一个会话时可归属）。
@@ -680,6 +750,10 @@ def export_media(account: str, chat_ids: list[str], *, kinds: list[str],
     **调用方必须传 `con`**：默认的 `None` 会静默选中账号级枚举那条老路——多会话下它一条都不归属，
     单会话下它会把账号级视频树里的全部文件都算到该会话头上（错归属，不只是缺归属）。生产入口
     `usecases.media_export` 自己开索引库并传进来；`None` 只留给不走索引的直接调用方（回归网）。
+
+    `with_cdn`（默认 False）：贴纸**本机那份是加密的**（两轮 spike 均未破，spec 附录 C/E.4），
+    故只有显式打开它才从微信 CDN 取件。**不开则贴纸一条都不导、一次网络请求都不发**
+    （`SECURITY.md` 的零网络承诺）。
     """
     report = MediaReport()
     out_root = ensure_tree(pathlib.Path(out_dir) if out_dir else paths.HOME_DIR / "media")
@@ -822,7 +896,7 @@ def export_media(account: str, chat_ids: list[str], *, kinds: list[str],
                 report.degraded.append(note)
             for chat in chat_ids:
                 cm = messages.md5_of(chat)
-                for ts, file_key in refs_by_chat.get(chat, ()):
+                for _msg_key, ts, file_key in refs_by_chat.get(chat, ()):
                     if want is not None and month_of(ts) not in want:
                         continue                     # 月份外的条目本来就不导出，不算「因上限收手」
                     if already(cm, "video", month_of(ts), file_key):
@@ -936,6 +1010,9 @@ def export_media(account: str, chat_ids: list[str], *, kinds: list[str],
             report.degraded.append("pilk 不可用：语音导出为原始 .slk（`uv add pilk` 后可转 WAV）")
         _export_voices(account, chat_ids, out_root, report, want, full, bump, progress,
                        already)
+    if "sticker" in kinds:
+        _export_stickers(account, chat_ids, out_root, report, want, full, bump, progress,
+                         already, con, with_cdn=with_cdn)
     return report
 
 
@@ -1000,6 +1077,252 @@ def voice_body_keys(account: str) -> frozenset[tuple[str, int]] | None:
             # 不做部分可信（半个集合会被上层当成完整事实）。
             return None
     return frozenset(out)
+
+
+# ---------- 贴纸 CDN 取件（**本项目唯一为贴纸联网的路径**） ----------
+
+# 实测出现的两个 host（spec 附录 E.1）。**按后缀收口**，不逐个列举。
+_CDN_ALLOWED = (".tc.qq.com",)
+
+
+class _AllowlistedRedirect(urllib.request.HTTPRedirectHandler):
+    """重定向目标必须**也在白名单内**——白名单只对第一跳成立等于没有白名单。
+
+    与 `sns_media._AllowlistedRedirect` 同一手法，但**判据不同**，故**不能复用**。两个障碍：
+    ① 贴纸 URL 的 scheme 是 **http**，被 `https_allowed` 的 scheme 那半条挡死；
+    ② `vweixinf.tc.qq.com` 不在其白名单里（`wxapp.tc.qq.com` 在）。
+    **不是「域不对」**——那是把理由说错了。本处的白名单只判 host 后缀、**不管 scheme**；
+    scheme 的限制是既知代价（spec R10）：实测 `vweixinf.tc.qq.com` 的证书对主机名无效，
+    而另一个 host 的 https 未测，故当前一律用 XML 给的 http。
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        host = urllib.parse.urlsplit(newurl).hostname or ""
+        if not host.endswith(_CDN_ALLOWED):
+            return None
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _cdn_opener() -> urllib.request.OpenerDirector:
+    """强制直连的 opener。**不要「简化」成 `urllib.request.urlopen`。**
+
+    本机 macOS 系统代理开着（`scutil --proxy` → 127.0.0.1:7897），Python 的 `getproxies()`
+    在 macOS 上会读它 ⇒ 裸 urlopen 全部超时。**2026-09-22 那次「CDN 实测不通」的假结论
+    就是这么来的**（spec 附录 E.3）。机制与理由见 `sns_media._default_opener` 的注释。
+    """
+    return urllib.request.build_opener(urllib.request.ProxyHandler({}),
+                                       _AllowlistedRedirect())
+
+
+def sticker_cdn_urls(account: str, items: Sequence[tuple[str, str, int]]
+                     ) -> dict[tuple[str, str, int], tuple[str, str]]:
+    """批量回源：`{(chat_md5, shard, local_id): (url, expect_md5)}`，取不到的键不出现。
+
+    **为什么必须批量**：回源要解密分片，而 `reader._open` 走的是 `decrypt.decrypted`
+    ——那是一次**完整分片**的 sqlcipher_export。本机 `message_4.db` 有 **235 MB**，
+    逐条回源 = 每条贴纸解密一整个分片：实测 120 条跑过 120 秒仍未完成，导出几十条就不可用。
+    **按分片分组、每个分片只解一次**是这条路径可用的前提，不是优化。
+
+    **凭据只在本函数的栈帧里存在**：`cdnurl`（`filekey` 在其查询串里）取出来交给返回值，
+    不落盘、不进日志、不进信封（贴纸 XML 不落库是结构性根治，spec §7.1）。
+    """
+    from .reader import MessageReader, _decode_content      # 惰性：避开 reader↔media 的环
+    out: dict[tuple[str, str, int], tuple[str, str]] = {}
+    # 按分片分组：同一个 (shard) 只开一次
+    by_shard: dict[str, list[tuple[str, int]]] = {}
+    for chat_md5, shard, local_id in items:
+        by_shard.setdefault(shard, []).append((chat_md5, local_id))
+    for shard, wanted in by_shard.items():
+        try:
+            r = MessageReader(account)
+            with r._open(f"message/{shard}") as con:
+                rows: dict[tuple[str, int], str | None] = {}
+                for chat_md5, local_id in wanted:
+                    row = con.execute(
+                        f"SELECT message_content, WCDB_CT_message_content FROM 'Msg_{chat_md5}' "
+                        f"WHERE local_id = ?", (local_id,)).fetchone()
+                    rows[(chat_md5, local_id)] = _decode_content(*row) if row else None
+        except Exception:                    # noqa: BLE001 —— 见 fetch_sticker_from_cdn 的说明
+            continue                         # 该分片整体取不到：这些键不出现在返回值里
+        for (chat_md5, local_id), xml in rows.items():
+            if not xml:
+                continue
+            # **必须与 `extract_sticker_ref` 用同一套正则**（`_emoji_attr_re`）：属性的空白
+            # 形态因消息而异，写死 `attr="` 会漏掉 48%（实测：cdnurl 严格 163/400、宽松 356/400）。
+            m, h = _emoji_attr_re("cdnurl").search(xml), _STICKER_MD5.search(xml)
+            if not (m and h):
+                continue                     # 没凭据 → 这个键不出现 → **一次请求都不发**
+            out[(chat_md5, shard, local_id)] = (m.group(1).replace("&amp;", "&"),
+                                                h.group(1).lower())
+    return out
+
+
+def _fetch_cdn_bytes(url: str, expect_md5: str, *, timeout: float = 15.0) -> bytes | None:
+    """取一次并校验，返回**明文图片**字节；任何失败返回 None，**不抛**。
+
+    `expect_md5` 是 XML 的 `md5` 属性——实测它恒等于**明文对象**的 md5（spec 附录 E.1），
+    故这是一次零成本的完整性校验：不符即失败、**绝不落盘**。它同时覆盖「下载内容不对」
+    与「服务端换了内容」两种失败。**这也意味着 md5 缺失时不会下载**（spec §2.2 记其覆盖 100%）。
+    """
+    try:
+        # **畸形 URL 会让 `urlsplit` 抛 `ValueError`**——放进同一道网里，别让它逃出 core。
+        host = urllib.parse.urlsplit(url).hostname or ""
+    except ValueError:
+        return None
+    if not host.endswith(_CDN_ALLOWED):
+        return None                      # 白名单外：一次请求都不发（跨跳由 handler 复查）
+    try:
+        with _cdn_opener().open(url, timeout=timeout) as resp:
+            if resp.status != 200:
+                return None
+            body = resp.read()
+    except Exception:                    # noqa: BLE001 —— 见下
+        # **必须宽到 `Exception`**：`http.client.HTTPException`（`BadStatusLine` 等）与
+        # `ssl.SSLError` 不是 `OSError` 的子类，按类型列举会漏；漏出去的异常违反
+        # 「core 层只抛项目异常」的契约（`sns_media.fetch` 对网络调用同样是宽接）。
+        # **不回显任何内容**：错误消息里可能带 `filekey`，连类型名都不带出去。
+        return None
+    return body if hashlib.md5(body).hexdigest() == expect_md5 else None
+
+
+def fetch_sticker_from_cdn(account: str, chat_md5: str, shard: str, local_id: int,
+                           *, timeout: float = 15.0) -> bytes | None:
+    """从 CDN 取**一张**贴纸的明文图片字节。取不到返回 None，**不抛**。
+
+    **唯一会联网的贴纸路径，只在调用方显式 opt-in 时被调用。**
+
+    **为什么回源而不是读索引**：贴纸 XML 不落库是凭据问题的结构性根治（spec §7.1）。
+    所以 `cdnurl`（`filekey` 就在它的查询串里）只能在**用的这一刻**从微信库里现取，
+    凭据随本函数的栈帧消失——不落盘、不进日志、不进信封。**不要改成从索引读。**
+
+    **走 `cdnurl`，不走 `encrypturl`**：实测 `cdnurl` 返回**明文**图片（spec 附录 E.1），
+    故本函数**不碰 `aeskey`**——凭据面因此只有 URL 里那一个 `filekey`。
+    （`encrypturl` 是 AES-128-CBC、`key = IV = aeskey` 的那一份，本设计不用它。）
+
+    **当前只能明文 http**（spec R10）：实测 `vweixinf.tc.qq.com` 的证书对主机名无效。
+    外发的是 `filekey`——**这是既知且被显式接受的代价，不许在文档或日志里说成加密传输**。
+    （**只测过那一个主机名**，别写成「贴纸域一律不支持 https」。）
+
+    **批量场景请用 `sticker_cdn_urls` + `_fetch_cdn_bytes`**：本函数是单条便捷包装，
+    每条都会重新解密一次分片（见 `sticker_cdn_urls` 的性能注记）。
+    """
+    loc = (chat_md5, shard, local_id)
+    urls = sticker_cdn_urls(account, [loc])
+    if loc not in urls:
+        return None
+    url, expect_md5 = urls[loc]
+    return _fetch_cdn_bytes(url, expect_md5, timeout=timeout)
+
+
+def _export_stickers(account: str, chat_ids: list[str], out_root: pathlib.Path,
+                     report: MediaReport, want: set[str] | None, is_full, bump,
+                     progress, already, con: sqlite3.Connection | None,
+                     *, with_cdn: bool = False) -> None:
+    """贴纸：按 `media_refs` 归属 → **从 CDN 取明文图** → 落盘。
+
+    **字节来源只有 CDN**：本机那份（`business/emoticon/`）是加密的，两轮 spike 均未破
+    （spec 附录 C / E.4），且实测是**缩略档**（16KB vs 原图 67KB）⇒ 本机支线不建。
+    `resolve_sticker` 只用来判「本机有没有那份加密副本」，供 `degraded` 文案说得准。
+
+    **归属靠 `media_refs`，不靠枚举**（与视频同一条理由）：贴纸文件本身没有会话维度，
+    账号级的 `business/emoticon/` 枚举会把别人的贴纸算到本次请求的会话头上。
+    `con=None` 时**一条都不导**并如实降级——错归属比缺归属更坏。
+
+    **三趟结构（性能要求，不是风格）**：① 摊平全部待办（归属、月份过滤、跳过判定都在
+    这一趟做完）→ ② 按分片**一次性**回源（见 `sticker_cdn_urls`：逐条回源 = 逐条解密
+    整个 235 MB 分片，实测逐条 120 条 >120 秒未完成、批量后 150 条 11.8 秒）
+    → ③ 逐条取件 + 落盘。
+    """
+    if con is None:
+        report.degraded.append("贴纸导出需要索引库（归属按 media_refs 判定）：本次未导出任何贴纸")
+        return
+    refs: dict[str, list[tuple[str, int, str]]] = {}
+    note: str | None = None
+    try:
+        refs = store.media_refs_by_chat(con, account, chat_ids, kind="sticker")
+        if not refs:
+            # 与视频同款三分解（spec §4.7）：计数值走**不 join messages** 的 count_media_refs，
+            # 否则「refs 在但消息没进索引」会被混成「一条都没有」，把用户导向错误的修法。
+            if store.count_media_refs(con, account, kind="sticker") == 0:
+                note = ("贴纸导出按 media_refs 索引归属：索引里这个账号一条贴纸引用都没有"
+                        "（索引建立在 media_refs 之前）。请先运行 `media rebuild-refs` 补齐引用。")
+            elif store.count_media_refs(con, account, chat_ids=chat_ids, kind="sticker"):
+                note = ("贴纸导出按 media_refs 索引归属：本次请求的会话有贴纸引用，"
+                        "但它们的消息不在索引里，本次未导出任何贴纸。"
+                        "请先导出这些会话的历史（它同时写入消息与媒体引用）。")
+            else:
+                note = ("贴纸导出按 media_refs 索引归属：本次请求的会话在索引里没有贴纸引用，"
+                        "本次未导出任何贴纸（该账号其它会话有引用，说明索引可用）。")
+    except (sqlite3.Error, OSError) as exc:
+        note = (f"贴纸索引读不了（{errors.redact(str(exc))}），本次未导出任何贴纸"
+                "（贴纸按 media_refs 索引归属）")
+    if note:
+        report.degraded.append(note)
+        return
+
+    # ── 第一趟：摊平待办（归属、月份过滤、跳过判定都在这里做完） ──
+    # (cm, shard, local_id, ts, md5)
+    plan: list[tuple[str, str, int, int, str]] = []
+    for chat in chat_ids:
+        cm = messages.md5_of(chat)
+        for msg_key, ts, file_key in refs.get(chat, ()):
+            mon = month_of(ts)               # 与 exported_path 同源，见下方注释
+            if want is not None and mon not in want:
+                continue
+            if already(cm, "sticker", mon, file_key):
+                report.sticker.skipped += 1
+                continue
+            parts = msg_key.split("|")
+            if len(parts) != 4:
+                report.sticker.failed += 1   # msg_key 形状不对：定位不了那一行
+                continue
+            plan.append((cm, parts[2], int(parts[3]), ts, file_key))
+    if not plan:
+        return
+
+    if not with_cdn:
+        # **默认零网络**：本机没有可用的明文来源，故如实计 missing。
+        # 这里**不置 truncated / remaining**——不开开关时重跑同样导不出，
+        # 把它们算进 remaining 会说「重跑即可继续」，那是假话。
+        local_encrypted = sum(1 for cm, _sh, _lid, _ts, md5 in plan
+                              if resolve_sticker(account, md5) is not None)
+        for cm, _sh, _lid, ts, md5 in plan:
+            report.sticker.missing += 1
+        report.degraded.append(
+            f"{len(plan)} 个贴纸未导出：微信把贴纸存成加密格式、解密方案未破，"
+            "本机那份是缩略档且取不出明文；加 `--with-cdn` 才从 CDN 取件（默认不联网）"
+            + (f"（其中 {local_encrypted} 个本机有加密副本）" if local_encrypted else ""))
+        return
+
+    # ── 第二趟：按分片**一次性**回源 ──
+    urls = sticker_cdn_urls(account, [(cm, sh, lid) for cm, sh, lid, _ts, _md5 in plan])
+
+    # ── 第三趟：逐条取件 + 落盘 ──
+    for cm, shard, local_id, ts, md5 in plan:
+        if is_full():
+            report.truncated = True
+            report.sticker.remaining += 1
+            continue
+        got = urls.get((cm, shard, local_id))
+        if got is None:
+            report.sticker.failed += 1       # 回源拿不到（行不在分片里 / XML 无凭据）
+            continue
+        data = _fetch_cdn_bytes(got[0], got[1])
+        if data is None:
+            report.sticker.failed += 1       # 联网了但没取到，**如实计失败**
+            continue
+        ext = detect_ext(data)
+        if ext is None:
+            # 认不出格式就当失败：乱码落盘比失败更坏（会被 already() 的跳过判定永久固化）。
+            report.sticker.failed += 1
+            continue
+        if _save(out_root, cm, "sticker", month_of(ts), md5, ext, data) is None:
+            report.sticker.failed += 1
+        else:
+            report.sticker.ok += 1
+            done = bump()
+            if progress:
+                progress(done)
 
 
 def _export_voices(account, chat_ids, out_root, report, want, is_full, bump, progress,

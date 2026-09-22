@@ -1806,3 +1806,324 @@ def test_extract_sticker_ref_is_total(lt, content):
         assert r is not None and r[0] == "a" * 32 and r[1] is None
     else:
         assert r is None
+
+
+def test_resolve_sticker_prefers_persist_then_falls_back_to_thumb(tmp_path, monkeypatch):
+    """三支都要有用例：命中 Persist / 只命中 Thumb / 都没有。"""
+    md5 = "d0f46ed3ce8bac33df5f7055656d8bd9"
+    # **账号那一层不能漏**：真机是 `XWECHAT_FILES/<account>/business/emoticon`。
+    # plan 初稿这里写的是 `tmp_path / "business/emoticon"`，少了账号层——
+    # 连它自己给的 `resolve_sticker` 实现都跑不过（实测）。
+    root = tmp_path / "wxid_testacct01_ab12" / "business/emoticon"
+    monkeypatch.setattr(paths, "XWECHAT_FILES", tmp_path)
+    (root / "Persist" / md5[:2]).mkdir(parents=True)
+    (root / "Thumb" / md5[:2]).mkdir(parents=True)
+    (root / "Thumb" / md5[:2] / f"{md5}.thumb").write_bytes(b"x")
+    p, thumb = media.resolve_sticker("wxid_testacct01_ab12", md5)
+    assert p.name == f"{md5}.thumb" and thumb is True          # 只有 Thumb
+    (root / "Persist" / md5[:2] / md5).write_bytes(b"y")
+    p, thumb = media.resolve_sticker("wxid_testacct01_ab12", md5)
+    assert p.name == md5 and thumb is False                    # Persist 优先
+    assert media.resolve_sticker("wxid_testacct01_ab12", "f" * 32) is None
+
+
+def test_out_candidates_sticker_uses_md5_stem():
+    assert media._out_candidates("sticker", "d0f46ed3") == (
+        ("d0f46ed3", "jpg"), ("d0f46ed3", "png"), ("d0f46ed3", "gif"),
+        ("d0f46ed3", "webp"), ("d0f46ed3", "wxgf"))
+
+
+def test_exported_path_sticker_uses_month_of_not_window(tmp_path):
+    """**月份窗口是本任务最容易埋的雷**：贴纸的源不按月分区，写与探都只用 month_of。
+
+    这条断言的判别法：把实现换成 `_month_window(ts)` 它会红——
+    因为 ts 落在 2026-09 时，产物在 `sticker/2026-09/`，而 2026-08 目录不存在。
+    """
+    ts = 1780000000                                  # 2026-09
+    mon = media.month_of(ts)
+    md5 = "d0f46ed3ce8bac33df5f7055656d8bd9"
+    assert media.exported_path(tmp_path, chat_md5="c" * 32, kind="sticker",
+                               ts=ts, file_key=md5, local_id=1) is None
+    (tmp_path / ("c" * 32) / "sticker" / mon).mkdir(parents=True)
+    (tmp_path / ("c" * 32) / "sticker" / mon / f"{md5}.gif").write_bytes(b"x")
+    p = media.exported_path(tmp_path, chat_md5="c" * 32, kind="sticker",
+                            ts=ts, file_key=md5, local_id=1)
+    assert p is not None and p.name == f"{md5}.gif"
+
+    # **真正能判别的那一条**：只在**相邻月**放同名产物，必须仍然探不到。
+    # 上面那条断言判别不了——`_month_window` 把当月排在**第一位**，换成它照样命中。
+    # 用窗口的真实失败模式是**假阳性**：去 2026-08 捞到本该属于别的月的文件。
+    # 判别法：把实现换成 `_month_window(ts)`，下面这一条立刻变红。
+    adj = media._shift_month(mon, -1)
+    d2 = tmp_path / ("c" * 32) / "sticker" / adj
+    d2.mkdir(parents=True)
+    (d2 / f"{md5}.png").write_bytes(b"x")
+    (tmp_path / ("c" * 32) / "sticker" / mon / f"{md5}.gif").unlink()
+    assert media.exported_path(tmp_path, chat_md5="c" * 32, kind="sticker",
+                               ts=ts, file_key=md5, local_id=1) is None
+
+
+# ---------- 贴纸 CDN 取件（T10） ----------
+
+def _one_sticker_index(ts, md5, chat_id="wxid_x", account="wxid_testacct01_ab12"):
+    """造一个只有一条贴纸引用的索引库，返回连接（`store.DB_PATH` 由 conftest 逐例隔离）。"""
+    con = store.connect()
+    cm = messages.md5_of(chat_id)
+    row = messages.make_row(
+        account=account, chat_md5=cm, chat_id=chat_id, shard="message_0.db",
+        local_id=7, ts=ts, msg_type=messages.TYPE_STICKER, sender_id=chat_id,
+        sender_name=None, is_self=0, content=messages.sticker_display(md5, None),
+        media_hint="[sticker]")
+    store.upsert_batch(con, [row])
+    store.upsert_media_refs(con, [(row["msg_key"], "sticker", md5, None)])
+    con.commit()
+    return con
+
+
+def test_sticker_export_sends_no_request_without_the_flag(tmp_path, monkeypatch):
+    """**默认零网络**：不加 `with_cdn`，导出流程一次 CDN 取件都不调，且如实计 missing。
+
+    与下面那条正向用例是**一对**。**打桩的是 `fetch_sticker_from_cdn` 而不是
+    `_cdn_opener`**：要钉的是「导出流程会不会走到联网那一步」。打更底层只能证明
+    「这次没发请求」，证明不了「没走那条分支」——分支被误接通时它照样绿。
+    """
+    _, account = make_tree(tmp_path, monkeypatch)
+    ts = int(datetime.datetime(2026, 9, 15, 12, 0).timestamp())
+    md5 = "d0f46ed3" + "0" * 24
+    called = []
+    monkeypatch.setattr(media, "sticker_cdn_urls",
+                        lambda *a, **k: called.append("urls") or {})
+    monkeypatch.setattr(media, "_fetch_cdn_bytes",
+                        lambda *a, **k: called.append("bytes") or None)
+    con = _one_sticker_index(ts, md5)
+    try:
+        rep = media.export_media(account, ["wxid_x"], kinds=["sticker"],
+                                 out_dir=tmp_path / "media", con=con)
+    finally:
+        con.close()
+    assert called == [], "没开 with_cdn 却去回源/取件了——默认零网络被破坏"
+    assert rep.sticker.ok == 0
+    assert rep.sticker.missing == 1
+
+
+def test_sticker_export_calls_cdn_only_with_the_flag(tmp_path, monkeypatch):
+    """开关**开着**时必须真的去调 CDN——没有这条，上面那条是假护栏。
+
+    把接线整段删掉，上面那条照样绿（`calls == []` 恒成立）。这条一加，删接线立刻红。
+    """
+    _, account = make_tree(tmp_path, monkeypatch)
+    ts = int(datetime.datetime(2026, 9, 15, 12, 0).timestamp())
+    md5 = "d0f46ed3" + "0" * 24
+    asked, fetched = [], []
+    cm_ = messages.md5_of("wxid_x")
+    monkeypatch.setattr(media, "sticker_cdn_urls",
+                        lambda acct, items, **k: (asked.append((acct, list(items)))
+                                                  or {(cm_, "message_0.db", 7):
+                                                      ("http://wxapp.tc.qq.com/x", md5)}))
+    monkeypatch.setattr(media, "_fetch_cdn_bytes",
+                        lambda url, expect, **k: fetched.append((url, expect)) or None)
+    con = _one_sticker_index(ts, md5)
+    try:
+        rep = media.export_media(account, ["wxid_x"], kinds=["sticker"],
+                                 out_dir=tmp_path / "media", con=con, with_cdn=True)
+    finally:
+        con.close()
+    assert asked, "开了 with_cdn 却没回源——接线断了"
+    # 回源要的三分量必须对得上（chat_md5|shard|local_id），否则查不到那一行
+    assert asked[0] == (account, [(cm_, "message_0.db", 7)])
+    assert fetched == [("http://wxapp.tc.qq.com/x", md5)]
+    assert rep.sticker.failed == 1        # 桩返回 None → 如实计失败，不假装成功
+
+
+def test_fetch_sticker_sends_no_request_without_cdnurl(tmp_path, monkeypatch):
+    """XML 里没有 `cdnurl` → 返回 None，**一次请求都不发**。
+
+    **打桩的是 `_cdn_opener`，不是 `urllib.request.urlopen`**：实现走
+    `build_opener(...).open()`，那条路**不经过 `urlopen`**——打 `urlopen` 的桩只能证明
+    「没调 urlopen」，把实现改成真的去联网它照样绿。
+    """
+    from agent_wechat import reader as reader_mod
+
+    opened = []
+
+    class _Boom:
+        def open(self, *a, **k):
+            opened.append(a)
+            raise AssertionError("没有凭据却发起了请求")
+
+    class _FakeCon:
+        def execute(self, *a, **k): return self
+        def fetchone(self): return (b"x", 0)
+        def close(self): pass
+
+    class _FakeReader:
+        def __init__(self, account): pass
+        def _open(self, rel):
+            import contextlib
+
+            @contextlib.contextmanager
+            def cm():
+                yield _FakeCon()
+            return cm()
+
+    monkeypatch.setattr(reader_mod, "MessageReader", _FakeReader)
+    md5_ = "d0f46ed3" + "0" * 24
+    monkeypatch.setattr(reader_mod, "_decode_content",
+                        lambda *a: f'<msg><emoji md5="{md5_}" aeskey="{"b" * 32}"/></msg>')
+    monkeypatch.setattr(media, "_cdn_opener", lambda: _Boom())
+    assert media.fetch_sticker_from_cdn("wxid_testacct01_ab12", "c" * 32,
+                                        "message_0.db", 1) is None
+    assert opened == []
+
+
+def test_fetch_sticker_swallows_any_opener_exception(tmp_path, monkeypatch):
+    """opener 抛任何异常（含非 `OSError` 家族）都必须返回 None，**不逃出 core 层**。
+
+    本仓库的硬契约是「core 层只抛项目异常」。按类型列举接不住
+    `http.client.HTTPException`（`BadStatusLine` 等）与 `ssl.SSLError` ——
+    **这条用例就是拿一个 `RuntimeError` 把它钉住**：把 except 收窄回
+    `(HTTPError, URLError, TimeoutError, ConnectionError, OSError)`，它立刻变红。
+    """
+    from agent_wechat import reader as reader_mod
+
+    class _Boom:
+        def open(self, *a, **k):
+            raise RuntimeError("模拟 http.client 家族之外的东西")
+
+    class _FakeCon:
+        def execute(self, *a, **k): return self
+        def fetchone(self): return (b"x", 0)
+        def close(self): pass
+
+    class _FakeReader:
+        def __init__(self, account): pass
+        def _open(self, rel):
+            import contextlib
+
+            @contextlib.contextmanager
+            def cm():
+                yield _FakeCon()
+            return cm()
+
+    md5_ = "d0f46ed3" + "0" * 24
+    monkeypatch.setattr(reader_mod, "MessageReader", _FakeReader)
+    monkeypatch.setattr(reader_mod, "_decode_content",
+                        lambda *a: f'<msg><emoji md5="{md5_}" '
+                                  f'cdnurl="http://wxapp.tc.qq.com/x?filekey=deadbeef"/></msg>')
+    monkeypatch.setattr(media, "_cdn_opener", lambda: _Boom())
+    assert media.fetch_sticker_from_cdn("wxid_testacct01_ab12", "c" * 32,
+                                        "message_0.db", 1) is None
+
+
+def test_fetch_sticker_refuses_host_outside_allowlist(tmp_path, monkeypatch):
+    """白名单外的主机**一次请求都不发**——XML 是对手可控的，凭据不能被引向别处。"""
+    from agent_wechat import reader as reader_mod
+
+    opened = []
+
+    class _Rec:
+        def open(self, *a, **k):
+            opened.append(a)
+            raise AssertionError("白名单外的 host 却发起了请求")
+
+    class _FakeCon:
+        def execute(self, *a, **k): return self
+        def fetchone(self): return (b"x", 0)
+        def close(self): pass
+
+    class _FakeReader:
+        def __init__(self, account): pass
+        def _open(self, rel):
+            import contextlib
+
+            @contextlib.contextmanager
+            def cm():
+                yield _FakeCon()
+            return cm()
+
+    md5_ = "d0f46ed3" + "0" * 24
+    monkeypatch.setattr(reader_mod, "MessageReader", _FakeReader)
+    monkeypatch.setattr(reader_mod, "_decode_content",
+                        lambda *a: f'<msg><emoji md5="{md5_}" '
+                                  f'cdnurl="http://evil.example.com/x?filekey=deadbeef"/></msg>')
+    monkeypatch.setattr(media, "_cdn_opener", lambda: _Rec())
+    assert media.fetch_sticker_from_cdn("wxid_testacct01_ab12", "c" * 32,
+                                        "message_0.db", 1) is None
+    assert opened == []
+
+
+@pytest.mark.parametrize("eq", ['="', ' = "', '= "', ' ="'])
+def test_sticker_attrs_tolerate_whitespace_around_eq(eq):
+    """属性与 `=` 之间的空白**因消息而异**，四种形态都必须解析出来。
+
+    实测（2026-09-23，最新 400 条贴纸）：**193 条**把属性写成 `cdnurl = "…"`，
+    而且**同一个 XML 内会混用**（`md5="…"` 紧写、`cdnurl = "…"` 带空格）。
+    写死 `attr="` 会**静默漏掉 48%**（严格 163/400 vs 宽松 356/400）——
+    本仓库最贵的那类缺陷：夹具编码了想象中的形态，代码与测试互相印证，全绿而功能为零。
+
+    **判别法**：把 `_emoji_attr_re` 里的 `_ATTR_EQ` 换回 `"="`，本用例立刻变红。
+    """
+    md5 = "d0f46ed3" + "0" * 24
+    # `eq` 已经含**开引号**（`="` / ` = "` / `= "` / ` ="`），值后面才补闭引号。
+    xml = (f'<msg><emoji fromusername{eq}wxid_x" md5{eq}{md5}" '
+           f'productid{eq}com.tencent.xin.emoticon.person.stiker_ab12"/></msg>')
+    ref = media.extract_sticker_ref(messages.TYPE_STICKER, xml)
+    assert ref is not None and ref[0] == md5
+    assert ref[2] == "com.tencent.xin.emoticon.person.stiker_ab12"
+
+
+@pytest.mark.parametrize("style", ["tight", "spaced"])
+def test_fetch_sticker_reads_cdnurl_in_both_spellings(tmp_path, monkeypatch, style):
+    """CDN 取件必须读得出**两种书写形态**的 `cdnurl`——否则近半数贴纸静默取不到件。
+
+    与上面那条是同一件事的两个入口：解析（`extract_sticker_ref`）与取件
+    （`fetch_sticker_from_cdn`）。**两处必须共用 `_emoji_attr_re`**，各写一份就是两个真相源。
+    """
+    from agent_wechat import reader as reader_mod
+
+    seen = []
+
+    class _Rec:
+        def open(self, url, **k):
+            seen.append(url)
+
+            class _R:
+                status = 200
+                headers: dict = {}
+
+                def read(self_inner):
+                    return b""
+
+                def __enter__(self_inner):
+                    return self_inner
+
+                def __exit__(self_inner, *a):
+                    return False
+            return _R()
+
+    class _FakeCon:
+        def execute(self, *a, **k): return self
+        def fetchone(self): return (b"x", 0)
+        def close(self): pass
+
+    class _FakeReader:
+        def __init__(self, account): pass
+        def _open(self, rel):
+            import contextlib
+
+            @contextlib.contextmanager
+            def cm():
+                yield _FakeCon()
+            return cm()
+
+    md5_ = "d0f46ed3" + "0" * 24
+    eq = '="' if style == "tight" else ' = "'
+    # `eq` 已含开引号，值后面补闭引号（写重了会捕获到空串——本用例第一版就踩了）。
+    xml = (f'<msg><emoji md5{eq}{md5_}" '
+           f'cdnurl{eq}http://wxapp.tc.qq.com/x?filekey=deadbeef"/></msg>')
+    monkeypatch.setattr(reader_mod, "MessageReader", _FakeReader)
+    monkeypatch.setattr(reader_mod, "_decode_content", lambda *a: xml)
+    monkeypatch.setattr(media, "_cdn_opener", lambda: _Rec())
+    media.fetch_sticker_from_cdn("wxid_testacct01_ab12", "c" * 32, "message_0.db", 1)
+    assert seen == ["http://wxapp.tc.qq.com/x?filekey=deadbeef"], \
+        f"{style} 形态的 cdnurl 没被读出来"

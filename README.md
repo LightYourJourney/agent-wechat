@@ -20,7 +20,7 @@
 | 🔍 本地全文检索 | SQLite + FTS5 trigram（≥3 字精确子串）+ LIKE 兜底（1-2 字） |
 | 🧠 向量语义检索 | 本地嵌入（fastembed + bge-small-zh-v1.5，聊天内容零外发）+ sqlite-vec KNN；关键词记不全时按语义找（`semantic_search`） |
 | 🖼️ 媒体导出 | 按会话导出图片（dat 解密）/ 语音（SILK → WAV）/ 视频（定位明文）；产物在 `~/.agent-wechat/media/`（0700） |
-| 🏷️ 贴纸可读标识 | 贴纸消息的正文不再是裸 `[sticker]`，而是 `[贴纸:名称]` / `[贴纸#md5前8位]`（名称取消息 XML 与本机 `emoticon.db`，实测覆盖率约 **9%**，其余显示短 ID）；`get_message_media` 把贴纸当作媒体 kind，但它**只可能答 `gone`**。**贴纸本体不可导出**——本机那份是微信自己的加密格式、解密方案未破，CDN 那条路实测 0 响应（本机有文件的占 38.3%，但同样是解不开的密文）：**没有任何代码路径能产出贴纸图片文件**，`--kinds` 也不接受 `sticker` |
+| 🏷️ 贴纸可读标识与导出 | 贴纸消息的正文不再是裸 `[sticker]`，而是 `[贴纸:名称]` / `[贴纸#md5前8位]`（名称取消息 XML 与本机 `emoticon.db`，实测覆盖率约 **9%**，其余显示短 ID）。**贴纸也可以导出成图片**：`media export --kinds …sticker --with-cdn`（MCP `export_chat_media(kinds="…,sticker", with_cdn=true)`）从腾讯 CDN 取**明文原图**；**两个开关都默认关**，不给则一次网络请求都不发。⚠️ 该请求**走明文 HTTP、携带 `filekey`**——它是三个零网络例外里唯一非加密传输的，见 SECURITY.md。本机那份（38.3% 的消息有）是解不开的密文**且是缩略档**，所以不用它 |
 | 🧩 媒体与消息关联 | 按消息回答「有没有媒体、什么类型、本机在不在、在哪」：MCP `get_message_media` / CLI `media locate` 同一套四态（`none` / `exported` / `exportable` / `gone`），检索命中用稳定标识 `msg_key` 指名 |
 | 📱 朋友圈导出 | 读取本账号可见的动态 / 评论 / 点赞，渲染成单文件 HTML 时间线；正文里的**外链**、**视频号**卡片（昵称 / 描述 / 封面）、**小视频**与 `type=7` 公开图都能出（此前这四类读不到或取不到）；**只覆盖微信本地缓存窗口，不是完整历史**；**默认零网络**，`--with-media` 才下载远程媒体本体（本机约 1.5 GiB） |
 | 📄 会话时间线导出 | 把某会话导成可读的**时间线**（HTML / Markdown 双格式，可搬走）：appmsg（引用 / 链接 / 文件 / 转账）渲染成结构化块、引用可跳转到原消息（HTML 侧）、已导出的媒体以相对路径在位；appmsg 原始载荷由 `appmsg rebuild` 一次性回填（`chat export` / `chat index`，MCP `export_chat` / `get_message_parts`） |

@@ -289,9 +289,10 @@ def test_media_export_wires_single_chat_and_passes_limit_through(stub, monkeypat
     seen: dict = {}
 
     def fake_export_media(account, chat_ids, *, kinds, months, out_dir, max_files,
-                          force=False, progress=None, con=None):
+                          force=False, progress=None, con=None, with_cdn=False):
         seen.update(account=account, chat_ids=chat_ids, kinds=kinds, months=months,
-                    out_dir=out_dir, max_files=max_files, force=force, con=con)
+                    out_dir=out_dir, max_files=max_files, force=force, con=con,
+                    with_cdn=with_cdn)
         return media.MediaReport(image=media.Counts(ok=1), out_dir="/default/media")
 
     monkeypatch.setattr(media, "export_media", fake_export_media)
@@ -299,7 +300,7 @@ def test_media_export_wires_single_chat_and_passes_limit_through(stub, monkeypat
                                 out_dir=None, limit=99999)
     assert seen == {"account": "acct", "chat_ids": ["wxid_target"], "kinds": ["image"],
                     "months": ["2026-09"], "out_dir": None, "max_files": 99999,
-                    "force": False, "con": None}
+                    "force": False, "con": None, "with_cdn": False}
     assert res.chat_id == "wxid_target" and res.out_dir == "/default/media"
     assert res.report.image.ok == 1
 
@@ -316,7 +317,7 @@ def test_media_export_opens_index_for_video(stub, monkeypatch):
     seen: dict = {}
 
     def fake_export_media(account, chat_ids, *, kinds, months, out_dir, max_files,
-                          force=False, progress=None, con=None):
+                          force=False, progress=None, con=None, with_cdn=False):
         seen["con"] = con
         seen["refs"] = con.execute("SELECT count(*) FROM media_refs").fetchone()[0]
         return media.MediaReport(out_dir="/default/media")
@@ -339,7 +340,7 @@ def test_media_export_unavailable_index_skips_video_and_degrades_loudly(stub, mo
     seen: dict = {}
 
     def fake_export_media(account, chat_ids, *, kinds, months, out_dir, max_files,
-                          force=False, progress=None, con=None):
+                          force=False, progress=None, con=None, with_cdn=False):
         # 用例层的硬不变量：没有索引连接时绝不请求视频导出
         assert con is not None or "video" not in kinds
         seen["kinds"], seen["con"] = kinds, con
@@ -367,7 +368,7 @@ def test_media_export_passes_large_limit_through(stub, monkeypatch):
     seen: dict = {}
 
     def fake_export_media(account, chat_ids, *, kinds, months, out_dir, max_files,
-                          force=False, progress=None, con=None):
+                          force=False, progress=None, con=None, with_cdn=False):
         seen.update(max_files=max_files, force=force)
         return media.MediaReport()
 

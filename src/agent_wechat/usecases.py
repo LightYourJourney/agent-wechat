@@ -305,7 +305,9 @@ def export_history(contact: str | None = None, full: bool = False,
     return {"task_id": task_id, "status": "running"}
 
 
-MEDIA_KINDS = ("image", "voice", "video")
+# 「能导出什么」的清单。**贴纸在列**（2026-09-23 恢复导出后收编）：它的字节来源是
+# CDN 取件，默认关（`--with-cdn`），故它是可导出 kind、但不是「默认就能导出的 kind」。
+MEDIA_KINDS = ("image", "voice", "video", "sticker")
 
 # 月份入参格式：与 media.month_of / 磁盘目录名（`%Y-%m`）逐字符同形。月份部分限定 01-12：
 # `2026-13` 同样比不中任何目录，一起被拒（只放行 `\d{2}` 会漏掉它）。
@@ -324,7 +326,8 @@ class MediaExportResult:
 
 def media_export(contact: str, *, kinds: list[str], months: list[str] | None = None,
                  out_dir=None, limit: int = 2000, force: bool = False,
-                 account: str | None = None) -> MediaExportResult | NeedConfirm:
+                 account: str | None = None,
+                 with_cdn: bool = False) -> MediaExportResult | NeedConfirm:
     """媒体导出用例：会话消歧 + 交 media.export_media。kinds/months 由入口解析成列表。
 
     chat_ids 恒为单元素——当前调用方一次只导一个会话，重复无从发生，故**不去重**；
@@ -337,6 +340,9 @@ def media_export(contact: str, *, kinds: list[str], months: list[str] | None = N
 
     `limit` 是**本次最多新增**的文件数：已存在的产物会被跳过（可通过 `force=True` 重建），
     故重跑同一条命令即可继续。
+
+    `with_cdn`（默认 False）：贴纸本机那份是加密的、解不开，故只有显式打开它才从微信 CDN
+    取件。**不开则一次网络请求都不发**（`SECURITY.md` 的零网络承诺）。
     """
     from . import media                       # 惰性：media 顶层拉起 cryptography
     ctx = ChatContext(account)
@@ -355,9 +361,9 @@ def media_export(contact: str, *, kinds: list[str], months: list[str] | None = N
     kinds_to_export = list(kinds)
     with contextlib.ExitStack() as stack:
         con = None
-        if "video" in kinds:
-            # 只有视频归属需要索引（图片按目录枚举、语音走 media_*.db）：不导视频的调用
-            # 不该多背一条失败路径。
+        if "video" in kinds or "sticker" in kinds:
+            # 只有视频与贴纸的**归属**需要索引（图片按目录枚举、语音走 media_*.db）：
+            # 不导这两类的调用不该多背一条失败路径。
             try:
                 con = stack.enter_context(store.open())
             except (errors.AgentWeChatError, sqlite3.Error, OSError) as exc:
@@ -365,16 +371,20 @@ def media_export(contact: str, *, kinds: list[str], months: list[str] | None = N
                 # 账号级视频树里的全部文件算到本次请求的会话头上（错归属，比不导出更坏——
                 # 本任务修的就是这个缺陷）。其余类型照常导。
                 index_note = errors.redact(str(exc))
-                kinds_to_export = [k for k in kinds if k != "video"]
+                kinds_to_export = [k for k in kinds if k not in ("video", "sticker")]
         report = media.export_media(ctx.account, [chat_id], kinds=kinds_to_export, months=months,
                                     out_dir=out_dir,
                                     max_files=clamp_limit(limit),   # 不再硬卡 2000
                                     force=force,
-                                    con=con)
+                                    con=con, with_cdn=with_cdn)
     if index_note is not None:
+        # 中文名与 kind 名分开查表：拿中文首字去 match 英文 kind 名会**恒不命中**，
+        # 印出「未导出任何——」这种半截话（写完当场踩过一次）。
+        dropped = "、".join(zh for en, zh in (("video", "视频"), ("sticker", "贴纸"))
+                            if en in kinds)
         report.degraded.append(
-            f"视频索引库不可用（{index_note}）：本次未导出任何视频——视频归属按 media_refs "
-            "索引，没有索引时无从判断某条视频属于哪个会话")
+            f"索引库不可用（{index_note}）：本次未导出任何{dropped}——它们的归属按 media_refs "
+            "索引，没有索引时无从判断某条属于哪个会话")
     return MediaExportResult(chat_id=chat_id, out_dir=report.out_dir, report=report)
 
 
@@ -382,9 +392,9 @@ LIMIT_MEDIA = (1, 500)
 
 _VOICE_TYPE = messages.TYPE_VOICE
 # `message_media` 答的是「这些 msg_type 的消息算媒体」——贴纸在列（它有类型、有身份）。
-# **与 `MEDIA_KINDS` 是两回事**：那个是「能导出什么」的清单，贴纸**不在**其中
-# （导出挂起：贴纸取不出来，见 `chat_text.STICKER_GONE`）。漏掉下面这一项，贴纸消息会被
-# SQL 整条滤掉，`_KIND_OF_TYPE[47]` 就成了静默 no-op。
+# **与 `MEDIA_KINDS` 是两回事**：那个是「能导出什么」的清单（贴纸现在**在**其中，
+# 但它的字节来源默认关）。漏掉下面这一项，贴纸消息会被 SQL 整条滤掉，
+# `_KIND_OF_TYPE[47]` 就成了静默 no-op。
 _MEDIA_TYPES = (messages.TYPE_IMAGE, messages.TYPE_VIDEO, messages.TYPE_VOICE,
                 messages.TYPE_STICKER)
 
@@ -452,17 +462,19 @@ def _state_of(row: dict, ref: tuple[str, str | None] | None, *,
         present = file_key is not None and media.resolve_image(
             account, row["chat_md5"], row["ts"], file_key) is not None
     elif kind == "sticker":
-        # **一律 gone，本分支恒不进 exportable**：本地那份是解不开的密文（spec 附录 C），
-        # CDN 传输也不通，所以我们**拿不出来**。`exportable` 的文档语义是「有产物可拿、
-        # 你还没导出」，对贴纸产出它就是谎报。
+        # **恒不进 exportable，只可能是 gone**（`exported` 由上面那一步判，与 kind 无关）。
+        #
+        # 本地那份是**解不开的密文**（两轮 spike 均未破，spec 附录 C/E.4），且实测是**缩略档**；
+        # 唯一的字节来源是 CDN 取件，而它**默认关**、单条成功率也不可预知（服务端可能删件）。
+        # `exportable` 的文档语义是「有产物可拿、你还没导出」——对贴纸产出它就是谎报。
         #
         # **这不是「本机没有」**：本机有多少条贴纸真的有文件，实测口径不同差异极大
         # （38.3% vs 按 md5 去重 8.6%），所以本状态没有可依据的存在性信号；措辞只能描述
         # 微信侧的存储格式——渲染端为此单列了 `chat_text.STICKER_GONE`。
         #
-        # **不要把它「修」成 `media.resolve_sticker(...)`**：那个定位函数随贴纸导出一起
-        # 挂起，而存在性判定在有导出之前没有意义——判出 `exportable` 会让用户以为有东西
-        # 可拿。要接它请连同导出一起接。
+        # **不要把它「修」成 `media.resolve_sticker(...)`**：那个定位函数只回答「本机有没有
+        # 那份**加密副本**」，而那不是可拿的产物——判出 `exportable` 会让用户以为有东西可拿。
+        # （它现在的用途只有一个：`_export_stickers` 判 degraded 文案时说得准。）
         present = False
     else:
         present = file_key is not None and media.resolve_video(

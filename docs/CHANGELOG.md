@@ -471,18 +471,54 @@
 
 **已知限制（贴纸）**：
 
-- **贴纸导出未实现，且不需要重新发现原因**——两条路都已判定走不通：
-  1. **本机解密**：微信把贴纸存成加密格式，解密方案**未破**（有证明级否定的 spike 结论，
-     见 spec 附录 C）。本机那 38.3% 的贴纸文件也是这份解不开的密文；
-  2. **CDN**：`cdnurl` + 凭据那条路实测 **15 次请求 0 响应**（502 / timeout，当天的贴纸也
-     一样），而同一主机上**不带凭据**的 URL 返回 HTTP 200 + 明文 PNG——说明网络能到腾讯，
-     是请求本身缺了签名 / 参数。（旁证：不带凭据的 `thumburl` 能取明文 PNG，但覆盖仅 9.9%，
-     拉取成功率约 1/6。）
-  所以 `media export --kinds` 的合法值**仍然只有 `image,voice,video`**，贴纸不在其中。
+> **订正（2026-09-23）**：下面第 2 条「CDN 实测 0 响应」是**假阴性**，已推翻。
+> 根因是探针用了裸 `urllib.request.urlopen`，而本机 macOS **系统代理**会被 Python 的
+> `getproxies()` 装回来 ⇒ 请求全部超时。同机同 URL 改 `ProxyHandler({})` 直连后
+> 0.2–0.3s 全部 HTTP 200。**别再引用「0 响应」这个结论，也别再去找「缺的那个签名参数」。**
+
+- **贴纸导出的两条路，现状是「本机不行、CDN 行」**：
+  1. **本机解密**：微信把贴纸存成加密格式，解密方案**未破**（两轮 spike，真机两向对照；
+     见 spec 附录 C 与 E.4）。本机那 38.3% 的贴纸文件也是这份解不开的密文——
+     而且**它是缩略档**（同一 md5：`Persist` 16,016B vs CDN 原图 67,167B），
+     所以即使破了也不是等价替代；
+  2. **CDN**：**可行**。`cdnurl` 返回**明文**图片（不需要 `aeskey`），2023 年的老贴纸
+     `filekey` 也仍然有效。代价是**只能走明文 HTTP**、`filekey` 明文出网
+     （见 SECURITY.md §1「零网络例外」第 3 条）。
+  所以 `media export --kinds` 的合法值**现在含 `sticker`**，但**默认不导**：
+  要 `kinds` 显式含 `sticker` **且** `with_cdn=true` 才取件。
   **本机有贴纸文件的比例（38.3%）不构成一条「有东西可导」的路**——别把它读成覆盖率
 - 名称覆盖率约 9% 是硬上限（贴纸来自 703 个表情包而本机只装了 5 个），不是可修的缺陷
-- `media_refs` 里的 sticker 行**只写不读**：唯一会消费它的路径是贴纸导出，导出未实现；
-  `get_message_media` 的贴纸态由 `msg_type` 判定，不看这张表
+- ~~`media_refs` 里的 sticker 行**只写不读**~~ **（2026-09-23 订正：已有读路径）**：
+  `media export --kinds sticker` 现在会消费它（归属按 `media_refs` 判定），
+  `get_message_media` 的贴纸态仍然只由 `msg_type` + `exported_path` 判定
+
+### 贴纸导出恢复（CDN 取件）
+
+**用户可见的变更**：
+
+- **贴纸可以导出成图片了**：`media export --chat X --kinds sticker --with-cdn`
+  （MCP `export_chat_media(kinds="…,sticker", with_cdn=true)`）。**两个开关都要给**——
+  `--kinds` 的默认值不含 `sticker`，`with_cdn` 默认关，两者都显式才发请求
+- **新增零网络例外（第 3 条）**：贴纸 CDN 取件。**它走明文 HTTP**，是三个例外里唯一非加密传输的，
+  请求 URL 携带该贴纸的 `filekey`（明文可见）。已在 SECURITY.md 详述，含「范围只实测过
+  `vweixinf.tc.qq.com` 一个主机名」这条边界
+- `media export` 多印一行「贴纸」计数（`ok` / `skipped` / `failed` / `missing`）；
+  MCP 信封的 `counts` 多一个 `sticker` 键
+- `get_message_media` 的贴纸态由「只可能 `gone`」变为「`gone` 或 `exported`」
+  （导过之后就是 `exported`）——**仍然永不为 `exportable`**
+
+**技术笔记**：
+
+- **载荷格式**：`cdnurl` 返回**明文**图片（4/4 实测：JPEG/PNG/GIF）；`encrypturl` 才是
+  AES-128-CBC + PKCS#7、`key = IV = bytes.fromhex(aeskey)` 的那一份，**本设计不用它**
+  （多握一把密钥、多一套解密，收益为零）。XML 的 `md5` 属性 = **明文对象**的 md5，
+  下载后据此校验，不符即失败且**不落盘**
+- **三个字段不可靠，禁止当判据**：`len`、`Content-Type`、`X-encflag` / `X-enclen`
+  （后者对加密载荷也返回 0，与朋友圈可用的 `x-enc: 1` 不是一回事）
+- **必须强制直连**（`ProxyHandler({})`）：裸 `urlopen` 会被 macOS 系统代理接管并超时
+- **宿主白名单逐跳复查**：`*.tc.qq.com`。`sns_media` 那套不能复用——两个障碍是
+  「贴纸 URL 是 http」与「`vweixinf` 不在其白名单里」，**不是**「域不对」
+- **本机支线不建**：那份密文解不开、且是缩略档
 
 ### 其他规划
 

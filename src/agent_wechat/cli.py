@@ -227,7 +227,7 @@ def cmd_media_export(args: argparse.Namespace) -> int:
               if args.months else None)
     res = usecases.media_export(args.chat, kinds=kinds, months=months,
                                 out_dir=args.out, limit=args.limit, force=args.force,
-                                account=args.account)
+                                account=args.account, with_cdn=args.with_cdn)
     if isinstance(res, usecases.NeedConfirm):
         return _need_confirm(args.chat, res)
     rep = res.report.to_dict()
@@ -238,9 +238,11 @@ def cmd_media_export(args: argparse.Namespace) -> int:
           f"  failed={rep['voice']['failed']}  raw_only={rep['voice']['raw_only']}")
     print(f"视频   ok={rep['video']['ok']}  skipped={rep['video']['skipped']}"
           f"  thumb={rep['video']['thumb']}  missing={rep['video']['missing']}")
+    print(f"贴纸   ok={rep['sticker']['ok']}  skipped={rep['sticker']['skipped']}"
+          f"  failed={rep['sticker']['failed']}  missing={rep['sticker']['missing']}")
     # remaining 是「未导出」而不是「续跑一定新增 N 个」：被上限挡下的条目里，续跑时
     # 仍会失败的（dat 读不出、blob is None）也计入，故只能说「还有 N 个未导出」。
-    left = sum(rep[k]["remaining"] for k in ("image", "voice", "video"))
+    left = sum(rep[k]["remaining"] for k in ("image", "voice", "video", "sticker"))
     if rep["truncated"]:
         print(f"（达到 --limit 上限，还有 {left} 个未导出 —— 重跑同一条命令即可继续）")
     print(f"输出目录: {res.out_dir}")
@@ -592,12 +594,16 @@ def main(argv: list[str] | None = None) -> None:
     msp = media_sub.add_parser("export", help="导出某会话的媒体到本地目录")
     msp.add_argument("--chat", required=True, help="会话（名字或 username）")
     msp.add_argument("--kinds", default="image,voice,video",
-                     help="逗号分隔：image,voice,video（默认全部）")
+                     help="逗号分隔：image,voice,video,sticker"
+                          "（默认前三项；sticker 需配 --with-cdn 才取得到本体）")
     msp.add_argument("--months", default=None, help="逗号分隔的 YYYY-MM（默认不限）")
     msp.add_argument("--out", default=None, help="输出目录（默认 ~/.agent-wechat/media/）")
     msp.add_argument("--limit", type=int, default=2000, help="本次最多新增文件数（已存在的不计）")
     msp.add_argument("--force", action="store_true",
                      help="忽略已存在的产物，全部重做（默认跳过）")
+    msp.add_argument("--with-cdn", action="store_true",
+                     help="贴纸改从微信 CDN 取件（**默认关**：不加则一次网络请求都不发）。"
+                          "**会把 filekey 以明文 http 发往腾讯 CDN**，见 SECURITY.md")
     msp.add_argument("--account")
     msp.set_defaults(fn=cmd_media_export)
     msp = media_sub.add_parser("locate", help="按消息列出媒体归属（不写微信目录、不写 --out、不联网）")

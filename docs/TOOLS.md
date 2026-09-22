@@ -302,17 +302,20 @@
 
 ## 9. export_chat_media
 
-**用途**：把某会话的媒体文件导出到本机（图片解密 / 语音转 WAV / 视频明文复制），
-返回各类计数与输出目录。图片依赖磁盘密钥推导；语音转 WAV 依赖 pilk（缺失时导出
-原始 `.slk` 并记 `degraded`）；视频直接复制明文。
+**用途**：把某会话的媒体文件导出到本机（图片解密 / 语音转 WAV / 视频明文复制 /
+贴纸从 CDN 取件），返回各类计数与输出目录。图片依赖磁盘密钥推导；语音转 WAV 依赖 pilk
+（缺失时导出原始 `.slk` 并记 `degraded`）；视频直接复制明文；**贴纸默认不导**——本机那份是
+微信自己的加密格式（解密方案未破），只有同时给 `kinds` 含 `sticker` 且 `with_cdn=true`
+才从腾讯 CDN 取明文原图（**该请求走明文 HTTP、携带 `filekey`**，见 SECURITY.md §1「零网络例外」第 3 条）。
 
 | 参数 | 类型 | 必填 | 默认 | 说明 |
 |---|---|---|---|---|
 | `contact` | string | **是** | — | username（`wxid_*` / `*@chatroom` / `filehelper`）或展示名（歧义返回 `need_confirm`，形状见 §3；未命中返回 `{"error": "找不到联系人「XXX」，请用 list_contacts 查询"}`） |
-| `kinds` | string | 否 | `"image,voice,video"` | 逗号分隔的媒体类型（`image` / `voice` / `video`）；含未知值报错 |
+| `kinds` | string | 否 | `"image,voice,video"` | 逗号分隔的媒体类型（`image` / `voice` / `video` / `sticker`）；含未知值报错。**默认不含 sticker**——要导贴纸得显式写进 `kinds`，且还要 `with_cdn=true` |
 | `months` | string | 否 | null | 逗号分隔的月份（`YYYY-MM`），按消息时间过滤；省略不限 |
 | `limit` | int | 否 | 500 | 本次最多**新增**的文件数（下界 1，无上界；产物已存在的不计） |
 | `force` | bool | 否 | `false` | `true` = 忽略已存在的产物全部重做（默认跳过已存在的） |
+| `with_cdn` | bool | 否 | `false` | `true` = 贴纸从腾讯 CDN 取件（**默认不联网**）。会把该贴纸的 `filekey` 以**明文 HTTP** 发往 `*.tc.qq.com`——这是既知且被显式接受的代价，见 SECURITY.md；返回 `degraded` 里的说明只写「CDN 下载失败」这类不含 URL 的文案 |
 | `account` | string | 否 | null | 同通用约定 |
 
 **成功返回**：
@@ -324,7 +327,8 @@
   "counts": {
     "image": { "ok": 12, "failed": 1, "missing": 0, "skipped": 0, "remaining": 0 },
     "voice": { "ok": 8, "failed": 0, "raw_only": 2, "skipped": 0, "remaining": 0 },
-    "video": { "ok": 3, "thumb": 1, "missing": 0, "skipped": 0, "remaining": 0 }
+    "video": { "ok": 3, "thumb": 1, "missing": 0, "skipped": 0, "remaining": 0 },
+    "sticker": { "ok": 5, "failed": 1, "missing": 40, "skipped": 0, "remaining": 0 }
   },
   "degraded": [],
   "truncated": false
@@ -345,19 +349,24 @@
   判断是不是故障，看 `video.ok` / `video.thumb` 是否意外为 0。`image.missing` **当前恒为
   0**——图片导出直接扫磁盘目录，不按消息逐条清点；该键为将来 `media_refs` 驱动的按消息
   导出预留。
-- `kinds` 传空串（或全是逗号/空白）表示**不导任何类型**：不报错，成功返回且三类计数全为 0
-  （只有 0700 权限等环境类 `degraded` 可能非空）。想导出全部请显式给 `image,voice,video`。
-- **`kinds` 的合法值只有 `image` / `voice` / `video`，没有 `sticker`**：贴纸**不可导出**，
-  传 `sticker` 得到 `{"error": "未知的媒体类型: ['sticker']（可用: image, voice, video）"}`。
-  **这不是「本轮没做」，是「今天做不了」**——本机那份贴纸文件是微信自己的加密格式，解密
-  方案未破（有证明级否定的 spike 结论）；CDN 那条路实测 15 次请求 **0 响应**（502 /
-  timeout，当天的贴纸也一样），而同一主机上**不带凭据**的 URL 返回 HTTP 200 + 明文 PNG
-  ——说明网络能到腾讯，是请求本身缺了签名 / 参数。所以**没有任何可验证的路径**能产出贴纸
-  文件。`get_message_media`（§11）因此把贴纸一律答 `gone`。
+- `kinds` 传空串（或全是逗号/空白）表示**不导任何类型**：不报错，成功返回且四类计数全为 0
+  （只有 0700 权限等环境类 `degraded` 可能非空）。
+- **贴纸（`sticker`）是可导出 kind，但有两个开关**：`kinds` 要显式含 `sticker`，
+  且要 `with_cdn=true`。背景：本机那份（`business/emoticon/`）是微信自己的加密格式、
+  解密方案未破（两轮 spike，spec 附录 C/E.4），而且实测是**缩略档**——所以唯一的字节来源是
+  CDN，那条路已实测可用（`cdnurl` 返回明文图片，2023 年的老贴纸也仍然有效）。
+  只给 `sticker` 不给 `with_cdn` 时：**一次网络请求都不发**，贴纸全部计入
+  `counts.sticker.missing`，并在 `degraded` 里说明原因。
+- `counts.sticker` 的口径：`ok` = 落盘成功；`failed` = 联网了但没取到（404、超时、
+  `md5` 校验不过）；`missing` = **没有可用的字节来源**（未开 `with_cdn`，或该消息在
+  `media_refs` 里没有可用引用）；`skipped` 同其余三类。
+- `get_message_media`（§11）里贴纸**永远不会是 `exportable`**（本机那份拿不出明文），
+  只可能是 `gone` 或 `exported`（后者 = 之前用 `with_cdn=true` 导过）。
 - `degraded` 键**恒存在**（与 §3 同一惯例：降级不是错误），但此处每项是**中文字符串**
   （图片密钥推导失败、pilk 缺失、wxgf 未转 JPEG、输出目录权限未收紧、视频索引相关等），
   不是 `{capability, effect}`。图片密钥问题不影响语音/视频导出。
-- **视频是唯一依赖索引的类型，因此多出四种降级说明**（措辞已指明该做什么，别混成一件事）：
+- **视频与贴纸是仅有的两个依赖索引的类型**（它们的归属都按 `media_refs` 判定），
+  **视频**因此多出四种降级说明（措辞已指明该做什么，别混成一件事）：
   1. 该账号一条视频引用都没有 → 索引建立在 `media_refs` 之前（或建索引时本机没有视频消息）
      → 跑 `media rebuild-refs` 补齐引用；
   2. 请求的会话在索引里没有视频引用（该账号其它会话有，说明索引可用）→ **无需修复**。注意
@@ -370,7 +379,7 @@
      账号级枚举：那会把账号视频树里的**全部**文件写进本次请求的会话目录（错归属比缺归属更坏）。
 - `counts[*].skipped` 是本次因产物已存在而跳过的**文件**数（**按文件**计，不是消息条数）；
   它不吃 `limit` 预算。`counts[*].remaining` 是撞上 `limit` 时还有多少个**未导出**（CLI 印的是
-  三类之和）。
+  四类之和）。
 - `truncated=true` 表示触及 `limit` 提前收手，结果不完整——`remaining` 含续跑时**仍会失败**的
   那些条目（dat 读不出、本体不存在），故它不等于「续跑一定多出这么多文件」。已存在的产物会被
   跳过，**重跑同一条命令即可继续**；要全部重做用 `force=true`——它**不**补缩略图：本体已在产物
@@ -513,22 +522,26 @@
   - `exportable` —— 有媒体且**本体还在微信里**，但还没导出到 `out_dir`。**贴纸永远不产出
     这个状态**：它没有产物可拿，判成 `exportable` 会让用户以为有东西能导
   - `gone` —— 有媒体，但本机找不到。**贴纸的 `gone` 是另一回事，它说的是「取不出来」**：
-    微信把贴纸存成加密格式、解密方案未破，**与本机有没有那份文件无关**——所以下面
-    「导出更多历史比修复有用」那句对贴纸**不成立**（`media export` 也帮不上：
-    `kinds` 根本不收 `sticker`，见 §9）
+    微信把贴纸存成加密格式、解密方案未破（且本机那份是缩略档），**与本机有没有那份文件无关**
+    ——所以下面「导出更多历史比修复有用」那句对贴纸**不成立**。
+    **贴纸要拿本体只有一条路**：`export_chat_media(kinds="…,sticker", with_cdn=true)`
+    （CLI 对应 `media export --kinds …sticker --with-cdn`），默认不联网；导过之后这条会变成
+    `exported`
 - **`gone` 是常态，不是错误**：微信只为**近期**消息保留媒体本体，而近期消息往往还没导出进本索引，
   所以本机能对上的极少。实测（2026-09-16）对索引内已有的消息：图片本体兑现率约 **0.005%**
   （2 / 39,307），视频 **0**（/ 4,404）；语音相反——本体存在 `media_*.db` 里、微信不清理，
   **7,390 条 100% 有**。所以 `exportable` 在本机**实质上是语音专属状态**。
-  **贴纸不在这句话的范围里**：它全归 `gone`，但那不是因为微信清理过什么（见上）。
+  **贴纸不在这句话的范围里**：它是 `gone`（或导过之后 `exported`），但那不是因为微信清理过
+  什么（见上）。
 - **`gone` 也可能是「定位不了」，不是「本机没有」**：媒体消息拿不到引用（没有 `file_key`）时，
   产物探测拒绝猜文件名，于是即使磁盘上真有产物也答 `gone`——这一类的 `gone` 只说明「判不出来」。
-  贴纸的 `gone` 又是第三种：既不靠引用表，也不看磁盘，只由 `msg_type` 判定——见上。
+  贴纸的 `gone` 又是第三种：它不看磁盘上有没有那份**加密**副本（有也算不出来，见上）。
 - **`by_kind` 是把 `counts` 按 `image` / `video` / `voice` / `sticker` 四项再拆一次**：
   四类的本机可得率相差几个数量级，池化的 `counts` 会把「语音几乎全可导出」与「图片视频
   与贴纸几乎全 `gone`」加成一个数字，看起来像「这个会话的媒体大多没了」。`kind` 为
-  `null` 的 `none` 态没有类型，只进 `counts`。**`sticker` 那一格只会有 `gone`**——
-  它永不产出 `exported` / `exportable`。某个 kind 该会话一条都没有时**整个键不出现**
+  `null` 的 `none` 态没有类型，只进 `counts`。**`sticker` 那一格只会有 `gone` 或
+  `exported`**——它**永不产出 `exportable`**（本机那份拿不出明文）。某个 kind 该会话
+  一条都没有时**整个键不出现**
   （不是「全 0 的字典」），所以 `by_kind` 里的项数随会话而变，最多四项。
 - **`exportable` 不保证本体可用**：视频只定位到缩略图时也算 `exportable`（本机只有一张
   jpg，`mp4` 本体不在）。
@@ -584,8 +597,8 @@
   推导」的分歧就是产物里所有媒体引用的静默 404。
 - `counts` 是 `kind` → 条数：`text` / `image` / `voice` / `video` / `sticker` / `location` /
   `status` / `system` / `revoke` / `appmsg`；未知类型回落成 `msg_type` 的数字字符串（不猜名字）。
-  它按**消息**计数，与「这类媒体能不能导出」**无关**——`sticker` 会在这里出现，但贴纸
-  不可导出（见 §9 与 §11）
+  它按**消息**计数，与「这类媒体能不能导出」**无关**——`sticker` 会在这里出现；
+  贴纸**可导出但需显式开关**（`kinds` 含 `sticker` + `with_cdn=true`，见 §9 与 §11）
 - `unparsed` 与 `rejected` 都是 appmsg 且**分开计数**：前者「解不开」，后者「主动拒绝」
   （含 DTD / 实体声明的载荷，防 billion laughs）。两者非零时部分 appmsg 会回落成
   `[appmsg: 标题]`，明细印在**产物顶部**。

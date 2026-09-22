@@ -689,6 +689,9 @@ def test_media_export_renders_counts_and_degraded_to_stderr(monkeypatch, capsys)
                 image=media.Counts(ok=3, failed=1, skipped=5, remaining=7),
                 voice=media.Counts(ok=2, raw_only=1, skipped=1, remaining=2),
                 video=media.Counts(ok=1, thumb=2, missing=1, remaining=1),
+                # 贴纸行同样给**全非零**：不给就是只断言了「格式里有这一行」，
+                # 而没断言「值真的透出来」（上一轮为此吃过一次）。
+                sticker=media.Counts(ok=4, failed=2, skipped=6, missing=3, remaining=1),
                 degraded=["pilk 不可用：语音导出为原始 .slk"],
                 truncated=True))
 
@@ -698,13 +701,14 @@ def test_media_export_renders_counts_and_degraded_to_stderr(monkeypatch, capsys)
     assert ei.value.code == 0
     assert seen == {"contact": "张三", "kinds": ["image", "voice", "video"],
                     "months": None, "out_dir": "/tmp/out", "limit": 2000,
-                    "force": False, "account": None}
+                    "force": False, "account": None, "with_cdn": False}
     out, err = capsys.readouterr()
     assert out == ("会话 wxid_target\n"
                    "图片   ok=3  skipped=5  failed=1  missing=0\n"
                    "语音   ok=2  skipped=1  failed=0  raw_only=1\n"
                    "视频   ok=1  skipped=0  thumb=2  missing=1\n"
-                   "（达到 --limit 上限，还有 10 个未导出 —— 重跑同一条命令即可继续）\n"
+                   "贴纸   ok=4  skipped=6  failed=2  missing=3\n"
+                   "（达到 --limit 上限，还有 11 个未导出 —— 重跑同一条命令即可继续）\n"
                    "输出目录: /tmp/out/media\n")
     assert err == "⚠️  pilk 不可用：语音导出为原始 .slk\n"
 
@@ -762,22 +766,36 @@ def test_media_export_rejects_unknown_kind_with_search_input_error(captured, cap
     assert "Traceback" not in err
 
 
-def test_media_export_still_rejects_sticker_kind(captured, capsys):
-    """**导出挂起期间贴纸不是可导出 kind**：`media export --kinds sticker` 必须继续被拒。
+def test_media_export_accepts_sticker_kind(captured, capsys):
+    """**导出恢复后贴纸是可导出 kind**：`--kinds sticker` 不再被拒，走完流程并如实报 0 条。
 
-    贴纸这一轮进了 `_MEDIA_TYPES` / `_KIND_OF_TYPE`（它是媒体消息、要报状态），但**没有**
-    进 `MEDIA_KINDS`（那是「能导出什么」的清单，而贴纸拿不出来：导出挂起、`resolve_sticker`
-    随 T7 搁置）。与上一条是一对：那条钉「非法值要被拒」，这条钉「贴纸本轮仍在非法值之列」
-    ——把 sticker 加进 `MEDIA_KINDS` 而不接线导出，这条必红。
+    这条是 `test_media_export_still_rejects_sticker_kind` 的**反面**——那条是导出挂起期间
+    的守卫（`sticker` 在非法值之列）。T13 把 `MEDIA_KINDS` 收编 sticker，那条守卫必红，
+    故就地换成这一条。**判别法**：把 `sticker` 从 `MEDIA_KINDS` 拿掉，这条立刻变红。
 
-    **校验发生在碰索引库之前**（`media_export` 先判 kinds 再 `store.open()`），所以
-    走 `captured` 夹具不会在真实 `~/.agent-wechat` 下建目录。
+    夹具是空索引（`captured` 桩掉账号与 reader），所以 `_export_stickers` 走「无引用」
+    那条降级路径：**不联网**、不落盘、退出码 0。
     """
+    assert "sticker" in usecases.MEDIA_KINDS
     with pytest.raises(SystemExit) as ei:
         cli.main(["media", "export", "--chat", "张三", "--kinds", "sticker"])
-    assert ei.value.code == 1
-    err = capsys.readouterr().err
-    assert "未知的媒体类型" in err and "sticker" in err
+    assert ei.value.code == 0
+    out = capsys.readouterr().out
+    assert "贴纸" in out               # 计数行渲染出来了，不是走到校验就退出
+
+
+def test_media_export_help_declares_cdn_credential_egress(capsys):
+    """`--with-cdn` 必须在帮助里**讲明它会把凭据发出去**。
+
+    这不是文案洁癖：`SECURITY.md` 承诺「不加则一次请求都不发」，而 CLI 帮助是用户
+    唯一会读到的现场提示。藏着一个会外发凭据的开关，等于让那份承诺实际失效。
+    """
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["media", "export", "--help"])
+    assert ei.value.code == 0
+    out = capsys.readouterr().out
+    assert "--with-cdn" in out
+    assert "filekey" in out or "凭据" in out
 
 
 def test_media_export_rejects_bad_months_with_search_input_error(captured, capsys):

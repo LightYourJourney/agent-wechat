@@ -186,7 +186,8 @@ def build_vector_index(rebuild: bool = False, account: str | None = None) -> dic
 @_guard
 def export_chat_media(contact: str, kinds: str = "image,voice,video",
                       months: str | None = None, limit: int = 500,
-                      force: bool = False, account: str | None = None) -> dict:
+                      force: bool = False, with_cdn: bool = False,
+                      account: str | None = None) -> dict:
     """导出某会话的媒体文件到本机（图片解密 / 语音转 WAV / 视频复制），返回计数与输出目录。
 
     contact 可以是 username（wxid / xxx@chatroom）或展示名（备注/昵称），歧义返回
@@ -200,16 +201,22 @@ def export_chat_media(contact: str, kinds: str = "image,voice,video",
     从头再来——触及 limit 时 truncated=true，counts 里的 remaining 是还有多少个**未导出**
     （不只是「续跑必然新增」：被上限挡下的条目里，续跑时仍会失败的那些也计入），
     **重跑同一条命令即可继续**。
+
+    with_cdn（默认 false）：贴纸本机那份是加密的、解不开（且是缩略档），只有显式打开它才从
+    微信 CDN 取件。**不开则一次网络请求都不发。** 打开后会把该贴纸的 `filekey` 以**明文 http**
+    发往腾讯 CDN（实测 `vweixinf.tc.qq.com` 的证书对主机名无效；另一个 host 的 https 未测）
+    ——这是既知且被显式接受的代价，
+    见 SECURITY.md §1「零网络例外」第 3 条。单条失败计入 counts.sticker.failed，不重试。
     """
     res = usecases.media_export(
         contact, kinds=[k.strip() for k in kinds.split(",") if k.strip()],
         months=[m.strip() for m in months.split(",") if m.strip()] if months else None,
-        limit=limit, force=force, account=account)
+        limit=limit, force=force, account=account, with_cdn=with_cdn)
     if isinstance(res, usecases.NeedConfirm):
         return _need_confirm(res)
     d = res.report.to_dict()
     return {"chat_id": res.chat_id, "out_dir": res.out_dir,
-            "counts": {k: d[k] for k in ("image", "voice", "video")},
+            "counts": {k: d[k] for k in ("image", "voice", "video", "sticker")},
             "degraded": res.report.degraded, "truncated": res.report.truncated}
 
 
@@ -240,10 +247,11 @@ def get_message_media(contact: str, keys: str | None = None, months: str | None 
     语音相反：本体存在 media_*.db 里、微信不清理，本机几乎 100% 可导出，所以
     **exportable 在本机实质上是语音专属状态**。
 
-    **贴纸（kind=sticker）本轮只可能答 gone，它也永远不会出现在 exportable 里**：导出侧
-    没有贴纸的产物布局（贴纸导出整体挂起），而它取不出来是因为微信侧把它存成加密格式、
-    当前解密方案未破——是「取不出来」，不是「本机找不到」，所以上面对图片/视频那句
-    「导出更多历史比修复有用」对贴纸不成立。本机有没有那份贴纸文件并不改变这个答案。
+    **贴纸（kind=sticker）永远不会出现在 exportable 里**，它只有两种可能：exported（已经用
+    `export_chat_media(with_cdn=true)` 取回来过）或 gone。**答 gone 时它不是「本机找不到」**：
+    本机那份是加密的、解密方案未破（且是缩略档），是「取不出来」——所以上面对图片/视频那句
+    「导出更多历史比修复有用」对贴纸不成立。要拿贴纸本体只有 CDN 一条路，且**默认关**：
+    见 `export_chat_media` 的 with_cdn。
 
     counts 给出四态的汇总，用来一眼判断是不是「全是 gone」；by_kind 再把 counts 按
     image/video/voice/sticker 拆开——池化会把「语音几乎全可导出」与「图片视频与贴纸几乎

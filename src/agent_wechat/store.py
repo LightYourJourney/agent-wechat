@@ -253,8 +253,12 @@ def media_refs_by_keys(con: sqlite3.Connection,
 
 def media_refs_by_chat(con: sqlite3.Connection, account: str,
                        chat_ids: Sequence[str], *, kind: str | None = None
-                       ) -> dict[str, list[tuple[int, str]]]:
-    """按会话批量取媒体引用：{chat_id: [(ts, file_key), …]}（会话内按 ts、local_id 升序）。
+                       ) -> dict[str, list[tuple[str, int, str]]]:
+    """按会话批量取媒体引用：{chat_id: [(msg_key, ts, file_key), …]}（会话内按 ts、local_id 升序）。
+
+    **`msg_key` 是第三样必需的**：贴纸走 CDN 取件时要回源到微信库，而定位一行所需的
+    `shard` / `local_id` **只编码在 msg_key 里**（`account|chat_md5|shard|local_id`，
+    见 `messages.row_key`）。视频用不到它，但数据源只有这一处，两个调用方共用。
 
     `media_refs` 只有 msg_key（没有 account / chat / ts 维度），所以必须 join `messages`
     取回会话与时间。**只出现在结果里的会话是有引用的那些**——调用方用 `.get(chat, ())` 取，
@@ -267,13 +271,13 @@ def media_refs_by_chat(con: sqlite3.Connection, account: str,
     """
     if not chat_ids:
         return {}
-    out: dict[str, list[tuple[int, str]]] = {}
+    out: dict[str, list[tuple[str, int, str]]] = {}
     # 与 media_refs_by_keys 同款分批（批大小见 KEYS_BATCH 的注释）。按**会话**分批不会
     # 打乱每条会话内部的顺序：一个会话只落在一批里，各批的 ORDER BY 结果可以直接拼接。
     batch = KEYS_BATCH
     for i in range(0, len(chat_ids), batch):
         chunk = chat_ids[i:i + batch]
-        sql = ("SELECT m.chat_id, m.ts, r.file_key FROM media_refs r "
+        sql = ("SELECT m.chat_id, m.msg_key, m.ts, r.file_key FROM media_refs r "
                "JOIN messages m ON m.msg_key = r.msg_key "
                f"WHERE m.account = ? AND m.chat_id IN ({','.join('?' * len(chunk))}) "
                "AND r.file_key IS NOT NULL")
@@ -281,8 +285,8 @@ def media_refs_by_chat(con: sqlite3.Connection, account: str,
         if kind is not None:
             sql += " AND r.media_kind = ?"
             args.append(kind)
-        for chat_id, ts, file_key in con.execute(sql + " ORDER BY m.ts, m.local_id", args):
-            out.setdefault(chat_id, []).append((ts, file_key))
+        for chat_id, msg_key, ts, file_key in con.execute(sql + " ORDER BY m.ts, m.local_id", args):
+            out.setdefault(chat_id, []).append((msg_key, ts, file_key))
     return out
 
 
