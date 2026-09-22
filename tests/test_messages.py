@@ -112,3 +112,38 @@ def test_type_names_complete_and_frozen():
 
 def test_reader_reexports_type_names():
     assert reader.TYPE_NAMES is messages.TYPE_NAMES
+
+
+# ---------- 哨兵三：贴纸显示串 ----------
+
+def test_sticker_display_with_name():
+    assert messages.sticker_display("d0f46ed3ce8bac33df5f7055656d8bd9", "滑稽") == "[贴纸:滑稽]"
+
+
+def test_sticker_display_without_name_uses_short_id():
+    """无名 → 稳定短 ID（md5 前 8 位）。
+
+    这是 D2 的全部价值所在：LLM 能据此分辨「同一贴纸被发了 5 次」与「5 个不同贴纸」。
+    短 ID 必须**稳定**——同 md5 恒同串，否则那个信号就没了。
+    """
+    md5 = "d0f46ed3ce8bac33df5f7055656d8bd9"
+    assert messages.sticker_display(md5, None) == "[贴纸#d0f46ed3]"
+    assert messages.sticker_display(md5, "") == "[贴纸#d0f46ed3]"
+
+
+def test_sticker_display_short_id_is_stable_and_distinct():
+    a = "d0f46ed3" + "0" * 24
+    b = "d0f46ed3" + "f" * 24          # 前 8 位相同 → 短 ID 相同（可接受：实测 6,123 个贴纸）
+    c = "1" * 32
+    assert messages.sticker_display(a, None) == messages.sticker_display(a, None)
+    assert messages.sticker_display(a, None) == messages.sticker_display(b, None)
+    assert messages.sticker_display(a, None) != messages.sticker_display(c, None)
+
+
+def test_sticker_display_roundtrip_parsers():
+    """生产端与解析端必须互认——本模块存在的理由就是防这对漂移。"""
+    assert messages.is_sticker_display("[贴纸:滑稽]")
+    assert messages.is_sticker_display("[贴纸#d0f46ed3]")
+    assert not messages.is_sticker_display("[sticker]")
+    assert messages.sticker_name_of("[贴纸:滑稽]") == "滑稽"
+    assert messages.sticker_name_of("[贴纸#d0f46ed3]") is None

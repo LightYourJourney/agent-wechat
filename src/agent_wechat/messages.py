@@ -1,10 +1,10 @@
-"""messages 行契约：本地 index.db 的 messages 一行——列清单、构造器、两条字符串哨兵。
+"""messages 行契约：本地 index.db 的 messages 一行——列清单、构造器、三条字符串哨兵。
 
 与 docs/schema-4.1.13.md 的分工：那份讲**微信侧**表结构（Msg_<md5> / Name2Id /
 WCDB 压缩），本模块讲**本地** messages 行。此前「一行 messages」在生产端
 （reader 手写 dict）、消费端（store 的 INSERT）、四处 SELECT 列清单、两份测试夹具里
-各编码一份；两条跨模块字符串约定（`md5:` 退化会话 id、`[appmsg: ...]` 媒体提示）
-的生产与解析也分居两处。现在它们都以本模块为唯一出处。
+各编码一份；三条跨模块字符串约定（`md5:` 退化会话 id、`[appmsg: ...]` 媒体提示、
+`[贴纸:…]` 贴纸显示串）的生产与解析也分居两处。现在它们都以本模块为唯一出处。
 
 依赖约束：**不 import 任何项目模块**。reader 已 import store，而 store/search/vector
 都 import 本模块——反向依赖会立即成环。
@@ -101,6 +101,36 @@ def appmsg_hint(title: str | None) -> str:
 def has_appmsg_title(text: str) -> bool:
     """解析端：是否为**带标题**的 appmsg 提示——只有它值得嵌入。"""
     return text.startswith(APPMSG_PREFIX) and text != APPMSG_NO_TITLE
+
+
+# ---------- 哨兵三：贴纸显示串 ----------
+#
+# 生产端与解析端**必须在同一处**（本模块自述的规矩）：写 `[贴纸:…]` 而解析按
+# `[sticker]` 找的漂移，与前两条哨兵踩过的是同一个坑。
+
+STICKER_PREFIX = "[贴纸:"
+STICKER_ID_PREFIX = "[贴纸#"
+STICKER_BARE = "[sticker]"          # reader 在没有 md5 时的兜底，**不变**
+
+
+def sticker_display(md5: str, name: str | None) -> str:
+    """贴纸的显示串：有名 `[贴纸:滑稽]`，无名 `[贴纸#d0f46ed3]`（md5 前 8 位）。
+
+    **短 ID 不是装饰**：实测名称覆盖率只有约 9%（XML 内嵌 6.5% + 本机 captions 2.8%），
+    剩下九成靠它。它让 LLM 能分辨「同一贴纸被发了 5 次」与「5 个不同贴纸」——
+    这是零成本的现成对话信号，比裸 `[sticker]` 多出一整层信息。
+    取 8 位十六进制：对实测 6,123 个不同贴纸无碰撞之虞。
+    """
+    return (f"{STICKER_PREFIX}{name}]" if name else f"{STICKER_ID_PREFIX}{md5[:8]}]")
+
+
+def is_sticker_display(text: str) -> bool:
+    return text.startswith((STICKER_PREFIX, STICKER_ID_PREFIX))
+
+
+def sticker_name_of(text: str) -> str | None:
+    """解析端：有名字返回名字；短 ID 形态返回 None。"""
+    return text[len(STICKER_PREFIX):-1] if text.startswith(STICKER_PREFIX) else None
 
 
 # ---------- 行 ----------

@@ -1248,3 +1248,123 @@ def test_sticker_captions_maps_md5_to_caption(env, tmp_path, monkeypatch):
     })
     caps = reader.MessageReader(ACCT).sticker_captions()
     assert caps == {"a" * 32: "抱抱", "b" * 32: "大哭"}
+
+
+# ---------- T6：贴纸显示串接入 ----------
+
+def test_decode_row_renders_sticker_display(env):
+    """`content` 变成可读串，`media_hint` **保持 `[sticker]` 不变**（spec D5）。
+
+    两列语义不同：`media_hint` 是给程序判类型的（`vector.py` 据它决定嵌入），
+    `content` 是给人/LLM 读的。名字不该污染类型标记——贴纸因此成为三类媒体里
+    唯一 content != media_hint 的成员，这是**刻意的**。
+    """
+    r = reader.MessageReader(ACCT)
+    xml = ('<msg><emoji md5="d0f46ed3ce8bac33df5f7055656d8bd9" '
+           'desc="Cg8KBXpoX2NuEgbosKLosKIKCQoFemhfdHcSAAoLCgdkZWZhdWx0EgA="></emoji></msg>')
+    m = r._decode_row(1, messages.TYPE_STICKER, 1, 1730000000, xml.encode(), 0,
+                      "0" * 32, {}, {})
+    assert m.content == "[贴纸:谢谢]"
+    assert m.media_hint == "[sticker]"
+    assert m.sticker_md5 == "d0f46ed3ce8bac33df5f7055656d8bd9"
+
+
+def test_decode_row_uses_db_caption_when_xml_has_no_name(env):
+    """优先级：XML 内嵌名 > emoticon.db caption > 短 ID。**反转优先级必红。**"""
+    r = reader.MessageReader(ACCT)
+    xml = '<msg><emoji md5="d0f46ed3ce8bac33df5f7055656d8bd9"></emoji></msg>'
+    m = r._decode_row(1, messages.TYPE_STICKER, 1, 1730000000, xml.encode(), 0,
+                      "0" * 32, {}, {}, sticker_names={"d0f46ed3ce8bac33df5f7055656d8bd9": "滑稽"})
+    assert m.content == "[贴纸:滑稽]"
+    m2 = r._decode_row(1, messages.TYPE_STICKER, 1, 1730000000, xml.encode(), 0,
+                       "0" * 32, {}, {}, sticker_names={})
+    assert m2.content == "[贴纸#d0f46ed3]"
+    # 两个源**都有名字且不同**时 XML 内嵌名胜出——没有这一条，上面两句对反转优先级是盲的
+    # （XML 无名时两个源不冲突，反着写也得到同一个串），docstring 那句「反转必红」就是空话。
+    named = ('<msg><emoji md5="d0f46ed3ce8bac33df5f7055656d8bd9" '
+             'desc="Cg8KBXpoX2NuEgbosKLosKIKCQoFemhfdHcSAAoLCgdkZWZhdWx0EgA="></emoji></msg>')
+    m3 = r._decode_row(1, messages.TYPE_STICKER, 1, 1730000000, named.encode(), 0,
+                       "0" * 32, {}, {},
+                       sticker_names={"d0f46ed3ce8bac33df5f7055656d8bd9": "库里的名字"})
+    assert m3.content == "[贴纸:谢谢]", "冲突时 XML 内嵌名优先于 emoticon.db caption"
+    assert m3.media_hint == "[sticker]"
+
+
+def test_decode_row_sticker_without_md5_falls_back(env):
+    """XML 没有 md5 → 回落 `[sticker]`，**不崩也不产出半个标识**。"""
+    r = reader.MessageReader(ACCT)
+    m = r._decode_row(1, messages.TYPE_STICKER, 1, 1730000000, b"<msg><emoji></emoji></msg>", 0,
+                      "0" * 32, {}, {})
+    assert m.content == "[sticker]"
+    assert m.sticker_md5 is None
+
+
+def test_iter_all_yields_a_sticker_ref_carrying_the_xml_md5(env, tmp_path, monkeypatch):
+    """贴纸也进 `media_refs`：`file_key` 位放 emoji XML 的 md5，`xml_md5` 位留 None。
+
+    **今天没有消费者，不等于可以不写**：这张表是「消息 → 媒体身份」的唯一索引，
+    而 md5 在走得到这条分支时是 100% 拿得到的——漏写意味着日后要再全量重导一遍
+    （67k 条消息）才补得回来。`media_kind='sticker'` 不需要 DDL 改动（没有 CHECK 约束），
+    只有 store 的列注释跟着改。
+
+    `sticker_md5` **必须来自 `_decode_row` 那一趟**：这条构造里 `packed_info_data` 是
+    NULL（真机贴纸就是没有 packed），所以从 packed 里找 md5 的写法拿不到任何东西。
+    行内容与 ref 是同一次解码的两半——索引里的 content 与实时 `recent` 必须是同一个串。
+    """
+    sticker_md5 = "d0f46ed3ce8bac33df5f7055656d8bd9"
+    root = tmp_path / "stickerwx"
+    shutil.copytree(env.wx, root)
+    build_shard(root, ACCT, "message_0.db",
+                {FRIEND: [(1, 47, 1, T0, f'<msg><emoji md5="{sticker_md5}"></emoji></msg>', 0)]},
+                [FRIEND, SELF])
+    monkeypatch.setattr(paths, "XWECHAT_FILES", root)
+
+    batches = list(reader.MessageReader(ACCT).iter_all())
+    rows = [r for batch, _ in batches for r in batch]
+    refs = [ref for _, rf in batches for ref in rf]
+    key = messages.row_key(ACCT, md5(FRIEND), "message_0.db", 1)
+    assert refs == [(key, "sticker", sticker_md5, None)]
+    sticker = next(r for r in rows if r["msg_type"] == 47)
+    assert sticker["content"] == "[贴纸#d0f46ed3]"     # 无名 → 短 ID，索引里照写
+    assert sticker["media_hint"] == "[sticker]"
+
+
+def test_recent_and_iter_all_pass_emoticon_captions_down(env, tmp_path, monkeypatch):
+    """`emoticon.db` 的名字必须真的走到 `content` 上，且**每次调用只解一次库**。
+
+    两个钉子缺一不可。上面三条测试都直接调 `_decode_row` 并手喂 `sticker_names`，
+    所以「`recent` / `iter_all` 把名字传下去」这**两行接线**今天无人守护——删掉它，
+    真机上贴纸会静默地全部回落短 ID（名字覆盖率那 9% 一分不剩），而单测全绿。
+
+    调用次数那一条**必须用多于一行**的夹具：只有一行时「循环外取一次」与「每行取一次」
+    都是 1，断言会退化成恒真。真机 67k 条消息，写成每行一次就是几万次白白解密。
+    """
+    sticker_md5 = "d0f46ed3ce8bac33df5f7055656d8bd9"
+    root = tmp_path / "captionwx"
+    shutil.copytree(env.wx, root)
+    build_shard(root, ACCT, "message_0.db",
+                {FRIEND: [(i, 47, 1, T0 + i, f'<msg><emoji md5="{sticker_md5}"/></msg>', 0)
+                          for i in (1, 2, 3)]},
+                [FRIEND, SELF])
+    enc_db(root / ACCT / "db_storage" / "emoticon" / "emoticon.db", {
+        "kStoreEmoticonCaptionsTable": (
+            "CREATE TABLE kStoreEmoticonCaptionsTable "
+            "(package_id_ TEXT, md5_ TEXT, language_ TEXT, caption_ TEXT)",
+            [("pkg_a", sticker_md5, "default", "滑稽")]),
+    })
+    monkeypatch.setattr(paths, "XWECHAT_FILES", root)
+
+    calls: list[int] = []
+    real = reader.MessageReader.sticker_captions
+    monkeypatch.setattr(reader.MessageReader, "sticker_captions",
+                        lambda self: (calls.append(1), real(self))[1])
+    r = reader.MessageReader(ACCT)
+
+    stickers = [m for m in r.recent(FRIEND, limit=10) if m.msg_type == 47]
+    assert [m.content for m in stickers] == ["[贴纸:滑稽]"] * 3
+    assert len(calls) == 1, f"recent 该在循环外取一次名字，实际取了 {len(calls)} 次"
+
+    calls.clear()
+    rows = [row for batch, _ in r.iter_all(FRIEND) for row in batch]
+    assert [x["content"] for x in rows if x["msg_type"] == 47] == ["[贴纸:滑稽]"] * 3
+    assert len(calls) == 1, f"iter_all 该在循环外取一次名字，实际取了 {len(calls)} 次"

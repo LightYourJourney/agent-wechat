@@ -103,9 +103,9 @@ CREATE TABLE IF NOT EXISTS roster_meta (
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS media_refs (
     msg_key    TEXT PRIMARY KEY,          -- = messages.msg_key（account 等字段经 join 取回）
-    media_kind TEXT NOT NULL,             -- 'image' | 'video'
-    file_key   TEXT,                      -- packed_info_data 的 32-hex（dat/mp4 文件名权威）
-    xml_md5    TEXT                       -- XML md5（兜底留证，与文件名无关）
+    media_kind TEXT NOT NULL,             -- 'image' | 'video' | 'sticker'
+    file_key   TEXT,                      -- 图片/视频：packed_info_data 的 32-hex（dat/mp4 文件名权威）；贴纸：emoji XML 的 md5
+    xml_md5    TEXT                       -- XML md5（兜底留证，与文件名无关；贴纸为 NULL）
 ) WITHOUT ROWID;
 
 CREATE TABLE IF NOT EXISTS msg_parts (

@@ -10,7 +10,7 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, asdict
 
 from . import decrypt, errors, keys, media, messages, paths, roster, schema, store
@@ -39,6 +39,7 @@ class Message:
     is_self: bool
     content: str | None
     media_hint: str | None
+    sticker_md5: str | None = None   # 仅 msg_type=47 且 XML 里有合法 md5 时非空
     msg_key: str = ""          # 由 _read_rows 赋（需 account + chat_md5 + shard + local_id 四者齐备）
 
     def to_dict(self) -> dict:
@@ -368,7 +369,8 @@ class MessageReader:
         return [r[0].decode() for r in con.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'Msg_%' ORDER BY name")]
 
-    def _decode_row(self, lid, ltype, sender, ts, mc, ct, md5hex, chat_map, n2i) -> Message:
+    def _decode_row(self, lid, ltype, sender, ts, mc, ct, md5hex, chat_map, n2i,
+                    sticker_names: Mapping[str, str] | None = None) -> Message:
         """单行解码：压缩、类型掩码、群前缀、媒体提示。所有读取路径共用此函数。"""
         chat_id = chat_map.get(md5hex) or messages.degraded_chat_id(md5hex)
         content = _decode_content(mc, ct)
@@ -378,8 +380,22 @@ class MessageReader:
             head, sep, rest = content.partition(":\n")
             if sep and head and "\n" not in head:   # 群消息 "<wxid>:\n正文" 前缀
                 sender_u, sender_name, content = head, head, rest
+        # 贴纸：`content` 变成可读串，`media_hint` **不动**（spec D5）。
+        # XML 只在这里解一次——`iter_all` 走同一条路径，所以索引里的 content
+        # 与实时 `recent` 是一致的，不会一个显示标识一个显示 `[sticker]`。
+        sticker_md5 = None
+        if t == messages.TYPE_STICKER:
+            ref = media.extract_sticker_ref(t, content)
+            if ref is not None:
+                sticker_md5, name, _pack = ref
+                name = name or (sticker_names or {}).get(sticker_md5)
+                content = messages.sticker_display(sticker_md5, name)
         hint = _media_hint(t, content)
         if t == messages.TYPE_TEXT:
+            body = content
+        elif sticker_md5:
+            # 贴纸的 content 已是显示串（上面那段），**不能用 hint**：hint 是类型标记，
+            # 两列语义不同（spec D5）。没有合法 md5 时不走这支，回落下面的 `[sticker]`。
             body = content
         elif hint:
             body = hint
@@ -389,10 +405,11 @@ class MessageReader:
         return Message(chat_id=chat_id, shard="", local_id=lid, ts=ts,
                        msg_type=t, type_name=_type_name(t), sender_id=sender_u,
                        sender_name=sender_name, is_self=(sender_u == self.self_wxid),
-                       content=body, media_hint=hint)
+                       content=body, media_hint=hint, sticker_md5=sticker_md5)
 
     def _read_rows(self, con, table, shard, md5hex, chat_map, n2i,
-                   order_desc=False, limit=None) -> list[Message]:
+                   order_desc=False, limit=None,
+                   sticker_names: Mapping[str, str] | None = None) -> list[Message]:
         sql = (f"SELECT local_id, local_type, real_sender_id, create_time, "
                f"message_content, WCDB_CT_message_content FROM '{table}'")
         sql += " ORDER BY local_id" + (" DESC" if order_desc else "")
@@ -400,7 +417,8 @@ class MessageReader:
             sql += f" LIMIT {int(limit)}"
         out = []
         for row in con.execute(sql):
-            m = self._decode_row(*row, md5hex, chat_map, n2i)
+            m = self._decode_row(*row, md5hex, chat_map, n2i,
+                                 sticker_names=sticker_names)
             m.shard = shard
             m.msg_key = messages.row_key(self.acct, md5hex, shard, m.local_id)
             out.append(m)
@@ -410,6 +428,7 @@ class MessageReader:
         """某会话最近 N 条（时间正序）。分片按时间分区 → 从最新分片起查，够数即停。"""
         md5hex = messages.md5_of(chat_id)
         chat_map = {md5hex: chat_id}
+        names = self.sticker_captions()        # **循环外取一次**，见该方法 docstring
         pieces: list[Message] = []
         for shard in reversed(paths.message_shards(self.acct)):
             with self._open(f"message/{shard.name}") as con:
@@ -419,7 +438,8 @@ class MessageReader:
                 n2i = self._name2id(con)
                 for table in tables:
                     pieces += self._read_rows(con, table, shard.name, md5hex, chat_map,
-                                              n2i, order_desc=True, limit=limit)
+                                              n2i, order_desc=True, limit=limit,
+                                              sticker_names=names)
             if len(pieces) >= limit:
                 break
         pieces.sort(key=lambda m: m.ts)
@@ -433,11 +453,13 @@ class MessageReader:
         local_id 是分片内序号，键必须含 shard）。
         yield (rows, refs)：rows 是 list[dict]，字段与 store.upsert_batch 对齐；refs 是
         [(msg_key, media_kind, file_key, xml_md5)]，与 store.upsert_media_refs 对齐——
-        图片/视频消息顺带抽取（spec §4.3），调用方得以把两者写进同一个事务。
+        图片/视频消息顺带抽取（spec §4.3），贴纸消息带出 md5（`file_key` 位），
+        调用方得以把两者写进同一个事务。
         """
         batch = batch or store.BATCH
         resume = resume or {}
         chat_map = self.md5_map()
+        sticker_names = self.sticker_captions()   # **循环外取一次**（同 recent）
         want_md5 = messages.md5_of(chat_id) if chat_id else None
         for shard in paths.message_shards(self.acct):
             with self._open(f"message/{shard.name}") as con:
@@ -459,7 +481,8 @@ class MessageReader:
                     for row in cur:
                         lid, ltype, sender, ts, mc, ct, packed = row
                         m = self._decode_row(lid, ltype, sender, ts, mc, ct,
-                                             md5hex, chat_map, n2i)
+                                             md5hex, chat_map, n2i,
+                                             sticker_names=sticker_names)
                         if m.msg_type in (messages.TYPE_IMAGE, messages.TYPE_VIDEO):
                             # 提取只用原始 XML（_decode_row 产出的 content 是 [image] 占位）；
                             # 只在图片/视频上多解一次压缩，量小可忽略
@@ -470,6 +493,13 @@ class MessageReader:
                                 refs.append((messages.row_key(self.acct, md5hex,
                                                               shard.name, lid),
                                              kind, fk, xm))
+                        elif m.sticker_md5:
+                            # 贴纸引用：`file_key` 位放 md5（它就是这个 kind 的定位键），
+                            # `xml_md5` 位留 None。**不再多解一次压缩**——`_decode_row`
+                            # 已经把 XML 解过了，`m.sticker_md5` 就是那一趟的结果。
+                            refs.append((messages.row_key(self.acct, md5hex,
+                                                          shard.name, lid),
+                                         "sticker", m.sticker_md5, None))
                         rows.append(messages.make_row(
                             account=self.acct, chat_md5=md5hex, chat_id=m.chat_id,
                             shard=shard.name, local_id=m.local_id, ts=m.ts,
