@@ -229,7 +229,9 @@ def get_message_media(contact: str, keys: str | None = None, months: str | None 
     判成 exportable 而非 exported。
 
     status 四态：none(不属于本功能覆盖的媒体类型——文件、位置、appmsg 等都归这里，
-    **不是**「这条消息没有媒体」) / exported(已导出，path 是产物路径) /
+    **不是**「这条消息没有媒体」；**只在显式给了 keys 时才可能非零**：省略 keys 时查询
+    只取图片/视频/语音/贴纸四类消息，四者的 kind 都解得出来，所以 counts.none 恒为 0
+    ——用 keys 指名一条文本或 appmsg 消息才会看到它) / exported(已导出，path 是产物路径) /
     exportable(有媒体、本体还在微信里，但你还没导出) / gone(有媒体但本机找不到；
     **贴纸的 gone 是另一回事，见下**)。
     **图片与视频以 gone 为主是常态，不是错误**：微信只为**近期（尚未导出）**的消息保留
