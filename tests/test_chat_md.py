@@ -199,3 +199,28 @@ def test_both_templates_take_their_wording_from_chat_text(monkeypatch):
     monkeypatch.setattr(chat_text, "GONE", "改过的文案XYZ")
     assert "改过的文案XYZ" in chat_html.render(view), "HTML 读的是导入期的旧值（F53）"
     assert "改过的文案XYZ" in chat_md.render(view), "Markdown 读的是导入期的旧值（F53）"
+
+
+def test_sticker_gone_says_encrypted_copy_exists():
+    """贴纸的 `gone` **不许**用那句通用的 GONE——它说的是「本机找不到本体（已被清理，
+    或从未下载到本机）」，而贴纸的真相是**副本就在本机、只是解不开**。
+
+    这条钉的是「产物里不许出现一句错话」。把实现改回共用 `chat_text.GONE` 它必红。
+    """
+    from agent_wechat import chat_text
+    from agent_wechat.usecases import MediaRefState
+    st = MediaRefState(msg_key="k", ts=1730000000, kind="sticker",
+                       status="gone", path=None)
+    out = chat_md._media_block(st, "..", "/out/c")
+    assert chat_text.STICKER_GONE in out
+    assert chat_text.GONE not in out          # **关键**：不是那句通用的
+    assert "贴纸" in out
+
+
+def test_sticker_label_is_chinese():
+    """类型标签走 `chat_text.KIND_LABEL`——两个模板共用一份，不各写各的。
+
+    没有它，`gone` 支的占位会印成 `[sticker · …]` 而不是 `[贴纸 · …]`。
+    """
+    from agent_wechat import chat_text
+    assert chat_text.KIND_LABEL["sticker"] == "贴纸"

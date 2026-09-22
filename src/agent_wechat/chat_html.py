@@ -95,7 +95,8 @@ def _media_block(m: MediaRefState, prefix: str, out_dir: str) -> str:
         why = chat_text.EXPORTABLE.get(kind, chat_text.EXPORTABLE_OTHER)
         return f'<div class="ph">[{_esc(label)} · {_esc(why)}]</div>'
     if m.status == "gone":
-        return f'<div class="ph">[{_esc(label)} · {_esc(chat_text.GONE)}]</div>'
+        why = chat_text.STICKER_GONE if kind == "sticker" else chat_text.GONE
+        return f'<div class="ph">[{_esc(label)} · {_esc(why)}]</div>'
     if m.status == "none":
         return ""
     # 四态之外的取值（上游将来加枚举值）：照实印出来，不猜也不吞。

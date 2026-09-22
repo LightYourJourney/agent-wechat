@@ -58,7 +58,8 @@ def _media_block(m: MediaRefState, prefix: str, out_dir: str) -> str:
     if m.status == "exportable":
         return "〔{} · {}〕".format(_t(label), _t(chat_text.EXPORTABLE.get(kind, chat_text.EXPORTABLE_OTHER)))
     if m.status == "gone":
-        return "〔{} · {}〕".format(_t(label), _t(chat_text.GONE))
+        why = chat_text.STICKER_GONE if kind == "sticker" else chat_text.GONE
+        return "〔{} · {}〕".format(_t(label), _t(why))
     if m.status == "none":
         return ""
     return f"〔{_t(label)} · 未知媒体状态 {_t(m.status)}〕"
