@@ -27,9 +27,10 @@ class Requirement:
     columns: tuple[str, ...]
 
 
-# 四个探测能力。注意它们与**用户可见的能力**不是一一对应（spec §6）：
+# 五个探测能力。注意它们与**用户可见的能力**不是一一对应（spec §6）：
 #   contacts 命令 → contacts；recent → messages + contacts；export → messages + username_pool
 #   search/semantic → contacts（索引库不受漂移影响）；inspect → 不探测
+#   stickers 是 export 的**降级**来源：漂了只少一列名字，不挡导出（spec §6.4）
 CAPABILITIES: dict[str, tuple[Requirement, ...]] = {
     "contacts": (
         Requirement("contact/contact.db", "contact",
@@ -47,6 +48,13 @@ CAPABILITIES: dict[str, tuple[Requirement, ...]] = {
                     ("local_id", "local_type", "real_sender_id", "create_time",
                      "message_content", "WCDB_CT_message_content", "packed_info_data",
                      "server_id")),
+    ),
+    # 贴纸名字来源（spec §6.4）。**降级的能力**：读不到就回落短 ID，不抛。
+    # 实测 925 行、零空 caption；`language_` **全是 'default'**，不是 'zh_cn'——
+    # 别照 XML 里 desc 的语言习惯去筛。
+    "stickers": (
+        Requirement("emoticon/emoticon.db", "kStoreEmoticonCaptionsTable",
+                    ("md5_", "language_", "caption_")),
     ),
     "username_pool": (
         Requirement("session/session.db", "SessionTable", ("username",)),

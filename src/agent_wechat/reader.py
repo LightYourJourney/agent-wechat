@@ -306,6 +306,33 @@ class MessageReader:
                 pass                      # 备注/昵称不可用；群昵称仍可产出
         return roster.build_rows(groups, contacts)
 
+    def sticker_captions(self) -> dict[str, str]:
+        """`md5 → 中文名`，来自 `emoticon/emoticon.db`。
+
+        **降级的能力**（与 `roster()` 同一条理由）：库缺失、结构漂移、解密失败——
+        一律返回空表，绝不抛。贴纸没有名字仍要能导出，只是回落短 ID。
+
+        `language_` 实测**全是 `'default'`**（925/925），不是 `'zh_cn'`——这是微信
+        自己的表，语言列名与 XML 里 `desc` 的多语言结构不是一回事。仍按
+        `language_='default'` 精确筛：漏筛会把同一 md5 因未来多语言而重复计入。
+
+        调用方**只需调一次**：925 行的载入成本很低，但导出循环里每批调一次是浪费。
+        `iter_all` 那条路径由调用方在循环外取好再传下去（见 usecases）。
+        """
+        out: dict[str, str] = {}
+        try:
+            with self._open("emoticon/emoticon.db") as con:
+                self._check("stickers", "emoticon/emoticon.db", con)
+                for md5, caption in con.execute(
+                        "SELECT md5_, caption_ FROM kStoreEmoticonCaptionsTable "
+                        "WHERE language_='default'"):
+                    k, v = _s(md5), _s(caption)
+                    if k and v:
+                        out[k.lower()] = v
+        except (DataNotFound, errors.SchemaDrift, errors.AgentWeChatError, sqlite3.Error):
+            return {}
+        return out
+
     def _roster_map(self) -> dict[tuple[str, str], str]:
         """`{(chat_id, member_key): display_name}`，**实例级缓存**——与
         `_contacts_all_cached` 同一模式：一次工具调用里 resolve + recent 会先后用到它。

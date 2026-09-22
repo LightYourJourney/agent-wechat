@@ -1,6 +1,6 @@
 """schema 声明清单的完整性测试。
 
-这份清单是「关于微信的知识」——它的对照物是 docs/schema-4.1.13.md：四个能力声明的
+这份清单是「关于微信的知识」——它的对照物是 docs/schema-4.1.13.md：五个能力声明的
 每一列都要能在那份文档里找到。`contact.db` 的声明从 T7 起也纳入核对（此前那份文档只有
 描述性列举，`chat_room` / `ext_buffer` 连一行 DDL 都没有，核对基准不存在）。
 """
@@ -27,17 +27,34 @@ def test_column_lists_are_non_empty_and_unique():
             assert len(set(r.columns)) == len(r.columns), f"{cap}.{r.table} 有重复列名"
 
 
-def test_the_four_capabilities_are_exactly_these():
+def test_the_five_capabilities_are_exactly_these():
     """能力名是降级策略表的键（T5）——多一个少一个都会让策略表失配。"""
-    assert set(schema.CAPABILITIES) == {"contacts", "roster", "messages", "username_pool"}
+    assert set(schema.CAPABILITIES) == {"contacts", "roster", "messages", "username_pool",
+                                        "stickers"}
+
+
+def test_stickers_capability_declares_the_real_columns():
+    """能力声明是**关于微信的知识**，它必须与真机表结构逐列对上。
+
+    **列名全部带尾下划线**——这是微信自己的命名，实测
+    `['package_id_', 'md5_', 'language_', 'caption_']`（PRAGMA table_info）。
+    写掉一个 `_` 就会在真机上判成「结构漂移」：`sticker_captions()` 吞掉异常返回空表，
+    **emoticon.db 这个来源静默产出为零**（1,916 条名字全部回落短 ID），且不报任何错。
+    """
+    reqs = schema.CAPABILITIES["stickers"]
+    assert len(reqs) == 1
+    r = reqs[0]
+    assert r.db == "emoticon/emoticon.db"
+    assert r.table == "kStoreEmoticonCaptionsTable"
+    assert r.columns == ("md5_", "language_", "caption_")
 
 
 def test_all_declarations_match_the_schema_doc():
-    """四个能力声明的每一列，都要能在 docs/schema-4.1.13.md 里找到（逐列核对）。
+    """五个能力声明的每一列，都要能在 docs/schema-4.1.13.md 里找到（逐列核对）。
 
     这条测试的价值是「声明不是凭记忆写的」——文档改了它就会红。`contact.db` 的声明
     也在这里：它曾在文档里无一行 DDL（`chat_room` / `ext_buffer` 只有名字或干脆缺席），
-    T7 补齐后才有了可核对的基准。
+    T7 补齐后才有了可核对的基准。`emoticon.db` 同理（T5 补的那一节）。
     """
     doc = (pathlib.Path(__file__).resolve().parents[1]
            / "docs" / "schema-4.1.13.md").read_text()

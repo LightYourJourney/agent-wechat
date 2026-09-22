@@ -98,6 +98,28 @@ CREATE TABLE chatroom_member(room_id INTEGER, member_id INTEGER,
 - `schema.py` 在 `contact.db` 上的声明：`contact` 的 `username` / `alias` / `remark` /
   `nick_name` / `delete_flag`，`chat_room` 的 `id` / `ext_buffer`，`name2id` 的 `username`。
 
+## emoticon.db
+
+贴纸库：`emoticon/emoticon.db`（SQLCipher，与其他库同一套 `keys.py` 派生的 passphrase）。
+7 张表，本项目只读下面这一张——贴纸名字的**账号级**来源（`schema.py` 的 `stickers` 声明）。
+
+```sql
+-- 贴纸名：md5 → 中文名。**列名全部带尾下划线**（微信自己的命名，别「顺手」去掉）
+CREATE TABLE kStoreEmoticonCaptionsTable(
+  package_id_ TEXT, md5_ TEXT, language_ TEXT, caption_ TEXT);
+```
+
+实测（2026-09-22 复测，微信 4.1.13.63）：**925 行、925 个不同 md5、47 个表情包、零空
+caption**；`language_` **全部是 `'default'`**（925/925）。
+
+- 语言列**不是** XML 里 `desc` 那套多语言结构（那边是 `zh_cn`）。筛的时候按
+  `language_='default'` 精确筛；不筛的话，微信将来若给同一 md5 出多语言行，
+  同一个贴纸会被重复计入。
+- 名字的优先级是 `XML desc/emojiattr` > 这张表 > 回落短 ID（spec §6.3）：XML 是逐条的、
+  与消息同源，这张表是账号级的按 md5 反查。
+- `kNonStoreEmoticonTable.aes_key` 那把密钥**解不出**本机 `business/emoticon/Persist`
+  下的贴纸文件（spec 附录 C.3 有证明）——所以这张表只用来取名字，与贴纸文件解密无关。
+
 ## 对去重键的直接影响
 
 同会话跨分片 local_id 重复（不同消息）→ 检索库主键必须为

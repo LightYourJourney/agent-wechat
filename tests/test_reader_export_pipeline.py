@@ -1209,3 +1209,42 @@ def test_recent_messages_msg_key_populated_by_read_rows(env):
     for m in res.messages:
         assert m.msg_key == messages.row_key(ACCT, messages.md5_of(m.chat_id),
                                              m.shard, m.local_id)
+
+
+# ---------- T5：emoticon.db 的名字来源 ----------
+
+def test_sticker_captions_returns_empty_when_db_unreadable(env, monkeypatch):
+    """**降级的能力**：读不到就返回空表，绝不抛——贴纸没有名字仍要能导出。
+
+    与 `roster()` 的逐源降级同一条理由：少一个源不该让整个导出失败。
+    """
+    r = reader.MessageReader(ACCT)
+    monkeypatch.setattr(reader.MessageReader, "_open",
+                        lambda self, rel: (_ for _ in ()).throw(errors.DataNotFound("x")))
+    assert r.sticker_captions() == {}
+
+
+def test_sticker_captions_maps_md5_to_caption(env, tmp_path, monkeypatch):
+    """**正向路径**，也是列名那条静默失败的唯一单测防线。
+
+    夹具的 DDL 用**真机列名**（`md5_` / `language_` / `caption_`，带尾下划线）：
+    声明或 SQL 里写掉一个 `_`，`_check` 会判漂移、`sticker_captions()` 吞掉异常返回
+    空表——那时下面的断言会红。没有这条，错列名在单测里**完全不可见**（只靠真机冒烟）。
+
+    三条边界同时钉住：非 `'default'` 语言的行**不入表**（不筛会把同一 md5 重复计入）、
+    空 caption 跳过、md5 归一化成小写（XML 那边的 md5 大小写不定，合并时按小写对齐）。
+    """
+    root = tmp_path / "wx"
+    monkeypatch.setattr(paths, "XWECHAT_FILES", root)
+    enc_db(root / ACCT / "db_storage" / "emoticon" / "emoticon.db", {
+        "kStoreEmoticonCaptionsTable": (
+            "CREATE TABLE kStoreEmoticonCaptionsTable "
+            "(package_id_ TEXT, md5_ TEXT, language_ TEXT, caption_ TEXT)",
+            [("pkg_a", "a" * 32, "default", "抱抱"),
+             ("pkg_a", "B" * 32, "default", "大哭"),
+             ("pkg_a", "c" * 32, "en_us", "hug"),        # 别的语言：不入表
+             ("pkg_a", "d" * 32, "default", ""),         # 空 caption：不入表
+             ("pkg_a", "e" * 32, "default", None)]),
+    })
+    caps = reader.MessageReader(ACCT).sticker_captions()
+    assert caps == {"a" * 32: "抱抱", "b" * 32: "大哭"}
