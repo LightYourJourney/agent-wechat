@@ -749,13 +749,35 @@ def test_media_rebuild_refs_prints_total(monkeypatch, capsys):
 def test_media_export_rejects_unknown_kind_with_search_input_error(captured, capsys):
     """kinds 非法 → SearchInputError 经 main() 既有 AgentWeChatError 翻译：单行中文到
     stderr、退出码 1。这条走**真实** usecases.media_export（captured 桩掉账号与
-    reader）——非法 kinds 必须在碰任何导出逻辑之前被拒。"""
+    reader）——非法 kinds 必须在碰任何导出逻辑之前被拒。
+
+    **本轮订正**：原先拿 `image,sticker` 当非法值，改用拼错的 `stikers`——免得这条
+    「非法值要被拒」和「贴纸本轮是不是可导出 kind」缠在一起（后者由下一条专门钉）。
+    """
     with pytest.raises(SystemExit) as ei:
-        cli.main(["media", "export", "--chat", "张三", "--kinds", "image,sticker"])
+        cli.main(["media", "export", "--chat", "张三", "--kinds", "image,stikers"])
+    assert ei.value.code == 1
+    err = capsys.readouterr().err
+    assert "未知的媒体类型" in err and "stikers" in err
+    assert "Traceback" not in err
+
+
+def test_media_export_still_rejects_sticker_kind(captured, capsys):
+    """**导出挂起期间贴纸不是可导出 kind**：`media export --kinds sticker` 必须继续被拒。
+
+    贴纸这一轮进了 `_MEDIA_TYPES` / `_KIND_OF_TYPE`（它是媒体消息、要报状态），但**没有**
+    进 `MEDIA_KINDS`（那是「能导出什么」的清单，而贴纸拿不出来：导出挂起、`resolve_sticker`
+    随 T7 搁置）。与上一条是一对：那条钉「非法值要被拒」，这条钉「贴纸本轮仍在非法值之列」
+    ——把 sticker 加进 `MEDIA_KINDS` 而不接线导出，这条必红。
+
+    **校验发生在碰索引库之前**（`media_export` 先判 kinds 再 `store.open()`），所以
+    走 `captured` 夹具不会在真实 `~/.agent-wechat` 下建目录。
+    """
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["media", "export", "--chat", "张三", "--kinds", "sticker"])
     assert ei.value.code == 1
     err = capsys.readouterr().err
     assert "未知的媒体类型" in err and "sticker" in err
-    assert "Traceback" not in err
 
 
 def test_media_export_rejects_bad_months_with_search_input_error(captured, capsys):
@@ -895,6 +917,43 @@ def test_media_locate_prints_truncation_notice_only_when_truncated(monkeypatch, 
                         lambda contact, **kw: _media_result(gone, counts))
     assert cli.cmd_media_locate(args) == 0
     assert "达到 --limit 上限" not in capsys.readouterr().out
+
+
+def test_media_locate_shows_sticker_bucket_and_qualifies_its_gone(monkeypatch, capsys):
+    """贴纸进了 `by_kind` → 按类型那一节必须印它；它那句 `gone` 提示必须另说。
+
+    两件都钉在这条上，因为两处都是**写死的枚举**：
+    1. `cmd_media_locate` 的按类型循环用固定元组 `("image", "video", "voice")`——
+       漏掉 sticker 时该桶在 CLI 里静默消失（而 MCP 信封有，两个入口的文档承诺
+       「同一套 by_kind」）。删掉元组里的 "sticker" 这条必红。
+    2. 上面那句「gone = 消息引用了媒体但本机找不到，导出更多历史比修复有用」**对贴纸
+       是句错话**：贴纸取不出来是微信侧存成加密格式、方案未破，与「本机有没有」无关
+       （`chat_text.STICKER_GONE` 就是为这句话设的）。没有贴纸时不许印那句——否则它是
+       恒定的噪音，也证明不了它「针对贴纸」。
+    """
+    args = SimpleNamespace(chat="wxid_x", keys=None, months=None, limit=200,
+                           out=None, account=None)
+    states = _media_states(("image", "gone"), ("sticker", "gone"))
+    counts = {"none": 0, "exported": 0, "exportable": 0, "gone": 2}
+    by_kind = {"image": {"gone": 1}, "sticker": {"gone": 1}}
+    monkeypatch.setattr(usecases, "message_media",
+                        lambda contact, **kw: _media_result(states, counts, by_kind=by_kind))
+    assert cli.cmd_media_locate(args) == 0
+    out = capsys.readouterr().out
+    assert "  按类型 sticker exported=0 exportable=0 gone=1" in out
+    assert "取不出来" in out            # 贴纸专用那句：通用那句对它不成立
+    assert "sticker" in out
+
+    # 没有贴纸的会话：通用那句照旧，贴纸专用那句不出现在这里
+    monkeypatch.setattr(usecases, "message_media", lambda contact, **kw: _media_result(
+        _media_states(("image", "gone")),
+        {"none": 0, "exported": 0, "exportable": 0, "gone": 1},
+        by_kind={"image": {"gone": 1}}))
+    assert cli.cmd_media_locate(args) == 0
+    plain = capsys.readouterr().out
+    assert "微信只为近期（尚未导出）的消息保留本体" in plain
+    assert "按类型 sticker" not in plain
+    assert "取不出来" not in plain
 
 
 def test_media_locate_prints_absolute_paths_for_relative_out(tmp_path, monkeypatch, capsys,

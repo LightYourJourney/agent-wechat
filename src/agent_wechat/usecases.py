@@ -381,7 +381,12 @@ def media_export(contact: str, *, kinds: list[str], months: list[str] | None = N
 LIMIT_MEDIA = (1, 500)
 
 _VOICE_TYPE = messages.TYPE_VOICE
-_MEDIA_TYPES = (messages.TYPE_IMAGE, messages.TYPE_VIDEO, messages.TYPE_VOICE)
+# `message_media` 答的是「这些 msg_type 的消息算媒体」——贴纸在列（它有类型、有身份）。
+# **与 `MEDIA_KINDS` 是两回事**：那个是「能导出什么」的清单，贴纸**不在**其中
+# （导出挂起：贴纸取不出来，见 `chat_text.STICKER_GONE`）。漏掉下面这一项，贴纸消息会被
+# SQL 整条滤掉，`_KIND_OF_TYPE[47]` 就成了静默 no-op。
+_MEDIA_TYPES = (messages.TYPE_IMAGE, messages.TYPE_VIDEO, messages.TYPE_VOICE,
+                messages.TYPE_STICKER)
 
 
 def _voice_keys_for(account: str) -> frozenset[tuple[str, int]] | None:
@@ -421,7 +426,8 @@ class MessageMediaResult:
 
 _KIND_OF_TYPE = {messages.TYPE_IMAGE: "image",
                  messages.TYPE_VIDEO: "video",
-                 messages.TYPE_VOICE: "voice"}
+                 messages.TYPE_VOICE: "voice",
+                 messages.TYPE_STICKER: "sticker"}
 
 
 def _state_of(row: dict, ref: tuple[str, str | None] | None, *,
@@ -445,6 +451,19 @@ def _state_of(row: dict, ref: tuple[str, str | None] | None, *,
     elif kind == "image":
         present = file_key is not None and media.resolve_image(
             account, row["chat_md5"], row["ts"], file_key) is not None
+    elif kind == "sticker":
+        # **一律 gone，本分支恒不进 exportable**：本地那份是解不开的密文（spec 附录 C），
+        # CDN 传输也不通，所以我们**拿不出来**。`exportable` 的文档语义是「有产物可拿、
+        # 你还没导出」，对贴纸产出它就是谎报。
+        #
+        # **这不是「本机没有」**：本机有多少条贴纸真的有文件，实测口径不同差异极大
+        # （38.3% vs 按 md5 去重 8.6%），所以本状态没有可依据的存在性信号；措辞只能描述
+        # 微信侧的存储格式——渲染端为此单列了 `chat_text.STICKER_GONE`。
+        #
+        # **不要把它「修」成 `media.resolve_sticker(...)`**：那个定位函数随贴纸导出一起
+        # 挂起，而存在性判定在有导出之前没有意义——判出 `exportable` 会让用户以为有东西
+        # 可拿。要接它请连同导出一起接。
+        present = False
     else:
         present = file_key is not None and media.resolve_video(
             account, row["ts"], file_key) is not None
@@ -482,7 +501,7 @@ def message_media(contact: str, *, keys: Sequence[str] | None = None,
                   _ctx=None, _con=None) -> MessageMediaResult | NeedConfirm:
     """消息 → 媒体状态（spec §4.1 的四态）。
 
-    keys=None → 该会话**所有媒体类型的消息**（msg_type ∈ {3,43,34}），受 limit 约束
+    keys=None → 该会话**所有媒体类型的消息**（msg_type ∈ {3,43,34,47}），受 limit 约束
     ——按 msg_type 而非按 ref 筛选：索引内实测有 259 条媒体消息拿不到 ref，
     按 ref 筛会把它们谎报成「没有媒体」。给了 keys → 只答这些，查不到的静默略过。
     months 在 SQL 里筛（不是取回后再滤）：limit 卡的必须是**命中月份**的条数。

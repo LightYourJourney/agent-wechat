@@ -397,3 +397,96 @@ def test_many_keys_are_queried_in_batches(tmp_path, monkeypatch, idx):
         "wxid_x", keys=[rows[0]["msg_key"]] * (store.KEYS_BATCH + 1), limit=500,
         out_dir=str(tmp_path / "media"), account=ACCT, _ctx=_FakeCtx(), _con=con)
     assert len(dup.states) == 1
+
+
+# ---------- T9：贴纸是第四个 kind（不再是 none），但**永不** exportable ----------
+
+STICKER_MD5 = "d0f46ed3ce8bac33df5f7055656d8bd9"
+
+
+def test_sticker_message_is_a_covered_kind_not_none(tmp_path, monkeypatch, idx):
+    """贴纸**不再是 `none`**——这是本轮唯一改动的已文档化 MCP 契约。
+
+    回归对象：`_KIND_OF_TYPE` 里没有 47 时，贴纸落进 `if kind is None` 那条早退，
+    返回 `kind=None, status="none"`，且 `by_kind` 里根本没有 sticker 这一项。
+
+    **后半段同样是要害：贴纸一律 `gone`，永不 `exportable`。** 夹具刻意把一份 md5 命名的
+    文件放在本机（真实布局 `business/emoticon/Persist/<xx>/<md5>`），两行仍都是 gone——
+    presence 是写死的常量，不是存在性判定。谁把它「修」成任何 `resolve_*` 调用，这条先红。
+    理由（本轮裁定）：`exportable` 的文档语义是「有产物可拿」，而贴纸**拿不出来**
+    （本地是解不开的密文、CDN 传输不通），产出它就是谎报。
+    """
+    mon = monkeypatch  # 便于对齐本文件其它用例的命名习惯
+    wx = tmp_path / "wx"
+    mon.setattr(paths, "XWECHAT_FILES", wx)
+    mon.setattr(usecases, "_voice_keys_for", lambda acct: frozenset(), raising=False)
+    # 本机有那份 md5 命名的文件（`Persist` 那一支）
+    p = wx / ACCT / "business/emoticon/Persist" / STICKER_MD5[:2] / STICKER_MD5
+    p.parent.mkdir(parents=True)
+    p.write_bytes(b"x")
+
+    con, rows = idx
+    rows.append(_row(7, messages.TYPE_STICKER))
+    # 8 号：本机没有那份文件 → 同样是 gone。**两支都要**：只测一支，「一律 gone」就只证明了
+    # 一半，而另一半（本机有文件时是不是就 exportable 了）恰是本轮最容易走偏的地方。
+    rows.append(_row(8, messages.TYPE_STICKER))
+    store.upsert_batch(con, rows[-2:])
+    store.upsert_media_refs(con, [
+        (rows[-2]["msg_key"], "sticker", STICKER_MD5, None),
+        (rows[-1]["msg_key"], "sticker", "f" * 32, None),
+    ])
+    con.commit()
+
+    res = usecases.message_media(
+        "wxid_x", keys=[r["msg_key"] for r in rows],
+        out_dir=str(tmp_path / "media"), account=ACCT, _ctx=_FakeCtx(), _con=con)
+    by_key = {s.msg_key: s for s in res.states}
+    assert by_key[rows[-2]["msg_key"]].kind == "sticker"
+    assert by_key[rows[-2]["msg_key"]].status == "gone"     # 本机有那份文件也一样
+    assert by_key[rows[-1]["msg_key"]].status == "gone"
+    assert "sticker" in res.by_kind
+    assert res.by_kind["sticker"] == {"gone": 2}
+
+
+def test_sticker_without_md5_is_gone_not_guessed(tmp_path, monkeypatch, idx):
+    """`file_key` 为空（XML 无 md5）→ `gone`，**不猜文件名**。
+
+    与 `_state_of` 对 video/image 的同一条立场：没有钥匙就说「定位不了」，
+    不许按 ts 猜一个路径出来。实测索引里确实有拿不到 ref 的媒体消息
+    （image 259 条），这条路径不是假想。
+    """
+    monkeypatch.setattr(paths, "XWECHAT_FILES", tmp_path / "wx")
+    monkeypatch.setattr(usecases, "_voice_keys_for", lambda acct: frozenset(), raising=False)
+    con, rows = idx
+    rows.append(_row(9, messages.TYPE_STICKER))
+    store.upsert_batch(con, rows[-1:])
+    store.upsert_media_refs(con, [(rows[-1]["msg_key"], "sticker", None, None)])
+    con.commit()
+    res = usecases.message_media(
+        "wxid_x", keys=[rows[-1]["msg_key"]],
+        out_dir=str(tmp_path / "media"), account=ACCT, _ctx=_FakeCtx(), _con=con)
+    st = {s.msg_key: s for s in res.states}[rows[-1]["msg_key"]]
+    assert (st.kind, st.status) == ("sticker", "gone")
+
+
+def test_default_keys_include_sticker_messages(tmp_path, monkeypatch, idx):
+    """keys=None（默认）的「全部媒体类型的消息」必须含贴纸 —— 这正是 `_MEDIA_TYPES` 的作用。
+
+    漏掉 `_MEDIA_TYPES` 里的 TYPE_STICKER，贴纸消息在 SQL 里就被整条滤掉，
+    `_KIND_OF_TYPE[47]` 于是成了**静默 no-op**（kind 判定根本轮不到它）：删掉那一个常量
+    这条必红。**连 ref 都没有的贴纸也要答**——按 ref 筛就等于把「定位不了」谎报成
+    「不是媒体」。
+    """
+    con, rows = idx
+    monkeypatch.setattr(paths, "XWECHAT_FILES", tmp_path / "wx")
+    monkeypatch.setattr(usecases, "_voice_keys_for", lambda acct: frozenset())
+    rows.append(_row(13, messages.TYPE_STICKER))       # 刻意**不写** media_refs 行
+    store.upsert_batch(con, rows[-1:])
+    con.commit()
+    res = usecases.message_media(
+        "wxid_x", out_dir=str(tmp_path / "media"), account=ACCT,
+        _ctx=_FakeCtx(), _con=con)
+    got = {s.msg_key: s for s in res.states}
+    assert got[rows[-1]["msg_key"]].kind == "sticker"
+    assert got[rows[-1]["msg_key"]].status == "gone"   # 没有 ref 也是 gone，不是 none
+    assert res.by_kind["sticker"] == {"gone": 1}

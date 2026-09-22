@@ -300,7 +300,7 @@ def cmd_media_locate(args: argparse.Namespace) -> int:
     # 大多没了」；按 kind 拆开才看得出语音几乎全可导出、图片视频几乎全 gone。拆分由用例层
     # 派生（MCP 信封的 by_kind 读的就是同一份），`none` 态没有 kind，只进上面那行汇总。
     # 固定顺序（不是消息顺序）：两次运行、两次导出的输出可直接 diff
-    for kind in ("image", "video", "voice"):
+    for kind in ("image", "video", "voice", "sticker"):
         bucket = res.by_kind.get(kind)
         if not bucket:
             continue
@@ -315,6 +315,13 @@ def cmd_media_locate(args: argparse.Namespace) -> int:
         # 是同一套措辞）。先写次因（「微信已清理本体」）会把用户支去「修复」而不是去导历史。
         print("提示：gone 表示消息引用了媒体但本机找不到——微信只为近期（尚未导出）的消息"
               "保留本体，所以导出更多历史比「修复」有用。")
+    if res.by_kind.get("sticker", {}).get("gone"):
+        # 贴纸的 gone 与上面那句**不是一回事**（`chat_text.STICKER_GONE` 的注释是本条的
+        # 依据）：它取不出来是微信侧存成加密格式、方案未破，与「本机有没有」无关——所以上面
+        # 那句「导出更多历史比修复有用」对贴纸是句错话，必须单独说清。主语自己给，不搬
+        # `STICKER_GONE`（那个常量是照 `[标签 · 措辞]` 槽位写的，单独用就没有先行词）。
+        print("提示：贴纸的 gone 是「取不出来」而不是「本机找不到」——微信把它存成加密格式，"
+              "解密方案未破，导出更多历史也拿不出来。")
     _render_degradations(res.degraded)       # stderr：成功但有保留，不污染 stdout（spec §7）
     return 0
 
