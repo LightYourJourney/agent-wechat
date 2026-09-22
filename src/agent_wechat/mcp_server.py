@@ -396,9 +396,12 @@ def get_message_parts(contact: str, keys: str, account: str | None = None) -> di
     null；ref_msg_key 是引用目标（回填那一刻的快照，解不到为 null——目标后来才导出时
     重跑 `appmsg rebuild` 即刷新）。
 
-    顶层另有 `unparsed` / `rejected` 两个计数（口径与 export_chat 逐字同源）：
-    「解压失败或 XML 解不开」与「命中危险载荷守卫被主动拒绝」**分开计**，两者都不进
-    parts——答案里少一条时，看这两个数才知道是「解不开」还是「本来就没有可读内容」。
+    顶层另有三个计数。`unparsed` / `rejected`（口径与 export_chat 逐字同源）：「解压失败或
+    XML 解不开」与「命中危险载荷守卫被主动拒绝」**分开计**，两者都不进 parts——答案里少一条时，
+    看这两个数才知道是「解不开」还是「本来就没有可读内容」。`dropped_blobs` 数的是**解析成功**
+    的消息里被形状规则剔掉的长 Base64 块（实测主要是 `emojiinfo` / `cdnthumburl` 这类 1.5 KB
+    的凭据载体：对模型是纯噪声，且 Base64 一包就让值过滤失明）。**它与「读不出来」不是一回事，
+    不许并进 `unparsed`**——字段表少几行时靠它区分「本来就没有」与「按规则剔掉了」。
 
     转账（type 2000）的金额、备注、双方用户名与交易号**照实返回**（用户 2026-09-16 裁定：
     与 search_history 已在信封返回正文一致，不为转账单开例外）——这些内容会离开本机，
@@ -420,7 +423,8 @@ def get_message_parts(contact: str, keys: str, account: str | None = None) -> di
                                 if p.appmsg.transfer else None),
                    "ref_msg_key": p.ref_msg_key}
                   for p in res.parts],
-        "unparsed": res.unparsed, "rejected": res.rejected, "degraded": []}
+        "unparsed": res.unparsed, "rejected": res.rejected,
+        "dropped_blobs": res.dropped_blobs, "degraded": []}
     if not res.backfilled:
         # 两个通道**分工不重复**（控制器 F69.2）：degraded 只说「少了什么」（结构化记录），
         # 可操作的那一句在 hint 里。同一句话印两遍对读的人只是噪声。

@@ -160,6 +160,31 @@ def _is_secret(path: str, value: str) -> bool:
             or _has_credential_param(value))
 
 
+# 长 Base64 块：**形状规则，不是名字黑名单**。
+#
+# 为什么必须有这条：Base64 包裹让值闸门彻底失明——`emojiinfo` 名字干净（不以 key
+# 结尾），值里 `&filekey=` 被编码成 `JmZpbGVrZXk9`，`_has_credential_param` 也看不见。
+# 实测 505 条 type-8 表情 appmsg 中 393 条携带它，解码后是明文 CDN 地址。
+# 逐个把 `emojiinfo`/`cdnthumburl` 加进黑名单是打地鼠——下一类载荷照漏。
+#
+# **阈值 128 是实测出来的，不是拍的**：须剔除的最小值 168（cdnthumburl）、须保留的
+# 最大值 108（lastgmsgid）之间有 60 字符空档，128 落在正中。
+#   · 剔除：cdnthumburl 168-202、cdnattachurl 168-178、coverinfo 188+、
+#           platform_signature 452、emojiinfo 868-1492
+#   · 保留：lastgmsgid 68-108、lastGMsgID 72-100、newaa.billno 96、thumbdatahash 64
+# 真 URL 不受影响——`://` `?` `=` 不在 Base64 字母表内（实测 40,000 条 appmsg 里
+# 1,606 个 `url` 字段零命中）。
+#
+# **限制改成数一律重测**：阈值两端的数据都在真机语料里，不要凭印象调。
+_OPAQUE_MIN = 128
+_OPAQUE_B64 = re.compile(r"^[A-Za-z0-9+/]{%d,}={0,2}$" % _OPAQUE_MIN)
+
+
+def _is_opaque_blob(value: str) -> bool:
+    """该值是否为长 Base64 不透明块（对 LLM 无信息量，且可能藏着凭据）。"""
+    return bool(_OPAQUE_B64.match(value))
+
+
 @dataclass(frozen=True)
 class Quote:
     """引用（type 57）的载荷 `refermsg`。"""
@@ -231,6 +256,9 @@ class ParseResult:
     **两种失败必须分得开**：`None` 返回（`AppMsg | None`）无法区分「我们主动拒绝」与
     「解不开」，而 §5 要求分开计数（`rejected` / `unparsed`）。带上 `reason`，
     调用方的计数就不可能写错。
+
+    `dropped_blobs`：被形状规则剔除的长 Base64 块数。**不许静默丢弃**——字段表少了几行
+    时，调用方要能说出是「本来就没有」还是「按规则剔掉了」。
     """
 
     appmsg: AppMsg | None
@@ -239,6 +267,9 @@ class ParseResult:
     # 存在的理由：别让调用方再 `normalize` 一遍——回填要把正文存盘，重算一次既多跑一遍，
     # 又把「存盘形态」耦合到「`normalize` 幂等」这个隐含前提上。
     normalized: str | None = None
+    # 默认 0 让 `rejected` / `malformed` 两条早退路径（`ParseResult(None, "…")`）无需改动：
+    # 那两条根本没走到字段过滤。
+    dropped_blobs: int = 0
 
 
 def kind_name(kind: int) -> str:
@@ -383,13 +414,23 @@ def parse(raw: str) -> ParseResult:
     kind = _to_int(appmsg_el.findtext("type"))
     if kind is None:
         kind = -1
-    fields = tuple((p, v) for p, v in _leaf_fields(appmsg_el, kind)
-                   if not _is_secret(p, v))
+    # 两道过滤**顺序固定**：先名字/值命中（`_is_secret`），再形状规则（`_is_opaque_blob`）。
+    # 反过来的话，一个「名字像密钥的长 Base64」会被计进 dropped_blobs 而不是密材，
+    # 计数就不再是「剔掉了几个不透明块」而是「剔掉了几样东西的混合」。
+    fields: list[tuple[str, str]] = []
+    dropped = 0
+    for p, v in _leaf_fields(appmsg_el, kind):
+        if _is_secret(p, v):
+            continue
+        if _is_opaque_blob(v):
+            dropped += 1
+            continue
+        fields.append((p, v))
     return ParseResult(
         AppMsg(
             kind=kind,
             title=appmsg_el.findtext("title"),
-            fields=fields,
+            fields=tuple(fields),
             quote=_quote(appmsg_el) if kind == KIND_QUOTE else None,
             link=_link(appmsg_el) if kind == KIND_LINK else None,
             file=_file(appmsg_el) if kind == KIND_FILE else None,
@@ -397,4 +438,5 @@ def parse(raw: str) -> ParseResult:
         ),
         None,
         norm,
+        dropped,
     )

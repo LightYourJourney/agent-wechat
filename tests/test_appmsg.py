@@ -520,3 +520,49 @@ def test_link_url_keeps_ordinary_links():
         f'<msg><appmsg><title>x</title><type>5</type><url>{url}</url></appmsg></msg>'
     ).appmsg.link.url
     assert got == url
+
+
+def _emoji_appmsg(kind=8, **extra):
+    """真机形态的 appmsg 载荷（照 2026-09-22 采集的真实样本裁剪）。
+
+    **不要凭想象写夹具**——本仓库最贵的一类缺陷就是「夹具编码了想象中的形态」。
+    """
+    fields = "".join(f"<{k}>{v}</{k}>" for k, v in extra.items())
+    return (f'<?xml version="1.0"?><msg><appmsg><title></title><type>{kind}</type>'
+            f'<appattach>{fields}</appattach></appmsg></msg>')
+
+
+# 真机实测长度：emojiinfo 中位 1360、cdnthumburl 中位 178。
+_REAL_EMOJIINFO = "CiAxMDVkNjdjZjg1MDJkYmY3MWZkMGY0ZjNmYTQ3MTliNBLEAmh0dHA6Ly92d2VpeGlu" * 20
+_REAL_CDNTHUMBURL = "3057020100044b30490201000204f5d7166702033d11fe02040cd0533b02" * 4
+
+
+def test_opaque_base64_blob_is_not_a_leaf_field():
+    """长 Base64 块不进字段表——它既是 1.5 KB 的噪声，也是凭据的藏身处。
+
+    回归对象：`emojiinfo` 曾把 1.5 KB Base64 原样送进 MCP 信封（实测 393/505 条）。
+    删掉 `_is_opaque_blob` 那道过滤必红。
+    """
+    xml = _emoji_appmsg(emojiinfo=_REAL_EMOJIINFO, emoticonmd5="105d67cf8502dbf71fd0f4f3fa4719b4")
+    r = appmsg.parse(xml)
+    paths = [p for p, _ in r.appmsg.fields]
+    assert "appattach.emojiinfo" not in paths
+    assert "appattach.emoticonmd5" in paths          # 同一子树里的正常字段不受牵连
+    assert r.dropped_blobs == 1
+
+
+def test_opaque_rule_does_not_eat_identifiers_or_urls():
+    """反向用例：**过度剔除比漏剔更隐蔽**——字段表空掉没人报错。
+
+    实测 `newaa.billno`(96) / `lastgmsgid`(108) 是标识不是凭据，必须留下。
+    """
+    xml = _emoji_appmsg(kind=2000,
+                        billno="85e4d29b6619924f9d92a2ecaba70cec37749cc78e4f",
+                        lastgmsgid="Cgl0ZXN0dXNlcjESFHd4aWRfdGVzdGFjY3QwMV9hYjEy",
+                        url="https://mp.weixin.qq.com/s/YnT7VqXaBcDeFgHiJkLmNoPq")
+    r = appmsg.parse(xml)
+    paths = [p for p, _ in r.appmsg.fields]
+    assert "appattach.billno" in paths
+    assert "appattach.lastgmsgid" in paths
+    assert "appattach.url" in paths
+    assert r.dropped_blobs == 0

@@ -653,9 +653,9 @@ def test_get_message_parts_envelope_shape(monkeypatch):
     key, _foreign = _parts_fixture(monkeypatch)
     res = _call(mcp_server.get_message_parts, contact="张三",
                 keys=",".join(key(i) for i in (2, 3, 4, 5, 6)))
-    # 已回填：不带 hint（hint 只在未回填时给）；解不开/被拒两个计数恒存在（这里都是 0）
-    assert set(res) == {"parts", "unparsed", "rejected", "degraded"}
-    assert (res["unparsed"], res["rejected"]) == (0, 0)
+    # 已回填：不带 hint（hint 只在未回填时给）；解不开/被拒/剔块三个计数恒存在（这里都是 0）
+    assert set(res) == {"parts", "unparsed", "rejected", "dropped_blobs", "degraded"}
+    assert (res["unparsed"], res["rejected"], res["dropped_blobs"]) == (0, 0, 0)
     assert [p["msg_key"] for p in res["parts"]] == [key(i) for i in (2, 3, 4, 5, 6)]
     assert [p["kind"] for p in res["parts"]] == [57, 5, 6, 2000, 33]
     assert [p["kind_name"] for p in res["parts"]] == ["引用", "链接", "文件", "转账", "小程序"]
@@ -766,6 +766,33 @@ def test_get_message_parts_counts_unparsed_and_rejected_separately(monkeypatch):
     assert res["rejected"] == 1        # 主动拒绝单独计
     assert [p["msg_key"] for p in res["parts"]] == [key(2)]   # 三条都没进 parts
     assert res["degraded"] == []       # 回填过（夹具种了行）：不报「未回填」
+
+
+def test_envelope_reports_dropped_blobs(monkeypatch):
+    """信封必须**说出**剔了几个不透明块——静默丢弃会让「字段表少了几行」
+    与「这条本来就没有字段」无法区分（与 `unparsed` / `rejected` 同一条理由）。
+
+    **计数归 `dropped_blobs` 而不是 `unparsed`**：它与「解不开」不是一回事，
+    并进去会让「载荷里有个大 blob」看起来像「这条消息读不出来」。
+    """
+    key, _foreign = _parts_fixture(monkeypatch)
+    cm = messages.chat_md5("wxid_friend")
+    k = lambda i: messages.row_key("acct", cm, "message_0.db", i)   # noqa: E731
+    # 真机形态：appattach 里一个 1.5 KB 的 emojiinfo（实测中位 1360 字符）
+    blob = "CiAxMDVkNjdjZjg1MDJkYmY3MWZkMGY0ZjNmYTQ3MTliNBLEAmh0dHA6Ly92d2VpeGlu" * 20
+    _seed_raw(monkeypatch, [
+        (k(11), zlib.compress(
+            f'<msg><appmsg><title>x</title><type>8</type><appattach>'
+            f'<emojiinfo>{blob}</emojiinfo>'
+            f'<emoticonmd5>{"a" * 32}</emoticonmd5>'
+            f'</appattach></appmsg></msg>'.encode(), 6)),
+    ])
+    res = _call(mcp_server.get_message_parts, contact="张三", keys=str(k(11)))
+    assert res["dropped_blobs"] == 1
+    assert res["unparsed"] == 0 and res["rejected"] == 0   # 三者不许混
+    fields = dict(res["parts"][0]["fields"])
+    assert "appattach.emojiinfo" not in fields
+    assert fields["appattach.emoticonmd5"] == "a" * 32     # 正常字段不受牵连
 
 
 def test_message_parts_usecase_returns_typed_result(monkeypatch):

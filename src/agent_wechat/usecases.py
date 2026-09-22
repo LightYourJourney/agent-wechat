@@ -590,13 +590,16 @@ def message_media(contact: str, *, keys: Sequence[str] | None = None,
                               degraded=tuple(degraded) + collect_degradations(ctx.reader))
 
 
-def _decode_part(raw_xml: bytes) -> tuple["appmsg.AppMsg | None", str]:
-    """解压 + 解析一条 `msg_parts` 载荷 → `(AppMsg | None, 结果)`。
+def _decode_part(raw_xml: bytes) -> tuple["appmsg.AppMsg | None", str, int]:
+    """解压 + 解析一条 `msg_parts` 载荷 → `(AppMsg | None, 结果, 剔掉的不透明块数)`。
 
     结果是三者之一：`"ok"` / `"unparsed"`（解压失败或 XML 解不开）/ `"rejected"`（命中危险
     载荷守卫）。**对任意 bytes 全定义、不抛**：`raw_xml` 是**别人写进去**的字节（索引库可被
     手工改动，半拷贝的 WAL 会落下半页），裸 `zlib.error` 不得逃出 core 层；而 `appmsg.parse`
     自己就对任意 `str` 全定义。
+
+    第三项**随 `appmsg.parse` 的计数一起出来**（`ParseResult.dropped_blobs`），不另解一次：
+    解不开 / 被拒的那两条路径恒为 0（它们在字段过滤之前就早退了），故与调用方的分支无关。
 
     **`chat_export` 与 `message_parts` 共用这一份**（丙 R21：同一个解码两处实现，迟早漂移成
     「`unparsed` 与 `rejected` 在两个入口口径不同」）。两处都按同一个「解压失败与解不开合
@@ -605,13 +608,13 @@ def _decode_part(raw_xml: bytes) -> tuple["appmsg.AppMsg | None", str]:
     try:
         raw = zlib.decompress(raw_xml).decode("utf-8", "ignore")
     except zlib.error:
-        return None, "unparsed"
+        return None, "unparsed", 0
     res = appmsg.parse(raw)
     if res.reason == "rejected":
-        return None, "rejected"
+        return None, "rejected", 0
     if res.reason is not None:            # 'malformed'
-        return None, "unparsed"
-    return res.appmsg, "ok"
+        return None, "unparsed", 0
+    return res.appmsg, "ok", res.dropped_blobs
 
 
 @dataclass(frozen=True)
@@ -729,7 +732,10 @@ def chat_export(contact: str, *, months: list[str] | None = None, limit: int = 5
             refs[key] = ref_key       # `None` 的不进表：build 靠「在不在表里」判退化
         # 解压 + 解析是**共用的一份**（`_decode_part`，`message_parts` 用的是同一个）：
         # 两处各写一遍时，「解压失败算哪一种」这种口径迟早分叉。
-        parsed, outcome = _decode_part(raw_xml)
+        # 第三项（剔掉的不透明块数）导出侧**不消费**：本任务的消费点只有 MCP 信封
+        # （`MessagePartsResult.dropped_blobs`），产物侧不新开计数（那是另一处入口的渲染决定，
+        # 不是「没人读的死字段」——计数在这里照样算得出来，只是本期没人接）。
+        parsed, outcome, _dropped = _decode_part(raw_xml)
         if outcome == "rejected":
             rejected += 1             # 我们主动拒绝（DTD / 实体），与「解不开」分开计数
         elif outcome == "unparsed":
@@ -794,6 +800,11 @@ class MessagePartsResult:
     解压失败与 XML 解不开合计 `unparsed`，命中危险载荷守卫计 `rejected`，**两者分开**
     （spec §5：『我们主动拒绝』与『解不开』是两件事）。
 
+    `dropped_blobs` 是**第三个**计数，与上两个**不许并**：它数的是**解析成功**的载荷里被
+    形状规则剔掉的长 Base64 块（`appmsg._is_opaque_blob`）。并进 `unparsed` 会让「载荷里
+    有个大 blob」看起来像「这条消息读不出来」——两者的严重程度与可操作性都不同。**它与
+    `unparsed` / `rejected` 同为 0 时才是「字段表就是全部」**。
+
     `backfilled` 是「这个账号回填过没有」这个**事实**，由 `count_msg_parts` 回答
     （不 join `messages`）。入口靠它把「没回填」与「这些消息本来就没有可读内容」分开——
     两种「空答案」不许长得一样（丙 R23）。**它只承载事实，不带文案**：具体给用户看什么
@@ -801,11 +812,13 @@ class MessagePartsResult:
 
     **刻意没有 `chat_id` 字段**（对照 `MessageMediaResult.chat_id` 有真消费者）：本工具的
     信封按 spec 不含 `chat_id`、CLI 侧也没有命令消费它，加了就是没人读的死字段（审阅 F73）。
+    （`dropped_blobs` 与它不同：MCP 信封读它，故不是死字段。）
     """
 
     parts: tuple[MessagePart, ...]
     unparsed: int
     rejected: int
+    dropped_blobs: int
     backfilled: bool
 
 
@@ -846,20 +859,23 @@ def message_parts(contact: str, *, keys: Sequence[str],
             hint="索引库可能损坏；删除 index.db 后重跑 export_full_history 可重建"
         ) from exc
     out: list[MessagePart] = []
-    unparsed = rejected = 0
+    unparsed = rejected = dropped_blobs = 0
     for key in wanted:
         row = got.get(key)
         if row is None:               # 不是 appmsg / 没导出：两种情形在这里不可分
             continue
-        parsed, outcome = _decode_part(row[3])
+        parsed, outcome, blobs = _decode_part(row[3])
+        # **无条件累加**：`rejected` / `unparsed` 两条路径的第三项恒为 0（`_decode_part` 的
+        # 早退），所以不必按 outcome 分支——分了反而是把「计数口径」和「成功与否」绑在一起。
+        dropped_blobs += blobs
         if outcome == "rejected":
             rejected += 1
         elif outcome == "unparsed":
             unparsed += 1
         elif parsed is not None:
             out.append(MessagePart(key, parsed, row[2]))   # 四元组的第三项是 ref_msg_key
-    return MessagePartsResult(parts=tuple(out), unparsed=unparsed,
-                              rejected=rejected, backfilled=backfilled)
+    return MessagePartsResult(parts=tuple(out), unparsed=unparsed, rejected=rejected,
+                              dropped_blobs=dropped_blobs, backfilled=backfilled)
 
 
 @dataclass(frozen=True)
