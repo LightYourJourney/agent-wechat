@@ -376,10 +376,18 @@ class MessageReader:
         content = _decode_content(mc, ct)
         t = ltype & 0xffffffff
         sender_u, sender_name = n2i.get(sender), None
-        if chat_id.endswith("@chatroom") and content and t == messages.TYPE_TEXT:
+        if chat_id.endswith("@chatroom") and content:
             head, sep, rest = content.partition(":\n")
-            if sep and head and "\n" not in head:   # 群消息 "<wxid>:\n正文" 前缀
-                sender_u, sender_name, content = head, head, rest
+            if sep and head and "\n" not in head:   # 群消息 "<X>:\n正文" 前缀
+                if t == messages.TYPE_TEXT:
+                    sender_u, sender_name, content = head, head, rest
+                elif head.endswith("@chatroom"):
+                    # 非文本：head 是群 id 的**残留**前缀（实测 1,952 条，全是 10000），
+                    # 只剥正文、**不当发送者**——head 是群 id，当成 sender 会污染 sender_id。
+                    # 收窄到 @chatroom 形态是因为唯一的假阳性（群 appmsg 的标题自带 ":\n"）
+                    # 其 head 是 XML：放成「非文本一律剥」会把那条的标题削掉（实测 1 条）。
+                    # 剥掉后正文若整段是 XML，下面的兜底会把它换成占位符（R9）。
+                    content = rest
         # 贴纸：`content` 变成可读串，`media_hint` **不动**（spec D5）。
         # XML 只在这里解一次——`iter_all` 走同一条路径，所以索引里的 content
         # 与实时 `recent` 是一致的，不会一个显示标识一个显示 `[sticker]`。
@@ -400,7 +408,12 @@ class MessageReader:
         elif hint:
             body = hint
         else:
-            body = (content if content and not content.startswith("<?xml")
+            # 非文本的正文若整段是 XML，一律给类型占位符，别把 XML 喂给上层。
+            # **判据是 `"<"` 而不是 `"<?xml"`**：真机群 sysmsg 里带 `<?xml` 声明的只有 1 行，
+            # 根直接是 `<sysmsg …>` 的有 1,960 行——只认声明会把多数派放过去（实测共 2,221 行）。
+            # 这里只到得了 `hint is None` 的类型（10000/10002）；人类文本走上面那条分支，
+            # 所以「有人粘了一段 HTML」「有人写 `<video>就能显示hdr`」那 18 行不受影响。
+            body = (content if content and not content.startswith("<")
                     else f"[{_type_name(t)}]")
         return Message(chat_id=chat_id, shard="", local_id=lid, ts=ts,
                        msg_type=t, type_name=_type_name(t), sender_id=sender_u,

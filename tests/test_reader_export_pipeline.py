@@ -362,6 +362,120 @@ def test_recent_cross_shard_decode(env):
     assert g[0].content == "开会啦"
 
 
+# ---------- R9：群前缀在文本上是「发送者」，在非文本上只是残留 ----------
+#
+# 实测（本机 index.db）：群聊里带 `<X>:\n` 形状的**非文本**行共 1,953 条——
+#   1,952 条 head 是 `<digits>@chatroom`（全部 type=10000，前缀是残留，该清）；
+#   1   条是 appmsg 标题里本来就带 `:\n`（假阳性，**不能碰**）。
+# 前者里恰好 1 条前缀后面直接跟 `<?xml`，正文含 **4 处 `aeskey`**——那就是 R9 本体：
+# 凭据随原始 XML 落进了 `messages.content`，因为 `_media_hint(10000)` 返回 None，
+# 而兜底的 `content.startswith("<?xml")` 看不见前缀后面的 XML。
+
+ROOM = "12345678901@chatroom"          # 真机群 id 就是这个形态，head 也是它
+XML_SECRET = "1f2e3d4c5b6a7988"        # 只为断言「没漏出来」，不是真凭据
+SYSMSG_XML = ('<?xml version="1.0"?><sysmsg type="sysmsgtemplate"><sysmsgtemplate>'
+              '<content_template type="tmpl_type_profile">'
+              f'<link aeskey="{XML_SECRET}"/>'
+              "</content_template></sysmsgtemplate></sysmsg>")
+# **真机的多数派形态**：根就是 `<sysmsg>`、**没有 `<?xml` 声明**。实测群 `sysmsg` 里
+# 1,960 行是这个样子，而带 `<?xml` 声明的只有 1 行（就是含凭据的那条）。
+# 夹具必须同时编两种，否则「回落判据认得出来」这条只对被编出来的那种成立。
+SYSMSG_XML_NO_PROLOG = ('<sysmsg type="mmchatroomtopmsg"><mmchatroomtopmsg>'
+                        '<chatroomname><![CDATA[12345678901@chatroom]]></chatroomname>'
+                        "</mmchatroomtopmsg></sysmsg>")
+
+
+@pytest.fixture()
+def room_env(env, tmp_path, monkeypatch):
+    """只装本组用例的合成树；用独立 root，不动模块级 `wechat` 夹具的行数。"""
+    root = tmp_path / "wx-sysmsg"
+    build_shard(root, ACCT, "message_0.db", {
+        ROOM: [(1, 10000, 0, T0 + 100, f"{ROOM}:\n{SYSMSG_XML}", 0),       # 前缀 + XML（R9）
+               (2, 10000, 0, T0 + 101, f"{ROOM}:\n你撤回了一条消息", 0),    # 前缀 + 普通文案
+               (3, 10000, 0, T0 + 102, SYSMSG_XML, 0),                    # **不**带前缀（对照）
+               (4, 1, 1, T0 + 103, f"{FRIEND}:\n开会啦", 0),               # 群文本（回归）
+               # 假阳性：appmsg 标题自带 ":\n"。head 是 XML 而不是群 id，不该被剥。
+               (5, 49, 1, T0 + 104,
+                "<msg><appmsg><title>services:\n  example-svc: latest</title></appmsg></msg>", 0),
+               # 真机多数派形态：无 `<?xml` 声明，前缀剥掉后 XML 仍在（见下面那条用例）
+               (6, 10000, 0, T0 + 105, f"{ROOM}:\n{SYSMSG_XML_NO_PROLOG}", 0)],
+        FRIEND: [(1, 1, 1, T0 + 110, "note:\n正文", 0),                    # 单聊不该剥
+                 (2, 10000, 1, T0 + 111, "对方已通过你的好友请求", 0)],
+    }, [FRIEND, SELF])
+    # `recent` → `_apply_roster` 会读 contact.db；表留空 = 名册解析不出任何名字，
+    # 断言就只依赖解码本身（否则 sender_name 会被备注名替换，测的就不是 R9 了）。
+    enc_db(root / ACCT / "db_storage" / "contact" / "contact.db", {
+        "name2id": ("CREATE TABLE name2id (username TEXT)", []),
+        "contact": ("CREATE TABLE contact (username TEXT, alias TEXT, remark TEXT, "
+                    "nick_name TEXT, delete_flag INTEGER)", []),
+        "chat_room": ("CREATE TABLE chat_room (id INTEGER PRIMARY KEY, username TEXT, "
+                      "owner TEXT, ext_buffer BLOB)", []),
+    })
+    monkeypatch.setattr(paths, "XWECHAT_FILES", root)
+    return root
+
+
+def _by_lid(msgs):
+    return {m.local_id: m for m in msgs}
+
+
+def test_group_sysmsg_prefix_does_not_leak_raw_xml(room_env):
+    """R9 本体：前缀后面是 `<?xml` 时，落进 content 的必须是占位符，不是原始 XML。"""
+    m = _by_lid(reader.MessageReader(ACCT).recent(ROOM, limit=10))[1]
+    assert m.content == "[system]"
+    assert "<?xml" not in m.content
+    assert XML_SECRET not in m.content, "凭据随原始 XML 漏进了 content"
+
+
+def test_group_sysmsg_prefix_is_stripped_but_never_taken_as_sender(room_env):
+    """残留前缀要清掉正文；但 head 是**群 id**，绝不能当发送者——那会污染 sender_id。"""
+    msgs = _by_lid(reader.MessageReader(ACCT).recent(ROOM, limit=10))
+    assert msgs[2].content == "你撤回了一条消息"
+    for lid in (1, 2, 6):                      # 三条带前缀的 sysmsg 逐一确认
+        assert msgs[lid].sender_id != ROOM, f"local_id={lid} 把群 id 当成了发送者"
+        assert msgs[lid].is_self == 0
+
+
+def test_group_sysmsg_without_prefix_is_unchanged(room_env):
+    """对照组：不带前缀的 sysmsg 本来就靠 `startswith("<?xml")` 兜住了。"""
+    m = _by_lid(reader.MessageReader(ACCT).recent(ROOM, limit=10))[3]
+    assert m.content == "[system]"
+
+
+def test_group_sysmsg_without_xml_prolog_also_becomes_a_placeholder(room_env):
+    """根是 `<sysmsg>`、**没有 `<?xml` 声明**时也要换成占位符，不能只认 `<?xml`。
+
+    实测这种形态才是**多数派**：群 `sysmsg` 里带 `<?xml` 声明的只有 1 行（含凭据那条），
+    根直接是 `<sysmsg …>` 的有 1,960 行。放宽到 `startswith("<")` 后受影响共 2,221 行，
+    **全是 `msg_type=10000`**；以 `<` 开头的**人类文本**（实测 18 行 `type=1`，有人粘了
+    HTML、有人写 `<video>就能显示hdr`）走文本那条分支，`hint` 都不查，不受影响。
+    """
+    m = _by_lid(reader.MessageReader(ACCT).recent(ROOM, limit=10))[6]
+    assert m.content == "[system]"
+    assert "<sysmsg" not in m.content and "chatroomname" not in m.content
+
+
+def test_group_text_still_extracts_its_sender(room_env):
+    """回归：文本那条语义没被动过——head 仍是发送者，仍被剥掉。"""
+    m = _by_lid(reader.MessageReader(ACCT).recent(ROOM, limit=10))[4]
+    assert m.content == "开会啦"
+    assert m.sender_id == FRIEND and m.sender_name == FRIEND
+    assert m.is_self == 0
+
+
+def test_non_group_and_appmsg_content_is_untouched(room_env):
+    """收窄的界限：单聊不剥；群 appmsg 的 head 是 XML 不是群 id，也不剥。
+
+    放开成「所有非文本一律剥」会把这条 appmsg 的标题从 `services:...` 削成 `latest`，
+    实测本机恰好有 1 条这样的行——清 1,952 条不能顺手改坏第 1,953 条。
+    """
+    msgs = _by_lid(reader.MessageReader(ACCT).recent(FRIEND, limit=10))
+    assert msgs[1].content == "note:\n正文"
+    assert msgs[2].content == "对方已通过你的好友请求"
+    app = _by_lid(reader.MessageReader(ACCT).recent(ROOM, limit=10))[5]
+    assert "services" in app.content and "example-svc" in app.content
+
+
 # ---------- export ----------
 
 def test_export_full_idempotent(env):
