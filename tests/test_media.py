@@ -2264,3 +2264,32 @@ def test_sticker_export_sources_credentials_from_another_month(tmp_path, monkeyp
     assert rep.sticker.ok == 2, "9 月那条没有靠 8 月的候选拿到凭据"
     for mon in ("2026-09", "2026-08"):
         assert (out / cm / "sticker" / mon / f"{md5}.png").exists(), f"{mon} 没有产物"
+
+
+@pytest.mark.parametrize("host", ["vweixinf.tc.qq.com", "wxapp.tc.qq.com",
+                                  "mmbiz.qpic.cn", "snsvideo.c2c.wechat.com"])
+def test_fetch_sticker_allows_every_observed_cdn_host(monkeypatch, host):
+    """**实测出现的四种 CDN 主机都要放行**。
+
+    白名单最初只按两个样本收成 `*.tc.qq.com`，真机于是静默挡掉 1.2%——
+    `mmbiz.qpic.cn` 1.0% + `snsvideo.c2c.wechat.com` 0.1%。**白名单不能靠样本拍**。
+    判别法：把 `_CDN_ALLOWED` 缩回 `(".tc.qq.com",)`，后两个参数立刻变红。
+    """
+    seen = []
+
+    class _Rec:
+        def open(self, url, **k):
+            seen.append(url)
+
+            class _R:
+                status = 200
+                headers: dict = {}
+
+                def read(self_inner): return b""
+                def __enter__(self_inner): return self_inner
+                def __exit__(self_inner, *a): return False
+            return _R()
+
+    monkeypatch.setattr(media, "_cdn_opener", lambda: _Rec())
+    media._fetch_cdn_bytes(f"http://{host}/x?filekey=deadbeef", "0" * 32)
+    assert seen == [f"http://{host}/x?filekey=deadbeef"], f"{host} 被白名单挡了"

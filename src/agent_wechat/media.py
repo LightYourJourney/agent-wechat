@@ -1081,8 +1081,18 @@ def voice_body_keys(account: str) -> frozenset[tuple[str, int]] | None:
 
 # ---------- 贴纸 CDN 取件（**本项目唯一为贴纸联网的路径**） ----------
 
-# 实测出现的两个 host（spec 附录 E.1）。**按后缀收口**，不逐个列举。
-_CDN_ALLOWED = (".tc.qq.com",)
+# 贴纸 `cdnurl` 允许的主机。**按后缀收口**，不逐个列举 host——实测 3,683 个 URL 的分布是
+# `vweixinf.tc.qq.com` 71% / `wxapp.tc.qq.com` 27% / `mmbiz.qpic.cn` 1.0% /
+# `snsvideo.c2c.wechat.com` 0.1%（另有 0.1% 解析不出 host，一律拒）。
+#
+# **为什么这三个后缀可以放行**：`tc.qq.com` / `qpic.cn` / `wechat.com` 都是腾讯自有的
+# CDN 域。本白名单防的是「把请求（带着用户的 IP 与 filekey）发到**攻击者控制**的主机」——
+# 而贴纸 XML 是**发送方可影响**的（`cdnurl` 由对方的客户端写入），所以这道门必须有。
+# 放行腾讯自有域**不增加攻击者的可达面**：最坏情况是请求打到腾讯的另一个子域，且带的是
+# **攻击者自己的** filekey，没有任何用户数据外流。
+#
+# `qpic.cn` 与 `wxapp.tc.qq.com` 在 `sns_media` 的白名单里早有先例（朋友圈那条路）。
+_CDN_ALLOWED = (".tc.qq.com", ".qpic.cn", ".wechat.com")
 
 
 class _AllowlistedRedirect(urllib.request.HTTPRedirectHandler):
