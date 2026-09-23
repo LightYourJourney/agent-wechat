@@ -1271,9 +1271,18 @@ def _export_stickers(account: str, chat_ids: list[str], out_root: pathlib.Path,
     # **首条消息没有 `cdnurl`**（商店表情包引用形态）而同 md5 的**另一条有**。只认首条会把
     # 可得件数从 104 压到 97。候选一起交给批量回源是**近乎零成本**的：分片已经解密，多的只是
     # 几次行查询。
+    # **候选池按 `(会话, md5)` 收，与月份无关**：`cdnurl` 是按**贴纸**（md5）走的，
+    # 与它哪个月发过没有关系。若只收同月的消息，某个贴纸「本月那条没有凭据、别月那条有」
+    # 就会白白失败——实测某会话有 5 个正是这样（那 5 个的响应体与 md5 都完全正常）。
+    all_keys: dict[tuple[str, str], list[str]] = {}
+    for chat in chat_ids:
+        cm = messages.md5_of(chat)
+        for msg_key, _ts, file_key in refs.get(chat, ()):
+            if msg_key.count("|") == 3:
+                all_keys.setdefault((cm, file_key), []).append(msg_key)
+
     order: list[tuple[str, str, str]] = []                  # (cm, mon, md5)，保序
-    cands: dict[tuple[str, str, str], list[str]] = {}       # -> 该 md5 的全部 msg_key
-    ts_of: dict[tuple[str, str, str], int] = {}
+    cands: dict[tuple[str, str, str], list[str]] = {}       # -> 候选 msg_key（跨月）
     for chat in chat_ids:
         cm = messages.md5_of(chat)
         for msg_key, ts, file_key in refs.get(chat, ()):
@@ -1289,10 +1298,8 @@ def _export_stickers(account: str, chat_ids: list[str], out_root: pathlib.Path,
             key = (cm, mon, file_key)
             if key in cands:
                 report.sticker.skipped += 1  # 本轮已排过：同一个贴纸，落的是同一个文件
-                cands[key].append(msg_key)   # 但仍然记下候选，回源时多试一条
                 continue
-            cands[key] = [msg_key]
-            ts_of[key] = ts
+            cands[key] = all_keys[(cm, file_key)]
             order.append(key)
     if not order:
         return
@@ -1304,7 +1311,8 @@ def _export_stickers(account: str, chat_ids: list[str], out_root: pathlib.Path,
             out.append((c, sh, int(l)))
         return out
 
-    all_locs = [loc for key in order for loc in _locs(cands[key])]
+    # 去重：候选跨月后同一个 msg_key 会出现在多个月份键里，重复的行查询是白费。
+    all_locs = list(dict.fromkeys(loc for key in order for loc in _locs(cands[key])))
 
     if not with_cdn:
         # **默认零网络**：本机没有可用的明文来源，故如实计 missing。

@@ -2204,3 +2204,63 @@ def test_sticker_export_tries_other_messages_of_the_same_sticker(tmp_path, monke
     assert len(fetched) == 1, "首条候选没凭据就放弃了，没有试同 md5 的其它消息"
     assert rep.sticker.ok == 0              # 桩返回 None → 如实计失败
     assert rep.sticker.failed == 1          # 仍然是**一个贴纸**失败，不是两个
+
+
+def test_sticker_export_sources_credentials_from_another_month(tmp_path, monkeypatch):
+    """凭据可以从**同会话、别的月份**的同 md5 消息取。
+
+    `cdnurl` 是按**贴纸**（md5）走的，与它哪个月发过无关。实测某会话有 **5 个**贴纸栽在
+    这里——它们本月那条消息的 XML 没有凭据、别月那条有，于是白丢 5 个（而那 5 个的响应体
+    与 md5 都完全正常，手动取件 HTTP 200 且 md5 相符）。
+
+    **判别法**：把候选池改回「只收同月」，下面的 `seen_locs` 里就不会出现 8 月那条的 loc，
+    断言立刻变红。
+    """
+    _, account = make_tree(tmp_path, monkeypatch)
+    md5 = "d0f46ed3" + "0" * 24
+    sep = int(datetime.datetime(2026, 9, 15, 12, 0).timestamp())
+    aug = int(datetime.datetime(2026, 8, 15, 12, 0).timestamp())
+
+    con = store.connect()
+    cm = messages.md5_of("wxid_x")
+    rows = [
+        messages.make_row(account=account, chat_md5=cm, chat_id="wxid_x",
+                          shard="message_0.db", local_id=7, ts=sep,
+                          msg_type=messages.TYPE_STICKER, sender_id="wxid_x",
+                          sender_name=None, is_self=0,
+                          content=messages.sticker_display(md5, None), media_hint="[sticker]"),
+        messages.make_row(account=account, chat_md5=cm, chat_id="wxid_x",
+                          shard="message_0.db", local_id=8, ts=aug,
+                          msg_type=messages.TYPE_STICKER, sender_id="wxid_x",
+                          sender_name=None, is_self=0,
+                          content=messages.sticker_display(md5, None), media_hint="[sticker]"),
+    ]
+    store.upsert_batch(con, rows)
+    store.upsert_media_refs(con, [(r["msg_key"], "sticker", md5, None) for r in rows])
+    con.commit()
+
+    seen_locs, fetched = [], []
+    png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 40      # detect_ext 认得的最小假 PNG
+
+    def _fake_urls(acct, items, **k):
+        seen_locs.extend(items)
+        # **只有 8 月那条**（local_id=8）拿得到凭据
+        return {(cm, "message_0.db", 8): ("http://wxapp.tc.qq.com/x", md5)}
+
+    monkeypatch.setattr(media, "sticker_cdn_urls", _fake_urls)
+    monkeypatch.setattr(media, "_fetch_cdn_bytes",
+                        lambda url, expect, **k: fetched.append(url) or png)
+    out = tmp_path / "media"
+    try:
+        rep = media.export_media(account, ["wxid_x"], kinds=["sticker"],
+                                 out_dir=out, con=con, with_cdn=True)
+    finally:
+        con.close()
+    assert (cm, "message_0.db", 8) in seen_locs, \
+        "候选池只收了同月的消息——别月那条带凭据的消息没被交出去"
+    # **同一个贴纸跨两个月 = 两个产物、两次取件**，这是 D4 明确接受的按会话/月去重；
+    # 本条用例要钉的是「**9 月那一条也拿到了凭据**」，不是「只取一次」。
+    assert len(fetched) == 2, f"应两个月各取一次件，实为 {len(fetched)}"
+    assert rep.sticker.ok == 2, "9 月那条没有靠 8 月的候选拿到凭据"
+    for mon in ("2026-09", "2026-08"):
+        assert (out / cm / "sticker" / mon / f"{md5}.png").exists(), f"{mon} 没有产物"
