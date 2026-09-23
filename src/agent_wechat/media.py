@@ -1260,9 +1260,20 @@ def _export_stickers(account: str, chat_ids: list[str], out_root: pathlib.Path,
         report.degraded.append(note)
         return
 
-    # ── 第一趟：摊平待办（归属、月份过滤、跳过判定都在这里做完） ──
-    # (cm, shard, local_id, ts, md5)
-    plan: list[tuple[str, str, int, int, str]] = []
+    # ── 第一趟：按 `(cm, 月, md5)` **去重排队**，并保留该 md5 的**全部候选消息** ──
+    #
+    # **为什么去重**：产物按 md5 内容寻址，同一条贴纸被发 5 次只该取一次件。实测某会话
+    # 265 条贴纸只有 **109 个不同 md5（重复 58%）**——不去重就白发 156 次请求，而这条路径的
+    # 设计约束恰恰是「少发请求」（默认关、逐条可数）。**与 `already()` 是两回事**：那个查的是
+    # 磁盘上已有的产物，管不了同一次运行内的重复。
+    #
+    # **为什么保留全部候选**：同一个 md5 的不同消息，XML 形态可能不同——实测有 7 个贴纸的
+    # **首条消息没有 `cdnurl`**（商店表情包引用形态）而同 md5 的**另一条有**。只认首条会把
+    # 可得件数从 104 压到 97。候选一起交给批量回源是**近乎零成本**的：分片已经解密，多的只是
+    # 几次行查询。
+    order: list[tuple[str, str, str]] = []                  # (cm, mon, md5)，保序
+    cands: dict[tuple[str, str, str], list[str]] = {}       # -> 该 md5 的全部 msg_key
+    ts_of: dict[tuple[str, str, str], int] = {}
     for chat in chat_ids:
         cm = messages.md5_of(chat)
         for msg_key, ts, file_key in refs.get(chat, ()):
@@ -1272,40 +1283,54 @@ def _export_stickers(account: str, chat_ids: list[str], out_root: pathlib.Path,
             if already(cm, "sticker", mon, file_key):
                 report.sticker.skipped += 1
                 continue
-            parts = msg_key.split("|")
-            if len(parts) != 4:
+            if msg_key.count("|") != 3:
                 report.sticker.failed += 1   # msg_key 形状不对：定位不了那一行
                 continue
-            plan.append((cm, parts[2], int(parts[3]), ts, file_key))
-    if not plan:
+            key = (cm, mon, file_key)
+            if key in cands:
+                report.sticker.skipped += 1  # 本轮已排过：同一个贴纸，落的是同一个文件
+                cands[key].append(msg_key)   # 但仍然记下候选，回源时多试一条
+                continue
+            cands[key] = [msg_key]
+            ts_of[key] = ts
+            order.append(key)
+    if not order:
         return
+
+    def _locs(keys: list[str]) -> list[tuple[str, str, int]]:
+        out = []
+        for k in keys:
+            _a, c, sh, l = k.split("|")
+            out.append((c, sh, int(l)))
+        return out
+
+    all_locs = [loc for key in order for loc in _locs(cands[key])]
 
     if not with_cdn:
         # **默认零网络**：本机没有可用的明文来源，故如实计 missing。
         # 这里**不置 truncated / remaining**——不开开关时重跑同样导不出，
         # 把它们算进 remaining 会说「重跑即可继续」，那是假话。
-        local_encrypted = sum(1 for cm, _sh, _lid, _ts, md5 in plan
-                              if resolve_sticker(account, md5) is not None)
-        for cm, _sh, _lid, ts, md5 in plan:
-            report.sticker.missing += 1
+        local_encrypted = sum(1 for key in order
+                              if resolve_sticker(account, key[2]) is not None)
+        report.sticker.missing += len(order)
         report.degraded.append(
-            f"{len(plan)} 个贴纸未导出：微信把贴纸存成加密格式、解密方案未破，"
+            f"{len(order)} 个贴纸未导出：微信把贴纸存成加密格式、解密方案未破，"
             "本机那份是缩略档且取不出明文；加 `--with-cdn` 才从 CDN 取件（默认不联网）"
             + (f"（其中 {local_encrypted} 个本机有加密副本）" if local_encrypted else ""))
         return
 
-    # ── 第二趟：按分片**一次性**回源 ──
-    urls = sticker_cdn_urls(account, [(cm, sh, lid) for cm, sh, lid, _ts, _md5 in plan])
+    # ── 第二趟：按分片**一次性**回源（候选消息一并交出去） ──
+    urls = sticker_cdn_urls(account, all_locs)
 
-    # ── 第三趟：逐条取件 + 落盘 ──
-    for cm, shard, local_id, ts, md5 in plan:
+    # ── 第三趟：每个不同贴纸取一次件 + 落盘 ──
+    for cm, mon, md5 in order:
         if is_full():
             report.truncated = True
             report.sticker.remaining += 1
             continue
-        got = urls.get((cm, shard, local_id))
+        got = next((urls[loc] for loc in _locs(cands[(cm, mon, md5)]) if loc in urls), None)
         if got is None:
-            report.sticker.failed += 1       # 回源拿不到（行不在分片里 / XML 无凭据）
+            report.sticker.failed += 1       # 全部候选都拿不到（行不在分片里 / XML 无凭据）
             continue
         data = _fetch_cdn_bytes(got[0], got[1])
         if data is None:
@@ -1316,7 +1341,7 @@ def _export_stickers(account: str, chat_ids: list[str], out_root: pathlib.Path,
             # 认不出格式就当失败：乱码落盘比失败更坏（会被 already() 的跳过判定永久固化）。
             report.sticker.failed += 1
             continue
-        if _save(out_root, cm, "sticker", month_of(ts), md5, ext, data) is None:
+        if _save(out_root, cm, "sticker", mon, md5, ext, data) is None:
             report.sticker.failed += 1
         else:
             report.sticker.ok += 1

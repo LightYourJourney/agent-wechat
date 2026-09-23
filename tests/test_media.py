@@ -2127,3 +2127,80 @@ def test_fetch_sticker_reads_cdnurl_in_both_spellings(tmp_path, monkeypatch, sty
     media.fetch_sticker_from_cdn("wxid_testacct01_ab12", "c" * 32, "message_0.db", 1)
     assert seen == ["http://wxapp.tc.qq.com/x?filekey=deadbeef"], \
         f"{style} 形态的 cdnurl 没被读出来"
+
+
+def test_sticker_export_fetches_a_repeated_sticker_only_once(tmp_path, monkeypatch):
+    """同一个 md5 被发多次 → **只取一次件**，其余计 `skipped`。
+
+    实测某会话 265 条贴纸只有 **109 个不同 md5（重复 58%）**：不去重就会白发 156 次请求，
+    而这条路径的设计约束正是「少发请求」。**判别法**：把第一趟的 `queued` 去重删掉，
+    本用例的 `fetched` 会变成 3（而不是 1）。
+    """
+    _, account = make_tree(tmp_path, monkeypatch)
+    ts_ = int(datetime.datetime(2026, 9, 15, 12, 0).timestamp())
+    md5 = "d0f46ed3" + "0" * 24
+
+    con = store.connect()
+    cm = messages.md5_of("wxid_x")
+    rows = []
+    for i in range(3):                      # 同一条贴纸发 3 次（local_id 不同）
+        rows.append(messages.make_row(
+            account=account, chat_md5=cm, chat_id="wxid_x", shard="message_0.db",
+            local_id=7 + i, ts=ts_ + i, msg_type=messages.TYPE_STICKER,
+            sender_id="wxid_x", sender_name=None, is_self=0,
+            content=messages.sticker_display(md5, None), media_hint="[sticker]"))
+    store.upsert_batch(con, rows)
+    store.upsert_media_refs(con, [(r["msg_key"], "sticker", md5, None) for r in rows])
+    con.commit()
+
+    fetched = []
+    monkeypatch.setattr(media, "sticker_cdn_urls", lambda acct, items, **k: {
+        (cm, "message_0.db", 7 + i): ("http://wxapp.tc.qq.com/x", md5) for i in range(3)})
+    monkeypatch.setattr(media, "_fetch_cdn_bytes",
+                        lambda url, expect, **k: fetched.append(url) or None)
+    try:
+        rep = media.export_media(account, ["wxid_x"], kinds=["sticker"],
+                                 out_dir=tmp_path / "media", con=con, with_cdn=True)
+    finally:
+        con.close()
+    assert len(fetched) == 1, f"同一条贴纸取了 {len(fetched)} 次件——去重没生效"
+    assert rep.sticker.skipped == 2         # 另两条走 skipped，不吃 limit 预算
+
+
+def test_sticker_export_tries_other_messages_of_the_same_sticker(tmp_path, monkeypatch):
+    """同一个 md5 的**首条**消息拿不到凭据时，必须试它的其它候选消息。
+
+    实测有 7 个贴纸的首条消息是「商店表情包引用」形态（XML 里没有 `cdnurl`），
+    而同 md5 的另一条消息**有**——只认首条会把可得件数从 **104 压到 97**。
+    去重（按 md5 排一次队）与「多试候选」（不漏件）是两件事，都要成立。
+
+    **判别法**：把第三趟改回只查 `cands[key][0]`，本用例立刻变红（一次都不取）。
+    """
+    _, account = make_tree(tmp_path, monkeypatch)
+    ts_ = int(datetime.datetime(2026, 9, 15, 12, 0).timestamp())
+    md5 = "d0f46ed3" + "0" * 24
+    con = store.connect()
+    cm = messages.md5_of("wxid_x")
+    rows = [messages.make_row(
+        account=account, chat_md5=cm, chat_id="wxid_x", shard="message_0.db",
+        local_id=lid, ts=ts_ + lid, msg_type=messages.TYPE_STICKER, sender_id="wxid_x",
+        sender_name=None, is_self=0, content=messages.sticker_display(md5, None),
+        media_hint="[sticker]") for lid in (7, 8)]
+    store.upsert_batch(con, rows)
+    store.upsert_media_refs(con, [(r["msg_key"], "sticker", md5, None) for r in rows])
+    con.commit()
+
+    fetched = []
+    # **只有第二条候选**（local_id=8）拿得到凭据——模拟首条是商店引用形态
+    monkeypatch.setattr(media, "sticker_cdn_urls", lambda acct, items, **k: {
+        (cm, "message_0.db", 8): ("http://wxapp.tc.qq.com/x", md5)})
+    monkeypatch.setattr(media, "_fetch_cdn_bytes",
+                        lambda url, expect, **k: fetched.append(url) or None)
+    try:
+        rep = media.export_media(account, ["wxid_x"], kinds=["sticker"],
+                                 out_dir=tmp_path / "media", con=con, with_cdn=True)
+    finally:
+        con.close()
+    assert len(fetched) == 1, "首条候选没凭据就放弃了，没有试同 md5 的其它消息"
+    assert rep.sticker.ok == 0              # 桩返回 None → 如实计失败
+    assert rep.sticker.failed == 1          # 仍然是**一个贴纸**失败，不是两个
