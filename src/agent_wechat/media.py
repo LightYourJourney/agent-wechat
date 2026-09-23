@@ -1341,6 +1341,7 @@ def _export_stickers(account: str, chat_ids: list[str], out_root: pathlib.Path,
     urls = sticker_cdn_urls(account, all_locs)
 
     # ── 第三趟：每个不同贴纸取一次件 + 落盘 ──
+    wxgf_warned = False          # once-flag：一次导出只说一次（与图片分支同款）
     for cm, mon, md5 in order:
         if is_full():
             report.truncated = True
@@ -1359,13 +1360,24 @@ def _export_stickers(account: str, chat_ids: list[str], out_root: pathlib.Path,
             # 认不出格式就当失败：乱码落盘比失败更坏（会被 already() 的跳过判定永久固化）。
             report.sticker.failed += 1
             continue
-        if _save(out_root, cm, "sticker", mon, md5, ext, data) is None:
-            report.sticker.failed += 1
-        else:
-            report.sticker.ok += 1
-            done = bump()
-            if progress:
-                progress(done)
+        # **wxgf 是容器、不是图片，直接落盘用户打不开**——与图片分支同一手法：
+        # 有 ffmpeg 就转 JPEG（直写终路径，不留半成品），没有/转码失败则退回存原容器**并公告**。
+        # （这条分支在贴纸侧此前是漏的：全库实测 0 个 wxgf 贴纸，所以从未被走到——
+        #   一旦遇到，产物会是 `file` 认不出、用户打不开的 .wxgf 而不报任何异常。）
+        converted = False
+        if ext == "wxgf":
+            converted = _wxgf_to_jpeg(data, _dest(out_root, cm, "sticker", mon, md5, "jpg"))
+        if not converted:
+            if ext == "wxgf" and not wxgf_warned:
+                report.degraded.append("wxgf 贴纸未转 JPEG（无 ffmpeg 或转码失败），存原容器")
+                wxgf_warned = True
+            if _save(out_root, cm, "sticker", mon, md5, ext, data) is None:
+                report.sticker.failed += 1
+                continue
+        report.sticker.ok += 1
+        done = bump()
+        if progress:
+            progress(done)
 
 
 def _export_voices(account, chat_ids, out_root, report, want, is_full, bump, progress,

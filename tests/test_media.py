@@ -2293,3 +2293,86 @@ def test_fetch_sticker_allows_every_observed_cdn_host(monkeypatch, host):
     monkeypatch.setattr(media, "_cdn_opener", lambda: _Rec())
     media._fetch_cdn_bytes(f"http://{host}/x?filekey=deadbeef", "0" * 32)
     assert seen == [f"http://{host}/x?filekey=deadbeef"], f"{host} 被白名单挡了"
+
+
+def _one_wxgf_sticker_index(ts, md5, chat_id="wxid_x", account="wxid_testacct01_ab12"):
+    con = store.connect()
+    cm = messages.md5_of(chat_id)
+    row = messages.make_row(
+        account=account, chat_md5=cm, chat_id=chat_id, shard="message_0.db",
+        local_id=7, ts=ts, msg_type=messages.TYPE_STICKER, sender_id=chat_id,
+        sender_name=None, is_self=0, content=messages.sticker_display(md5, None),
+        media_hint="[sticker]")
+    store.upsert_batch(con, [row])
+    store.upsert_media_refs(con, [(row["msg_key"], "sticker", md5, None)])
+    con.commit()
+    return con, cm
+
+
+WXGF_BLOB = b"wxgf" + b"\x00\x00\x00\x01" + b"\x00" * 16
+
+
+def test_sticker_wxgf_transcodes_to_jpeg(tmp_path, monkeypatch):
+    """CDN 返回 wxgf 贴纸时**必须转成 JPEG** —— wxgf 是容器，原样落盘用户打不开。
+
+    这条分支在贴纸侧此前是**漏的**（`_wxgf_to_jpeg` 只接在图片分支上）：全库实测 0 个
+    wxgf 贴纸所以从未被走到，一旦遇到会落一个 `file` 认不出、用户打不开的 .wxgf
+    **且不报任何异常**。这里把成功的转码分支钉住（否则只有回退那条被覆盖）。
+
+    **判别法**：删掉 `if ext == "wxgf": converted = _wxgf_to_jpeg(...)` 两行，本用例变红
+    （产物会变成 .wxgf 而不是 .jpg）。
+    """
+    _, account = make_tree(tmp_path, monkeypatch)
+    ts = int(datetime.datetime(2026, 9, 15, 12, 0).timestamp())
+    md5 = "d0f46ed3" + "0" * 24
+    con, cm = _one_wxgf_sticker_index(ts, md5)
+    monkeypatch.setattr(media, "sticker_cdn_urls",
+                        lambda acct, items, **k: {(cm, "message_0.db", 7):
+                                                  ("http://wxapp.tc.qq.com/x", md5)})
+    monkeypatch.setattr(media, "_fetch_cdn_bytes",
+                        lambda url, expect, **k: WXGF_BLOB)
+
+    def _fake_transcode(data, dest):
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"\xff\xd8\xff" + b"x" * 20)   # 假装 ffmpeg 落了 jpeg
+        return True
+
+    monkeypatch.setattr(media, "_wxgf_to_jpeg", _fake_transcode)
+    out = tmp_path / "media"
+    try:
+        rep = media.export_media(account, ["wxid_x"], kinds=["sticker"],
+                                 out_dir=out, con=con, with_cdn=True)
+    finally:
+        con.close()
+    names = sorted(p.name for p in (out / cm / "sticker" / "2026-09").iterdir())
+    assert names == [f"{md5}.jpg"], f"wxgf 没转成 jpeg：{names}"
+    assert rep.sticker.ok == 1
+    assert rep.degraded == []          # 转成功了就不该公告
+
+
+def test_sticker_wxgf_without_transcode_saves_container_and_says_so(tmp_path, monkeypatch):
+    """转码失败 → 存 .wxgf 原容器 + **公告一次**（与图片分支同款 once-flag），仍计 ok。
+
+    **宁可留可恢复的原容器，也不丢数据**；但必须让用户知道这个文件打不开——
+    静默落一个 .wxgf 就是「全绿而功能为零」。
+    """
+    _, account = make_tree(tmp_path, monkeypatch)
+    ts = int(datetime.datetime(2026, 9, 15, 12, 0).timestamp())
+    md5 = "d0f46ed3" + "0" * 24
+    con, cm = _one_wxgf_sticker_index(ts, md5)
+    monkeypatch.setattr(media, "sticker_cdn_urls",
+                        lambda acct, items, **k: {(cm, "message_0.db", 7):
+                                                  ("http://wxapp.tc.qq.com/x", md5)})
+    monkeypatch.setattr(media, "_fetch_cdn_bytes",
+                        lambda url, expect, **k: WXGF_BLOB)
+    monkeypatch.setattr(media, "_wxgf_to_jpeg", lambda data, dest: False)   # 无 ffmpeg / 转码失败
+    out = tmp_path / "media"
+    try:
+        rep = media.export_media(account, ["wxid_x"], kinds=["sticker"],
+                                 out_dir=out, con=con, with_cdn=True)
+    finally:
+        con.close()
+    names = sorted(p.name for p in (out / cm / "sticker" / "2026-09").iterdir())
+    assert names == [f"{md5}.wxgf"]
+    assert rep.sticker.ok == 1                       # 原容器保留了，算导出来了
+    assert rep.degraded == ["wxgf 贴纸未转 JPEG（无 ffmpeg 或转码失败），存原容器"]
