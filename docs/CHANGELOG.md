@@ -531,16 +531,18 @@
 - **带真实 `<aeskey>` 的那条系统消息不再落进 `messages.content`**：`reader._decode_row` 原本只在
   `msg_type == 1` 时剥群前缀 `"<X>:\n"`，而群里的 `sysmsg`（`msg_type=10000`）同样带这层前缀，
   于是兜底的 `content.startswith("<?xml")` 判据失配，整段 XML 原样入库。实测本机索引里
-  **恰好 1 行**（`12345678901@chatroom`，一条「邀请你加入了群聊」的系统消息，正文含 **4 处
-  `aeskey`**）——`messages.content` 是 `get_recent_messages` / `search_history` 直接交给 LLM 的字段，
+  **恰好 1 行**（一条群里的「邀请你加入了群聊」系统消息，正文含 **4 处 `aeskey`**）——
+  `messages.content` 是 `get_recent_messages` / `search_history` 直接交给 LLM 的字段，
   还进 FTS，所以这是**凭据进了信封**，和 `raw_xml` 那条（从不进信封）不是一回事。该行现显示 `[system]`
 - **顺带清掉群 sysmsg 正文里的群 id 前缀**：实测 **1,952 行**（全部 `msg_type=10000`）的
-  `content` 是 `12345678901@chatroom:\n你撤回了一条消息` 这种形态。现在前缀被剥掉。
+  `content` 是 `<群 id>@chatroom:\n你撤回了一条消息` 这种形态。现在前缀被剥掉。
   **爆炸半径实测是 1,952，不是 spec 原先写的 12,681**——12,681 是 `msg_type=10000` 的总数，
   真带前缀的只有 1,952
-- **剥前缀的判据对非文本收窄到 `<digits>@chatroom` 形态，且绝不把它当发送者**：本机有
-  1 条群 appmsg 的**标题自带** `":\n"`（一段 docker-compose 片段），放成「非文本一律剥」
-  会把它削坏；而 head 是**群 id**，当发送者会污染 `sender_id`。文本那条路径一字未动
+- **剥前缀的判据对非文本收窄到「head 以 `@chatroom` 结尾」，且绝不把它当发送者**：
+  实测那 1,952 条的 head 都是 `<digits>@chatroom`，但**代码只判后缀**（不判数字形态）——
+  这样将来出现别的群 id 形态也照样清得掉。之所以要收窄：本机有 1 条群 appmsg 的**标题自带**
+  `":\n"`（一段带冒号换行的配置片段），放成「非文本一律剥」会把它削坏；而 head 是**群 id**，
+  当发送者会污染 `sender_id`。文本那条路径一字未动
 - **非文本整段 XML 一律换成类型占位符**：回落判据从 `startswith("<?xml")` 放宽到
   `startswith("<")`。原因——真机群 `sysmsg` 里带 `<?xml` 声明的只有 **1 行**，而根直接是
   `<sysmsg …>` 的有 **1,960 行**：只认声明会把多数派放过去，原始 XML 照样喂给上层。
@@ -553,7 +555,8 @@
   **两轮里 `msg_type=1` 都是一行未动**，与「文本路径没改」一致
 - **已知代价**：向量索引是**水位线**式的（`messages.id > last_rowid`），改 `content` 不移动 `id`，
   所以这些行的 embedding **不会自动重算**。判为可接受（系统消息的语义检索价值低）；
-  要抹平就跑一次 `vector-build`
+  要抹平得跑 **`vector-build --rebuild`**（MCP `build_vector_index(rebuild=true)`）——
+  不带 `--rebuild` 只增量追加水位线之后的行，对已存在的行**是 no-op**
 
 ### 其他规划
 
