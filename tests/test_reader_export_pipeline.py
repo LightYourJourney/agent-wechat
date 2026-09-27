@@ -369,7 +369,7 @@ def test_recent_cross_shard_decode(env):
 # 前者正文多为原始 `<sysmsg …>` XML，其中 1 条含真实 `<aeskey>`——那就是 R9 本体。
 
 ROOM = "12345678901@chatroom"          # 合成群 id；真机是同形态的 <digits>@chatroom
-XML_SECRET = "1f2e3d4c5b6a7988"        # 只为断言「没漏出来」，不是真凭据
+XML_SECRET = "1f2e3d4c5b6a7988"        # 造一条「正文带凭据」的夹具；不是真凭据
 SYSMSG_XML = ('<?xml version="1.0"?><sysmsg type="sysmsgtemplate"><sysmsgtemplate>'
               '<content_template type="tmpl_type_profile">'
               f'<link aeskey="{XML_SECRET}"/>'
@@ -442,7 +442,7 @@ def test_group_sysmsg_prefix_is_stripped_but_never_taken_as_sender(msgs):
 
 
 def test_group_sysmsg_without_prefix_is_unchanged(msgs):
-    """对照组：不带前缀的 sysmsg 本来就靠 `startswith("<?xml")` 兜住了。"""
+    """对照组：不带前缀的 sysmsg 本来就靠回落判据兜住了。"""
     assert msgs[ROOM][3].content == "[system]"
 
 
