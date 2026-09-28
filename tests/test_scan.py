@@ -99,3 +99,34 @@ def test_non_scanner_error_is_fail_closed(scan, monkeypatch, capsys):
 
     assert rc == scan.EXIT_ERROR, "非 ScannerError 的崩溃也必须退出 2"
     assert "扫描器出错" in capsys.readouterr().err, "消息要点明是扫描器出错，不是发现泄漏"
+
+
+def test_values_view_is_per_value_not_per_occurrence(scan, tmp_path, monkeypatch, capsys):
+    """spec §4.6 的归类是逐**值**的（90 个），不是逐处的。"""
+    (tmp_path / "a.txt").write_text("x " + FAKE + " y\n", encoding="utf-8")
+    (tmp_path / "b.txt").write_text(FAKE + "\n" + FAKE + "\n", encoding="utf-8")
+    monkeypatch.setattr(scan, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(scan, "_tracked_files", lambda: ["a.txt", "b.txt"])
+    monkeypatch.setattr(scan, "ALLOWLIST_PATH", tmp_path / "allowlist.txt")
+
+    rc = scan.main(["--values"])
+    out = capsys.readouterr().out
+
+    assert FAKE not in out, "逐值视图同样不许打印值"
+    assert out.count(scan.fingerprint(FAKE)) == 1, "同一个值只该有一行"
+    assert "3 次" in out, "要给出出现次数"
+    assert rc == scan.EXIT_HITS
+
+
+def test_repo_scope_comes_from_git(scan, monkeypatch):
+    """作用域由 `git ls-files` 决定——`.gitignore` 掉的东西天然不进（spec §4.4 作用域说明）。
+
+    这条钉的是**机制**而不是结果：如果有人哪天把枚举改成自己 os.walk 目录树，
+    `.venv/`、`node_modules/` 这些会被扫进来，而这条会红。
+    （原先这里写的是「把 _tracked_files 打桩成 []，断言 collect_values() == {}」——
+    没有文件当然没有命中，那条断言**永远不可能为它名字宣称的东西而失败**。）
+    """
+    calls = []
+    monkeypatch.setattr(scan, "_git", lambda *a: (calls.append(a), "a.py\0b.py\0")[1])
+    assert scan._tracked_files() == ["a.py", "b.py"]
+    assert calls == [("ls-files", "-z")], "枚举必须走 git，不许自己去 walk 目录树"

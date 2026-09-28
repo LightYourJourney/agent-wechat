@@ -31,6 +31,9 @@ PATTERNS = (
 
 SHAPE_LABEL = {"wxid": "wxid 形", "chatroom": "chatroom 形", "phone": "手机号形"}
 
+FIXTURE_KEYWORDS = ("test", "fake", "dummy", "sample", "example", "placeholder",
+                    "abc", "123")
+
 
 class ScannerError(Exception):
     """扫描器自身出错——与「发现泄漏」是两回事（退出码 2 对 1）。"""
@@ -100,12 +103,45 @@ def scan_repo():
     return out
 
 
+def collect_values():
+    """逐值汇总（spec §4.4 的 --values 视图）。
+
+    返回的 value 只在内存里流转——任何出口都必须先过 fingerprint()。
+    """
+    agg = {}
+    for rel, _lineno, shape, value in scan_repo():
+        key = fingerprint(value)
+        entry = agg.get(key)
+        if entry is None:
+            entry = {"value": value, "shape": shape, "dirs": set(), "count": 0}
+            agg[key] = entry
+        entry["dirs"].add(rel.split("/", 1)[0] if "/" in rel else ".")
+        entry["count"] += 1
+    return agg
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="扫描形状像真机标识的字符串（绝不打印值）")
     ap.add_argument("--all", action="store_true", help="扫全部 tracked 文件（逐处）")
+    ap.add_argument("--values", action="store_true", help="逐值汇总（审查用，spec §4.6）")
     ap.add_argument("--show-values", action="store_true",
                     help="⚠️ 打印命中值本身——它会被写进你的会话记录，等于又开一个出口")
     args = ap.parse_args(argv)
+
+    if args.values:
+        try:
+            table = collect_values()
+        except Exception as exc:
+            print("scan: 扫描器出错：%s" % exc, file=sys.stderr)
+            return EXIT_ERROR
+        for key in sorted(table, key=lambda k: (table[k]["shape"], k)):
+            e = table[key]
+            low = e["value"].lower()
+            fixture = "是" if any(w in low for w in FIXTURE_KEYWORDS) else "否"
+            print("#%s  %s · %d 字符 · 出现于 %s · %d 次 · 夹具关键词：%s"
+                  % (key, SHAPE_LABEL[e["shape"]], len(e["value"]),
+                     "、".join(sorted(e["dirs"])), e["count"], fixture))
+        return EXIT_HITS if table else EXIT_CLEAN
 
     try:
         hits = scan_repo()
