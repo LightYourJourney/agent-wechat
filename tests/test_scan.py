@@ -210,3 +210,25 @@ def test_values_view_marks_registered_state(scan, tmp_path, monkeypatch, capsys)
     out = capsys.readouterr().out
     assert "已登记" in out, "登记后应显示已登记"
     assert FAKE not in out, "加一列不等于放宽掩码原则"
+
+
+def test_default_view_skips_registered_values(scan, tmp_path, monkeypatch, capsys):
+    """豁免清单对**默认视图**的过滤必须真的生效。
+
+    没有这条时，把 `unregistered = [h for h in hits if h[3] not in allow]` 换回
+    `unregistered = hits`，十六条测试**全绿**——意味着「登记」这个动作可以在默认视图上
+    **静默失效**而没有任何东西变红。
+    """
+    (tmp_path / "x.txt").write_text("hit " + FAKE + "\n", encoding="utf-8")
+    allow = tmp_path / "allowlist.txt"
+    monkeypatch.setattr(scan, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(scan, "_tracked_files", lambda: ["x.txt"])
+    monkeypatch.setattr(scan, "ALLOWLIST_PATH", allow)
+
+    assert scan.main(["--all"]) == scan.EXIT_HITS, "登记之前它应当报出来"
+
+    scan.main(["--allow", scan.fingerprint(FAKE)])
+    capsys.readouterr()
+
+    assert scan.main(["--all"]) == scan.EXIT_CLEAN, "登记之后默认视图不该再报它"
+    assert capsys.readouterr().out == "", "登记之后默认视图不该再打印任何一行"

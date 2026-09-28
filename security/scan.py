@@ -202,10 +202,10 @@ def main(argv=None):
     if args.values:
         try:
             table = collect_values()
+            allow = load_allowlist()      # 读文件，必须在边界之内（同上）
         except Exception as exc:
             print("scan: 扫描器出错：%s" % exc, file=sys.stderr)
             return EXIT_ERROR
-        allow = load_allowlist()
         for key in sorted(table, key=lambda k: (table[k]["shape"], k)):
             e = table[key]
             low = e["value"].lower()
@@ -218,11 +218,11 @@ def main(argv=None):
 
     try:
         hits = scan_repo()
+        allow = load_allowlist()          # 读文件，必须在边界之内
     except Exception as exc:
         print("scan: 扫描器出错：%s" % exc, file=sys.stderr)
         return EXIT_ERROR
 
-    allow = load_allowlist()
     unregistered = [h for h in hits if h[3] not in allow]
     for rel, lineno, shape, value in unregistered:
         shown = value if args.show_values else "%d 字符" % len(value)
