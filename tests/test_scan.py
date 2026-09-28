@@ -130,3 +130,83 @@ def test_repo_scope_comes_from_git(scan, monkeypatch):
     monkeypatch.setattr(scan, "_git", lambda *a: (calls.append(a), "a.py\0b.py\0")[1])
     assert scan._tracked_files() == ["a.py", "b.py"]
     assert calls == [("ls-files", "-z")], "枚举必须走 git，不许自己去 walk 目录树"
+
+
+def test_allowlist_parses_values_ignoring_comments(scan, tmp_path):
+    p = tmp_path / "allowlist.txt"
+    p.write_text("# 注释行\n\n" + FAKE + "  全仓库通用夹具\n"
+                 "12345678901@chatroom  # 行内注释\n", encoding="utf-8")
+    assert scan.load_allowlist(p) == {FAKE, "12345678901@chatroom"}
+
+
+def test_missing_allowlist_yields_empty_set_not_crash(scan, tmp_path):
+    """Review Focus 4：清单不存在时不崩，行为是「全部按未登记处理」。"""
+    assert scan.load_allowlist(tmp_path / "nope.txt") == set()
+
+
+def test_allow_writes_value_but_never_prints_it(scan, tmp_path, monkeypatch, capsys):
+    """Review Focus 1 + spec §4.4：--allow 的输出不许出现值。"""
+    (tmp_path / "x.txt").write_text("hit " + FAKE + "\n", encoding="utf-8")
+    allow = tmp_path / "allowlist.txt"
+    monkeypatch.setattr(scan, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(scan, "_tracked_files", lambda: ["x.txt"])
+    monkeypatch.setattr(scan, "ALLOWLIST_PATH", allow)
+
+    rc = scan.main(["--allow", scan.fingerprint(FAKE)])
+    out = capsys.readouterr()
+
+    assert rc == scan.EXIT_CLEAN
+    assert FAKE not in out.out and FAKE not in out.err, "承诺过不打印值"
+    assert FAKE in allow.read_text(encoding="utf-8"), "但必须写进清单"
+
+
+def test_allow_with_unknown_fingerprint_is_an_error(scan, tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(scan, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(scan, "_tracked_files", lambda: [])
+    monkeypatch.setattr(scan, "ALLOWLIST_PATH", tmp_path / "allowlist.txt")
+    rc = scan.main(["--allow", "deadbeef"])
+    assert rc == scan.EXIT_ERROR
+    assert "deadbeef" in capsys.readouterr().err
+
+
+def test_verify_allowlist_flags_dead_entries(scan, tmp_path, monkeypatch, capsys):
+    """spec §4.3 不变式 1：清单里每一项都必须在仓库里至少命中一次。
+
+    注意 scan_repo() 会跳过 allowlist.txt 自身——否则这条不变式**永远为真**，
+    是个假护栏。
+    """
+    allow = tmp_path / "allowlist.txt"
+    allow.write_text("wxid_zzzznotinthere9  死条目\n", encoding="utf-8")
+    monkeypatch.setattr(scan, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(scan, "_tracked_files", lambda: ["allowlist.txt"])
+    monkeypatch.setattr(scan, "ALLOWLIST_PATH", allow)
+
+    rc = scan.main(["--verify-allowlist"])
+    out = capsys.readouterr().out
+    assert rc == scan.EXIT_HITS, "死条目必须让它红"
+    assert "wxid_zzzznotinthere9" not in out, "报死条目也不打印值"
+    assert scan.fingerprint("wxid_zzzznotinthere9") in out
+
+
+def test_values_view_marks_registered_state(scan, tmp_path, monkeypatch, capsys):
+    """Task 7 的人工归类靠这一列看进度——它必须真的跟着豁免清单变。
+
+    没有这条，删掉那行 `state = ...` 不会有任何测试变红（Task 3 的审阅正是在
+    `--values` 的 `dirs` 那半边记录过同一类空档）。
+    """
+    (tmp_path / "x.txt").write_text("hit " + FAKE + "\n", encoding="utf-8")
+    allow = tmp_path / "allowlist.txt"
+    monkeypatch.setattr(scan, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(scan, "_tracked_files", lambda: ["x.txt"])
+    monkeypatch.setattr(scan, "ALLOWLIST_PATH", allow)
+
+    scan.main(["--values"])
+    assert "未登记" in capsys.readouterr().out, "登记前应显示未登记"
+
+    scan.main(["--allow", scan.fingerprint(FAKE)])
+    capsys.readouterr()
+
+    scan.main(["--values"])
+    out = capsys.readouterr().out
+    assert "已登记" in out, "登记后应显示已登记"
+    assert FAKE not in out, "加一列不等于放宽掩码原则"

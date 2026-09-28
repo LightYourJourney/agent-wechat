@@ -120,13 +120,84 @@ def collect_values():
     return agg
 
 
+def load_allowlist(path=None):
+    """→ set(值)。`#` 起注释；第一个空白之前的 token 是值，其后是说明。
+
+    文件不存在时返回空集：效果是「全部按未登记处理」，方向是 fail-closed（spec §4.3）。
+    """
+    path = Path(path) if path is not None else ALLOWLIST_PATH
+    if not path.exists():
+        return set()
+    values = set()
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if line:
+            values.add(line.split()[0])
+    return values
+
+
+def allow_value(key):
+    """把 fingerprint == key 的值写进豁免清单。返回写入的行（**调用方不得打印它**）。
+
+    **为什么编号是 sha256[:8] 指纹，而不是递增序号**：序号会**随命中集合漂移**——
+    你看了 `#7`，中间任何人改了任何文件（或者你刚 `--allow` 掉一条），转头
+    `--allow 7` 指的可能已经是**另一个值**。指纹是值的函数、与集合无关，所以稳定。
+    这正是 Review Focus 第 1 条要防的误用。（spec §4.4 里的 `--allow 7` 只是**示意**；
+    它要求的是「不透明编号」，指纹满足。指纹本身不必抗暴力——豁免清单里本来就
+    躺着值，它只是个界面把手。）
+    """
+    table = collect_values()
+    if key not in table:
+        raise ScannerError("没有编号 %s 的命中——先跑 --values 看有哪些" % key)
+    entry = table[key]
+    line = "%s  %s · %d 字符 · --allow %s 登记" % (
+        entry["value"], entry["shape"], len(entry["value"]), key)
+    with ALLOWLIST_PATH.open("a", encoding="utf-8") as fh:
+        fh.write(line + "\n")
+    return line
+
+
+def verify_allowlist():
+    """spec §4.3 不变式 1 → 死条目的指纹列表。
+
+    判据是 scan_repo() 的产物；它**刻意跳过 allowlist.txt 自身**，否则清单里每一项
+    都会「出现在仓库里」，这条不变式就成了永真断言。
+    """
+    seen = {value for _, _, _, value in scan_repo()}
+    return sorted(fingerprint(v) for v in load_allowlist() - seen)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="扫描形状像真机标识的字符串（绝不打印值）")
     ap.add_argument("--all", action="store_true", help="扫全部 tracked 文件（逐处）")
     ap.add_argument("--values", action="store_true", help="逐值汇总（审查用，spec §4.6）")
     ap.add_argument("--show-values", action="store_true",
                     help="⚠️ 打印命中值本身——它会被写进你的会话记录，等于又开一个出口")
+    ap.add_argument("--allow", metavar="指纹", help="按指纹把该值写进豁免清单（不打印值）")
+    ap.add_argument("--verify-allowlist", action="store_true",
+                    help="检查豁免清单里的死条目（spec §4.3 不变式 1）")
     args = ap.parse_args(argv)
+
+    if args.verify_allowlist:
+        try:
+            dead = verify_allowlist()
+        except Exception as exc:
+            print("scan: 扫描器出错：%s" % exc, file=sys.stderr)
+            return EXIT_ERROR
+        if dead:
+            for key in dead:
+                print("死条目 #%s——它在仓库里一次都没命中，请从豁免清单删掉" % key)
+            return EXIT_HITS
+        return EXIT_CLEAN
+
+    if args.allow:
+        try:
+            allow_value(args.allow)
+        except Exception as exc:
+            print("scan: 扫描器出错：%s" % exc, file=sys.stderr)
+            return EXIT_ERROR
+        print("已登记 #%s 到 security/allowlist.txt" % args.allow)
+        return EXIT_CLEAN
 
     if args.values:
         try:
@@ -134,13 +205,15 @@ def main(argv=None):
         except Exception as exc:
             print("scan: 扫描器出错：%s" % exc, file=sys.stderr)
             return EXIT_ERROR
+        allow = load_allowlist()
         for key in sorted(table, key=lambda k: (table[k]["shape"], k)):
             e = table[key]
             low = e["value"].lower()
             fixture = "是" if any(w in low for w in FIXTURE_KEYWORDS) else "否"
-            print("#%s  %s · %d 字符 · 出现于 %s · %d 次 · 夹具关键词：%s"
+            state = "已登记" if e["value"] in allow else "未登记"
+            print("#%s  %s · %d 字符 · 出现于 %s · %d 次 · 夹具关键词：%s · %s"
                   % (key, SHAPE_LABEL[e["shape"]], len(e["value"]),
-                     "、".join(sorted(e["dirs"])), e["count"], fixture))
+                     "、".join(sorted(e["dirs"])), e["count"], fixture, state))
         return EXIT_HITS if table else EXIT_CLEAN
 
     try:
@@ -149,12 +222,14 @@ def main(argv=None):
         print("scan: 扫描器出错：%s" % exc, file=sys.stderr)
         return EXIT_ERROR
 
-    for rel, lineno, shape, value in hits:
+    allow = load_allowlist()
+    unregistered = [h for h in hits if h[3] not in allow]
+    for rel, lineno, shape, value in unregistered:
         shown = value if args.show_values else "%d 字符" % len(value)
         print("%s:%d  %s · %s · 未登记" % (rel, lineno, SHAPE_LABEL[shape], shown))
-    if args.show_values and hits:
+    if args.show_values and unregistered:
         print("⚠️ 上面打印了命中值本身——它已进入你的会话记录。", file=sys.stderr)
-    return EXIT_HITS if hits else EXIT_CLEAN
+    return EXIT_HITS if unregistered else EXIT_CLEAN
 
 
 if __name__ == "__main__":
