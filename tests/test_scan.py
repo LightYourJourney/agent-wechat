@@ -286,6 +286,40 @@ def test_staged_unresolvable_path_is_fail_closed(scan, tmp_path, monkeypatch):
             "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n+x\n")
 
 
+DIFF_HEADER_MIMIC = """\
+diff --git a/m.txt b/m.txt
+index 1111111..2222222 100644
+--- a/m.txt
++++ b/m.txt
+@@ -1 +1,2 @@
+--- x
++++ /dev/null
++still a hit " + FAKE + "
+"""
+
+
+def test_staged_header_mimic_does_not_swallow_the_rest_of_the_file(scan, tmp_path, monkeypatch):
+    """hunk 体内**长得像文件头**的内容行，不许把后面的行吞掉。
+
+    旧侧内容 `-- x` 渲染成 `--- x`，新侧内容 `++ /dev/null` 渲染成 `+++ /dev/null`。
+    只判「上一行是 `--- `」的旧写法会把这一对当成「文件被删」→ `path = None` →
+    **该文件后面所有行被静默跳过**，而进程退 0。**那是 fail-open**，且与
+    `staged_added_lines` 自己「不静默跳过」的承诺直接矛盾。
+
+    新判据按 `seen_hunk`：文件头只可能在**第一个 `@@` 之前**，所以 hunk 体内的
+    `--- `/`+++ ` 一律是内容。仓库今天没有这种相邻对（审阅者实测 129 个文件、0 处命中），
+    所以这是**潜伏**风险——但一个「只在没有伪装输入时才对」的解析器不算 fail-closed。
+    """
+    (tmp_path / "m.txt").write_text("x\n", encoding="utf-8")
+    monkeypatch.setattr(scan, "REPO_ROOT", tmp_path)
+
+    rows = scan.staged_added_lines(DIFF_HEADER_MIMIC)
+
+    assert any("still a hit" in text for _rel, _n, text in rows), \
+        "伪装的文件头不许吞掉它后面的新增行"
+    assert {rel for rel, _n, _t in rows} == {"m.txt"}, "路径也不许被劫持"
+
+
 def test_staged_empty_diff_is_clean_not_error(scan, monkeypatch, capsys):
     """Review Focus 2：空暂存区（无改动提交 / --amend / merge）必须干净退出 0。"""
     monkeypatch.setattr(scan, "staged_added_lines", lambda *a, **k: [])

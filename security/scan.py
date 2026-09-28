@@ -35,6 +35,7 @@ FIXTURE_KEYWORDS = ("test", "fake", "dummy", "sample", "example", "placeholder",
                     "abc", "123")
 
 _HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+_DIFF_HEADER = re.compile(r"^diff --git ")
 
 
 class ScannerError(Exception):
@@ -172,31 +173,40 @@ def verify_allowlist():
 def staged_added_lines(diff_text=None):
     """→ [(relpath, lineno, text)]，**只含新增行**（spec §4.4：不必为文件旧账负责）。
 
-    `+++ b/路径` 只有在**紧跟在 `--- ` 行之后**才算文件头——否则一个内容行
-    `+++ b/x` 会被误认成路径。路径解析不出来时**抛 ScannerError**（fail-closed），
-    不静默跳过：静默跳过会让「钩子装了但从没拦过」变得不可见。
+    **`+++ ` 只在「本文件的第一个 hunk 之前」才算文件头。**
+
+    订正（2026-09-29，Task 5 审阅）：原先只判「上一行是 `--- `」，**不够**——hunk 体内
+    也允许出现恰好长得像头的内容行：旧侧内容 `-- x` 渲染成 `--- x`，新侧内容
+    `++ /dev/null` 渲染成 `+++ /dev/null`，那一对会被误认成「文件被删」，于是**该文件
+    后面所有行被静默跳过**而进程照样退 0。**这是 fail-open，且与本节「不静默跳过」的
+    承诺直接矛盾。** 审阅者实测仓库今天没有这种相邻对（扫了 129 个文件、0 处命中），
+    所以是**潜伏**而非现患——但一个「只在没有伪装输入时才对」的解析器不算 fail-closed。
+    纯新增是安全的（内容 `-- x` / `++ y` 渲染成 `+-- x` / `+++ y`，都不匹配头）。
+
+    改判据：`--- `/`+++ ` 只可能出现在**文件头块**里，而文件头块一定在**第一个 `@@` 之前**。
+    所以用 `seen_hunk`（每个 `diff --git` 重置），而不是「上一行长什么样」。
     """
     diff = _git("diff", "--cached", "--unified=0", "--no-color") if diff_text is None else diff_text
     out = []
     path = None
     lineno = 0
-    prev_was_minus = False
+    seen_hunk = False
     for line in diff.splitlines():
-        if line.startswith("--- "):
-            prev_was_minus = True
+        if _DIFF_HEADER.match(line):
+            path = None
+            seen_hunk = False
             continue
-        if line.startswith("+++ ") and prev_was_minus:
-            prev_was_minus = False
+        if not seen_hunk and line.startswith("+++ "):
             target = line[4:].strip()
             path = None if target == "/dev/null" else target[2:]   # 去掉 "b/"
             if path is not None and not (REPO_ROOT / path).exists():
                 raise ScannerError("diff 里的路径解析不出来：%r" % path)
             continue
-        prev_was_minus = False
         if line.startswith("@@"):
             m = _HUNK.match(line)
             if m is None:
                 raise ScannerError("看不懂的 hunk 头：%r" % line)
+            seen_hunk = True
             lineno = int(m.group(1))
             continue
         if path is None:
@@ -288,7 +298,7 @@ def _run(args):
                 hits = [(rel, n, shape, value)
                         for rel, n, text in added
                         for _, _, shape, value in hits_in_text(text)]
-            allow = load_allowlist()  # 读文件，必须在边界之内（同前两处）
+            allow = load_allowlist()      # 读文件，必须在边界之内（同前两处）
         except Exception as exc:
             print("scan: 扫描器出错：%s" % exc, file=sys.stderr)
             return EXIT_ERROR
@@ -296,6 +306,8 @@ def _run(args):
         for rel, lineno, shape, value in unregistered:
             shown = value if args.show_values else "%d 字符" % len(value)
             print("%s:%d  %s · %s · 未登记" % (rel, lineno, SHAPE_LABEL[shape], shown))
+        if args.show_values and unregistered:
+            print("⚠️ 上面打印了命中值本身——它已进入你的会话记录。", file=sys.stderr)
         return EXIT_HITS if unregistered else EXIT_CLEAN
 
     try:
