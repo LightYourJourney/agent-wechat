@@ -34,6 +34,8 @@ SHAPE_LABEL = {"wxid": "wxid 形", "chatroom": "chatroom 形", "phone": "手机�
 FIXTURE_KEYWORDS = ("test", "fake", "dummy", "sample", "example", "placeholder",
                     "abc", "123")
 
+_HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+
 
 class ScannerError(Exception):
     """扫描器自身出错——与「发现泄漏」是两回事（退出码 2 对 1）。"""
@@ -167,6 +169,60 @@ def verify_allowlist():
     return sorted(fingerprint(v) for v in load_allowlist() - seen)
 
 
+def staged_added_lines(diff_text=None):
+    """→ [(relpath, lineno, text)]，**只含新增行**（spec §4.4：不必为文件旧账负责）。
+
+    `+++ b/路径` 只有在**紧跟在 `--- ` 行之后**才算文件头——否则一个内容行
+    `+++ b/x` 会被误认成路径。路径解析不出来时**抛 ScannerError**（fail-closed），
+    不静默跳过：静默跳过会让「钩子装了但从没拦过」变得不可见。
+    """
+    diff = _git("diff", "--cached", "--unified=0", "--no-color") if diff_text is None else diff_text
+    out = []
+    path = None
+    lineno = 0
+    prev_was_minus = False
+    for line in diff.splitlines():
+        if line.startswith("--- "):
+            prev_was_minus = True
+            continue
+        if line.startswith("+++ ") and prev_was_minus:
+            prev_was_minus = False
+            target = line[4:].strip()
+            path = None if target == "/dev/null" else target[2:]   # 去掉 "b/"
+            if path is not None and not (REPO_ROOT / path).exists():
+                raise ScannerError("diff 里的路径解析不出来：%r" % path)
+            continue
+        prev_was_minus = False
+        if line.startswith("@@"):
+            m = _HUNK.match(line)
+            if m is None:
+                raise ScannerError("看不懂的 hunk 头：%r" % line)
+            lineno = int(m.group(1))
+            continue
+        if path is None:
+            continue
+        if line.startswith("+"):
+            out.append((path, lineno, line[1:]))
+            lineno += 1
+        elif line.startswith(" "):
+            lineno += 1
+    return out
+
+
+def text_hits(path):
+    """扫一个给定文件（用于 commit-msg 的提交信息）。→ [(relpath, lineno, shape, value)]"""
+    p = Path(path)
+    try:
+        text = p.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        raise ScannerError("%s 不是合法 UTF-8——拒绝放行（fail-closed）" % p)
+    except OSError as exc:
+        raise ScannerError("读不了 %s：%s" % (p, exc))
+    return [(str(p), n, shape, value)
+            for n, line in enumerate(text.splitlines(), 1)
+            for _, _, shape, value in hits_in_text(line)]
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="扫描形状像真机标识的字符串（绝不打印值）")
     ap.add_argument("--all", action="store_true", help="扫全部 tracked 文件（逐处）")
@@ -176,6 +232,8 @@ def main(argv=None):
     ap.add_argument("--allow", metavar="指纹", help="按指纹把该值写进豁免清单（不打印值）")
     ap.add_argument("--verify-allowlist", action="store_true",
                     help="检查豁免清单里的死条目（spec §4.3 不变式 1）")
+    ap.add_argument("--staged", action="store_true", help="只扫暂存区的新增行（pre-commit 用）")
+    ap.add_argument("--text", metavar="文件", help="扫一个给定文件（commit-msg 用）")
     args = ap.parse_args(argv)
 
     if args.verify_allowlist:
@@ -215,6 +273,28 @@ def main(argv=None):
                   % (key, SHAPE_LABEL[e["shape"]], len(e["value"]),
                      "、".join(sorted(e["dirs"])), e["count"], fixture, state))
         return EXIT_HITS if table else EXIT_CLEAN
+
+    if args.staged or args.text:
+        try:
+            if args.text:
+                hits = text_hits(args.text)
+            else:
+                added = staged_added_lines()          # 只取一次：两次调用可能看到不同状态
+                if any(rel == "security/allowlist.txt" for rel, _n, _t in added):
+                    print("scan: ⚠️ 你在修改豁免清单——请确认新增的是**占位符**而不是真值",
+                          file=sys.stderr)
+                hits = [(rel, n, shape, value)
+                        for rel, n, text in added
+                        for _, _, shape, value in hits_in_text(text)]
+        except Exception as exc:
+            print("scan: 扫描器出错：%s" % exc, file=sys.stderr)
+            return EXIT_ERROR
+        allow = load_allowlist()
+        unregistered = [h for h in hits if h[3] not in allow]
+        for rel, lineno, shape, value in unregistered:
+            shown = value if args.show_values else "%d 字符" % len(value)
+            print("%s:%d  %s · %s · 未登记" % (rel, lineno, SHAPE_LABEL[shape], shown))
+        return EXIT_HITS if unregistered else EXIT_CLEAN
 
     try:
         hits = scan_repo()

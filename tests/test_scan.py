@@ -232,3 +232,95 @@ def test_default_view_skips_registered_values(scan, tmp_path, monkeypatch, capsy
 
     assert scan.main(["--all"]) == scan.EXIT_CLEAN, "登记之后默认视图不该再报它"
     assert capsys.readouterr().out == "", "登记之后默认视图不该再打印任何一行"
+
+
+DIFF_TWO_FILES = """\
+diff --git a/a.txt b/a.txt
+index b8cb000..ba5ef67 100644
+--- a/a.txt
++++ b/a.txt
+@@ -1,0 +2,2 @@ 尾部小节名
++added " + FAKE + "
++plain
+diff --git a/del.txt b/del.txt
+deleted file mode 100644
+index 587be6b..0000000
+--- a/del.txt
++++ /dev/null
+@@ -1 +0,0 @@
+-gone
+diff --git a/b.txt b/b.txt
+new file mode 100644
+index 0000000..9cd59d8
+--- /dev/null
++++ b/b.txt
+@@ -0,0 +1 @@
++also " + "12345678901@chatroom" + "
+"""
+
+
+def test_staged_added_lines_extracts_new_side_only(scan, tmp_path, monkeypatch):
+    """夹具是**照真实 `git diff --cached --unified=0` 抄下来的**，不是手编的。
+
+    刻意包含真机必现、而手编夹具最容易漏的四样：`index` 行、`deleted file mode`、
+    `new file mode`、以及 hunk 头尾部的**小节名**（`@@ … @@ 尾部小节名`）。
+    本项目吃过的最大一类亏就是「夹具编码了我以为的形态」。
+
+    **必须把 REPO_ROOT 换到 tmp_path 并真建出 a.txt / b.txt**：`staged_added_lines`
+    对解析出来的路径做了存在性检查，在真仓库里这两个文件不存在，会抛 ScannerError。
+    """
+    (tmp_path / "a.txt").write_text("x\n", encoding="utf-8")
+    (tmp_path / "b.txt").write_text("y\n", encoding="utf-8")
+    monkeypatch.setattr(scan, "REPO_ROOT", tmp_path)
+
+    rows = scan.staged_added_lines(DIFF_TWO_FILES)
+    assert [(r[0], r[1]) for r in rows] == [("a.txt", 2), ("a.txt", 3), ("b.txt", 1)], \
+        "行号要取 + 侧、只取新增行、且删掉的文件（+++ /dev/null）不许混进来"
+
+
+def test_staged_unresolvable_path_is_fail_closed(scan, tmp_path, monkeypatch):
+    """路径解析不出来时必须炸，不能静默跳过——静默跳过会让「装了但从没拦过」不可见。"""
+    monkeypatch.setattr(scan, "REPO_ROOT", tmp_path / "nowhere")
+    with pytest.raises(scan.ScannerError):
+        scan.staged_added_lines(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n+x\n")
+
+
+def test_staged_empty_diff_is_clean_not_error(scan, monkeypatch, capsys):
+    """Review Focus 2：空暂存区（无改动提交 / --amend / merge）必须干净退出 0。"""
+    monkeypatch.setattr(scan, "staged_added_lines", lambda *a, **k: [])
+    monkeypatch.setattr(scan, "load_allowlist", lambda *a, **k: set())
+    rc = scan.main(["--staged"])
+    assert rc == scan.EXIT_CLEAN
+    assert capsys.readouterr().out == ""
+
+
+def test_text_mode_is_fail_closed_on_undecodable_input(scan, tmp_path, capsys):
+    """Review Focus 3：提交信息不是合法 UTF-8 时必须退出 2，不是崩栈、也不是放行。"""
+    bad = tmp_path / "msg"
+    bad.write_bytes(b"ok\n\xff\xfe not utf8\n")
+    rc = scan.main(["--text", str(bad)])
+    assert rc == scan.EXIT_ERROR
+    assert "utf-8" in capsys.readouterr().err.lower()
+
+
+def test_text_mode_reports_hits_without_values(scan, tmp_path, capsys):
+    msg = tmp_path / "msg"
+    msg.write_text("subject\n\nbody mentions " + FAKE + "\n", encoding="utf-8")
+    rc = scan.main(["--text", str(msg)])
+    out = capsys.readouterr().out
+    assert rc == scan.EXIT_HITS
+    assert FAKE not in out
+    assert ":3" in out
+
+
+def test_staged_warns_when_allowlist_is_edited(scan, monkeypatch, capsys):
+    """spec §4.3 不变式 2：改豁免名单是需要本人确认的动作。"""
+    monkeypatch.setattr(scan, "staged_added_lines",
+                        lambda *a, **k: [("security/allowlist.txt", 3, "x")])
+    monkeypatch.setattr(scan, "load_allowlist", lambda *a, **k: set())
+    rc = scan.main(["--staged"])
+    err = capsys.readouterr().err
+    assert "豁免清单" in err
+    assert rc == scan.EXIT_CLEAN, (
+        "警告不是拦截：清单里的值本就已登记，不会被当成未登记命中")
