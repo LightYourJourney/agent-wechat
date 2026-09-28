@@ -360,6 +360,29 @@ def test_staged_warns_when_allowlist_is_edited(scan, monkeypatch, capsys):
         "警告不是拦截：清单里的值本就已登记，不会被当成未登记命中")
 
 
+def test_staged_show_values_prints_value_and_warns(scan, tmp_path, monkeypatch, capsys):
+    """`--staged --show-values` 是把**暂存区里的真标识**打到 stdout 的那条路——钩子要拦的
+    正是它——所以 spec §4.4 要求这个逃生阀**自己警告这一点**。
+
+    两半都钉：删掉那句 print 会红；把警告改成无条件打印也会红（没开 `--show-values` 时
+    stderr 必须为空——没有值可警告，就不该吓人）。
+    """
+    monkeypatch.setattr(scan, "staged_added_lines",
+                        lambda *a, **k: [("x.txt", 1, "hit " + FAKE + "\n")])
+    monkeypatch.setattr(scan, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(scan, "ALLOWLIST_PATH", tmp_path / "allowlist.txt")
+
+    assert scan.main(["--staged", "--show-values"]) == scan.EXIT_HITS
+    shown = capsys.readouterr()
+    assert FAKE in shown.out, "显式 --show-values 时才放行值本身"
+    assert "命中值本身" in shown.err, "但那一刻必须自己警告（spec §4.4）"
+
+    assert scan.main(["--staged"]) == scan.EXIT_HITS
+    masked = capsys.readouterr()
+    assert FAKE not in masked.out, "不带 --show-values 时值不许出现"
+    assert masked.err == "", "没有值可警告时，stderr 一个字都不该有"
+
+
 def test_main_wrapper_is_fail_closed(scan, monkeypatch, capsys):
     """`main` 是薄壳：**任何**逃出 `_run` 的异常都以 2 退出。
 
