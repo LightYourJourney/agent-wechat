@@ -223,7 +223,7 @@ def text_hits(path):
             for _, _, shape, value in hits_in_text(line)]
 
 
-def main(argv=None):
+def _build_parser():
     ap = argparse.ArgumentParser(description="扫描形状像真机标识的字符串（绝不打印值）")
     ap.add_argument("--all", action="store_true", help="扫全部 tracked 文件（逐处）")
     ap.add_argument("--values", action="store_true", help="逐值汇总（审查用，spec §4.6）")
@@ -234,8 +234,10 @@ def main(argv=None):
                     help="检查豁免清单里的死条目（spec §4.3 不变式 1）")
     ap.add_argument("--staged", action="store_true", help="只扫暂存区的新增行（pre-commit 用）")
     ap.add_argument("--text", metavar="文件", help="扫一个给定文件（commit-msg 用）")
-    args = ap.parse_args(argv)
+    return ap
 
+
+def _run(args):
     if args.verify_allowlist:
         try:
             dead = verify_allowlist()
@@ -286,10 +288,10 @@ def main(argv=None):
                 hits = [(rel, n, shape, value)
                         for rel, n, text in added
                         for _, _, shape, value in hits_in_text(text)]
+            allow = load_allowlist()  # 读文件，必须在边界之内（同前两处）
         except Exception as exc:
             print("scan: 扫描器出错：%s" % exc, file=sys.stderr)
             return EXIT_ERROR
-        allow = load_allowlist()
         unregistered = [h for h in hits if h[3] not in allow]
         for rel, lineno, shape, value in unregistered:
             shown = value if args.show_values else "%d 字符" % len(value)
@@ -310,6 +312,25 @@ def main(argv=None):
     if args.show_values and unregistered:
         print("⚠️ 上面打印了命中值本身——它已进入你的会话记录。", file=sys.stderr)
     return EXIT_HITS if unregistered else EXIT_CLEAN
+
+
+def main(argv=None):
+    """薄壳：**任何**逃出 `_run` 的异常都以 `EXIT_ERROR` 退出。
+
+    各分支内部仍保留自己的 `except Exception`（消息更具体）；这一层只作兜底，
+    防的是「新加一个分支时忘了把读文件/调外部命令的那步放进边界」——
+    那个坑在本计划里已经出现过三次。
+
+    `parse_args` 故意留在 `try` **之外**：参数错误应当照常以 argparse 自己的
+    退出码结束，不该被误报成「扫描器出错」。（`SystemExit` 不是 `Exception`
+    的子类，即使放进去也穿透，但放外面读起来更清楚。）
+    """
+    args = _build_parser().parse_args(argv)
+    try:
+        return _run(args)
+    except Exception as exc:      # 顶层 fail-closed 边界正是宽泛捕获的位置
+        print("scan: 扫描器出错：%s" % exc, file=sys.stderr)
+        return EXIT_ERROR
 
 
 if __name__ == "__main__":

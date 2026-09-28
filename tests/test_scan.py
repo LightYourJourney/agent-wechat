@@ -324,3 +324,34 @@ def test_staged_warns_when_allowlist_is_edited(scan, monkeypatch, capsys):
     assert "豁免清单" in err
     assert rc == scan.EXIT_CLEAN, (
         "警告不是拦截：清单里的值本就已登记，不会被当成未登记命中")
+
+
+def test_main_wrapper_is_fail_closed(scan, monkeypatch, capsys):
+    """`main` 是薄壳：**任何**逃出 `_run` 的异常都以 2 退出。
+
+    删掉 `main` 里那层 try/except，这条就会红。
+    """
+    def boom(_args):
+        raise RuntimeError("模拟一个没有任何内层处理器接住的错误")
+
+    monkeypatch.setattr(scan, "_run", boom)
+    rc = scan.main(["--all"])
+
+    assert rc == scan.EXIT_ERROR
+    assert "扫描器出错" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("argv", [[], ["--values"], ["--staged"]])
+def test_broken_allowlist_is_fail_closed_on_every_entry(scan, tmp_path, monkeypatch, argv):
+    """三条入口在清单不可读时都必须退出 2。
+
+    这个缺陷类在本计划里出现过三次，所以按**入口**参数化而不是只测一条。
+    """
+    allow = tmp_path / "allowlist.txt"
+    allow.write_bytes(b"\xff\xfe not utf-8\n")
+    monkeypatch.setattr(scan, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(scan, "_tracked_files", lambda: [])
+    monkeypatch.setattr(scan, "ALLOWLIST_PATH", allow)
+    monkeypatch.setattr(scan, "staged_added_lines", lambda *a, **k: [])
+
+    assert scan.main(argv) == scan.EXIT_ERROR
