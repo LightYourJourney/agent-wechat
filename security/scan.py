@@ -109,7 +109,7 @@ def main(argv=None):
 
     try:
         hits = scan_repo()
-    except ScannerError as exc:
+    except Exception as exc:
         print("scan: 扫描器出错：%s" % exc, file=sys.stderr)
         return EXIT_ERROR
 

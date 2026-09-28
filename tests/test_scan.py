@@ -82,3 +82,20 @@ def test_missing_git_is_fail_closed(scan, monkeypatch, capsys):
     rc = scan.main(["--all"])
     assert rc == scan.EXIT_ERROR, "找不到 git 必须退出 2，不能崩栈、也不能放行"
     assert "git" in capsys.readouterr().err
+
+
+def test_non_scanner_error_is_fail_closed(scan, monkeypatch, capsys):
+    """任何**非 `ScannerError`** 的内部错误也必须退出 2（不是 1）。
+
+    只捕获 `ScannerError` 时，其他异常会以**退出码 1** 逃逸——而 1 是契约留给
+    「发现命中」的码，于是 0 干净 / 1 命中 / 2 扫描器出错 这个**区分会坍缩**，
+    而那正是本任务存在的目的（spec §4.5）。这条测试就是它的护栏。
+    """
+    def boom(*_args, **_kwargs):
+        raise subprocess.TimeoutExpired(cmd="git", timeout=1)
+
+    monkeypatch.setattr(scan, "_git", boom)
+    rc = scan.main(["--all"])
+
+    assert rc == scan.EXIT_ERROR, "非 ScannerError 的崩溃也必须退出 2"
+    assert "扫描器出错" in capsys.readouterr().err, "消息要点明是扫描器出错，不是发现泄漏"
