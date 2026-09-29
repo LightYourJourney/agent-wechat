@@ -243,14 +243,14 @@ def _filter_excluded(con: sqlite3.Connection, keys: Sequence[str]) -> set[str]:
 
 def upsert_batch(con: sqlite3.Connection, rows: list[messages.MessageRow]) -> int:
     """批量幂等写入。rows 来自 reader 的解码输出（messages.make_row 构造）。
-    返回**被排除而跳过的**条数（`0` = 全写入）；排除清单里的 `msg_key` 一条都不落库。
+    返回**被排除而跳过的**行数（`0` = 全写入）；排除清单里的 `msg_key` 一条都不落库。
 
     排除判据与写入同事务：调用方可能已经开了事务（`export` 先写 refs），那就在那个事务里；
     没开就自己起一个 IMMEDIATE 的——写锁一拿，读到的最新状态在本次写入前不会再变
     （只判据同事务还不够：读在提交前、写在提交后，那份陈旧结果会把被删的行写回去，spec §5.4）。
 
     **水位线走全量 rows**：跳过写、不跳过水位线——否则该会话的增量导出会卡在被排除的
-    那一段反复重扫（spec §5.4 第 1 条）。返回值恒等于 `len(rows) - <实际写入的条数>`，
+    那一段反复重扫（spec §5.4 第 1 条）。返回值恒等于 `len(rows) - <实际写入的行数>`，
     调用方据此把「读到的」与「入库的」分开计（计数契约，见 `export.run_export`）。
     """
     if not con.in_transaction:
@@ -428,7 +428,7 @@ def chat_md5_in_index(con: sqlite3.Connection, account: str) -> set[str]:
 
 def upsert_media_refs(con: sqlite3.Connection,
                       rows: list[tuple[str, str, str | None, str | None]]) -> int:
-    """批量幂等写 media_refs。返回**被排除而跳过的**条数（`0` = 全写入）。
+    """批量幂等写 media_refs。返回**被排除而跳过的**行数（`0` = 全写入）。
     不 commit：由 upsert_batch 的 commit（同事务）或 store.open() 收口。
 
     被排除的 `msg_key` 一条都不落库——`media rebuild-refs` 与 `export` 都是**全量重扫**
@@ -561,7 +561,7 @@ def count_media_refs(con: sqlite3.Connection, account: str, *,
 
 def upsert_msg_parts(con: sqlite3.Connection,
                      rows: list[tuple[str, int, int | None, str | None, bytes]]) -> int:
-    """批量幂等写 msg_parts。返回**被排除而跳过的**条数（`0` = 全写入）。
+    """批量幂等写 msg_parts。返回**被排除而跳过的**行数（`0` = 全写入）。
     不 commit：与 upsert_media_refs 同约定，由调用方收口。
 
     被排除的 `msg_key` 一条都不落库——`appmsg rebuild` 直接回微信库重扫，不拦的话
@@ -706,7 +706,7 @@ def replace_roster(con: sqlite3.Connection, account: str,
     """
     con.execute("DELETE FROM display_names WHERE account=?", (account,))
     # 这一句**必须**留在 DELETE 之后：DELETE 是写语句，它当场把事务开起来并拿到主库的
-    # RESERVED 写锁——**没有匹配行时也拿**（实测：两种情形下 `in_transaction` 都是 True、
+    # WAL 写锁——**没有匹配行时也拿**（实测：两种情形下 `in_transaction` 都是 True、
     # 第二条连接写同一库都报 `database is locked`），其后的两次读与 INSERT 就全在锁内。
     # 挪到 DELETE 之前，两次读落在自动提交里，与写之间就有窗口：`purge --chat` 在窗口里
     # 提交墓碑并删完，本函数随即把那个会话的显示名原样写回去——purge 在 display_names 上

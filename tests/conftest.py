@@ -16,7 +16,7 @@
 **闸两道，缺一即漏：**
 - `store.DB_PATH` —— **import 期绑定**的那一份（上面说的那个洞）。
 - `paths.HOME_DIR` —— **调用时求值**的那些路径都读它：`exclusions.path()`、`decrypt.tmp_dir()`、
-  `media.media_root()`、`moments` 导出根，以及 `purge` 的整条计划/执行/核查。只闸 DB_PATH 的话，
+  `media.export_root()`、`moments.export_root()`，以及 `purge` 的整条计划/执行/核查。只闸 DB_PATH 的话，
   一句 `exclusions.path().unlink()` 就能删掉用户真实的排除清单（T2/T3/T7 都会碰它）。
 
 **刻意不管**另外三个 **import 期绑定**的常量（它们不经过上面两道闸，各有各的理由）：

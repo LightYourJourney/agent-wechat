@@ -20,9 +20,11 @@ def run_export(acct: str, chat_id: str | None = None, full: bool = False,
     索引里却静默躺着 `md5:<hex>` 会话（spec §7 要消灭的正是这个）。
     MCP 的长任务路径不传：任务结果（rows）是已发布契约，那条要另一个设计。
 
-    `on_skipped`：有行被排除时回调一次，参数是本次跳过的条数。与 `on_reader` 同构——
+    `on_skipped`：有行被排除时回调一次，参数是本次跳过的**行数**。与 `on_reader` 同构——
     「成功但有保留」不该只体现在数字变小上（spec §7）。注意它是**跨表**的：
-    被排除的消息行与属于它们的媒体引用行都计入，所以它 ≥ 被排除的消息条数。
+    被排除的消息行与属于它们的媒体引用行都计入，所以它 ≥ 被排除的消息行数。
+    量词只能是「行」：`media rebuild-refs` / `appmsg rebuild` 那两个同款回调一条 `messages`
+    都不写，说「条」会被读成消息条数（`cli._note_skipped` 记着同一笔账）。
 
     `_reader_factory`：测试用的桩入口（省略即 `reader.MessageReader`）。
     """

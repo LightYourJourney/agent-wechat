@@ -1052,7 +1052,7 @@ def media_rebuild_refs(account: str | None = None, progress=None, on_skipped=Non
     **返回值只数未被排除的行**（计数契约，与 `export.run_export` 同款）：它是全量重扫，
     被 `purge --chat` 删掉的会话仍在微信库里，每次都会读到——`store.upsert_media_refs`
     把它们拦在写入端，这里据此把「读到的」与「入库的」分开计。
-    `on_skipped`：有行被排除时回调一次，参数是本次跳过的条数（「成功但有保留」的出口）。
+    `on_skipped`：有行被排除时回调一次，参数是本次跳过的**行数**（「成功但有保留」的出口）。
     """
     ctx = ChatContext(account)
     n = 0
@@ -1087,12 +1087,12 @@ def appmsg_rebuild_parts(account: str | None = None, progress=None, on_skipped=N
         非空的行中，回指解出来 / 没解出来的行数（同一个谓词 ⇒ 两者之和恒等于该谓词下的
         引用行数）。删改后再跑一次，这组随整表变化，而 `parts` 只反映本轮。
 
-    `skipped` 是新增的键（既有键一个不动）：被排除清单挡下、**没落库**的条数——
+    `skipped` 是新增的键（既有键一个不动）：被排除清单挡下、**没落库**的行数——
     `appmsg rebuild` 直接回微信库重扫，被 `purge --chat` 删掉的会话每次都会读到，
     不拦的话它们的原始载荷（`raw_xml` 里是完整正文）会重新长回来（spec §5.4 第 2 条）。
     它不是第三个分母：`skipped ⊆ 缓冲时计的数`，而 `parts` 报的就是那个差
-    （**实际落库**的条数——与 `run_export` / `media_rebuild_refs` 的返回值同款口径，
-    三处都只数真正写进库的行）。`on_skipped`：有行被排除时
+    （**实际落库**的条数——与 `run_export` / `media_rebuild_refs` 的返回值同款口径：
+    三处都只数真正写进库的那些）。`on_skipped`：有行被排除时
     回调一次（与 `media_rebuild_refs` / `run_export` 同款，「成功但有保留」的出口）。
     """
     ctx = ChatContext(account)

@@ -1,6 +1,4 @@
 """exclusions 模块的单元测试。**不得指向真实 ~/.agent-wechat**（红线同 test_purge.py）。"""
-import pathlib
-
 import pytest
 
 from agent_wechat import exclusions, paths
