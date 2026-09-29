@@ -12,8 +12,10 @@
 """
 from __future__ import annotations
 
+import contextlib
 import pathlib
 import sqlite3
+from collections.abc import Iterator
 
 from . import paths
 
@@ -44,6 +46,31 @@ def path_for(db_path: pathlib.Path) -> pathlib.Path:
     才能让排除表也落在 tmp 里。生产上两者一致——`store.DB_PATH` 就是 `HOME_DIR/index.db`。
     """
     return db_path.parent / "exclusions.db"
+
+
+@contextlib.contextmanager
+def standalone() -> Iterator[sqlite3.Connection]:
+    """只连排除清单本身的连接：`:memory:` + `ATTACH DATABASE ? AS exclusions`。
+
+    给**不能走 `store.open()`** 的场合用——`store.connect()` 会 `ensure_home_dirs()` 并把整个
+    索引 schema 建出来，于是「看一眼/改一下清单」会把刚被 `purge --index` 删掉的 index.db
+    当场重建。别名与生产一致（`store.connect()` ATTACH 用的也是 `exclusions`，见模块
+    docstring），所以本模块与 `purge.py` 里那些带库名前缀的 SQL 原样可用。
+
+    清单文件不存在时给一张**空表**（在内存里建同一份 schema），而不是让 ATTACH 顺手把它
+    建出来——一条只读的查询不该在用户磁盘上落新文件。
+    """
+    p = path()
+    con = sqlite3.connect(":memory:")
+    try:
+        if p.exists():
+            con.execute("ATTACH DATABASE ? AS exclusions", (str(p),))
+        else:
+            con.execute("ATTACH DATABASE ':memory:' AS exclusions")
+            con.executescript(SCHEMA)
+        yield con
+    finally:
+        con.close()
 
 
 def add(con: sqlite3.Connection, rows: list[tuple[str, str, str]]) -> int:

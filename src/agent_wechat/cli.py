@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import contextlib
 import json
 import sqlite3
 import sys
@@ -475,32 +474,6 @@ def _exclusion_count() -> int | None:
         return None      # 读不出来就不说话：这句提示不该把销毁本身弄成失败
 
 
-@contextlib.contextmanager
-def _exclusions_con():
-    """只连排除清单的连接：`:memory:` + `ATTACH DATABASE ? AS exclusions`。
-
-    **绝不走 `store.open()`**：那条路会 `paths.ensure_home_dirs()` 并把整个索引 schema 建出来，
-    于是「看一眼排除清单」这个动作会把 `purge --index` 刚删掉的 index.db 当场重建——
-    而 `--excluded` 与 `--undo` 恰恰是紧跟在销毁之后跑的那两条（取舍与 `_exclusion_count`
-    同款，理由见那里）。别名与生产一致，`exclusions.py` 那几条 SQL 原样可用。
-
-    清单文件不存在时给一张**空表**（在内存里建同一份 schema），而不是让 ATTACH 顺手把它
-    建出来：一条只读的列清单命令不该在用户磁盘上落新文件。
-    """
-    from . import exclusions
-    p = exclusions.path()
-    con = sqlite3.connect(":memory:")
-    try:
-        if p.exists():
-            con.execute("ATTACH DATABASE ? AS exclusions", (str(p),))
-        else:
-            con.execute("ATTACH DATABASE ':memory:' AS exclusions")
-            con.executescript(exclusions.SCHEMA)
-        yield con
-    finally:
-        con.close()
-
-
 def cmd_purge(args: argparse.Namespace) -> int:
     """销毁本地产物。**默认 dry-run**：不带 --yes 只打印计划，一个字节不删。
 
@@ -509,8 +482,9 @@ def cmd_purge(args: argparse.Namespace) -> int:
     """
     # 两个轴各自分派：`--excluded` 是一次全局查询、`--chat` 是「删哪个会话」，两者都不碰
     # 产物范围那份计划（`purge.plan()` 会枚举 HOME_DIR，而它们一个字节都不删）。
-    # `--excluded` 放在 purge 的惰性 import **之前**：它连产物表都不看，不该为一条只读清单
-    # 命令把 vector→sqlite_vec 那条链拉起来（本文件开篇的冷启动取舍）。
+    # 分派放在 `from . import purge` 之前只是因为它用不上 purge——**不是**为了省冷启动：
+    # `main()` 的 purge 校验分支早就 `from . import purge as _purge` 过了，purge→vector→
+    # sqlite_vec 那条链在这个入口无论如何都已经拉起。
     if args.excluded:
         return _cmd_purge_excluded()
 
@@ -697,7 +671,7 @@ def _cmd_purge_excluded() -> int:
     `purge --index` 之后跑、索引已经不在了（spec §3）。"""
     from . import exclusions
     try:
-        with _exclusions_con() as con:
+        with exclusions.standalone() as con:
             rows = exclusions.by_chat(con)
     except (sqlite3.Error, OSError) as exc:
         # 读不出来**不能**报「0 条」：那是「一条都没被挡」的意思，与事实相反，而用户正是
@@ -714,7 +688,7 @@ def _cmd_purge_excluded() -> int:
 
 
 def _cmd_purge_chat(args: argparse.Namespace) -> int:
-    from . import purge, usecases
+    from . import purge, store, usecases
     targets = usecases.purge_chat_targets(args.chat, account=args.account)
     if isinstance(targets, usecases.NeedConfirm):
         return _need_confirm(args.chat, targets)
@@ -726,6 +700,13 @@ def _cmd_purge_chat(args: argparse.Namespace) -> int:
         return 0
     if args.undo:
         return _cmd_purge_chat_undo(targets, yes=args.yes)
+    if not store.DB_PATH.exists():
+        # 索引库不在（`purge --index` 之后）+ 有墓碑 → targets 是「只剩墓碑」的那些账号。
+        # 删除这条路会让 `plan_chat` 的 `store.open()` 把刚删掉的索引连 schema 建回来；
+        # 而活消息一条都没有，本来就没有东西可删——说清楚，别默默重建。
+        print(f"索引库不在（{store.DB_PATH}）——没有活消息可删；"
+              "要解除排除请加 --undo。", file=sys.stderr)
+        return 0
     plan = purge.plan_chat(targets)
     _render_chat_plan(plan, args.chat)
     if not args.yes:
@@ -744,9 +725,11 @@ def _cmd_purge_chat(args: argparse.Namespace) -> int:
     res = purge.verify_chat(plan)
     print("\n核查：")
     print(res.render())
-    # 四处判据缺一不可：导出物删掉了（报告侧）、墓碑写够了、索引里没有存活行、没有残留目录
-    # （核查侧）。`export_removed` 与 `export_still_there` 看似重复，但前者是「这一条报了什么」、
-    # 后者是「核查看见了什么」——把报告那一侧也接进退出码，就不存在「报告说没删掉、退出码 0」。
+    # 判据从「报告」与「核查」两侧各取一份。**今天前两项与后两项互为冗余**（实测：摘掉
+    # `not res.export_still_there` 没有任何测试会红），不是四条独立判据——别按「四处缺一不可」
+    # 记账。两份都留着是因为它们回答的是不同的问题：`export_removed` 是「这一条报了什么」，
+    # `export_still_there` 是「核查看见了什么」，而 memo ③ 要的是「报告说没删掉 ⇒ 不许退 0」
+    # 这条通道独立存在（它的判据是注入式的那条测试）。
     ok = (all(r.export_removed for r in reports) and res.tombstone_ok
           and not res.leftover and not res.export_still_there)
     return 0 if ok else 1
@@ -760,7 +743,7 @@ def _cmd_purge_chat_undo(targets: list[dict], yes: bool) -> int:
     """
     from . import exclusions
     try:
-        with _exclusions_con() as con:
+        with exclusions.standalone() as con:
             per = [(t["account"], t["chat_md5"],
                     con.execute("SELECT count(*) FROM exclusions.excluded "
                                 "WHERE account=? AND chat_md5=?",
@@ -952,6 +935,10 @@ def main(argv: list[str] | None = None) -> None:
         if args.excluded:
             if args.chat or args.undo or named or args.all:
                 p.error("--excluded 是全局查询，不能与其它参数同用")
+        elif args.undo and not args.chat:
+            # `--undo` 只对会话有意义。少了这一条，`purge --undo --media --yes` 会被当成
+            # 一条普通的范围删除跑掉——`--undo` 毫无效果，而整棵 media/ 没了（不可逆）。
+            p.error("--undo 只与 --chat 同用：它问的是「解除哪个会话的排除」，不是「删哪一类文件」")
         elif args.chat:
             if named or args.all:
                 p.error("--chat 与具名范围/--all 互斥：它问的是「删哪个会话」，不是「删哪一类文件」")

@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from . import account as acc_mod
-from . import appmsg, chatview, errors, export, keys, messages, paths, reader, search, store, tasks, vector
+from . import appmsg, chatview, errors, exclusions, export, keys, messages, paths, reader, search, store, tasks, vector
 # 模板模块名与下面的用例函数 `chat_index()` **同名**：这里起别名，否则函数定义会遮蔽
 # 模块名（`index_html.render` 那处引用会变成调用函数自身）。
 from . import chat_index as index_html
@@ -1010,8 +1010,11 @@ def purge_chat_targets(contact: str, account: str | None = None) -> list[dict] |
     这一支不会留下删不掉的残留：`--undo` 按 (account, chat_md5) 把墓碑删干净之后，
     这个账号下一次就不在并集里了。
 
-    这条 SQL 里的 `exclusions.excluded` 来自 `store.open()` 的 ATTACH（exclusions.py 的
-    模块 docstring 记了这条约定），所以这里必须走 `store.open()`、不能用裸连接。
+    **`index.db` 不存在时一个字节都不许建**：`store.open()`（→ `store.connect()` →
+    `executescript(SCHEMA)`）会把刚被 `purge --index` 删掉的索引连 schema 一起建回来，
+    而 `--undo` 恰恰是紧跟销毁之后跑的那条命令——它会**静默撤销那次索引 purge**。
+    索引库不在 ≡ 没有活消息（那一支本来就没有行可给），所以跳过它、只查排除清单即可；
+    那一支走 `exclusions.standalone()`（`:memory:` + ATTACH），同样不落文件。
     """
     chat_id = ChatContext(account).resolve_optional(contact)
     if isinstance(chat_id, NeedConfirm):
@@ -1020,11 +1023,17 @@ def purge_chat_targets(contact: str, account: str | None = None) -> list[dict] |
         raise errors.ContactNotFound(f"找不到会话「{contact}」")
     md5 = messages.chat_md5(chat_id)
     try:
-        with store.open() as con:
-            rows = con.execute(
-                "SELECT account FROM messages WHERE chat_id=? "
-                "UNION SELECT account FROM exclusions.excluded WHERE chat_md5=? "
-                "ORDER BY account", (chat_id, md5)).fetchall()
+        if store.DB_PATH.exists():
+            with store.open() as con:
+                rows = con.execute(
+                    "SELECT account FROM messages WHERE chat_id=? "
+                    "UNION SELECT account FROM exclusions.excluded WHERE chat_md5=? "
+                    "ORDER BY account", (chat_id, md5)).fetchall()
+        else:
+            with exclusions.standalone() as con:
+                rows = con.execute(
+                    "SELECT account FROM exclusions.excluded WHERE chat_md5=? "
+                    "ORDER BY account", (md5,)).fetchall()
     except (sqlite3.Error, OSError) as exc:
         # 与 plan_chat 同一口径：读不了索引/清单时裸 sqlite3.Error 会一路逃到 CLI 的
         # `except AgentWeChatError` 之外，用户看到的是一整个 traceback 而不是一行拒绝。

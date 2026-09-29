@@ -1291,6 +1291,21 @@ def test_purge_chat_dry_run_shows_the_resolved_identity_and_the_moments_warning(
     assert (home / "index.db").stat().st_size > 0        # 一个字节没删
 
 
+def test_purge_undo_needs_the_chat_flag(tmp_path, monkeypatch, capsys):
+    """`--undo` 只对会话有意义（评审 F2）。
+
+    少了这一条，`purge --undo --media --yes` 会被当成一条普通的范围删除**跑掉**：整棵
+    `media/` 没了（不可逆），而用户要的 `--undo` 毫无效果、也没有一个字提示。
+    """
+    _isolate(tmp_path, monkeypatch)
+    for argv in (["purge", "--undo", "--media", "--yes"],
+                 ["purge", "--undo", "--all", "--yes"],
+                 ["purge", "--undo"]):
+        with pytest.raises(SystemExit) as ei:
+            cli.main(argv)
+        assert ei.value.code == 2, f"{argv} 应当退 2（--undo 只与 --chat 同用）"
+
+
 def test_purge_excluded_lists_by_chat_md5(tmp_path, monkeypatch, capsys):
     _isolate(tmp_path, monkeypatch)
     from agent_wechat import exclusions
@@ -1328,20 +1343,22 @@ def test_purge_undo_yes_clears_the_tombstone_but_keeps_the_data_gone(
     而**数据仍然不在**——撤销只放开拦截，重导才把消息带回来。
 
     少了后半句，这条命令的语义会被读成「撤销 = 恢复」——那正是它的输出里必须印死一句的原因。
+
+    **夹具必须自洽**（`chat_id` ↔ `chat_md5` 成对，见 `_chat_row`）：不自洽时墓碑存的是
+    messages 行里的列、而核查按**派生值**数（`purge.py` 的 `_write_tombstone` / `verify_chat`），
+    于是真删那次会退 1——一条永远退 1 的实现也能过这条测试。
     """
     home = _isolate(tmp_path, monkeypatch)
-    from agent_wechat import exclusions
+    from agent_wechat import exclusions, messages
+    md5 = messages.md5_of("victim")
     with store.open() as con:
-        store.upsert_batch(con, [{
-            "msg_key": "a|aaaa|message_0.db|1", "account": "a", "chat_md5": "aaaa",
-            "chat_id": "victim", "shard": "message_0.db", "local_id": 1, "server_id": 1,
-            "ts": 100, "msg_type": 1, "sender_id": None, "sender_name": None,
-            "is_self": 0, "content": "要删的", "media_hint": None}])
+        store.upsert_batch(con, [_chat_row(1)])
     monkeypatch.setattr(usecases, "purge_chat_targets",
                         lambda *a, **kw: [{"account": "a", "chat_id": "victim",
-                                           "chat_md5": "aaaa"}])
-    with pytest.raises(SystemExit):
+                                           "chat_md5": md5}])
+    with pytest.raises(SystemExit) as ei:
         cli.main(["purge", "--chat", "小李", "--yes"])          # 先真删一次
+    assert ei.value.code == 0, "删除成功就该退 0"
     with store.open() as con:
         assert exclusions.count(con) == 1
         assert con.execute("SELECT count(*) FROM messages").fetchone()[0] == 0
@@ -1370,6 +1387,8 @@ def test_purge_chat_plan_counts_a_shared_export_dir_once(tmp_path, monkeypatch, 
     d = home / "media" / md5
     d.mkdir(parents=True)
     (d / "chat.html").write_bytes(b"x" * 1_200_000)
+    with store.open() as con:                    # 有索引的机器（索引库不在时走的是另一条提示）
+        store.upsert_batch(con, [_chat_row(1)])
     monkeypatch.setattr(usecases, "purge_chat_targets", lambda *a, **kw: [
         {"account": "a", "chat_id": "victim", "chat_md5": md5},
         {"account": "b", "chat_id": "victim", "chat_md5": md5}])
@@ -1443,20 +1462,73 @@ def test_purge_excluded_and_undo_do_not_recreate_the_index(tmp_path, monkeypatch
 
     `--excluded` 的用途之一正是「`purge --index` 之后看看清单还剩多少」；`--undo` 同理
     ——它只碰 `exclusions.db`，跟索引库没有关系。
+
+    **只桩解析层**（`ChatContext`），不桩 `purge_chat_targets`：桩掉它这条断言就成了假的
+    ——生产路径上第一个 `store.open()` 就在那个函数里（评审 F1），桩掉之后守卫测不到它。
     """
     home = _isolate(tmp_path, monkeypatch)
-    from agent_wechat import exclusions
+    from agent_wechat import exclusions, messages
+    md5 = messages.md5_of("victim")
     with store.open() as con:
-        exclusions.add(con, [("a|aaaa|message_0.db|1", "a", "aaaa")])
-    monkeypatch.setattr(usecases, "purge_chat_targets",
-                        lambda *a, **kw: [{"account": "a", "chat_id": "victim",
-                                           "chat_md5": "aaaa"}])
+        exclusions.add(con, [(f"a|{md5}|message_0.db|1", "a", md5)])
+    _stub_resolution(monkeypatch, "victim")
     for argv in (["purge", "--excluded"], ["purge", "--chat", "小李", "--undo"]):
         (home / "index.db").unlink(missing_ok=True)   # 模拟 purge --index（第二轮它已被证明不在）
         with pytest.raises(SystemExit) as ei:
             cli.main(argv)
         assert ei.value.code == 0, argv
         assert not (home / "index.db").exists(), f"{argv} 把刚删掉的索引建回来了"
+    with store.open() as con:            # 不带 --yes：清单一个字节都没动（两轮都没动）
+        assert exclusions.count(con) == 1
+
+
+def test_purge_chat_without_an_index_does_not_rebuild_it(tmp_path, monkeypatch, capsys):
+    """删除那条路也不许把索引库建回来（F1 那个洞的另一半）。
+
+    索引库不在时目标仍可能非空（只剩墓碑的那些账号），而 `plan_chat` 一进门就 `store.open()`
+    ——刚被 `purge --index` 删掉的索引会当场长回来。活消息一条都没有：没有东西可删，
+    说清楚，并指向 `--undo`。
+    """
+    home = _isolate(tmp_path, monkeypatch)
+    from agent_wechat import exclusions, messages
+    md5 = messages.md5_of("victim")
+    with store.open() as con:
+        exclusions.add(con, [(f"a|{md5}|message_0.db|1", "a", md5)])
+    (home / "index.db").unlink()                   # 模拟 purge --index
+    _stub_resolution(monkeypatch, "victim")
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["purge", "--chat", "小李", "--yes"])
+    assert ei.value.code == 0
+    assert not (home / "index.db").exists(), "删除路线把刚删掉的索引建回来了"
+    err = capsys.readouterr().err
+    assert "索引库不在" in err and "--undo" in err
+    with exclusions.standalone() as con:
+        assert exclusions.count(con) == 1, "什么都没删（活消息本来就没有）"
+
+
+def test_purge_chat_undo_works_with_no_index_db_at_all(tmp_path, monkeypatch, capsys):
+    """**撤销必须能在索引库完全不存在时跑通**（评审 F1 的判别条）。
+
+    `--undo` 的典型用法就是 `purge --chat X --yes` 之后反悔，而用户还可能顺手跑过
+    `purge --index` 去回收空间（本命令自己的汇总就在推荐它）。若这条路线里任何一个
+    `store.open()` 走到，就会冒出一个全 schema 的 index.db——**静默撤销那次索引 purge**。
+    所以：索引库不在时，目标只从排除清单出，一个字节都不建。
+    """
+    home = _isolate(tmp_path, monkeypatch)
+    from agent_wechat import exclusions, messages
+    md5 = messages.md5_of("victim")
+    with store.open() as con:                      # 先建索引写墓碑，再把它删掉
+        exclusions.add(con, [(f"a|{md5}|message_0.db|1", "a", md5)])
+    (home / "index.db").unlink()
+    _stub_resolution(monkeypatch, "victim")        # 不桩 purge_chat_targets
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["purge", "--chat", "小李", "--undo", "--yes"])
+    assert ei.value.code == 0
+    out = capsys.readouterr().out
+    assert "已解除 1 条排除" in out
+    assert not (home / "index.db").exists(), "撤销把刚删掉的索引建回来了"
+    with exclusions.standalone() as con:           # 读清单**也不能**把索引建回来
+        assert exclusions.count(con) == 0
 
 
 def test_purge_chat_undo_reaches_a_chat_whose_messages_are_already_gone(
@@ -1507,6 +1579,75 @@ def test_purge_chat_targets_fans_out_over_every_account_with_the_chat(tmp_path, 
     _stub_resolution(monkeypatch, "victim")
     targets = usecases.purge_chat_targets("小李")
     assert [t["account"] for t in targets] == ["a", "b"], "别的会话的账号不该进来"
+
+
+def test_purge_excluded_on_a_fresh_machine_prints_zero_and_creates_nothing(
+        tmp_path, monkeypatch, capsys):
+    """清单文件**不存在**的那条支路（`exclusions.standalone()` 的内存空表分支，评审 F5①）。
+
+    这是新特性最可能的第一次运行形态（还没删过任何东西）。判据有两条，缺一不可：
+    印「0 条」、且**没有**在磁盘上落下 exclusions.db——ATTACH 一个不存在的路径会把它建出来，
+    一条只读的列清单命令不该做这件事。
+    """
+    home = _isolate(tmp_path, monkeypatch)
+    assert not (home / "exclusions.db").exists(), "前提：清单文件不存在"
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["purge", "--excluded"])
+    assert ei.value.code == 0
+    assert "0 条" in capsys.readouterr().out
+    assert not (home / "exclusions.db").exists(), "一条只读命令把清单文件建出来了"
+
+
+def test_purge_excluded_turns_a_broken_list_into_one_line(tmp_path, monkeypatch, capsys):
+    """排除清单损坏 → 一行 `PurgeRefused`（退 1），不是 traceback、更不是「0 条」（评审 F4）。
+
+    夹具是真的（往清单文件里写垃圾字节），不是注入式判据：损坏的清单是 spec §6 明列的
+    拒绝场景，而**报 0 条**是这里最坏的失败——那意思是「一条都没被挡」，与事实相反，
+    用户会以为重导不会把东西带回来。
+    """
+    home = _isolate(tmp_path, monkeypatch)
+    (home / "exclusions.db").write_bytes(b"not a sqlite database" * 100)
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["purge", "--excluded"])
+    assert ei.value.code == 1
+    err = capsys.readouterr().err
+    assert "排除清单读不出来" in err and "Traceback" not in err
+
+
+def test_purge_chat_undo_turns_a_broken_list_into_one_line(tmp_path, monkeypatch, capsys):
+    """`--undo` 的读/写失败同样翻成一行（评审 F4）；桩打在**解析层**，撤销那段是真的。
+
+    这是注入式判据（清单损坏是构造出来的），但判据本身是真的：拆掉 `_cmd_purge_chat_undo`
+    的 `try/except`，裸 `sqlite3.DatabaseError` 会从 `main()` 的 `AgentWeChatError` 漏斗外
+    穿出去——用户看到的是一整个 traceback。
+    """
+    home = _isolate(tmp_path, monkeypatch)
+    (home / "exclusions.db").write_bytes(b"not a sqlite database" * 100)
+    _stub_resolution(monkeypatch, "victim")        # 只桩解析层：撤销那段照跑
+    monkeypatch.setattr(usecases, "purge_chat_targets",
+                        lambda *a, **kw: [{"account": "a", "chat_id": "victim",
+                                           "chat_md5": "aaaa"}])
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["purge", "--chat", "小李", "--undo", "--yes"])
+    assert ei.value.code == 1
+    err = capsys.readouterr().err
+    assert "撤销未执行" in err and "Traceback" not in err
+
+
+def test_purge_chat_turns_a_broken_index_into_one_line(tmp_path, monkeypatch, capsys):
+    """索引库损坏 → `purge_chat_targets` 那一层就翻成一行（评审 F4）。
+
+    与 Task 6 的 `test_plan_chat_turns_a_broken_index_into_purge_refused` 同一形状、不同入口：
+    这里要钉的是**新表面**不许把裸 `sqlite3.DatabaseError` 漏给用户。
+    """
+    home = _isolate(tmp_path, monkeypatch)
+    (home / "index.db").write_bytes(b"not a sqlite database" * 100)
+    _stub_resolution(monkeypatch, "victim")
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["purge", "--chat", "小李"])
+    assert ei.value.code == 1
+    err = capsys.readouterr().err
+    assert "读不出会话" in err and "Traceback" not in err
 
 
 def test_export_wires_the_skipped_note_to_stderr(monkeypatch, capsys):
