@@ -254,18 +254,31 @@ def _has_table(con: sqlite3.Connection, name: str) -> bool:
 
 
 def chat_row_counts(con: sqlite3.Connection, account: str, chat_id: str) -> dict[str, int]:
-    """该会话在五张表里的存活条数。核查与测试共用，避免各处各写一套判据。"""
+    """该会话在五张表里的存活条数。核查与测试共用，避免各处各写一套判据。
+
+    **`msg_parts` / `media_refs` 必须按 `msg_key` 前缀数，不能经 `messages` 子查询数。**
+    子查询那版有个致命的盲区（Task 3 的实现者用变异证明了）：`messages` 一删，子查询立刻为空，
+    于是**这两张表里的孤儿行恒不被计数**——把 `DELETE FROM messages` 提到前面，四条测试全绿，
+    而两张表各留一行孤儿（`msg_parts.raw_xml` 里是完整的 appmsg 载荷）。**核查也会继承这个盲区**：
+    一门自称「删干净了」的命令对着留了正文的孤儿行报 ✅。孤儿不是臆想：`appmsg rebuild` /
+    `media rebuild-refs` 只写 parts/refs、不写 messages，生产上就会留下它们。
+
+    前缀里的 `chat_md5` **在这里就地派生**（`messages.chat_md5(chat_id)`，退化形态安全；
+    用 `md5_of` 会对 `md5:<hex>` 再哈希一次、得到错的 md5）。就地派生而不是加一个参数，
+    是为了不动这个方法已有的全部调用点。**不能用 `LIKE`**：`account` 里含 `_` 与 `%`。
+    """
     def n(sql, args):
         return con.execute(sql, args).fetchone()[0]
-    ids = f"SELECT id FROM messages WHERE account=? AND chat_id=?"
-    keys = f"SELECT msg_key FROM messages WHERE account=? AND chat_id=?"
+    acct_chat = f"{account}|{messages.chat_md5(chat_id)}"
+    pref = acct_chat + "|"
+    p = (len(pref), pref)
     a = (account, chat_id)
     return {
         "messages": n("SELECT count(*) FROM messages WHERE account=? AND chat_id=?", a),
-        "vectors": (n(f"SELECT count(*) FROM vec_messages WHERE msg_rowid IN ({ids})", a)
+        "vectors": (n("SELECT count(*) FROM vec_messages WHERE acct_chat=?", (acct_chat,))
                     if _has_table(con, "vec_messages") else 0),
-        "parts": n(f"SELECT count(*) FROM msg_parts WHERE msg_key IN ({keys})", a),
-        "refs": n(f"SELECT count(*) FROM media_refs WHERE msg_key IN ({keys})", a),
+        "parts": n("SELECT count(*) FROM msg_parts WHERE substr(msg_key, 1, ?) = ?", p),
+        "refs": n("SELECT count(*) FROM media_refs WHERE substr(msg_key, 1, ?) = ?", p),
         "display_names": n("SELECT count(*) FROM display_names WHERE account=? AND chat_id=?", a),
     }
 
@@ -278,19 +291,29 @@ def delete_chat(con: sqlite3.Connection, *, account: str, chat_id: str,
     ② `PRAGMA secure_delete=ON`——实测默认设置下被删消息的正文仍留在 index.db 的 freelist
     页里、grep 得到（spec §2.2b）。本函数不设它，因为它是连接级设置、该由 purge 那条路径统一设。
 
-    顺序有两条硬约束：
+    顺序上只剩一条硬约束：
     - **墓碑必须先落**（由调用方在本函数之前写，同一事务）：先删后挡的话，崩在中间就是
       「删了但没挡」，那批东西会复活；先挡后删最坏只是「挡住了但没删掉」，核查看得见、重跑能收口。
-    - **`vec_messages` 必须早于 `messages`**：它的子查询依赖 `messages` 还在。
+
+    另三处**按宽谓词删**（`vec_messages` 用 `acct_chat` 分区键，`msg_parts`/`media_refs` 用
+    `msg_key` 前缀），不是经 `messages` 子查询删——所以它们与 `messages` 的先后不再有约束，
+    而且消息行早就不在了的**孤儿行照样盖得住**（子查询版会漏掉孤儿，见 `chat_row_counts`）。
     """
     before = chat_row_counts(con, account, chat_id)
     a = (account, chat_id)
-    ids = "SELECT id FROM messages WHERE account=? AND chat_id=?"
-    keys = "SELECT msg_key FROM messages WHERE account=? AND chat_id=?"
+    acct_chat = f"{account}|{chat_md5}"
+    pref = f"{account}|{chat_md5}|"
+    p = (len(pref), pref)
     if _has_table(con, "vec_messages"):                 # 轻装安装上不存在——见 _has_table
-        con.execute(f"DELETE FROM vec_messages WHERE msg_rowid IN ({ids})", a)
-    con.execute(f"DELETE FROM msg_parts WHERE msg_key IN ({keys})", a)
-    con.execute(f"DELETE FROM media_refs WHERE msg_key IN ({keys})", a)
+        # 按 **`acct_chat` 分区键**删，而不是按 `msg_rowid IN (SELECT id FROM messages …)`：
+        # 后者会漏掉孤儿向量（消息行已经不在了的那些），而孤儿正是隐私删除最该清的东西。
+        # 实测（sqlite-vec 0.1.9，两个分区各 100 行）：`DELETE … WHERE acct_chat=?` 成立，
+        # 200→100、被删分区残留 0、另一分区完整；`SELECT count(*) … WHERE acct_chat=?` 同样成立。
+        con.execute("DELETE FROM vec_messages WHERE acct_chat=?", (acct_chat,))
+    # `msg_parts` / `media_refs` 按 **`msg_key` 前缀**删，同样为了盖住孤儿行（见 chat_row_counts）。
+    # 不能用 LIKE：account 里含 `_` 与 `%`，两个都是通配符。
+    con.execute("DELETE FROM msg_parts WHERE substr(msg_key, 1, ?) = ?", p)
+    con.execute("DELETE FROM media_refs WHERE substr(msg_key, 1, ?) = ?", p)
     con.execute("DELETE FROM messages WHERE account=? AND chat_id=?", a)   # FTS 由触发器跟随
     con.execute("DELETE FROM display_names WHERE account=? AND chat_id=?", a)
     # 向量水位线：min 而非 max。**不要复用 vector._set_vector_watermark**——它的 upsert 写的是

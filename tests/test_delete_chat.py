@@ -2,8 +2,19 @@
 import sqlite3
 
 import pytest
+import sqlite_vec
 
-from agent_wechat import exclusions, messages, paths, store
+from agent_wechat import exclusions, messages, paths, store, vector
+
+# 会话 id 的两种形态都要过一遍（`messages.chat_md5` 就这两条分支）：
+# - victim 用**退化形态** `md5:<hex>`：它是 `chat_md5` 与 `md5_of` 唯一分道扬镳的地方
+#   （`md5_of` 会把 `md5:<hex>` 整个串再哈希一次、得到错的 md5）。宽谓词按
+#   `account|chat_md5|` 前缀定位，md5 取错就是**静默地一条都不删**，而核查还报 ✅。
+# - keeper 用普通会话名，把非退化那条分支也走一遍。
+VICTIM = messages.degraded_chat_id("aaaa")          # "md5:aaaa"，id 里就藏着 md5
+VICTIM_MD5 = "aaaa"                                 # 独立字面量，不从被测函数反推
+KEEPER = "keeper"
+KEEPER_MD5 = messages.md5_of(KEEPER)
 
 
 @pytest.fixture(autouse=True)
@@ -29,38 +40,50 @@ def _seed(con):
     # （计划的这一行原本把 victim 写在前面，于是 keeper 拿到 id 3、水位线只能降 3——
     # 与它自己断言的 1 自相矛盾。见 task-3 报告。）
     store.upsert_batch(con, [
-        row("a|bbbb|message_0.db|1", "a", "bbbb", "keeper", 1, 300, "留下的"),
-        row("a|aaaa|message_0.db|1", "a", "aaaa", "victim", 1, 100, "要删的 1"),
-        row("a|aaaa|message_0.db|2", "a", "aaaa", "victim", 2, 200, "要删的 2"),
+        row(f"a|{KEEPER_MD5}|message_0.db|1", "a", KEEPER_MD5, KEEPER, 1, 300, "留下的"),
+        row(f"a|{VICTIM_MD5}|message_0.db|1", "a", VICTIM_MD5, VICTIM, 1, 100, "要删的 1"),
+        row(f"a|{VICTIM_MD5}|message_0.db|2", "a", VICTIM_MD5, VICTIM, 2, 200, "要删的 2"),
     ])
-    store.upsert_msg_parts(con, [("a|aaaa|message_0.db|1", 57, None, None, b"<x/>")])
-    store.upsert_media_refs(con, [("a|aaaa|message_0.db|1", "image", "f" * 32, None)])
-    con.execute("INSERT INTO display_names VALUES ('a','victim','u1','受害人')")
-    con.execute("INSERT INTO display_names VALUES ('a','keeper','u2','留下的人')")
+    store.upsert_msg_parts(con, [(f"a|{VICTIM_MD5}|message_0.db|1", 57, None, None, b"<x/>")])
+    store.upsert_media_refs(con, [(f"a|{VICTIM_MD5}|message_0.db|1", "image", "f" * 32, None)])
+    store.upsert_msg_parts(con, [(f"a|{KEEPER_MD5}|message_0.db|1", 57, None, None, b"<k/>")])
+    # **孤儿行**：msg_key 属于 victim，但 messages 里没有对应的行。生产上真会出现——
+    # `appmsg rebuild` / `media rebuild-refs` 只写 parts/refs、不写 messages。它带着完整的
+    # appmsg 载荷，而「经 messages 子查询」那版**删除与计数都看不见它**（核查会对着残留正文报 ✅）。
+    # 这两行是本文件最重要的回归：按 msg_key 前缀的宽谓词必须把它们扫掉。
+    store.upsert_msg_parts(con, [(f"a|{VICTIM_MD5}|message_0.db|90", 57, None, None, b"<orphan/>")])
+    store.upsert_media_refs(con, [(f"a|{VICTIM_MD5}|message_0.db|91", "image", "e" * 32, None)])
+    con.execute("INSERT INTO display_names VALUES ('a',?,'u1','受害人')", (VICTIM,))
+    con.execute("INSERT INTO display_names VALUES ('a',?,'u2','留下的人')", (KEEPER,))
     con.commit()
 
 
 def test_delete_chat_removes_all_five_places(_temp_index):
     con = _temp_index
-    got = store.delete_chat(con, account="a", chat_id="victim", chat_md5="aaaa")
-    assert got == {"messages": 2, "vectors": 0, "parts": 1, "refs": 1, "display_names": 1}
-    assert store.chat_row_counts(con, "a", "victim") == {
+    got = store.delete_chat(con, account="a", chat_id=VICTIM, chat_md5=VICTIM_MD5)
+    # parts/refs 各 2：一条挂在存活消息上、一条是孤儿。**子查询版这里只会是 1**——孤儿看不见。
+    assert got == {"messages": 2, "vectors": 0, "parts": 2, "refs": 2, "display_names": 1}
+    assert store.chat_row_counts(con, "a", VICTIM) == {
         "messages": 0, "vectors": 0, "parts": 0, "refs": 0, "display_names": 0}
-    # 上面那条**挡不住 parts/refs 一条没删**：chat_row_counts 里这两项数的是
-    # `msg_key IN (SELECT msg_key FROM messages …)`，messages 一删子查询就空、恒为 0。
-    # 实测把 `DELETE FROM messages` 提到 parts/refs 之前，上面那条断言照样全绿，而两张表里
-    # 各留着一行孤儿（raw_xml 就是 purge 要销毁的那份载荷）。所以这里直接数全表——
-    # 夹具里这两张表只有 victim 的行，全表为 0 就等于「这个会话的载荷真没了」。
-    assert con.execute("SELECT count(*) FROM msg_parts").fetchone()[0] == 0
-    assert con.execute("SELECT count(*) FROM media_refs").fetchone()[0] == 0
+    # 这两条是**宽谓词的回归**（也是上面那两条断言的补丁）：子查询版删不到孤儿，两张表各留一行
+    # （`msg_parts.raw_xml` 就是 purge 要销毁的那份载荷），而上面照样全绿。
+    # 判据在测试里**独立写一遍**（不借 chat_row_counts，也不用全表计数——keeper 在这两张表里
+    # 本来就有一行，"全表为 0" 会被它挡住；要问的是「victim 这个分区还剩不剩」）。
+    pref = f"a|{VICTIM_MD5}|"
+    for table in ("msg_parts", "media_refs"):
+        assert con.execute(f"SELECT count(*) FROM {table} WHERE substr(msg_key, 1, ?) = ?",
+                           (len(pref), pref)).fetchone()[0] == 0, f"{table} 里还留着 victim 的行"
 
 
 def test_delete_chat_leaves_the_other_chat_untouched(_temp_index):
     """**反向断言**：范围泄漏在这门命令上不可逆，比正断言重要。"""
     con = _temp_index
-    store.delete_chat(con, account="a", chat_id="victim", chat_md5="aaaa")
-    assert store.chat_row_counts(con, "a", "keeper")["messages"] == 1
-    assert con.execute("SELECT count(*) FROM display_names WHERE chat_id='keeper'"
+    store.delete_chat(con, account="a", chat_id=VICTIM, chat_md5=VICTIM_MD5)
+    # keeper 的五项一个不少：前缀是 `account|chat_md5|`，**多一个 `|` 少一个 `|` 都会串到别的会话**
+    # （keeper 的 parts 行就是用来钉这件事的：前缀写宽了会把它一起删掉）。
+    assert store.chat_row_counts(con, "a", KEEPER) == {
+        "messages": 1, "vectors": 0, "parts": 1, "refs": 0, "display_names": 1}
+    assert con.execute("SELECT count(*) FROM display_names WHERE chat_id=?", (KEEPER,)
                        ).fetchone()[0] == 1
     assert con.execute("SELECT count(*) FROM messages_fts").fetchone()[0] == 1, \
         "FTS 必须由触发器跟随——少删一条就是搜索里还搜得到"
@@ -87,7 +110,7 @@ def test_rowid_reuse_regression(_temp_index):
         "  embedded INTEGER NOT NULL DEFAULT 0, skipped INTEGER NOT NULL DEFAULT 0);")
     con.execute("INSERT INTO vector_watermark VALUES ('m', 'a', 999999, 0)")
     con.commit()
-    store.delete_chat(con, account="a", chat_id="victim", chat_md5="aaaa")
+    store.delete_chat(con, account="a", chat_id=VICTIM, chat_md5=VICTIM_MD5)
     wm = con.execute("SELECT last_rowid FROM vector_watermark WHERE account='a'").fetchone()[0]
     assert wm == 1, f"水位线必须降到新的 max(id)=1，实际 {wm}"
     # 注意这条测试**不区分**「全局 max」与「该账号自己的 max」——本夹具只有一个账号，两者相同。
@@ -107,6 +130,41 @@ def test_delete_chat_without_any_vector_tables(_temp_index):
         "SELECT name FROM sqlite_master WHERE type='table'")}
     assert "vec_messages" not in names and "vector_watermark" not in names, \
         "前提：这个 fixture 刻意不建向量表"
-    got = store.delete_chat(con, account="a", chat_id="victim", chat_md5="aaaa")
+    got = store.delete_chat(con, account="a", chat_id=VICTIM, chat_md5=VICTIM_MD5)
     assert got["vectors"] == 0
-    assert store.chat_row_counts(con, "a", "victim")["vectors"] == 0
+    assert store.chat_row_counts(con, "a", VICTIM)["vectors"] == 0
+
+
+def test_delete_chat_removes_vectors_of_that_chat_only(_temp_index):
+    """**七处里唯一没有直接覆盖的一处**：`vec_messages` 是虚表，前面几条测试都只跑到
+    `_has_table` 为假的分支（轻装安装）。这条真加载 sqlite_vec、真建表、真种向量、真删。
+
+    删的是 **`acct_chat` 分区键**（`vector._acct_chat`，生产写入与查询共用同一个函数——
+    用它而不是在测试里手拼，正是为了钉住 store 内联的 `f"{account}|{chat_md5}"` 与它同格式），
+    不是 `msg_rowid IN (SELECT id FROM messages …)`：后者会漏掉**孤儿向量**（消息行早就不在了的
+    那些），而孤儿带着正文的嵌入、正是隐私删除最该清掉的东西。
+    """
+    con = _temp_index
+    con.enable_load_extension(True)
+    sqlite_vec.load(con)
+    con.enable_load_extension(False)
+    con.executescript(store.VECTOR_SCHEMA)      # 真 DDL（含 acct_chat 分区键），不手抄一份
+    emb = sqlite_vec.serialize_float32([0.1] * store.VECTOR_DIM)
+    victim_key = vector._acct_chat("a", VICTIM_MD5)
+    keeper_key = vector._acct_chat("a", KEEPER_MD5)
+    # msg_rowid 与夹具里 messages.id 对齐：keeper=1、victim=2,3；999 是孤儿（messages 里没有它）。
+    con.executemany(
+        "INSERT INTO vec_messages(msg_rowid, embedding, acct_chat, account, ts, preview) "
+        "VALUES (?,?,?,?,?,NULL)",
+        [(2, emb, victim_key, "a", 100), (3, emb, victim_key, "a", 200),
+         (999, emb, victim_key, "a", 900), (1, emb, keeper_key, "a", 300)])
+    con.commit()
+    assert store.chat_row_counts(con, "a", VICTIM)["vectors"] == 3
+    assert store.chat_row_counts(con, "a", KEEPER)["vectors"] == 1
+    got = store.delete_chat(con, account="a", chat_id=VICTIM, chat_md5=VICTIM_MD5)
+    assert got["vectors"] == 3, "孤儿向量也算数——它带着正文的嵌入"
+    assert store.chat_row_counts(con, "a", VICTIM)["vectors"] == 0
+    # keeper **逐条完好**：一条不多、一条不少，且 `acct_chat` 没被改
+    assert [tuple(r) for r in con.execute(
+        "SELECT msg_rowid, acct_chat FROM vec_messages ORDER BY msg_rowid")] == [(1, keeper_key)]
+    assert store.chat_row_counts(con, "a", KEEPER)["vectors"] == 1
