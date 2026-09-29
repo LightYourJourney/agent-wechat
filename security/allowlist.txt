@@ -25,15 +25,19 @@ wxid_friend01  wxid · 13 字符 · --allow 5eae113f 登记
 wxid_anything  wxid · 13 字符 · --allow 5fa4a9e7 登记
 12345678@chatroom  chatroom · 17 字符 · --allow 6c02fd38 登记
 wxid_qz7x2m4k9p1v3n8b  wxid · 21 字符 · --allow 7850126c 登记
+# 结构理由：验收文档里那条 post id 的**中间一段**（完整 ID 比它长，这 11 位是形状扫描截出来的）
 14860259457  phone · 11 字符 · --allow 7b62ec25 登记
+# 结构理由：连号占位——前缀 13 + 尾部 9 位同一个数字，构造痕迹一眼可辨（朋友圈测试夹具）
 13000000000  phone · 11 字符 · --allow 8e0396e4 登记
 wxid_0000  wxid · 9 字符 · --allow 94ad6a38 登记
+# 结构理由：连号占位——保留测试号段风格的重复结构（扫描器自身的测试用）
 13800138000  phone · 11 字符 · --allow a6942f97 登记
 wxid_abc123  wxid · 11 字符 · --allow acb2c0ef 登记
 wxid_requires_four_chars_after_prefix  wxid · 37 字符 · --allow b7ade123 登记
 123456@chatroom  chatroom · 15 字符 · --allow cbb1524b 登记
 wxid_zzzznotinthere9  wxid · 20 字符 · --allow d0bc69e0 登记
 wxid_abcd  wxid · 9 字符 · --allow ef82ef86 登记
+# 结构理由：贴纸 `productid` 里的数字子串（包名与十六进制摘要的接缝处），不是号码
 15375600770  phone · 11 字符 · --allow f03e0d9b 登记
 wxid_friend  wxid · 11 字符 · --allow f3c7a758 登记
 wxid_bulk  wxid · 9 字符 · --allow f44cc3f6 登记
@@ -56,4 +60,5 @@ wxid_other2222_ab12  wxid · 19 字符 · --allow ee4a5ab3 登记
 wxid_xxx_hex4  wxid · 13 字符 · --allow 0c1581b4 登记
 wxid_xxx_abcd  wxid · 13 字符 · --allow 2bddfde0 登记
 wxid_xxx_ab12  wxid · 13 字符 · --allow c8392dc6 登记
+# 结构理由：八进制 `127.0.0.1` 的写法（`0` + 此串）——WHATWG IPv4 判定的说明与它的测试
 17700000001  phone · 11 字符 · --allow a93d4abd 登记

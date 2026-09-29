@@ -8,7 +8,6 @@
 """
 import importlib.util
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
@@ -149,6 +148,50 @@ def test_scan_repo_skips_generated_lockfiles(scan, tmp_path, monkeypatch):
     assert rels == {"real.py"}, "uv.lock 不许进扫描面；真实文件必须照扫不误"
 
 
+# 修改已跟踪的锁文件——这是 uv.lock 最常见的形态（重新生成后 git add）。
+# 结构照 `git diff --cached --unified=0` 抄：`index` 行、`--- `/`+++ ` 双头、hunk 头。
+DIFF_WITH_LOCK = """\
+diff --git a/uv.lock b/uv.lock
+index b8cb000..ba5ef67 100644
+--- a/uv.lock
++++ b/uv.lock
+@@ -1,0 +2,2 @@
++hash "13800138000"
++plain
+diff --git a/real.py b/real.py
+new file mode 100644
+index 0000000..9cd59d8
+--- /dev/null
++++ b/real.py
+@@ -1,0 +1 @@
++hit " + FAKE + "
+"""
+
+
+def test_staged_skips_generated_lockfiles(scan, tmp_path, monkeypatch, capsys):
+    """终审 Critical 1：`--staged` 也必须跳过生成的依赖锁。
+
+    `SKIP_NAMES` 原先只在 `scan_repo()` 里生效，于是锁文件提交被**拦下**（那 47 个
+    假阳性），而文档给的解法**解不开**：`--allow` 走 `collect_values()` → `scan_repo()`，
+    那个文件在那儿被跳过 → 指纹进不了表 → 退出 2；手抄又会让 `--verify-allowlist`
+    永远红。工具自相矛盾：`--all` 说干净、`--staged` 说 47 个未登记。
+
+    删掉 `staged_added_lines` 里的 `SKIP_NAMES` 检查，这条会红（uv.lock 的两行会出现在
+    结果里）；「stderr 为空」那半则防「二进制警告被无差别打印」。
+    """
+    (tmp_path / "uv.lock").write_text("x\n", encoding="utf-8")
+    (tmp_path / "real.py").write_text("y\n", encoding="utf-8")
+    monkeypatch.setattr(scan, "REPO_ROOT", tmp_path)
+
+    rows = scan.staged_added_lines(DIFF_WITH_LOCK)
+
+    assert {rel for rel, _n, _t in rows} == {"real.py"}, \
+        "锁文件不进暂存区扫描面；真实文件的行必须照扫不误"
+    assert not any("hash" in text for _rel, _n, text in rows), \
+        "锁文件里的行一行都不许漏进来"
+    assert capsys.readouterr().err == "", "纯文本 diff 不该触发二进制警告"
+
+
 def test_allowlist_parses_values_ignoring_comments(scan, tmp_path):
     p = tmp_path / "allowlist.txt"
     p.write_text("# 注释行\n\n" + FAKE + "  全仓库通用夹具\n"
@@ -178,12 +221,22 @@ def test_allow_writes_value_but_never_prints_it(scan, tmp_path, monkeypatch, cap
 
 
 def test_allow_with_unknown_fingerprint_is_an_error(scan, tmp_path, monkeypatch, capsys):
+    """未知编号退出 2——**且不许把参数原样回显**（终审 Minor 6）。
+
+    `--allow` 是唯一能拿到**任意用户串**的入口。这里刻意传的是**值**而不是指纹
+    （最可能的误用：把值粘进来），回显就等于扫描器亲手把值打到 stderr，
+    与「默认绝不打印命中值」直接矛盾。恢复那句 `%s`，这条会红。
+    """
     monkeypatch.setattr(scan, "REPO_ROOT", tmp_path)
     monkeypatch.setattr(scan, "_tracked_files", lambda: [])
     monkeypatch.setattr(scan, "ALLOWLIST_PATH", tmp_path / "allowlist.txt")
-    rc = scan.main(["--allow", "deadbeef"])
+
+    rc = scan.main(["--allow", FAKE])
+
+    err = capsys.readouterr().err
     assert rc == scan.EXIT_ERROR
-    assert "deadbeef" in capsys.readouterr().err
+    assert FAKE not in err, "参数被原样回显了——那就等于扫描器自己打印了值"
+    assert "指纹" in err or "sha256" in err, "要说清编号长什么样，否则用户只能瞎猜"
 
 
 def test_verify_allowlist_flags_dead_entries(scan, tmp_path, monkeypatch, capsys):
@@ -203,6 +256,23 @@ def test_verify_allowlist_flags_dead_entries(scan, tmp_path, monkeypatch, capsys
     assert rc == scan.EXIT_HITS, "死条目必须让它红"
     assert "wxid_zzzznotinthere9" not in out, "报死条目也不打印值"
     assert scan.fingerprint("wxid_zzzznotinthere9") in out
+
+
+def test_verify_allowlist_missing_registry_is_an_error(scan, tmp_path, monkeypatch, capsys):
+    """终审 Minor 9：清单被删 / 改名时，「一个条目都没校验过」不许报 verified（退出 0）。
+
+    `load_allowlist` 对缺失文件返回空集，那是**别处**要的方向（全部按未登记处理，
+    fail-closed）；拿它来**校验**就反了——死条目一条都查不出来，却报「验证通过」。
+    删掉 `verify_allowlist` 里那句存在性检查，这条会红（退回 EXIT_CLEAN）。
+    """
+    monkeypatch.setattr(scan, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(scan, "_tracked_files", lambda: [])
+    monkeypatch.setattr(scan, "ALLOWLIST_PATH", tmp_path / "nope.txt")
+
+    rc = scan.main(["--verify-allowlist"])
+
+    assert rc == scan.EXIT_ERROR, "「没有清单」不是「清单干净」"
+    assert "不存在" in capsys.readouterr().err
 
 
 def test_values_view_marks_registered_state(scan, tmp_path, monkeypatch, capsys):
@@ -337,6 +407,37 @@ def test_staged_header_mimic_does_not_swallow_the_rest_of_the_file(scan, tmp_pat
     assert {rel for rel, _n, _t in rows} == {"m.txt"}, "路径也不许被劫持"
 
 
+DIFF_BINARY = """\
+diff --git a/x.bin b/x.bin
+new file mode 100644
+index 0000000..c866266
+Binary files /dev/null and b/x.bin differ
+"""
+
+
+def test_staged_binary_file_is_warned_not_silent(scan, tmp_path, monkeypatch, capsys):
+    """终审 Important 2：二进制文件在 --staged 上是一条**静默**路径。
+
+    夹具照真实 `git diff --cached --unified=0`（git 2.55）抄：二进制节**没有**
+    `--- `/`+++ ` 双头、也没有 hunk，只有一行 `Binary files … differ`。于是它既没有
+    `+` 行可扫（--staged 只认 `+` 行），也碰不到那条「路径解析不出来」的存在性检查——
+    不点名就等于「扫过了、干净」。今天仓库里 0 个非 UTF-8 tracked 文件，所以是**潜伏**。
+
+    删掉那句 print，这条会红；把警告改成拦下（动退出码）也会红——二进制文件本身
+    不是泄漏证据，它只是**没被检查**。
+    """
+    monkeypatch.setattr(scan, "_git", lambda *a: DIFF_BINARY)
+    monkeypatch.setattr(scan, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(scan, "ALLOWLIST_PATH", tmp_path / "allowlist.txt")
+
+    rc = scan.main(["--staged"])
+
+    captured = capsys.readouterr()
+    assert "x.bin" in captured.err, "必须点名那个一行都没被检查的文件"
+    assert captured.out == "", "点名不是命中，不该出现在 stdout"
+    assert rc == scan.EXIT_CLEAN, "警告不改退出码"
+
+
 def test_staged_empty_diff_is_clean_not_error(scan, monkeypatch, capsys):
     """Review Focus 2：空暂存区（无改动提交 / --amend / merge）必须干净退出 0。"""
     monkeypatch.setattr(scan, "staged_added_lines", lambda *a, **k: [])
@@ -402,6 +503,29 @@ def test_staged_show_values_prints_value_and_warns(scan, tmp_path, monkeypatch, 
     masked = capsys.readouterr()
     assert FAKE not in masked.out, "不带 --show-values 时值不许出现"
     assert masked.err == "", "没有值可警告时，stderr 一个字都不该有"
+
+
+def test_staged_skips_registered_values(scan, tmp_path, monkeypatch, capsys):
+    """终审 Important 4：豁免清单对 `--staged`（**生产路径**，钩子走的就是它）的过滤。
+
+    没有这条时，把 `unregistered = [h for h in hits if h[3] not in allow]` 换成
+    `unregistered = hits`，整套测试**全绿**——意味着「登记」这个动作可以在**钩子那条路**
+    上静默失效而没有任何东西变红（默认视图那半边已有 test_default_view_skips_registered_values，
+    生产路径这半边一直空着）。这条与 `--text` 共用同一行，所以一并钉住。
+    """
+    monkeypatch.setattr(scan, "staged_added_lines",
+                        lambda *a, **k: [("x.txt", 1, "hit " + FAKE + "\n")])
+    allow = tmp_path / "allowlist.txt"
+    allow.write_text(FAKE + "  夹具\n", encoding="utf-8")
+    monkeypatch.setattr(scan, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(scan, "ALLOWLIST_PATH", allow)
+
+    rc = scan.main(["--staged"])
+
+    captured = capsys.readouterr()
+    assert rc == scan.EXIT_CLEAN, "登记过的值不该再拦"
+    assert captured.out == "", "登记过就不该再打印任何一行"
+    assert captured.err == "", "没有值可警告时 stderr 一个字都不该有"
 
 
 def test_main_wrapper_is_fail_closed(scan, monkeypatch, capsys):

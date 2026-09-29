@@ -41,6 +41,11 @@ FIXTURE_KEYWORDS = ("test", "fake", "dummy", "sample", "example", "placeholder",
 
 _HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 _DIFF_HEADER = re.compile(r"^diff --git ")
+# 二进制文件在 diff 里**没有 `---`/`+++` 头、也没有 hunk**（实测 git 2.55：新文件只给
+# `Binary files /dev/null and b/<路径> differ`），所以它既进不了新增行、也不会被
+# 那条「路径解析不出来」的存在性检查碰到——是一条**静默**路径。git 的这句是**人类消息**
+# （非结构化 token），理论上随 locale 变；本机 git 无 gettext 目录，实测 zh_CN 下仍是英文。
+_BINARY = re.compile(r"^Binary files .* and (.*) differ$")
 
 
 class ScannerError(Exception):
@@ -159,7 +164,10 @@ def allow_value(key):
     """
     table = collect_values()
     if key not in table:
-        raise ScannerError("没有编号 %s 的命中——先跑 --values 看有哪些" % key)
+        # **不回显 key**：这是唯一可能拿到任意用户串的入口。有人把**值本身**粘进来时
+        # （而不是指纹），回显就等于扫描器亲手把值打印到了 stdout/stderr（spec §4.4）。
+        raise ScannerError("这个编号不在命中表里——编号是值的 sha256 前 8 位小写十六进制"
+                           "（先跑 --values 看有哪些），**不要把值本身粘进来**")
     entry = table[key]
     line = "%s  %s · %d 字符 · --allow %s 登记" % (
         entry["value"], entry["shape"], len(entry["value"]), key)
@@ -173,9 +181,26 @@ def verify_allowlist():
 
     判据是 scan_repo() 的产物；它**刻意跳过 allowlist.txt 自身**，否则清单里每一项
     都会「出现在仓库里」，这条不变式就成了永真断言。
+
+    **清单文件不存在是错误（退出 2），不是「干净」**：`load_allowlist` 对缺失文件返回
+    空集，那是「全部按未登记处理」的正确方向；但拿它来**校验**就变成了「一个条目都没
+    校验过」却报 verified——删掉 / 改名清单会让这条不变式静默失效。
     """
+    if not ALLOWLIST_PATH.exists():
+        raise ScannerError("豁免清单 %s 不存在——「没有清单」不是「清单干净」"
+                           % ALLOWLIST_PATH)
     seen = {value for _, _, _, value in scan_repo()}
     return sorted(fingerprint(v) for v in load_allowlist() - seen)
+
+
+def _b_side_path(token):
+    """二进制行里的 `b/<路径>` → `<路径>`；删除那一侧是 `/dev/null` → None。"""
+    token = token.strip()
+    if len(token) >= 2 and token.startswith('"') and token.endswith('"'):
+        token = token[1:-1]          # 含空格 / 非 ASCII 时 git 会加引号（不展开转义）
+    if token == "/dev/null":
+        return None
+    return token[2:] if token.startswith("b/") else token
 
 
 def staged_added_lines(diff_text=None):
@@ -189,10 +214,26 @@ def staged_added_lines(diff_text=None):
     后面所有行被静默跳过**而进程照样退 0。**这是 fail-open，且与本节「不静默跳过」的
     承诺直接矛盾。** 审阅者实测仓库今天没有这种相邻对（扫了 129 个文件、0 处命中），
     所以是**潜伏**而非现患——但一个「只在没有伪装输入时才对」的解析器不算 fail-closed。
-    纯新增是安全的（内容 `-- x` / `++ y` 渲染成 `+-- x` / `+++ y`，都不匹配头）。
+
+    纯新增安全，但**理由不是「不匹配头」**（复审订正）：内容 `-- x` 渲染成 `+-- x`，
+    以 `+` 开头、确实不匹配头；内容 `++ y` 渲染成 `+++ y`，它**确实匹配**
+    `startswith("+++ ")`——只是那时已经在 hunk 体**之内**，`seen_hunk` 会把它挡在
+    文件头分支外。**是新判据救了它，不是文本模式。**
 
     改判据：`--- `/`+++ ` 只可能出现在**文件头块**里，而文件头块一定在**第一个 `@@` 之前**。
     所以用 `seen_hunk`（每个 `diff --git` 重置），而不是「上一行长什么样」。
+
+    **`SKIP_NAMES` 在这里也生效**（2026-09-29 终审 Critical 1）：跳过规则原先只在
+    `scan_repo()` 里，于是 `--staged` 会拿 `uv.lock` 里 47 个 URL 十六进制摘要中的
+    手机号形假阳性**拦下一次提交**，而文档给的解法**根本解不开**——`--allow` 走
+    `collect_values()` → `scan_repo()`，那个文件在那儿被跳过，指纹进不了表，
+    `--allow` 只会退出 2；手抄又会让 `--verify-allowlist` 永远红。工具自相矛盾：
+    `--all` 说干净、`--staged` 说 47 个未登记。放在这里，所有调用方一并继承。
+
+    **二进制文件会点名警告**（终审 Important 2）：git 对二进制不给 `---`/`+++`、也不给
+    hunk，只给一行 `Binary files … differ`，于是它既没有可扫的行、也无从触发上面那条
+    存在性检查——**不警告就是静默退 0**，与「装了但从没拦过」不可区分。只警告，
+    **不改退出码**：二进制文件不构成泄漏证据。
     """
     diff = _git("diff", "--cached", "--unified=0", "--no-color") if diff_text is None else diff_text
     out = []
@@ -207,8 +248,11 @@ def staged_added_lines(diff_text=None):
         if not seen_hunk and line.startswith("+++ "):
             target = line[4:].strip()
             path = None if target == "/dev/null" else target[2:]   # 去掉 "b/"
-            if path is not None and not (REPO_ROOT / path).exists():
-                raise ScannerError("diff 里的路径解析不出来：%r" % path)
+            if path is not None:
+                if Path(path).name in SKIP_NAMES:
+                    path = None       # 与 scan_repo() 同一条规则，别让两条路各说各话
+                elif not (REPO_ROOT / path).exists():
+                    raise ScannerError("diff 里的路径解析不出来：%r" % path)
             continue
         if line.startswith("@@"):
             m = _HUNK.match(line)
@@ -216,6 +260,14 @@ def staged_added_lines(diff_text=None):
                 raise ScannerError("看不懂的 hunk 头：%r" % line)
             seen_hunk = True
             lineno = int(m.group(1))
+            continue
+        m = _BINARY.match(line)
+        if m is not None:
+            bpath = _b_side_path(m.group(1))
+            if bpath is not None:
+                print("scan: ⚠️ %s 是二进制文件——它**一行都没被检查**"
+                      "（形状扫描只读得懂 UTF-8 文本），退出码不因它改变" % bpath,
+                      file=sys.stderr)
             continue
         if path is None:
             continue
@@ -243,7 +295,8 @@ def text_hits(path):
 
 def _build_parser():
     ap = argparse.ArgumentParser(description="扫描形状像真机标识的字符串（绝不打印值）")
-    ap.add_argument("--all", action="store_true", help="扫全部 tracked 文件（逐处）")
+    ap.add_argument("--all", action="store_true",
+                    help="扫全部 tracked 文件（逐处）——这是**默认行为**，本开关保留为显式别名")
     ap.add_argument("--values", action="store_true", help="逐值汇总（审查用，spec §4.6）")
     ap.add_argument("--show-values", action="store_true",
                     help="⚠️ 打印命中值本身——它会被写进你的会话记录，等于又开一个出口")
