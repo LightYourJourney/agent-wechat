@@ -307,15 +307,26 @@ def test_roster_skip_read_lands_inside_the_write_transaction(_temp_index, tmp_pa
     **另一条连接**（同进程，等价于另一个 `purge --chat` 进程）把窗口里会发生的事做一遍
     （阶段 1 写墓碑、阶段 2 删名册），`busy_timeout=0` 让它立刻报错而非挂 5 秒。
 
-    - 修好后：DELETE 是写语句，它当场拿到主库 RESERVED 写锁（**没有匹配行时也拿**——本测试
-      走的正是「victim 那行已经不在了」这条分支），那个写者进不来 ⇒ 窗口不存在；
+    - 修好后：DELETE 是写语句，它当场拿到主库 RESERVED 写锁，第二条连接**写索引库**的那一次
+      （阶段 2 删名册）进不来 ⇒ 修复依赖的那条线堵住了；
     - 把 `skip = roster_skip_chat_md5(...)` 挪到 DELETE **之前**：两次读落在自动提交里，
       窗口打开 ⇒ `blocked` 为假 ⇒ 本条红。
+
+    **被挡的不是阶段 1**：墓碑落在 `exclusions.db`——**另一个库文件**，主库那把 RESERVED 锁
+    管不到它（实测三条语句各自的去向：墓碑通过、`DELETE FROM display_names` 报
+    `database is locked`、随后的 commit 通过）。这不影响判据：会把 purge 的删除撤销掉的正是
+    阶段 2；阶段 1 提前落下只意味着下次刷新会跳过那个会话，而 purge 的事务随后照样会删掉
+    本函数刚插进去的那一行。
+
+    **本测试不走「DELETE 匹配 0 行」那条分支**：`_seed` 留了 keeper 的名册行，`delete_chat`
+    只删 victim 的那行，所以 `DELETE FROM display_names WHERE account=?` 至少匹配 keeper 一行。
+    「没有匹配行时也拿到锁」是**另行探针**验证的（临时库：DELETE 匹配 0 行时 `in_transaction`
+    仍为 True、第二条连接写同一库报 `database is locked`），别把它读成这条测试覆盖的东西。
 
     为什么窗口必须堵：读在锁外时，`purge --chat` 可以在「读之后、写之前」提交墓碑并删完，
     随后的 INSERT 就把那个会话的显示名写回去——purge 在 `display_names` 那一处删除被撤销，
     此后没有任何东西会再清它。窗口里具体毁掉什么取决于 purge 那一刻做到哪一步，所以这里钉的是
-    **窗口不存在**（写者被挡），而不是某一份具体的坏结果。
+    **窗口不存在**（第二条连接对索引库的那次写被挡），而不是某一份具体的坏结果。
     """
     con = _temp_index
     exclusions.add(con, [(f"a|{VICTIM_MD5}|message_0.db|1", "a", VICTIM_MD5)])
@@ -348,8 +359,8 @@ def test_roster_skip_read_lands_inside_the_write_transaction(_temp_index, tmp_pa
         other.rollback()
         other.close()
     assert seen.get("blocked"), \
-        "判据的读落在写事务之外：另一个写者把墓碑提交进来了——purge 若在窗口里提交，" \
-        "这次 INSERT 会把它的 display_names 删除撤销"
+        "判据的读落在写事务之外：另一个写者对**索引库**的那次写（删名册那一句）没被挡住——" \
+        "purge 若在窗口里把它做掉，这次 INSERT 就会撤销 purge 的 display_names 删除"
     # 拿着锁照常干活：victim 被跳过、keeper 照常重建（锁内那条路径不是「什么都不写」）
     got = {r[0] for r in con.execute("SELECT chat_id FROM display_names WHERE account='a'")}
     assert got == {KEEPER}, f"名册应当只剩 keeper，实际 {got}"
