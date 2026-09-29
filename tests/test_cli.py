@@ -221,11 +221,18 @@ def _isolate(tmp_path, monkeypatch):
     """把 purge 会碰的路径全部指向 tmp_path，并把外部命令注入桩。patch 的是**模块属性**——
     purge.py 用 `from . import keys` 取常量，所以 patch keys.CACHE_FILE 才生效
     （`from .keys import CACHE_FILE` 那种写法 patch 不掉，会删到真实数据，spec §4）。"""
-    from agent_wechat import keys, paths, purge, store
+    from agent_wechat import keys, paths, purge, store, tasks, vector
     home = tmp_path / "home"; home.mkdir(parents=True)
     monkeypatch.setattr(paths, "HOME_DIR", home)
     monkeypatch.setattr(keys, "CACHE_FILE", home / "passphrase.json")
     monkeypatch.setattr(store, "DB_PATH", home / "index.db")
+    # models/ 与 tasks.json 是**没有 CLI 开关**的产物（scope=None）：`--foo` 选不中它们，但
+    # `--all` 会删，而 purge 取的正是 known_artifacts() 里那两个**真实路径**。此前不必 patch
+    # 只是因为它们仅作为从 home 枚举出的 loose 行存在；升成产物后不 patch 就真的会碰真机
+    # ——实测症状是 `purge --all --yes` 去扫真实的 ~/.agent-wechat/models（huggingface 布局里
+    # snapshots/ 全是符号链接），报「待删路径是符号链接」退出 1。
+    monkeypatch.setattr(vector, "MODEL_CACHE_DIR", home / "models")
+    monkeypatch.setattr(tasks, "TASKS_FILE", home / "tasks.json")
     # lsof（_holders）与 tmutil（_tmutil）都经 _run：桩打在最低层，一处覆盖两个外部命令。
     # 不加这个，任何走进 execute/verify 的 CLI 测试都会去跑**真实的** lsof 与 tmutil。
     # 三个字段都是被测代码的隐式契约：_holders 只读 stdout，_tmutil 还要读 returncode 与
@@ -235,11 +242,16 @@ def _isolate(tmp_path, monkeypatch):
                                                         "returncode": 0})())
     # $TMPDIR 同样要隔离：verify 会 glob 它找 awcap_* 残留，否则读的是本机真实临时目录
     monkeypatch.setenv("TMPDIR", str(tmp_path / "tmpdir"))
+    # 红线（同 tests/test_purge.py 的 autouse fixture，但查的是结果而不是 patch 列表）：
+    # 每一条已知产物的路径都必须落在 tmp_path 下。上面漏 patch 过一次，症状不是测试失败，
+    # 而是测试去读真实数据目录——所以兜底断言必须不看具体 patch 了哪些常量。
+    for a in purge.known_artifacts():
+        assert a.path.is_relative_to(tmp_path), f"红线：{a.path} 指向真实数据目录"
     return home
 
 
 def test_purge_named_scopes_can_combine(tmp_path, monkeypatch):
-    """三个具名范围可任意组合——这正是 argparse 互斥组做不到的那一半（spec §3）。"""
+    """具名范围可任意组合——这正是 argparse 互斥组做不到的那一半（spec §3）。"""
     home = _isolate(tmp_path, monkeypatch)
     (home / "index.db").write_bytes(b"x" * 10)
     # main() 结尾是 raise SystemExit(code)，**从不返回**（cli.py:284）。既有测试一律
@@ -247,9 +259,26 @@ def test_purge_named_scopes_can_combine(tmp_path, monkeypatch):
     # 写成 `assert cli.main(...) == 0` 的话 SystemExit(0) 会逃出测试体，测试以未捕获
     # 异常失败而非断言失败，实现者会误判成「实现没跑通」。
     with pytest.raises(SystemExit) as ei:
-        cli.main(["purge", "--index", "--tmp"])             # dry-run，退出 0
+        cli.main(["purge", "--index", "--media", "--moments", "--tmp"])   # dry-run，退出 0
     assert ei.value.code == 0
     assert (home / "index.db").exists()                     # 一个字节没删
+
+
+@pytest.mark.parametrize("scope", ["keys", "index", "media", "moments", "tmp"])
+def test_every_named_scope_has_a_working_flag(scope, tmp_path, monkeypatch, capsys):
+    """五个具名范围各要有一个**真的能用**的开关。两半缺一不可：argparse 必须接受
+    `--<scope>`（开关存在），且 plan() 里必须有产物认领它（否则是静默空操作——报成功、
+    一个字节没删）。
+
+    漂移的两个方向都被这条钉住：加了开关没加产物 → plan 抛「未知的范围」、退出 1（不是 0）；
+    加了产物没加开关 → argparse 退 2。tests/test_purge.py 里另有一条钉住名单本身。
+    """
+    _isolate(tmp_path, monkeypatch)
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["purge", f"--{scope}"])
+    assert ei.value.code == 0, f"--{scope} 没被接受，或 dry-run 不是干净退出"
+    out = capsys.readouterr().out
+    assert f"  {scope} " in out, f"--{scope} 没有渲染出属于它的行：{out!r}"
 
 
 def test_purge_refused_renders_single_line_not_traceback(tmp_path, monkeypatch, capsys):
@@ -307,18 +336,22 @@ def test_purge_yes_executes_and_reports(tmp_path, monkeypatch, capsys):
     assert "2 MB" in out, f"freed 必须反映真实字节数，而实际输出是：{out!r}"
 
 
-def test_render_plan_shows_no_size_for_directory(tmp_path, monkeypatch, capsys):
-    """目录行不得显示体积。`PlanItem.size` 对目录是 `lstat().st_size`（inode 自身大小，
-    几十到几百字节），而 execute 的汇总行用 `_tree_size` 量整树——同一个 tmp/ 会在计划表里
-    显示 96 B、在汇总行显示几百 MB，差好几个数量级。spec §3 的表样对那一行标的正是「—」。"""
+def test_render_plan_shows_tree_size_for_directory(tmp_path, monkeypatch, capsys):
+    """目录行必须显示**整树**体积，不能是 inode 自身大小。
+
+    这条此前是反过来的（要求目录行印「—」占位）：当时 `PlanItem.size` 对目录取
+    `lstat().st_size`，与 execute 汇总行的 `_tree_size` 差好几个数量级，渲染器只好回避。
+    回避的代价是**最大的一项看不到体积**——media/ 有 10 GB，在那张用户据以说 --yes 的表上
+    看起来无事发生。修法挪到了源头：`_item` 对目录走 `_tree_size`，两处同源，渲染器不必再藏。
+    """
     home = _isolate(tmp_path, monkeypatch)
     (home / "tmp").mkdir()
     (home / "tmp" / "plaintext.db").write_bytes(b"x" * 500_000)   # 目录里确实有半 MB 明文
     with pytest.raises(SystemExit):
         cli.main(["purge", "--tmp"])
     out = capsys.readouterr().out
-    assert "500 KB" not in out and "500000 B" not in out, f"目录行不该显示体积：{out!r}"
-    assert "—" in out, f"目录行应显示「—」：{out!r}"
+    assert "500 KB" in out, f"目录行必须显示整树体积：{out!r}"
+    assert "—" not in out, f"不该再有「—」占位（它等于让用户看不见要删多少）：{out!r}"
 
 
 def test_purge_all_dry_run_renders_loose_rows(tmp_path, monkeypatch, capsys):
@@ -326,14 +359,16 @@ def test_purge_all_dry_run_renders_loose_rows(tmp_path, monkeypatch, capsys):
     报告的冒烟也用 `--index`。那儿一个格式串写坏会静默发布，而它正是
     spec §3「枚举 HOME_DIR 顶层条目逐条列出」那条要求的落点。"""
     home = _isolate(tmp_path, monkeypatch)
-    (home / "leaked.db").write_bytes(b"stray")      # 不属于任何具名范围
-    (home / "models").mkdir()
+    (home / "leaked.db").write_bytes(b"stray")      # 真散落：不属于任何已知产物
     with pytest.raises(SystemExit) as ei:
         cli.main(["purge", "--all"])
     assert ei.value.code == 0
     out = capsys.readouterr().out
-    assert "leaked.db" in out and "models" in out
-    assert "不属于任何具名范围" in out
+    assert "leaked.db" in out
+    assert "不属于任何已知产物" in out
+    # 敏感度写「未知」而不是留空：这张表里空着读起来是「已检查过、不要紧」，
+    # 而真实含义是「没人认识它」——两者正相反。
+    assert "未知" in out, f"无主条目的敏感度必须写「未知」：{out!r}"
     assert (home / "leaked.db").exists()            # dry-run，一个字节没删
 
 
@@ -530,14 +565,14 @@ def test_purge_all_yes_reports_home_removed(tmp_path, monkeypatch, capsys):
     assert "数据目录本身" in out, f"未报告目录自身也被删：{out!r}"
 
 
-def test_purge_all_loose_rows_name_known_artifacts(tmp_path, monkeypatch, capsys):
-    """`--all` 的 loose 行此前一律印「不属于任何具名范围」——对 models/ 与 tasks.json 是误导：
-    它们是 vector.MODEL_CACHE_DIR 与 tasks.TASKS_FILE，有拥有者，只是没有对应的 CLI 开关。
-    spec §3 要求每行点名它属于哪个已知产物，或标「散落文件」。"""
-    from agent_wechat import tasks as _tasks, vector as _vector
-    home = _isolate(tmp_path, monkeypatch)
-    monkeypatch.setattr(_vector, "MODEL_CACHE_DIR", home / "models")
-    monkeypatch.setattr(_tasks, "TASKS_FILE", home / "tasks.json")
+def test_purge_all_scopeless_artifacts_are_full_rows(tmp_path, monkeypatch, capsys):
+    """`models/` 与 `tasks.json` 有拥有者、没有 CLI 开关（scope=None）。它们此前的呈现是
+    loose 段里一句「已知产物：…」——**敏感度与重建代价两列是空的**，而整张 `--all` 表的意义
+    就在于让用户看清自己要删掉什么、删了要付什么代价。
+
+    现在它们进 items 段，与有开关的产物共用同一套列。spec §3「每行点名它属于哪个已知产物」
+    那条要求因此以更强的形式满足：不只是点名，还带上了那两列。"""
+    home = _isolate(tmp_path, monkeypatch)          # 这两个常量由 _isolate 一并重定向
     (home / "models").mkdir()
     (home / "tasks.json").write_text("{}")
     (home / "leaked.db").write_bytes(b"stray")
@@ -547,9 +582,14 @@ def test_purge_all_loose_rows_name_known_artifacts(tmp_path, monkeypatch, capsys
     out = capsys.readouterr().out
     lines = {name: next(l for l in out.splitlines() if name in l)
              for name in ("models", "tasks.json", "leaked.db")}
-    assert "已知产物" in lines["models"] and "向量模型缓存" in lines["models"]
-    assert "已知产物" in lines["tasks.json"] and "长任务注册表" in lines["tasks.json"]
-    assert "不属于任何具名范围" in lines["leaked.db"]
+    assert "重新下载" in lines["models"], "models 行必须带重建代价——loose 行时代这一列是空的"
+    assert "否" in lines["models"], "models 是公开模型资产，敏感度列应为「否」"
+    assert "否" in lines["tasks.json"], "tasks.json 不敏感，敏感度列应为「否」"
+    # 反断言：它们不得再作为「不属于任何已知产物」的散落行出现——那读起来是「没人认识的野
+    # 文件」，而 models/ 恰恰是向量模型的落点（删了要重新下载）。
+    assert "不属于任何已知产物" not in lines["models"]
+    assert "不属于任何已知产物" not in lines["tasks.json"]
+    assert "不属于任何已知产物" in lines["leaked.db"]
 
 
 def test_purge_dry_run_prints_plan_and_deletes_nothing(tmp_path, monkeypatch, capsys):

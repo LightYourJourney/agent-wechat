@@ -1,11 +1,14 @@
 """朋友圈解析：sns.db 的 TimelineObject XML → 结构化动态。
 
 纯读取：不联网、不 import store/reader。解密复用既有 decrypt/keys/paths。
+除了解析，本模块还拥有**导出根的路径**（`export_root()`）——purge 的产物清单要求
+每条路径的唯一来源在拥有它的模块里。
 """
 from __future__ import annotations
 
 import dataclasses
 import math
+import pathlib
 import sqlite3
 import urllib.parse
 import xml.etree.ElementTree as ET
@@ -22,6 +25,15 @@ CMT_LIKE, CMT_COMMENT = "like", "comment"
 # 而不是在 build_url 里加一条分支（分支多了，白名单校验就会有人忘记做）。
 AUTH_SNS = "sns"        # 老路径：token/key 在 url 元素属性；URL 需拼 idx=1、尺寸段归一
 AUTH_READY = "ready"    # URL 已完整可用（自带签名或无签名公开）；原样 GET，仅 http→https
+
+
+def export_root() -> pathlib.Path:
+    """朋友圈导出根：`--out` 省略时的落点（`HOME_DIR/moments`）。
+
+    **调用时求值**，理由见 `media.export_root()`：purge 的红线 fixture 靠 monkeypatch
+    `paths.HOME_DIR` 保护测试不碰真实数据，import 时绑定值的常量会绕过它。
+    """
+    return paths.HOME_DIR / "moments"
 
 
 def split_url(url: str | None) -> urllib.parse.SplitResult | None:

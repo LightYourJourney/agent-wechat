@@ -18,16 +18,21 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 
-from . import decrypt, errors, keys, paths, store, tasks, vector
+from . import decrypt, errors, keys, media, moments, paths, store, tasks, vector
 
 _run = subprocess.run          # 模块级替换点（同 account._run）：测试注入桩
 
 
 @dataclass(frozen=True)
 class Artifact:
-    """一个可被销毁的路径。每条一个对象，path 是单数——计划表逐行渲染与它一一对应。"""
-    scope: str          # "keys" | "index" | "tmp"
-    label: str          # 人类可读说明
+    """一个可被销毁的路径。每条一个对象，path 是单数——计划表逐行渲染与它一一对应。
+
+    **没有人类可读的 label 字段，不要加回来**：它此前只服务于 `--all` 的 loose 行
+    （「已知产物：向量模型缓存」），而那些行现在都进了 items 段，靠 scope + sensitive +
+    rebuild 三列说话。最后一个读者消失之后，label 就成了没人核对、会静默漂移的第二份来源
+    ——正是本模块开篇禁止的那件事，而它恰好是 media/ 与 moments/ 漏掉的那次事故的成因。
+    """
+    scope: str | None   # 具名范围的开关名；None = 有拥有者但没有开关，只随 --all 一起删
     path: pathlib.Path
     kind: str           # "file" | "dir"：决定 unlink 还是 rmtree，不靠调用方猜
     sensitive: bool
@@ -63,35 +68,39 @@ def _holders(path: pathlib.Path) -> list[int]:
     return sorted(set(pids))
 
 
-def artifacts() -> tuple[Artifact, ...]:
-    """三个具名范围的清单。**调用时求值**——测试靠 monkeypatch 重定向路径。"""
-    out = [
-        Artifact("keys", "密钥缓存", keys.CACHE_FILE, "file", True,
-                 "重建需 sudo + 在微信内退出登录再重新登录"),
-        Artifact("tmp", "解密临时目录", decrypt.tmp_dir(), "dir", True, "无"),
-    ]
-    out += [Artifact("index", "本地检索库（含向量索引）", p, "file", True,
-                     "重建 ≈2.5–3 小时（68 万向量）")
+def known_artifacts() -> tuple[Artifact, ...]:
+    """**全部已知产物**的清单。**调用时求值**——测试靠 monkeypatch 重定向路径。
+
+    与 artifacts() 的分工是「有没有 CLI 开关」：这里含 scope=None 的那几条，它们只随
+    `--all` 一起删，但计划表照样要印出敏感度与重建代价。
+
+    **为什么合成一张表**：此前「有哪些产物」写在两处——artifacts() 三个具名范围，
+    known_artifact_label() 补上 models/ 与 tasks.json。而本模块开篇那条约定恰恰禁止第二份
+    来源：拥有者演进时，没被改到的那张表不会跟着演进（media/ 与 moments/ 就是这么漏掉的
+    ——它们的拥有者 09-15/09-16 才落地，而这两张表都停在 09-13）。
+    """
+    out = [Artifact("keys", keys.CACHE_FILE, "file", True,
+                    "重建需 sudo + 在微信内退出登录再重新登录")]
+    out += [Artifact("index", p, "file", True, "重建 ≈2.5–3 小时（68 万向量）")
             for p in store.db_paths()]
+    # 本表的顺序即计划表的行序，也即 CLI 那句「必须指定至少一个范围：…」里的开关序
+    # （cli.py 从这张表演绎名单），三处同源，改这一处就够。
+    out += [
+        Artifact("media", media.export_root(), "dir", True,
+                 "重新导出：需联网抓 CDN，图片与语音还要重解微信本体"),
+        Artifact("moments", moments.export_root(), "dir", True, "重新导出：需联网抓 CDN"),
+        Artifact("tmp", decrypt.tmp_dir(), "dir", True, "无"),
+        Artifact(None, vector.MODEL_CACHE_DIR, "dir", False, "重新下载"),
+        Artifact(None, tasks.TASKS_FILE, "file", False, "无"),
+    ]
     return tuple(out)
 
 
-def known_artifact_label(path: pathlib.Path) -> str | None:
-    """该顶层路径是**已知产物**（有拥有者模块）但不属于任何具名范围时，返回它的展示名。
-
-    与 artifacts() 的区别是有没有 CLI 开关：keys / index / tmp 三个能被 `--keys` / `--index`
-    / `--tmp` 单独选中；models/ 与 tasks.json 有拥有者（vector.MODEL_CACHE_DIR /
-    tasks.TASKS_FILE）却没有开关，只出现在 `--all` 的 loose 行里。spec §3 要求每行点名它
-    属于哪个已知产物、或标「散落文件」——把 models/ 一律印成「不属于任何具名范围」字面没错，
-    但它读起来是「没人认识的野文件」，而它恰恰是向量模型的落点（删了要重新下载）。
-
-    **调用时求值**：测试靠 monkeypatch 重定向这两个常量。
-    """
-    for p, label in ((vector.MODEL_CACHE_DIR, "向量模型缓存"),
-                     (tasks.TASKS_FILE, "长任务注册表")):
-        if path == p:
-            return label
-    return None
+def artifacts() -> tuple[Artifact, ...]:
+    """**具名范围**的清单：有 CLI 开关、能被单独选中的那些（`--keys` / `--index` /
+    `--media` / `--moments` / `--tmp`）。名单与顺序都由 known_artifacts() 决定，
+    CLI 的那句「必须指定至少一个范围：…」也从这里演绎，不另写一份。"""
+    return tuple(a for a in known_artifacts() if a.scope is not None)
 
 
 @dataclass(frozen=True)
@@ -129,7 +138,16 @@ def _item(a: Artifact) -> PlanItem:
         # 而这个命令的全部价值就在于让用户在动手前看清将发生什么。
         raise errors.PurgeRefused(f"无法读取待删路径：{a.path}",
                                   hint=f"{exc}；请先修正权限再重试") from exc
-    return PlanItem(a, True, st.st_size, a.path.is_symlink())
+    is_link = a.path.is_symlink()
+    # 目录量整树。此前目录一律由渲染器印「—」来回避这件事（inode 大小与整树体积差几个数量级），
+    # 代价是**最大的一项看不到体积**——media/ 有 10 GB，印成「—」等于让用户在据以说 --yes 的
+    # 那张表上看不见自己要删掉多少东西。而 execute 汇总行用的正是 _tree_size，两个数字本来就
+    # 该是同一个（T4 已在 freed 上修过这个错，这是它最后一块残留）。
+    # `not is_link` 的理由同 _loose_entry：跟随链接会把**目标**的整树算进来，而删除时 unlink
+    # 的只是链接本身，目标是留存的。
+    if a.kind == "dir" and not is_link:
+        return PlanItem(a, True, _tree_size(a.path), False)
+    return PlanItem(a, True, st.st_size, is_link)
 
 
 def _loose_entry(p: pathlib.Path) -> LooseEntry:
@@ -233,13 +251,23 @@ def plan(scopes: frozenset[str], all_: bool = False,
          home: pathlib.Path | None = None) -> PurgePlan:
     """生成删除计划。**纯只读**：不创建、不删除、不写任何东西。
 
-    `--all` 的 loose 是「枚举 HOME_DIR 顶层减去已知产物」，不是 artifacts() 的产物——
-    artifacts() 只认识三个具名范围，列不出 models/ 与散落文件。
+    `--all` 的 loose 是「枚举 HOME_DIR 顶层减去**全部已知产物**」（known_artifacts()），
+    而不是减去具名范围：后者列不出 models/ 这类**没有开关**的产物，它们会同时出现在 items
+    与 loose 里，计划表把同一个路径渲染两遍。
     """
     home = home or paths.HOME_DIR
     # 闸门在 plan 里而不是只在 execute 里：dry-run 的那张表就是用户据以说 --yes 的东西，
     # 计划表照常渲染完再由 execute 拒绝，等于默许了一张「将删除当前目录」的表。
     _check_home_is_sane(home)
+    # 请求的范围必须真有产物认领。否则一次改名（或 CLI 开关与那张表各改一处）会让 purge 变成
+    # **静默空操作**：dry-run 印一张空表、--yes 报「已删除 0 项，释放 0 B」并退 0——一门专门
+    # 用来销毁数据的命令报成功却一个字节没删，是这个模块最不该产出的假象。
+    named = {a.scope for a in artifacts()}
+    unknown = sorted(str(s) for s in scopes if s not in named)
+    if unknown:
+        raise errors.PurgeRefused(
+            f"未知的范围：{'、'.join(unknown)}",
+            hint="CLI 的开关与 purge.artifacts() 的范围名漂移了（某一处改了名）")
     # spec §6 那一行：plan 阶段权限不足（目录不可读）→ PurgeRefused，**不是**「删除失败」，
     # 发生在任何 unlink 之前。此前这种情况会被 _item() 吞成「不存在」，于是 dry-run 对一堆
     # 活着的文件打「（不存在）」，而 --yes 会在 is_symlink() 上抛裸 PermissionError。
@@ -254,10 +282,10 @@ def plan(scopes: frozenset[str], all_: bool = False,
         raise errors.PurgeRefused(f"目录不可读，拒绝生成销毁计划：{home}",
                                   hint="请先修正权限（需要读 + 进入权限），再重试")
     # --all 时 items 仍全部列出：计划表要显示 index/keys 的重建代价（spec §3 的 --all 表样）
-    items = tuple(_item(a) for a in artifacts() if all_ or a.scope in scopes)
+    items = tuple(_item(a) for a in known_artifacts() if all_ or a.scope in scopes)
     loose: tuple[pathlib.Path, ...] = ()
     if all_:
-        known = {a.path for a in artifacts()}
+        known = {a.path for a in known_artifacts()}
         try:
             top = sorted(home.iterdir())
         except OSError:

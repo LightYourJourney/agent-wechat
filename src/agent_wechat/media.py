@@ -548,6 +548,20 @@ def _chmod_quiet(p: pathlib.Path) -> None:
         pass
 
 
+def export_root() -> pathlib.Path:
+    """导出根：`--out` 省略时全部产物的落点（`HOME_DIR/media`）。
+
+    **调用时求值，不做模块常量**——这不是风格问题：`purge` 的产物清单靠 monkeypatch
+    `paths.HOME_DIR` 把路径重定向到临时目录（`tests/test_purge.py` 的红线 fixture），
+    而 import 时绑定值的常量会让那条保护静默失效，后果是测试去删真实数据。
+    同款先例：`store.db_paths()`、`decrypt.tmp_dir()`。
+
+    存在的第二个理由：路径的唯一来源必须在拥有它的模块里。`purge.py` 与 `usecases.py`
+    各拼一遍 `HOME_DIR / "media"` 就是第二份来源——拥有者演进时它不会跟着演进。
+    """
+    return paths.HOME_DIR / "media"
+
+
 def ensure_tree(root: pathlib.Path, *parts: str) -> pathlib.Path:
     """逐级建目录并**逐级 chmod 0700**，返回最终路径（Ruling 11）。
 
@@ -756,7 +770,7 @@ def export_media(account: str, chat_ids: list[str], *, kinds: list[str],
     （`SECURITY.md` 的零网络承诺）。
     """
     report = MediaReport()
-    out_root = ensure_tree(pathlib.Path(out_dir) if out_dir else paths.HOME_DIR / "media")
+    out_root = ensure_tree(pathlib.Path(out_dir) if out_dir else export_root())
     report.out_dir = str(out_root)
     # 一次 stat 检查（Ruling 15）：chmod 是尽力而为的（见 _chmod_quiet），收紧失败在这里
     # 如实上报——只报一次、带路径，不按文件刷屏。stat 也失败（目录被换掉/没权限）同样算

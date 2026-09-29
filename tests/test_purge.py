@@ -33,9 +33,11 @@ def _never_touch_real_home(monkeypatch, tmp_path):
     monkeypatch.setattr(purge, "_run",
                         lambda *a, **kw: type("R", (), {"stdout": "", "stderr": "",
                                                         "returncode": 0})())
-    arts = purge.artifacts()
-    assert len(arts) == 5, \
-        f"红线：清单条目数由 5 变为 {len(arts)}，必有产物未被保护，须先核对再改这个数"
+    # 遍历 known_artifacts() 而不是 artifacts()：后者只含有 CLI 开关的那几个，scope=None
+    # 的（models/、tasks.json）同样会被删，也必须逐个确认路径被重定向过。
+    arts = purge.known_artifacts()
+    assert len(arts) == 9, \
+        f"红线：清单条目数由 9 变为 {len(arts)}，必有产物未被保护，须先核对再改这个数"
     for a in arts:
         assert a.path != REAL_HOME and REAL_HOME not in a.path.parents, \
             f"红线：{a.path} 指向真实数据目录"
@@ -81,22 +83,45 @@ def test_plan_index_has_three_items():
     assert all(i.artifact.kind == "file" for i in p.items)
 
 
+def test_plan_refuses_unknown_scope():
+    """未知范围必须是**响亮的拒绝**，不能是静默空操作。
+
+    没有这道闸门时，一次改名（CLI 加了 `--media` 而 artifacts() 里那条被改名，或反过来）
+    会让 `purge --media --yes` 印一张空表、报「已删除 0 项，释放 0 B」并**退 0**——一门专门
+    用来销毁数据的命令报成功却一个字节没删。这比删错更难发现：没有任何输出提示异常。
+    """
+    with pytest.raises(errors.PurgeRefused) as ei:
+        purge.plan(frozenset({"mediia"}))
+    assert "mediia" in str(ei.value)
+
+
+def test_named_scopes_are_exactly_the_documented_five():
+    """具名范围的名单是一份**要成对演进**的契约：新增一个就要同时加 CLI 开关、文档行与
+    test_cli 里的 parametrize 用例。这条钉住名单本身，test_cli 那条钉住开关真的能用。"""
+    assert {a.scope for a in purge.artifacts()} == \
+        {"keys", "index", "media", "moments", "tmp"}
+
+
 def test_plan_all_enumerates_home_including_strays(tmp_path):
-    """--all 的计划**不由 artifacts() 生成**，而是枚举 HOME_DIR 顶层，
-    这样才列得出 models/、tasks.json 与散落文件（spec §3）。"""
+    """--all 的计划**不由 known_artifacts() 生成**，而是枚举 HOME_DIR 顶层，
+    这样才列得出散落文件（spec §3）；已知产物反过来要从 loose 里排除。"""
     home = tmp_path / "home"
     home.mkdir(parents=True)
-    (home / "index.db").write_bytes(b"x" * 1000)        # 已知产物：必须被排除在 loose 之外
-    (home / "leaked.db").write_bytes(b"stray")          # 模拟 decrypt --out 的散落明文
-    (home / "models").mkdir()
+    (home / "index.db").write_bytes(b"x" * 1000)        # 有 CLI 开关的已知产物
+    (home / "models").mkdir()                           # **没有** CLI 开关的已知产物
+    (home / "leaked.db").write_bytes(b"stray")          # 真散落：不属于任何已知产物
     p = purge.plan(frozenset(), all_=True)
     assert p.all_ is True
-    assert {x.path.name for x in p.loose} >= {"leaked.db", "models"}
-    # 反断言：`if p not in known` 这条排除若被删掉，这个测试原本仍会通过，但已知产物
-    # 会在 items 与 loose 里各出现一次——计划表会把同一个路径渲染两遍。
+    assert {x.path.name for x in p.loose} == {"leaked.db"}, \
+        "loose 必须只剩真散落——两类已知产物（有开关的与没有开关的）都在 items 里"
+    # 反断言：排除集若用 artifacts()（只含有开关的那些）算，models/ 会**同时**出现在 items
+    # 与 loose 里，而计划表会把同一个路径渲染两遍。这个测试此前只查 index.db，恰好看不见
+    # models/ 那一半——score=None 的产物是这次新增的，正是漏得掉的那类。
     # （注意别把它说成「体积重复计入 freed」：--all 的 freed 是 _tree_size 走盘量出来的，
     #   不是 items+loose 求和，所以重复项不会让 freed 翻倍。）
-    assert "index.db" not in {x.path.name for x in p.loose}
+    both = ({x.path for x in p.loose} & {i.artifact.path for i in p.items})
+    assert not both, f"同一路径同时出现在 items 与 loose：{both}"
+    assert {"index.db", "models"} <= {i.artifact.path.name for i in p.items}
 
 
 def test_execute_keys_does_not_touch_index(tmp_path):
@@ -154,7 +179,9 @@ def test_execute_tolerates_stale_plan(tmp_path):
 
 def test_execute_dir_reports_tree_size_not_inode_size(tmp_path):
     """`purge --tmp` 删的是解密明文临时目录。目录的 lstat().st_size 只是 inode 自身
-    大小（几十到几百字节），若直接相加，无论删掉多少明文都报「释放 ~96 B」。"""
+    大小（几十到几百字节），若直接相加，无论删掉多少明文都报「释放 ~96 B」。
+
+    计划表与汇总行两个数字同源，在本测试里一并钉住（见下）。"""
     home = tmp_path / "home"; home.mkdir(parents=True)
     tmpdir = home / "tmp"
     tmpdir.mkdir()
@@ -163,10 +190,62 @@ def test_execute_dir_reports_tree_size_not_inode_size(tmp_path):
     p = purge.plan(frozenset({"tmp"}))
     item = p.items[0]
     assert item.artifact.kind == "dir"
-    assert item.size < 2000, "前提：目录的 st_size 是 inode 大小，远小于整树体积"
+    # 同一个数字有两处要用：**计划表**（用户据以说 --yes 的那张表）与 execute 的汇总行。
+    # _item 对目录走 _tree_size 之后两处同源；此前计划表靠渲染器印「—」回避，代价是最大的
+    # 一项（media/，10 GB）在那张表上看起来无事发生。
+    assert item.size == 4000, "计划表里的目录体积必须是整树，不是 lstat().st_size"
     r = purge.execute(p)
     assert r.freed == 4000
+    assert r.freed == item.size, "计划表与汇总行必须是同一个数字"
     assert not tmpdir.exists()
+
+
+def test_execute_media_scope_does_not_touch_index(tmp_path):
+    """`--media` 只能删导出物。**反向断言**在这里比正断言重要：范围泄漏是不可逆的（一次
+    误删就是 5 GB 索引 + 2.5–3 小时重建，或一枚要 sudo + 重登才回得来的密钥），而正断言
+    「media 被删了」在泄漏发生时照样绿。
+
+    media/ 是 HOME_DIR 里最大也最可读的一堆（解密后的图片/视频/语音 + 浏览器直接打开的
+    HTML/MD），它此前根本没有开关——只能连同索引与密钥一起 --all 掉。
+    """
+    home = tmp_path / "home"; home.mkdir(parents=True)
+    (home / "index.db").write_bytes(b"x" * 1000)
+    (home / "passphrase.json").write_bytes(b"k" * 10)
+    media_dir = home / "media"; media_dir.mkdir()
+    (media_dir / "shot.jpg").write_bytes(b"j" * 500)
+    r = purge.execute(purge.plan(frozenset({"media"})))
+    assert not media_dir.exists()
+    assert (home / "index.db").exists(), "范围泄漏：--media 动了检索库"
+    assert (home / "passphrase.json").exists(), "范围泄漏：--media 动了密钥缓存"
+    assert r.freed == 500
+
+
+def test_execute_moments_scope_does_not_touch_media(tmp_path):
+    """同上的反向断言，针对 `--moments`：朋友圈导出与媒体导出是两个目录、两个开关。"""
+    home = tmp_path / "home"; home.mkdir(parents=True)
+    (home / "media").mkdir()
+    (home / "media" / "shot.jpg").write_bytes(b"j" * 500)
+    moments_dir = home / "moments"; moments_dir.mkdir()
+    (moments_dir / "sns.html").write_bytes(b"h" * 300)
+    r = purge.execute(purge.plan(frozenset({"moments"})))
+    assert not moments_dir.exists()
+    assert (home / "media" / "shot.jpg").exists(), "范围泄漏：--moments 动了媒体导出"
+    assert r.freed == 300
+
+
+def test_named_scope_never_touches_scopeless_artifacts(tmp_path):
+    """`models/` 与 `tasks.json` 的 scope 是 None——**任何具名范围都不得碰到它们**，它们只
+    随 `--all` 一起走。判据的写法（`all_ or a.scope in scopes`）一旦被改成别的形状这里会红：
+    models/ 是公开模型资产，被 --media 顺手删掉是纯损失（要靠重新下载才回得来）。
+    """
+    home = tmp_path / "home"; home.mkdir(parents=True)
+    (home / "models").mkdir()
+    (home / "models" / "m.onnx").write_bytes(b"m" * 100)
+    (home / "tasks.json").write_text("{}")
+    (home / "media").mkdir()
+    purge.execute(purge.plan(frozenset({"media"})))
+    assert (home / "models" / "m.onnx").exists(), "scope=None 的产物被具名范围删掉了"
+    assert (home / "tasks.json").exists(), "scope=None 的产物被具名范围删掉了"
 
 
 def test_execute_all_removes_tree_and_does_not_recreate(tmp_path):

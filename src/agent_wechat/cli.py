@@ -433,13 +433,15 @@ def _human_size(n: int) -> str:
 def cmd_purge(args: argparse.Namespace) -> int:
     """销毁本地产物。**默认 dry-run**：不带 --yes 只打印计划，一个字节不删。
 
-    --all 的语义是「整个 HOME_DIR」（超集），不是三个具名范围的并集——这样才扫得掉
+    --all 的语义是「整个 HOME_DIR」（超集），不是具名范围的并集——这样才扫得掉
     `decrypt --out` 落在 HOME_DIR 下的散落明文（SECURITY.md §1 标为极高敏感）。
     """
     from . import purge
 
-    scopes = frozenset(s for s, on in
-                       (("keys", args.keys), ("index", args.index), ("tmp", args.tmp)) if on)
+    # 同样从产物表演绎，不手写第二份名单；`--<scope>` 这个约定由 tests/test_cli.py 的
+    # test_every_named_scope_has_a_working_flag 逐条钉住。
+    scopes = frozenset(s for s in (a.scope for a in purge.artifacts())
+                       if s and getattr(args, s))
     plan = purge.plan(scopes, all_=args.all)
 
     if not args.yes:
@@ -466,22 +468,21 @@ def _render_plan(plan: purge.PurgePlan) -> None:
     # 被设成空值时全都相对当前工作目录），而「将删除：」这四个字是这张表唯一的上下文。
     print(f"目标目录：{paths.HOME_DIR.resolve()}")
     for i in plan.items:
-        # 目录的 i.size 是 inode 自身大小（几十到几百字节），**不是整树体积**——
-        # 而 execute 的汇总行用的是 _tree_size 量出的整树体积。同一个 tmp/ 会在计划表里
-        # 显示 96 B、在汇总行显示几百 MB，差好几个数量级。spec §3 的表样对那一行标的正是
-        # 「—」，故目录一律不显体积。（T4 修过 freed 上的同一个错误，这是它在渲染器里的残留。）
-        size = _human_size(i.size) if (i.exists and i.artifact.kind != "dir") else "—"
+        # 目录现在也有整树体积（_item 走 _tree_size），不再印「—」——那张表是用户据以说
+        # --yes 的唯一依据，而「—」让最大的一项（media/，10 GB）看起来无事发生。
+        size = _human_size(i.size) if i.exists else "—"
         mark = "" if i.exists else "（不存在）"
-        print(f"  {i.artifact.scope:<7} {i.artifact.path}  {size:>10}  "
+        # scope 为 None = 有拥有者但没有 CLI 开关（models/、tasks.json），只随 --all 一起删。
+        # 印「all」与下面 loose 行第一列同形：那一列的含义本来就是「按哪个范围删得掉它」。
+        print(f"  {i.artifact.scope or 'all':<7} {i.artifact.path}  {size:>10}  "
               f"{'敏感' if i.artifact.sensitive else '否':<4} {i.artifact.rebuild}{mark}")
     for e in plan.loose:
-        # spec §3：每行点名它属于哪个已知产物，或标「散落文件」。models/ 与 tasks.json 是
-        # vector/tasks 的已知产物，只是没有对应的 CLI 开关——一律印「不属于任何具名范围」
-        # 字面没错，读起来却是「没人认识的文件」。
+        # 走到这里的一定是**没有拥有者**的条目：有拥有者的（含没有开关的 models/、
+        # tasks.json）都被 plan() 排进了 items。所以敏感度写「未知」而不是留空——这张表里
+        # 空着读起来是「已检查过、不要紧」，而真实含义是「没人认识它」，两者正相反。
         # 体积由 purge 侧算（目录走整树，见 _loose_entry）：CLI 不再自己量一遍，那是第二份来源。
-        known = purge.known_artifact_label(e.path)
-        mark = f"已知产物：{known}" if known else "不属于任何具名范围"
-        print(f"  {'all':<7} {e.path}  {_human_size(e.size):>10}  （{mark}）")
+        print(f"  {'all':<7} {e.path}  {_human_size(e.size):>10}  "
+              f"{'未知':<4} 不属于任何已知产物")
     print("\n未删除任何文件。加 --yes 执行。")
 
 
@@ -583,6 +584,9 @@ def main(argv: list[str] | None = None) -> None:
     sp = sub.add_parser("purge", help="销毁本地产物（默认 dry-run，加 --yes 才真删）")
     sp.add_argument("--keys", action="store_true", help="密钥缓存 passphrase.json")
     sp.add_argument("--index", action="store_true", help="本地检索库 index.db（含向量索引）")
+    sp.add_argument("--media", action="store_true",
+                    help="媒体与聊天导出（HOME_DIR/media：解密后的图片/视频/语音，及 HTML/MD）")
+    sp.add_argument("--moments", action="store_true", help="朋友圈导出（HOME_DIR/moments）")
     sp.add_argument("--tmp", action="store_true", help="解密临时目录")
     sp.add_argument("--all", action="store_true",
                     help="整个 ~/.agent-wechat（含 models/ 与散落文件），与具名范围互斥")
@@ -661,11 +665,18 @@ def main(argv: list[str] | None = None) -> None:
 
     args = p.parse_args(argv)
     if args.cmd == "purge":
-        named = args.keys or args.index or args.tmp
+        # 名单**从产物表演绎**，不再手写第二遍：这里原是一份三元素的手写清单，加上
+        # --media / --moments 之后它会判「没指定范围」——参数明明给了却报用法错。
+        # 「范围名」在本模块此前有三处枚举（purge 那张表、cmd_purge 的 scopes 元组、这里），
+        # 三份要手工同步的东西就是漂移的温床；现在只剩那张表一处。
+        from . import purge as _purge
+        names = [a.scope for a in _purge.artifacts() if a.scope]
+        flags = " / ".join(f"--{s}" for s in names)
+        named = any(getattr(args, s) for s in names)     # 开关缺失就是 AttributeError，响亮
         if args.all and named:
-            p.error("--all 不能与 --keys/--index/--tmp 同时使用")
+            p.error(f"--all 不能与具名范围同时使用：{flags}")
         if not args.all and not named:
-            p.error("必须指定至少一个范围：--keys / --index / --tmp / --all")
+            p.error(f"必须指定至少一个范围：{flags} / --all")
     try:
         code = args.fn(args)
     except errors.ContactNotFound as exc:

@@ -532,7 +532,7 @@ def message_media(contact: str, *, keys: Sequence[str] | None = None,
     cm = messages.md5_of(chat_id)
     # 绝对化：`--out 相对路径` 会让 states[].path 变成 MCP 客户端用不了的相对路径。
     # `.resolve()` 是纯路径运算，不碰微信数据（红线不受影响）。
-    out_root = (pathlib.Path(out_dir) if out_dir else paths.HOME_DIR / "media").resolve()
+    out_root = (pathlib.Path(out_dir) if out_dir else media.export_root()).resolve()
     lim = clamp_limit(limit, LIMIT_MEDIA)
     month_sql, month_args = _month_clause(months)
     degraded: list[Degradation] = []
@@ -723,7 +723,7 @@ def chat_export(contact: str, *, months: list[str] | None = None, limit: int = 5
     # （`message_media` 自己 resolve 过），`chat_text.media_src` 用 `os.path.relpath` 算
     # 相对引用时按 **cwd** 展开相对的那一侧 —— 产物的 `<img>` 照常渲染、打不开
     # （静默 404）。与 `message_media` 同款处理。
-    out_root = (pathlib.Path(out_dir) if out_dir else paths.HOME_DIR / "media").resolve()
+    out_root = (pathlib.Path(out_dir) if out_dir else media.export_root()).resolve()
     try:
         rows, truncated = search.messages_in_range(
             chat_id, account=ctx.account, after_ts=after_ts, before_ts=before_ts,
@@ -947,9 +947,10 @@ def chat_index(out_dir: str | None = None, account: str | None = None) -> ChatIn
     `contacts(limit=5000)` 的 5000 行窗口，窗口外的会话会静默回落裸 id（真机 772 个会话
     只有 18% 在窗口内）——那条已 park，别在这里顺手接上。
     """
+    from . import media                     # 只为 export_root()：本函数此前不 import media
     # 与 `chat_export` 同款绝对化：`--out` 给相对路径时，`out_dir`/`file` 才是能直接打开、
     # 也能与 `chat export` 对齐的路径。
-    out_root = (pathlib.Path(out_dir) if out_dir else paths.HOME_DIR / "media").resolve()
+    out_root = (pathlib.Path(out_dir) if out_dir else media.export_root()).resolve()
     found = list(out_root.glob("*/chat/index.html"))
     if not found:
         return ChatIndexResult(out_dir=str(out_root), file=None, chats=0)
@@ -1196,7 +1197,7 @@ def moments_export(contact: str | None = None, *, months: list[str] | None = Non
     do_fetch = fetch if fetch is not None else sns_media.fetch
 
     out_root = media.ensure_tree(
-        pathlib.Path(out_dir) if out_dir else paths.HOME_DIR / "moments")
+        pathlib.Path(out_dir) if out_dir else moments.export_root())
     report = moments.MomentsReport()
     kept: list[moments.SnsPost] = []
     lo = hi = None
