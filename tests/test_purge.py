@@ -876,10 +876,11 @@ def test_execute_chat_refuses_when_lock_is_held(tmp_path):
     finally:
         holder.rollback(); holder.close()
     # 消息不许说谎（F4/F6）：标题是**操作**（库损坏、磁盘满也会落到这一支），真因在 `{exc}` 里，
-    # 并带上本轮进度——「此前已完成的」不能被说成没发生。
+    # 并带上本轮进度——「此前已完成的」不能被说成没发生。数的单位是**项**（账号 × 会话），
+    # 不是会话：跨账号 purge 里同一个会话是两项。
     msg = str(ei.value)
     assert "删除未执行" in msg and "database is locked" in msg, msg
-    assert "本次计划 1 个会话" in msg and "此前已完成 0 个" in msg, msg
+    assert "本次计划 1 项" in msg and "此前已完成 0 项" in msg, msg
     # docstring 承诺了「索引零变化」就得真断言：没有这一句，一个「先删一半再抛」的实现
     # 也能让上面那条 pytest.raises 通过——**这门命令上那是最坏的形状**。
     with store.open() as con:
@@ -1071,6 +1072,29 @@ def test_plan_chat_shares_one_export_dir_across_accounts(tmp_path):
     assert "导出目录仍在" not in res.render()
 
 
+def test_plan_chat_does_not_report_a_dangling_export_symlink_as_removed(tmp_path):
+    """`media/<md5>` 是**悬空符号链接**时：`rmtree` 跟随它、抛 `FileNotFoundError`，
+    而链接本身原封不动（M-B）。
+
+    于是「FileNotFoundError → 成功」这条幂等分支会报「已删除」，核查若用 `exists()`
+    （问「有没有内容」，悬空链接答「没有」）也跟着说干净——**说删了、东西还在、核查说干净**，
+    正是本项目最忌讳的那一类。判据要用 `lstat`（问「这个名字还在吗」）。
+    """
+    home = tmp_path / "home"; home.mkdir(parents=True)
+    with store.open() as con:
+        store.upsert_batch(con, [_victim_row(1)])
+    media = home / "media"; media.mkdir()
+    link = media / VICTIM_MD5
+    link.symlink_to(media / "早就没有了")
+    plan = purge.plan_chat([{"account": "a", "chat_id": VICTIM, "chat_md5": VICTIM_MD5}])
+    report = purge.execute_chat(plan)
+    assert report[0].export_removed is False, "链接还在，就不算删掉"
+    assert os.path.lexists(link), "前提：rmtree 没能删掉这个悬空链接"
+    res = purge.verify_chat(plan)
+    assert res.export_still_there is True
+    assert str(link) in res.render()
+
+
 def test_plan_chat_turns_a_broken_index_into_purge_refused(tmp_path):
     """索引坏了/读不了时，裸 `sqlite3.DatabaseError` 不许逃到 CLI（F2）。
 
@@ -1225,6 +1249,10 @@ def test_verify_chat_derives_chat_md5_instead_of_trusting_the_plan(tmp_path):
     数墓碑。两边一旦不同源，核查会读 0 → 误报「不可逆性未建立」（真出问题时也可能被垫成 ✅）。
     判别形态用**退化会话名** `md5:<hex>`：它是 `chat_md5` 与 `md5_of` 唯一分道扬镳的地方，
     这里故意传 `md5_of` 那一支（CLI 若用错帮手就是这个值）。
+
+    **`plan_chat` 侧的目录也走同一判据**（M-C）：`media/<md5>/` 必须由 `chat_id` 现推，
+    退回「照抄调用方传的 `item["chat_md5"]`」时，路径会指向一个不存在的目录——
+    真目录永远删不掉、核查看不见（这条断言就是那个回归的判据）。
     """
     chat = messages.degraded_chat_id("aaaa")
     home = tmp_path / "home"; home.mkdir(parents=True)
@@ -1232,6 +1260,9 @@ def test_verify_chat_derives_chat_md5_instead_of_trusting_the_plan(tmp_path):
         store.upsert_batch(con, [_row(chat, "aaaa", 1)])
     plan = purge.plan_chat([{"account": "a", "chat_id": chat,
                              "chat_md5": messages.md5_of(chat)}])
+    assert plan.entries[0].export_dir == home / "media" / "aaaa", \
+        "计划侧的目录也要派生（退化形态的 md5 就是那段 hex），不许用传进来的值"
+    assert plan.entries[0].chat_md5 == "aaaa", "同理，计划里存的也必须是生效的那个"
     purge.execute_chat(plan)
     res = purge.verify_chat(plan)
     assert res.tombstone_written == 1, "墓碑就在那儿，只是键要用派生的那个"

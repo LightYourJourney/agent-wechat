@@ -663,6 +663,22 @@ class ChatResidue:
         return "\n".join(lines)
 
 
+def _name_there(p: pathlib.Path) -> bool:
+    """**这个路径名还在吗**——不跟随符号链接（悬空链接也算在），判不出来就抛。
+
+    与 `exists()` 的分工：`exists()` 问「有没有内容」，悬空链接答「没有」，于是「说删了、
+    链接还在、核查说干净」这种假象就成立了；这里问的是「这个名字还在不在」。
+    与 `os.path.lexists()` 的分工：那个把 OSError 吞成 False——父目录不可搜索（EACCES）
+    时它会对残留报「不在」，同样是假象。走 `Path.lstat()`（EACCES 会抛，由调用方的
+    try 翻成 PurgeRefused），只有真的没有这个名字才返回 False。
+    """
+    try:
+        p.lstat()
+    except FileNotFoundError:
+        return False
+    return True
+
+
 def plan_chat(resolved: list[dict], home: pathlib.Path | None = None) -> ChatPlan:
     """**纯只读**：只算将删什么，一个字节都不动。`resolved` 是
     `[{"account":…, "chat_id":…, "chat_md5":…}, …]`（解析由 cli 层做，见 Task 7）。
@@ -798,11 +814,11 @@ def execute_chat(plan: ChatPlan) -> tuple[ChatReport, ...]:
             #
             # 消息只说**实际发生的事**：标题是**操作**（不是「拿不到写锁」——库损坏、磁盘满
             # 都会落到这一支，真因在 `{exc}` 里），并带上本轮进度——不然「此前已完成的」
-            # 会被说成没发生（F1 之后 plan.entries 恒 ≤1 项，所以今天这两个数字恒为 1 / 0，
-            # 但这句话不该依赖那个前提）。
+            # 会被说成没发生。两个数字数的是**项**（`plan.entries` 的条数 = 账号 × 会话），
+            # **不是会话数**：跨账号 purge 里同一个会话是两项（每个有它的账号各一条）。
             raise errors.PurgeRefused(
                 f"删除未执行：{e.account}/{e.chat_id} 未被删除"
-                f"（本次计划 {len(plan.entries)} 个会话，此前已完成 {len(out)} 个）：{exc}",
+                f"（本次计划 {len(plan.entries)} 项，此前已完成 {len(out)} 项）：{exc}",
                 hint="`database is locked` → 有别的进程正在写索引（导出任务 / MCP server），"
                      "等它结束后重试；库损坏（file is not a database 等）→ 先 purge --index "
                      "删掉索引，再重跑 export") from exc
@@ -816,7 +832,10 @@ def execute_chat(plan: ChatPlan) -> tuple[ChatReport, ...]:
             shutil.rmtree(e.export_dir)
             removed = True
         except FileNotFoundError:
-            removed = True
+            # 「不在了」有两种：真的删掉了（幂等成功），以及 `media/<md5>` 是**悬空符号链接**
+            # ——`rmtree` 会**跟随**它、报 FileNotFoundError，而链接本身原封不动。后者必须报
+            # False：它是残留，报成功就是「说删了、东西还在」，随后核查还会跟着说干净。
+            removed = not _name_there(e.export_dir)
         except OSError:
             removed = False          # 部分失败继续：按既有约定逐条报告、退 1
         # tombstone 报的是**本次真正新写进去的条数**（两阶段之和，见 _write_tombstone），
@@ -855,10 +874,12 @@ def verify_chat(plan: ChatPlan) -> ChatResidue:
                 for e in plan.entries)
         # 导出物**逐条**查，并去重（跨账号的两条 entry 共享同一个 `media/<md5>/`）：
         # 只查第一条会在多会话时漏报；只回一个 bool 则说不出「哪个还在」。
-        # `exists()` 必须在 try 里：`media/` 父目录不可搜索时 pathlib 抛 EACCES
-        # （EACCES 不在它忽略的 errno 里），那也要翻成 PurgeRefused，不许裸穿。
+        # 存活判据是 `_name_there`（**不跟随符号链接**）：悬空链接在这个字段里也算残留——
+        # 这里问的是「这个名字还在吗」，不是「有没有内容」。
+        # 它必须在 try 里：父目录不可搜索时 `lstat` 抛 EACCES（EACCES 不在 pathlib 忽略的
+        # errno 里），那也要翻成 PurgeRefused，不许裸穿、更不许被吞成「不在」。
         surviving = tuple(dict.fromkeys(
-            e.export_dir for e in plan.entries if e.export_dir.exists()))
+            e.export_dir for e in plan.entries if _name_there(e.export_dir)))
     except (sqlite3.Error, OSError) as exc:
         # 同 plan_chat：读不了库时不许裸 sqlite3.Error 逃到 CLI。而且**「核查不了」必须与
         # 「核查通过」区分开**——静默返回一个空 leftover 就是对着未知状态报 ✅。
