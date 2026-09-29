@@ -4,7 +4,7 @@ import sqlite3
 import pytest
 import sqlite_vec
 
-from agent_wechat import exclusions, messages, paths, store, vector
+from agent_wechat import errors, exclusions, messages, paths, store, vector
 
 # 会话 id 的两种形态都要过一遍（`messages.chat_md5` 就这两条分支）：
 # - victim 用**退化形态** `md5:<hex>`：它是 `chat_md5` 与 `md5_of` 唯一分道扬镳的地方
@@ -57,6 +57,57 @@ def _seed(con):
     con.execute("INSERT INTO display_names VALUES ('a',?,'u1','受害人')", (VICTIM,))
     con.execute("INSERT INTO display_names VALUES ('a',?,'u2','留下的人')", (KEEPER,))
     con.commit()
+
+
+@pytest.fixture
+def _vec_index_db(_temp_index, tmp_path):
+    """在夹具那条库上真建向量表、真种一行，返回**库文件路径**。
+
+    建表用的是夹具自己的 `con`（它加载了扩展）；而下面那两条测试要的恰恰是**另一条不加载
+    扩展**的连接，所以这里交出路径、不交出连接（同一条连接上扩展的模块注册是不可逆的）。
+    """
+    con = _temp_index
+    con.enable_load_extension(True)
+    sqlite_vec.load(con)
+    con.enable_load_extension(False)
+    con.executescript(store.VECTOR_SCHEMA)
+    # vec0 的 metadata 列（account / ts）**不允许 NULL**：两者都必须给值，只给 account 会报
+    # `Expected integer for INTEGER metadata column ts, received NULL`。
+    con.execute(
+        "INSERT INTO vec_messages(msg_rowid, embedding, acct_chat, account, ts, preview) "
+        "VALUES (?,?,?,?,?,NULL)",
+        (2, sqlite_vec.serialize_float32([0.1] * store.VECTOR_DIM),
+         vector._acct_chat("a", VICTIM_MD5), "a", 100))
+    con.commit()
+    return tmp_path / "index.db"
+
+
+def test_chat_row_counts_refuses_when_vec_extension_not_loaded(_vec_index_db):
+    """**装了向量索引的机器上 purge 的第一句就会踩这条**：`store.connect()` 从不加载
+    sqlite-vec（加载是 `vector.connect()` 的职责，见 `vector.py:31` 的 docstring），于是
+    `SELECT … FROM vec_messages` 抛裸 `sqlite3.OperationalError: no such module: vec0`
+    ——违反「core 层只抛 AgentWeChatError 子类」（`errors.py:1`）。
+
+    `_has_table` 只证明「表在」，不证明「这条连接能用它」：守卫要保留（轻装安装是正常路径，
+    见 test_delete_chat_without_any_vector_tables），这一格靠翻译补。
+    """
+    with store.open(_vec_index_db) as plain:        # 不加载扩展的连接——生产 purge 的形态
+        with pytest.raises(errors.PurgeRefused) as ei:
+            store.chat_row_counts(plain, "a", VICTIM)
+    assert isinstance(ei.value.__cause__, sqlite3.OperationalError), \
+        "必须 `from e` 保住病因，否则排查时看不到 no such module: vec0"
+    assert ei.value.hint and "vector.connect()" in ei.value.hint, \
+        "hint 必须给出可执行的修法：改用 vector.connect() 开连接"
+
+
+def test_delete_chat_refuses_when_vec_extension_not_loaded(_vec_index_db):
+    """同一条连接上 `DELETE FROM vec_messages` 也是**响亮失败**（实测 sqlite-vec 0.1.9：
+    `execute()` 当场抛 `no such module: vec0`，不是静默空操作）——所以这里**不做** rowcount
+    对账，它守卫的是一个不存在的危险。"""
+    with store.open(_vec_index_db) as plain:
+        with pytest.raises(errors.PurgeRefused) as ei:
+            store.delete_chat(plain, account="a", chat_id=VICTIM)
+    assert isinstance(ei.value.__cause__, sqlite3.OperationalError)
 
 
 def test_delete_chat_removes_all_five_places(_temp_index):

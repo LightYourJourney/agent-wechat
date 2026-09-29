@@ -15,7 +15,7 @@ import sqlite3
 import time
 from collections.abc import Iterator, Sequence
 
-from . import exclusions, messages, paths
+from . import errors, exclusions, messages, paths
 
 DB_PATH = paths.HOME_DIR / "index.db"
 
@@ -253,6 +253,33 @@ def _has_table(con: sqlite3.Connection, name: str) -> bool:
         (name,)).fetchone() is not None
 
 
+def _vec_exec(con: sqlite3.Connection, sql: str, args: tuple = ()) -> sqlite3.Cursor:
+    """在 `vec_messages` 上执行一条语句，把「这条连接没加载 sqlite-vec」翻成项目异常。
+
+    **为什么必须翻**：`store.connect()` 从不加载扩展——加载是 `vector.connect()` 的职责
+    （`vector.py:31` 的 docstring 写着「sqlite-vec 的知识只留在本模块」）。于是装了向量索引的
+    机器上（表在、扩展没加载），本模块任何一句真碰 `vec_messages` 的 SQL 都抛裸
+    `sqlite3.OperationalError: no such module: vec0`，违反「core 层只抛 AgentWeChatError 子类」
+    （`errors.py:1`）。`_has_table` 只证明「表在」，不证明「这条连接能用它」——两个判据的差
+    正是这一格。
+
+    SELECT 与 DELETE **都是响亮失败**（实测 sqlite-vec 0.1.9：`execute()` 当场抛，不是静默
+    空操作），所以不需要 rowcount 对账之类的守卫。
+
+    只翻 `no such module` 一种：语法错、库损坏等其它 OperationalError 原样透出——把它们
+    一并翻译会掩盖真正的问题。也**不 import sqlite_vec / vector**：store 只认 sqlite3。
+    """
+    try:
+        return con.execute(sql, args)
+    except sqlite3.OperationalError as e:
+        if "no such module" not in str(e):
+            raise
+        raise errors.PurgeRefused(
+            f"无法访问向量表 vec_messages：{e}",
+            hint="这条连接没加载 sqlite-vec；purge 路径应改用 vector.connect() 开连接"
+                 "（store.connect() 不加载扩展）") from e
+
+
 def chat_row_counts(con: sqlite3.Connection, account: str, chat_id: str) -> dict[str, int]:
     """该会话在五张表里的存活条数。核查与测试共用，避免各处各写一套判据。
 
@@ -275,7 +302,8 @@ def chat_row_counts(con: sqlite3.Connection, account: str, chat_id: str) -> dict
     a = (account, chat_id)
     return {
         "messages": n("SELECT count(*) FROM messages WHERE account=? AND chat_id=?", a),
-        "vectors": (n("SELECT count(*) FROM vec_messages WHERE acct_chat=?", (acct_chat,))
+        "vectors": (_vec_exec(con, "SELECT count(*) FROM vec_messages WHERE acct_chat=?",
+                              (acct_chat,)).fetchone()[0]
                     if _has_table(con, "vec_messages") else 0),
         "parts": n("SELECT count(*) FROM msg_parts WHERE substr(msg_key, 1, ?) = ?", p),
         "refs": n("SELECT count(*) FROM media_refs WHERE substr(msg_key, 1, ?) = ?", p),
@@ -313,7 +341,7 @@ def delete_chat(con: sqlite3.Connection, *, account: str, chat_id: str) -> dict[
         # 后者会漏掉孤儿向量（消息行已经不在了的那些），而孤儿正是隐私删除最该清的东西。
         # 实测（sqlite-vec 0.1.9，两个分区各 100 行）：`DELETE … WHERE acct_chat=?` 成立，
         # 200→100、被删分区残留 0、另一分区完整；`SELECT count(*) … WHERE acct_chat=?` 同样成立。
-        con.execute("DELETE FROM vec_messages WHERE acct_chat=?", (acct_chat,))
+        _vec_exec(con, "DELETE FROM vec_messages WHERE acct_chat=?", (acct_chat,))
     # `msg_parts` / `media_refs` 按 **`msg_key` 前缀**删，同样为了盖住孤儿行（见 chat_row_counts）。
     # 不能用 LIKE：account 里含 `_` 与 `%`，两个都是通配符。
     con.execute("DELETE FROM msg_parts WHERE substr(msg_key, 1, ?) = ?", p)
