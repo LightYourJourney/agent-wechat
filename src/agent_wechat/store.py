@@ -676,6 +676,24 @@ def roster_is_stale(con: sqlite3.Connection, account: str, ttl: int) -> bool:
     return row is None or (int(time.time()) - row[0]) >= ttl
 
 
+def roster_skip_chat_md5(con: sqlite3.Connection, account: str) -> set[str]:
+    """名册重建时要跳过的会话：**被排除过 且 索引里已无存活消息**。
+
+    第二个条件是必须的——`_SENDER_EXPR` 是 COALESCE(dn.display_name, m.sender_name,
+    m.sender_id)，而 `sender_name` 只在群聊有值（DDL 注释：「群聊时从 content 前缀解析」），
+    **私聊的 `sender_name` 是 NULL**。只按第一个条件拦，被删的私聊将来收到的新消息会显示成
+    裸 wxid，直到 --undo——那等于把「只清当时已有的」偷偷扩成「把这个会话弄瘸」。
+    加上第二个条件之后它自愈：一旦有新消息入库，名册就照常重建这个名字。
+
+    **调用点必须在 `replace_roster` 的 DELETE 之后**（那里才拿得到写锁），理由见那里的注释。
+    """
+    excluded = {r[0] for r in con.execute(
+        "SELECT DISTINCT chat_md5 FROM exclusions.excluded WHERE account=?", (account,))}
+    if not excluded:
+        return set()
+    return excluded - chat_md5_in_index(con, account)
+
+
 def replace_roster(con: sqlite3.Connection, account: str,
                    rows: list[tuple[str, str, str]]) -> None:
     """整体替换该账号的名册，并更新 refreshed_at。
@@ -683,8 +701,20 @@ def replace_roster(con: sqlite3.Connection, account: str,
     **一个事务内 DELETE + INSERT**：中途失败若留下半份名册，那半份之外的人会突然
     显示成 wxid——比不刷新更糟（一半有名一半没名，用户无从判断哪个可信）。
     本函数不 commit：由调用方（`store.open()` 或 usecases）决定事务边界。
+
+    **跳过判据的读必须在这句 DELETE 之后**（不是风格问题，是承重的，见下面那句注释）。
     """
     con.execute("DELETE FROM display_names WHERE account=?", (account,))
+    # 这一句**必须**留在 DELETE 之后：DELETE 是写语句，它当场把事务开起来并拿到主库的
+    # RESERVED 写锁——**没有匹配行时也拿**（实测：两种情形下 `in_transaction` 都是 True、
+    # 第二条连接写同一库都报 `database is locked`），其后的两次读与 INSERT 就全在锁内。
+    # 挪到 DELETE 之前，两次读落在自动提交里，与写之间就有窗口：`purge --chat` 在窗口里
+    # 提交墓碑并删完，本函数随即把那个会话的显示名原样写回去——purge 在 display_names 上
+    # 的那一处删除被撤销，此后没有任何东西会再清它。
+    # 判据**不是** `con.in_transaction`：TEMP 表的 INSERT 也会开一个 deferred 事务而主库
+    # 写锁并未拿到（Task 4 已实测），那时 `in_transaction` 为真却仍在窗口里。
+    skip = roster_skip_chat_md5(con, account)
+    rows = [r for r in rows if messages.chat_md5(r[0]) not in skip]
     con.executemany(
         "INSERT OR REPLACE INTO display_names (account, chat_id, member_key, display_name) "
         "VALUES (?,?,?,?)",

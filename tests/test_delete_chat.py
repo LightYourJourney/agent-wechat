@@ -255,6 +255,106 @@ def test_delete_chat_removes_vectors_of_that_chat_only(_temp_index):
     assert store.chat_row_counts(con, "a", KEEPER)["vectors"] == 1
 
 
+def test_roster_skips_deleted_chat_but_not_others(_temp_index):
+    """被排除**且**索引里已无存活消息的会话，名册重建时要跳过；
+    别的会话必须照常重建（反向断言：拦的是那个会话，不是把整张表冻住）。
+
+    **两个条件缺一不可**：只写墓碑不删消息的话，第二个条件不成立，判据就不该跳过它
+    （那正是下面那条自愈测试的情形）。所以这里必须走一遍真正的删除。
+
+    会话 id 用本文件的 `VICTIM`（**退化形态** `md5:aaaa`）：`messages.chat_md5` 的两条分支
+    里只有它在 `md5_of` 下会分道扬镳——判据若拿 `md5_of(chat_id)` 去比对墓碑的 `chat_md5`，
+    这里会静默地一条都不跳（`md5_of("md5:aaaa")` 是另一个值），而 keeper 那条反向断言照样绿。
+    """
+    con = _temp_index
+    exclusions.add(con, [(f"a|{VICTIM_MD5}|message_0.db|1", "a", VICTIM_MD5),
+                         (f"a|{VICTIM_MD5}|message_0.db|2", "a", VICTIM_MD5)])
+    con.commit()
+    store.delete_chat(con, account="a", chat_id=VICTIM)
+    con.commit()
+    store.replace_roster(con, "a", [(VICTIM, "u1", "受害人"), (KEEPER, "u2", "留下的人")])
+    got = {r[0] for r in con.execute("SELECT chat_id FROM display_names WHERE account='a'")}
+    assert got == {KEEPER}, f"名册应当只剩 keeper，实际 {got}"
+
+
+def test_roster_self_heals_once_new_messages_arrive(_temp_index):
+    """**自愈**：那个会话一旦有新消息入库，名册就照常给出它的名字。
+
+    没有这一条，「只清当时已有的」会偷偷变成「把这个会话弄瘸」——私聊的 sender_name 是 NULL，
+    新消息会显示成裸 wxid（spec §5.4 第 4 条）。
+    """
+    con = _temp_index
+    exclusions.add(con, [(f"a|{VICTIM_MD5}|message_0.db|1", "a", VICTIM_MD5)])
+    con.commit()
+    store.delete_chat(con, account="a", chat_id=VICTIM)
+    con.commit()
+    store.replace_roster(con, "a", [(VICTIM, "u1", "受害人"), (KEEPER, "u2", "留下的人")])
+    assert VICTIM not in {r[0] for r in con.execute("SELECT chat_id FROM display_names")}
+    # 新消息进来（未被排除，照常入库）
+    store.upsert_batch(con, [{"msg_key": f"a|{VICTIM_MD5}|message_0.db|9", "account": "a",
+        "chat_md5": VICTIM_MD5, "chat_id": VICTIM, "shard": "message_0.db", "local_id": 9,
+        "server_id": 9, "ts": 900, "msg_type": 1, "sender_id": None, "sender_name": None,
+        "is_self": 0, "content": "新来的", "media_hint": None}])
+    store.replace_roster(con, "a", [(VICTIM, "u1", "受害人"), (KEEPER, "u2", "留下的人")])
+    assert VICTIM in {r[0] for r in con.execute("SELECT chat_id FROM display_names")}, \
+        "该会话有新消息之后，名册必须重新给出它的显示名"
+
+
+def test_roster_skip_read_lands_inside_the_write_transaction(_temp_index, tmp_path, monkeypatch):
+    """**判别性**：跳过判据的读必须落在 `DELETE FROM display_names` 拿到的写锁**之内**。
+
+    构造同 `tests/test_exclusions.py` 的窗口测试：在判据**读完**之后、本函数写库之前，让
+    **另一条连接**（同进程，等价于另一个 `purge --chat` 进程）把窗口里会发生的事做一遍
+    （阶段 1 写墓碑、阶段 2 删名册），`busy_timeout=0` 让它立刻报错而非挂 5 秒。
+
+    - 修好后：DELETE 是写语句，它当场拿到主库 RESERVED 写锁（**没有匹配行时也拿**——本测试
+      走的正是「victim 那行已经不在了」这条分支），那个写者进不来 ⇒ 窗口不存在；
+    - 把 `skip = roster_skip_chat_md5(...)` 挪到 DELETE **之前**：两次读落在自动提交里，
+      窗口打开 ⇒ `blocked` 为假 ⇒ 本条红。
+
+    为什么窗口必须堵：读在锁外时，`purge --chat` 可以在「读之后、写之前」提交墓碑并删完，
+    随后的 INSERT 就把那个会话的显示名写回去——purge 在 `display_names` 那一处删除被撤销，
+    此后没有任何东西会再清它。窗口里具体毁掉什么取决于 purge 那一刻做到哪一步，所以这里钉的是
+    **窗口不存在**（写者被挡），而不是某一份具体的坏结果。
+    """
+    con = _temp_index
+    exclusions.add(con, [(f"a|{VICTIM_MD5}|message_0.db|1", "a", VICTIM_MD5)])
+    con.commit()
+    # 让判据真算出东西：先把 victim 的消息与名册行都删掉（墓碑留着）。
+    store.delete_chat(con, account="a", chat_id=VICTIM)
+    con.commit()
+    assert store.roster_skip_chat_md5(con, "a") == {VICTIM_MD5}, "前提：判据此刻应当跳过 victim"
+
+    other = store.connect(tmp_path / "index.db")     # 第二条连接提前开好，不参与本事务
+    other.execute("PRAGMA busy_timeout=0")
+    real = store.roster_skip_chat_md5
+    seen: dict = {}
+
+    def read_then_let_purge_run(con_, account):
+        out = real(con_, account)                    # ← 判据在这里读完，窗口从这里开始
+        try:
+            exclusions.add(other, [(f"a|{VICTIM_MD5}|message_0.db|2", "a", VICTIM_MD5)])
+            other.execute("DELETE FROM display_names WHERE account=? AND chat_id=?", ("a", VICTIM))
+            other.commit()
+            seen["blocked"] = False
+        except sqlite3.OperationalError as e:
+            seen["blocked"] = "locked" in str(e)
+        return out
+
+    monkeypatch.setattr(store, "roster_skip_chat_md5", read_then_let_purge_run)
+    try:
+        store.replace_roster(con, "a", [(VICTIM, "u1", "受害人"), (KEEPER, "u2", "留下的人")])
+    finally:
+        other.rollback()
+        other.close()
+    assert seen.get("blocked"), \
+        "判据的读落在写事务之外：另一个写者把墓碑提交进来了——purge 若在窗口里提交，" \
+        "这次 INSERT 会把它的 display_names 删除撤销"
+    # 拿着锁照常干活：victim 被跳过、keeper 照常重建（锁内那条路径不是「什么都不写」）
+    got = {r[0] for r in con.execute("SELECT chat_id FROM display_names WHERE account='a'")}
+    assert got == {KEEPER}, f"名册应当只剩 keeper，实际 {got}"
+
+
 def test_delete_chat_recomputes_embedded_from_actual_rows(_temp_index):
     """`vector_meta.embedded` 必须按**实际剩余行数**重算，不能按 `before["vectors"]` 做减法。
 
