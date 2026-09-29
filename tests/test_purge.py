@@ -1095,6 +1095,29 @@ def test_plan_chat_does_not_report_a_dangling_export_symlink_as_removed(tmp_path
     assert str(link) in res.render()
 
 
+def test_execute_chat_allows_a_tree_internal_link(tmp_path):
+    """树内链接**不拒**（判据的另一半，防的是「见到链接就拒」那种过度拒绝）。
+
+    判据跟的是**删除原语**：`rmtree` 会把链接当普通条目 unlink、而它的目标在树内，
+    随整树一并消失，不存在 false-clean。一律拒绝会让 `media/<md5>/` 里任何一个内部软链
+    把整个会话变成删不掉的死结——`_escapes_home` 的 docstring 记过这条取舍（blob/snapshot
+    式布局就是这种），`--all` 那条同款回归在 `test_execute_all_allows_intra_tree_symlink`。
+    """
+    home = tmp_path / "home"; home.mkdir(parents=True)
+    with store.open() as con:
+        store.upsert_batch(con, [_victim_row(1)])
+    d = home / "media" / VICTIM_MD5
+    (d / "chat").mkdir(parents=True)
+    (d / "chat" / "index.html").write_text("导出物")
+    (d / "latest").symlink_to(d / "chat")            # 目标在树内
+    plan = purge.plan_chat([{"account": "a", "chat_id": VICTIM, "chat_md5": VICTIM_MD5}])
+    assert purge._escaping_links(plan, home) == [], "树内目标不该被判成逃逸"
+    report = purge.execute_chat(plan)
+    assert report[0].export_removed is True
+    assert not os.path.lexists(d) and not (d / "chat" / "index.html").exists()
+    assert purge.verify_chat(plan).export_still_there is False
+
+
 def test_execute_chat_contains_a_failing_export_recheck(tmp_path, monkeypatch):
     """re-check **自己抛的** OSError 必须被就地兜住（M-D）。
 

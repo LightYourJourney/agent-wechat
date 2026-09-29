@@ -1430,6 +1430,46 @@ def test_purge_chat_reports_an_undeletable_export_dir_and_exits_1(tmp_path, monk
     assert "（不存在）" in out and "—" in out
 
 
+def test_purge_chat_refuses_an_escaping_link_before_deleting_anything(
+        tmp_path, monkeypatch, capsys):
+    """`media/<md5>/` 树内指向**数据目录之外**的链接，必须在删任何东西之前拒绝（终审 I-2）。
+
+    不拒的后果是 false-clean：`rmtree` 把链接当普通条目 unlink、**目标明文原封不动**，
+    而运行报「导出物已删除」、核查也报干净——用户以为外面那份没了，它还在。
+    判据与具名范围的目录型产物同源（`_tree_entries` + `_escapes_home`）。
+
+    **判别性**：摘掉 `execute_chat` 开头那道闸门，这条当场红——删除会照常跑完
+    （messages 归零、墓碑落库、导出目录消失），只剩树外那份文件还在。
+    """
+    home = _isolate(tmp_path, monkeypatch)
+    from agent_wechat import exclusions, messages
+    md5 = messages.chat_md5("victim")            # 与 `_chat_row` 自洽的那一个
+    with store.open() as con:
+        store.upsert_batch(con, [_chat_row(1)])
+    export_dir = home / "media" / md5
+    export_dir.mkdir(parents=True)
+    (export_dir / "chat.html").write_text("导出物")
+    outside = tmp_path / "outside"; outside.mkdir()
+    secret = outside / "secret.txt"; secret.write_text("外面那份明文")
+    # 链接存**相对目标**：`os.readlink` 原样报出来，消息里就看得见它指向哪里（绝对路径会长到
+    # 被 `errors.redact` 那 300 字的上限截掉后半段——那是渲染层既有的长度上限，不是这里的判据）。
+    (export_dir / "leak.txt").symlink_to("../../../outside/secret.txt")
+    monkeypatch.setattr(usecases, "purge_chat_targets", lambda *a, **kw: [
+        {"account": "a", "chat_id": "victim", "chat_md5": md5}])
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["purge", "--chat", "小李", "--yes"])
+    assert ei.value.code == 1, "拒绝就必须退 1，不许当成功"
+    err = capsys.readouterr().err
+    assert str(export_dir / "leak.txt") in err, "要点名是哪个链接"
+    assert "../../../outside/secret.txt" in err, "还要说清它指向哪里"
+    # 判据：拒绝时 messages / exclusions / 盘上的导出物**全部零变化**
+    with store.open() as con:
+        assert exclusions.count(con) == 0, "拒绝时不许写墓碑"
+        assert store.chat_row_counts(con, "a", "victim")["messages"] == 1, "拒绝时不许删消息"
+    assert (export_dir / "chat.html").read_text() == "导出物"
+    assert secret.read_text() == "外面那份明文"
+
+
 def test_purge_chat_exits_1_even_when_the_check_says_clean(tmp_path, monkeypatch, capsys):
     """报告侧那一句**自己**也是退出码的判据（注入式判据，不是真夹具）。
 

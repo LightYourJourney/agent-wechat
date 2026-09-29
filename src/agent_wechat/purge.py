@@ -746,6 +746,38 @@ def _write_tombstone(con: sqlite3.Connection, account: str, chat_id: str) -> int
     return cur.rowcount
 
 
+def _escaping_links(plan: ChatPlan, home: pathlib.Path) -> list[pathlib.Path]:
+    """导出物里**删完之后还会留下东西**的链接（判不出来也算）——按目录去重。
+
+    与 `execute()` 给目录型产物做的是**同一套判据**（`_tree_entries` + `_escapes_home`），
+    只是根换成了每个 `ChatEntry.export_dir`。为什么必须有：`rmtree` 把树内链接当普通条目
+    unlink、**目标明文原封不动**，于是运行报「导出物已删除」、核查也报干净——正是
+    `execute()` 那段注释点名的 false-clean（终审 I-2）。
+
+    根链接与树内链接**同判**（对齐 `execute()` 的目录型分支）：目标解析到 home 之外、或
+    判不出来 → 拒绝；目标在树内 → 随 rmtree 一并删除，不拒——一律拒绝会让 blob/snapshot
+    式的内部布局永远删不掉（完整论证见 `_escapes_home`）。
+    """
+    out: list[pathlib.Path] = []
+    # 跨账号的多条 entry 共享同一个 `media/<md5>/`：同一棵树只扫一遍、同一个链接只报一次。
+    for d in dict.fromkeys(e.export_dir for e in plan.entries):
+        if d.is_symlink():
+            # 根是链接时不再往下走：`os.walk` 会**跟随**它，列出来的全是目标的内部条目。
+            if _escapes_home(d, home):
+                out.append(d)
+            continue
+        out += [p for p in _tree_entries(d) if p.is_symlink() and _escapes_home(p, home)]
+    return out
+
+
+def _link_target(link: pathlib.Path) -> str:
+    """链接指向哪里——**只用于错误消息**。读不出来就照实说，不猜。"""
+    try:
+        return os.readlink(link)
+    except OSError as exc:
+        return f"（读不出指向：{exc}）"
+
+
 def execute_chat(plan: ChatPlan) -> tuple[ChatReport, ...]:
     """执行：**墓碑先落，然后才删**，两段式（spec §5.4）。
 
@@ -759,6 +791,16 @@ def execute_chat(plan: ChatPlan) -> tuple[ChatReport, ...]:
     `vec_messages_auxiliary` 的活跃页里搜到 1–3 次，dbstat 显示它们不在 freelist）。要字节级
     清除只能重建：`purge --index` 后重跑 export。
     """
+    # 逃逸链接闸门：**必须在任何删除/提交之前**（与 `execute()` 同一位置——先扫链接，再做
+    # 占用/fail-closed 那些检查）。它挡的不是「目标在树外」这件事本身，而是**删完之后目标还
+    # 在、而报告与核查都说删干净了**那个 false-clean（终审 I-2）。具名范围对目录型产物是同一
+    # 套判据：只拒绝目标逃出 HOME_DIR（或判不出来）的链接，树内目标随 rmtree 一并删除。
+    links = _escaping_links(plan, paths.HOME_DIR)
+    if links:
+        raise errors.PurgeRefused(
+            "导出目录里有链接指向数据目录之外，拒绝删除："
+            + "、".join(f"{p} → {_link_target(p)}" for p in links),
+            hint="删链接不会删目标，会造成「已清干净」的假象；请手工处理这些链接后重试")
     out = []
     # fail-closed（spec §4.2）：读不出排除清单就没法建立不可逆性，这一次删除就只是「暂时看不见」。
     # 宁可什么都不做，也不做一个看起来成功的假删除。
