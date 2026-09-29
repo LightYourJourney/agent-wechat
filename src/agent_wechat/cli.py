@@ -153,6 +153,13 @@ def cmd_recent(args: argparse.Namespace) -> int:
     return 0
 
 
+def _note_skipped(n: int) -> None:
+    """「跳过 N 条（已排除）」走 stderr——与 `_render_degradations` 同一条出口：
+    导出/回填**成功但有保留**（被 `purge --chat` 删掉的行仍在微信库里、被写入端挡下），
+    不该污染 stdout（那是给人看的表，也是管道里机器可读的部分，spec §7）。"""
+    _render_degradations([f"跳过 {n} 条（已排除）"])
+
+
 def cmd_export(args: argparse.Namespace) -> int:
     from . import export, store, usecases
     plan = usecases.export_plan(contact=args.contact, full=args.full, account=args.account)
@@ -169,7 +176,8 @@ def cmd_export(args: argparse.Namespace) -> int:
         degraded.extend(usecases.collect_degradations(r))
 
     n = export.run_export(plan.account, chat_id=plan.chat_id, full=plan.full,
-                          progress=progress, on_reader=note_reader)
+                          progress=progress, on_reader=note_reader,
+                          on_skipped=_note_skipped)
     with store.open() as con:
         print(f"完成：本轮 {n} 行；索引总量 {store.counts(con)}")
     _render_degradations(degraded)      # 降级走 stderr：成功但有保留（spec §7）
@@ -256,7 +264,8 @@ def cmd_media_rebuild_refs(args: argparse.Namespace) -> int:
     def progress(n: int) -> None:
         print(f"  已回填 {n} 条媒体引用…", flush=True)
 
-    n = usecases.media_rebuild_refs(account=args.account, progress=progress)
+    n = usecases.media_rebuild_refs(account=args.account, progress=progress,
+                                    on_skipped=_note_skipped)
     print(f"完成：media_refs 共 {n} 条")
     return 0
 
@@ -267,7 +276,8 @@ def cmd_appmsg_rebuild(args: argparse.Namespace) -> int:
     def progress(n: int) -> None:
         print(f"  已回填 {n} 条 appmsg…", flush=True)
 
-    res = usecases.appmsg_rebuild_parts(account=args.account, progress=progress)
+    res = usecases.appmsg_rebuild_parts(account=args.account, progress=progress,
+                                        on_skipped=_note_skipped)
     # 两组计数分母不同（见 usecases.appmsg_rebuild_parts 的 docstring）：`parts` 是本轮写入，
     # `resolved` / `unresolved` 是该账号整表。印出来时各自标清，免得被当同一个分母读。
     print(f"完成：本轮写入 msg_parts {res['parts']} 条；"

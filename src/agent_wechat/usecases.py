@@ -993,21 +993,31 @@ def chat_index(out_dir: str | None = None, account: str | None = None) -> ChatIn
     return ChatIndexResult(out_dir=str(out_root), file=str(target), chats=len(entries))
 
 
-def media_rebuild_refs(account: str | None = None, progress=None) -> int:
+def media_rebuild_refs(account: str | None = None, progress=None, on_skipped=None) -> int:
     """全量重扫微信库，只为存量历史回填 media_refs（spec §4.5）。幂等 upsert；
-    **不写 messages**（消息内容不变，只有 refs 需要补）。分钟级，同步执行。"""
+    **不写 messages**（消息内容不变，只有 refs 需要补）。分钟级，同步执行。
+
+    **返回值只数未被排除的行**（计数契约，与 `export.run_export` 同款）：它是全量重扫，
+    被 `purge --chat` 删掉的会话仍在微信库里，每次都会读到——`store.upsert_media_refs`
+    把它们拦在写入端，这里据此把「读到的」与「入库的」分开计。
+    `on_skipped`：有行被排除时回调一次，参数是本次跳过的条数（「成功但有保留」的出口）。
+    """
     ctx = ChatContext(account)
     n = 0
+    skipped = 0
     with store.open() as con:
         for _rows, refs in ctx.reader.iter_all():
-            store.upsert_media_refs(con, refs)
-            n += len(refs)
+            k = store.upsert_media_refs(con, refs)
+            skipped += k
+            n += len(refs) - k            # ← 计数契约：只数未被排除的
             if progress and n and n % 20_000 < store.BATCH:
                 progress(n)
+    if on_skipped is not None and skipped:
+        on_skipped(skipped)
     return n
 
 
-def appmsg_rebuild_parts(account: str | None = None, progress=None) -> dict:
+def appmsg_rebuild_parts(account: str | None = None, progress=None, on_skipped=None) -> dict:
     """全量重扫微信库回填 msg_parts（spec §4.1）。幂等；**只写 msg_parts**——
     不碰 messages / FTS / 向量 / 水位线。
 
@@ -1023,10 +1033,18 @@ def appmsg_rebuild_parts(account: str | None = None, progress=None) -> dict:
       - `resolved` / `unresolved` = 跑完后**该账号整张 `msg_parts` 表**里 `ref_svrid`
         非空的行中，回指解出来 / 没解出来的条数（同一个谓词 ⇒ 两者之和恒等于该谓词下的
         引用行数）。删改后再跑一次，这组随整表变化，而 `parts` 只反映本轮。
+
+    `skipped` 是新增的键（既有键一个不动）：被排除清单挡下、**没落库**的条数——
+    `appmsg rebuild` 直接回微信库重扫，被 `purge --chat` 删掉的会话每次都会读到，
+    不拦的话它们的原始载荷（`raw_xml` 里是完整正文）会重新长回来（spec §5.4 第 2 条）。
+    它不是第三个分母：`parts` 在**缓冲时**计数，所以**包含**被挡下的那些，
+    `skipped ⊆ parts`、真正落库的是 `parts - skipped`。`on_skipped`：有行被排除时
+    回调一次（与 `media_rebuild_refs` / `run_export` 同款，「成功但有保留」的出口）。
     """
     ctx = ChatContext(account)
     prefix = f"{ctx.account}|"
     parts = rejected = malformed = 0
+    skipped = 0
     with store.open() as con:
         con.execute("CREATE TEMP TABLE sid_map("
                     "server_id INTEGER PRIMARY KEY, msg_key TEXT NOT NULL)")
@@ -1036,6 +1054,7 @@ def appmsg_rebuild_parts(account: str | None = None, progress=None) -> dict:
         def flush(wrote_parts: bool) -> None:
             """把两批攒下的行落库。**同一批里一起写**：`sid_map` 与 `msg_parts` 都只是
             缓冲，谁先落都不影响结果（阶段 2 在全部扫完之后才跑）。"""
+            nonlocal skipped
             if sid_buf:
                 # `OR IGNORE`：`server_id` 实测全局唯一（846,785 个、重复 0 次），但那是
                 # 上一次测量的结论，而消息还在不断进来。真撞上重复时**静默保留第一条映射**
@@ -1045,7 +1064,7 @@ def appmsg_rebuild_parts(account: str | None = None, progress=None) -> dict:
                 con.executemany("INSERT OR IGNORE INTO sid_map VALUES (?,?)", sid_buf)
                 sid_buf.clear()
             if part_buf:
-                store.upsert_msg_parts(con, part_buf)
+                skipped += store.upsert_msg_parts(con, part_buf)
                 part_buf.clear()
             if wrote_parts and progress:
                 progress(parts)
@@ -1093,8 +1112,10 @@ def appmsg_rebuild_parts(account: str | None = None, progress=None) -> dict:
             con.execute("SELECT count(*), count(ref_msg_key) FROM msg_parts "
                         "WHERE ref_svrid IS NOT NULL AND substr(msg_key, 1, ?) = ?",
                         (len(prefix), prefix)).fetchone())
+    if on_skipped is not None and skipped:
+        on_skipped(skipped)
     return {"parts": parts, "resolved": resolved, "unresolved": refs - resolved,
-            "rejected": rejected, "malformed": malformed}
+            "rejected": rejected, "malformed": malformed, "skipped": skipped}
 
 
 def search_history(query: str, contact: str | None = None, limit: int = 20,

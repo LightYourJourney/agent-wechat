@@ -223,10 +223,43 @@ _INSERT_SQL = (
     "WHERE messages.content IS NOT excluded.content")
 
 
-def upsert_batch(con: sqlite3.Connection, rows: list[messages.MessageRow]) -> None:
-    """批量幂等写入。rows 来自 reader 的解码输出（messages.make_row 构造）。"""
+def _filter_excluded(con: sqlite3.Connection, keys: Sequence[str]) -> set[str]:
+    """本批里被排除的 msg_key。**必须在调用方的事务内查**，与随后的写同事务：
+    读在提交前、写在提交后的话，那份陈旧结果会把被删的行原样写回去（spec §5.4）。
+
+    走 `exclusions.excluded` 的主键，按 KEYS_BATCH 分批——与 `media_refs_by_keys` 同一写法。
+    """
+    if not keys:
+        return set()
+    uniq = list(dict.fromkeys(keys))
+    out: set[str] = set()
+    for i in range(0, len(uniq), KEYS_BATCH):
+        chunk = uniq[i:i + KEYS_BATCH]
+        sql = ("SELECT msg_key FROM exclusions.excluded "
+               f"WHERE msg_key IN ({','.join('?' * len(chunk))})")
+        out.update(r[0] for r in con.execute(sql, chunk))
+    return out
+
+
+def upsert_batch(con: sqlite3.Connection, rows: list[messages.MessageRow]) -> int:
+    """批量幂等写入。rows 来自 reader 的解码输出（messages.make_row 构造）。
+    返回**被排除而跳过的**条数（`0` = 全写入）；排除清单里的 `msg_key` 一条都不落库。
+
+    排除判据与写入同事务：调用方可能已经开了事务（`export` 先写 refs），那就在那个事务里；
+    没开就自己起一个 IMMEDIATE 的——写锁一拿，读到的最新状态在本次写入前不会再变
+    （只判据同事务还不够：读在提交前、写在提交后，那份陈旧结果会把被删的行写回去，spec §5.4）。
+
+    **水位线走全量 rows**：跳过写、不跳过水位线——否则该会话的增量导出会卡在被排除的
+    那一段反复重扫（spec §5.4 第 1 条）。返回值恒等于 `len(rows) - <实际写入的条数>`，
+    调用方据此把「读到的」与「入库的」分开计（计数契约，见 `export.run_export`）。
+    """
+    if not con.in_transaction:
+        con.execute("BEGIN IMMEDIATE")
     now = int(time.time())
-    con.executemany(_INSERT_SQL, [{**r, "exported_at": now} for r in rows])
+    skip = _filter_excluded(con, [r["msg_key"] for r in rows])
+    keep = [r for r in rows if r["msg_key"] not in skip]
+    if keep:
+        con.executemany(_INSERT_SQL, [{**r, "exported_at": now} for r in keep])
     wm: dict[tuple[str, str, str], int] = {}
     for r in rows:  # 水位线：批内按会话聚合后一条语句推进（单调 max）
         k = (r["account"], r["shard"], r["chat_md5"])
@@ -240,6 +273,7 @@ def upsert_batch(con: sqlite3.Connection, rows: list[messages.MessageRow]) -> No
              updated_at=excluded.updated_at""",
         [(a, s, m, mx, now) for (a, s, m), mx in wm.items()])
     con.commit()
+    return len(rows) - len(keep)
 
 
 def _has_table(con: sqlite3.Connection, name: str) -> bool:
@@ -393,14 +427,24 @@ def chat_md5_in_index(con: sqlite3.Connection, account: str) -> set[str]:
 
 
 def upsert_media_refs(con: sqlite3.Connection,
-                      rows: list[tuple[str, str, str | None, str | None]]) -> None:
-    """批量幂等写 media_refs。不 commit：由 upsert_batch 的 commit（同事务）或 store.open() 收口。"""
+                      rows: list[tuple[str, str, str | None, str | None]]) -> int:
+    """批量幂等写 media_refs。返回**被排除而跳过的**条数（`0` = 全写入）。
+    不 commit：由 upsert_batch 的 commit（同事务）或 store.open() 收口。
+
+    被排除的 `msg_key` 一条都不落库——`media rebuild-refs` 与 `export` 都是**全量重扫**
+    微信库，不拦的话已删消息的媒体引用会重新长回来（spec §5.4 第 3 条），两个调用者
+    共用本函数，所以拦在这里一处就够。
+    """
     if not rows:
-        return
-    con.executemany(
-        "INSERT INTO media_refs (msg_key, media_kind, file_key, xml_md5) VALUES (?,?,?,?) "
-        "ON CONFLICT(msg_key) DO UPDATE SET media_kind=excluded.media_kind, "
-        "file_key=excluded.file_key, xml_md5=excluded.xml_md5", rows)
+        return 0
+    skip = _filter_excluded(con, [r[0] for r in rows])
+    keep = [r for r in rows if r[0] not in skip]
+    if keep:
+        con.executemany(
+            "INSERT INTO media_refs (msg_key, media_kind, file_key, xml_md5) VALUES (?,?,?,?) "
+            "ON CONFLICT(msg_key) DO UPDATE SET media_kind=excluded.media_kind, "
+            "file_key=excluded.file_key, xml_md5=excluded.xml_md5", keep)
+    return len(rows) - len(keep)
 
 
 def media_refs_by_keys(con: sqlite3.Connection,
@@ -500,16 +544,25 @@ def count_media_refs(con: sqlite3.Connection, account: str, *,
 
 
 def upsert_msg_parts(con: sqlite3.Connection,
-                     rows: list[tuple[str, int, int | None, str | None, bytes]]) -> None:
-    """批量幂等写 msg_parts。不 commit：与 upsert_media_refs 同约定，由调用方收口。"""
+                     rows: list[tuple[str, int, int | None, str | None, bytes]]) -> int:
+    """批量幂等写 msg_parts。返回**被排除而跳过的**条数（`0` = 全写入）。
+    不 commit：与 upsert_media_refs 同约定，由调用方收口。
+
+    被排除的 `msg_key` 一条都不落库——`appmsg rebuild` 直接回微信库重扫，不拦的话
+    被删消息的 appmsg 原始载荷（含完整正文）会重新长回来（spec §5.4 第 2 条）。
+    """
     if not rows:
-        return
-    con.executemany(
-        "INSERT INTO msg_parts (msg_key, appmsg_type, ref_svrid, ref_msg_key, raw_xml) "
-        "VALUES (?,?,?,?,?) "
-        "ON CONFLICT(msg_key) DO UPDATE SET appmsg_type=excluded.appmsg_type, "
-        "ref_svrid=excluded.ref_svrid, ref_msg_key=excluded.ref_msg_key, "
-        "raw_xml=excluded.raw_xml", rows)
+        return 0
+    skip = _filter_excluded(con, [r[0] for r in rows])
+    keep = [r for r in rows if r[0] not in skip]
+    if keep:
+        con.executemany(
+            "INSERT INTO msg_parts (msg_key, appmsg_type, ref_svrid, ref_msg_key, raw_xml) "
+            "VALUES (?,?,?,?,?) "
+            "ON CONFLICT(msg_key) DO UPDATE SET appmsg_type=excluded.appmsg_type, "
+            "ref_svrid=excluded.ref_svrid, ref_msg_key=excluded.ref_msg_key, "
+            "raw_xml=excluded.raw_xml", keep)
+    return len(rows) - len(keep)
 
 
 def msg_parts_by_keys(con: sqlite3.Connection, keys: Sequence[str]

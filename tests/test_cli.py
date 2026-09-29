@@ -641,14 +641,10 @@ def test_exclusions_survive_index_purge(tmp_path, monkeypatch):
         assert exclusions.count(con) == 1
 
 
-@pytest.mark.xfail(strict=True,
-                   reason="依赖 Task 4 的 store.upsert_batch → int 契约（今天返回 None，"
-                          "被排除的行照写）；Task 4 落地后本标记会 XPASS(strict) 变红，删掉它即可")
 def test_reimport_after_index_purge_is_still_blocked(tmp_path, monkeypatch):
     """**AC4 后半**：重建索引之后，那批仍必须被拦（spec §5.4 第 1 条）。
 
-    拦在**写入端**的判据是 Task 4 的（`_filter_excluded` + `upsert_batch` 的返回值），
-    本任务只负责产物表与提示，所以这条今天红——`upsert_batch` 返回 None 且照写。
+    拦在**写入端**的判据是 Task 4 的（`_filter_excluded` + `upsert_batch` 的返回值）。
     """
     home = _isolate(tmp_path, monkeypatch)
     from agent_wechat import exclusions, store
@@ -872,7 +868,7 @@ def test_media_export_force_flag_is_forwarded(monkeypatch):
 def test_media_rebuild_refs_prints_total(monkeypatch, capsys):
     """进度行与总数行都到 stdout（media_rebuild_refs 打桩，不打真库）。"""
 
-    def fake_rebuild(account=None, progress=None):
+    def fake_rebuild(account=None, progress=None, on_skipped=None):
         if progress:
             progress(20_000)
         return 20_042
