@@ -447,8 +447,16 @@ def _human_size(n: int) -> str:
     return f"{n / 1000**4:.2f} TB"      # ≥999.995 TB：再往上的单位没有实际用途
 
 
-def _exclusion_count() -> int | None:
-    """排除清单（`exclusions.db`）里的墓碑数；读不出来返回 None。**绝不抛**。
+def _exclusion_count() -> tuple[int | None, str | None]:
+    """排除清单（`exclusions.db`）的墓碑数，以及**它到底读没读成**。**绝不抛**。
+
+    返回 `(计数, 读不出来的原因)`，三种组合各有各的含义、**不许合并**（M-6）：
+    · `(None, None)` —— 清单文件不在。这是**常态**：`store.connect()` 每次都会把它建出来，
+      所以「空清单」与「没清单」对用户是同一件事——没有任何东西失效，不必出声；
+    · `(n, None)`    —— 读到 n 条；
+    · `(None, 原因)` —— **判不出来**（损坏 / 权限 / 被占）。它与上面那条正相反：用户此刻
+      最需要知道的是「**无法确认排除还在不在生效**」——不说，`--index`/`--all` 两条路都会
+      静默给出一个「看起来没问题」的输出。
 
     **刻意不走 `store.open()`**：那条路会 `paths.ensure_home_dirs()` 再把整个索引 schema
     建出来，于是 `purge --index` 刚删掉的 index.db、`purge --all` 刚删掉的整个数据目录都会被
@@ -463,15 +471,15 @@ def _exclusion_count() -> int | None:
     try:
         p = exclusions.path()
         if not p.exists():
-            return None
+            return None, None
         con = sqlite3.connect(":memory:")
         try:
             con.execute("ATTACH DATABASE ? AS exclusions", (str(p),))
-            return exclusions.count(con)
+            return exclusions.count(con), None
         finally:
             con.close()
-    except Exception:
-        return None      # 读不出来就不说话：这句提示不该把销毁本身弄成失败
+    except Exception as exc:
+        return None, str(exc)   # 读不出来要报出来，但这句提示不该把销毁本身弄成失败
 
 
 def cmd_purge(args: argparse.Namespace) -> int:
@@ -505,7 +513,16 @@ def cmd_purge(args: argparse.Namespace) -> int:
 
     # 排除清单的规模必须在删除**之前**取：`--all` 会把它连文件一起删掉（它已是产物之一），
     # 删完再读只剩 0 或「没有」——而那句提示说的是「失去了多少」（spec §4.1③）。
-    ex_count = _exclusion_count() if (args.index or args.all) else None
+    ex_count = ex_error = None
+    if args.index or args.all:
+        ex_count, ex_error = _exclusion_count()
+    if ex_error is not None:
+        # **读不出来与「没有清单」含义正相反**，所以这句必须单独说（M-6）：前者意味着
+        # 无法确认排除还在不在生效。它也必须印在**删除之前**——`--all` 正要把这份清单
+        # 连文件一起清掉，那之后再说「读不出来」就分不清是哪种了。走 stderr：与
+        # `_note_skipped` / `_render_degradations` 同一条「成功但有保留」的出口。
+        print(f"⚠️ 排除清单读不出来（{ex_error}）——无法确认它是否还在生效；"
+              "它若失效，被删内容下次导出就会回来。", file=sys.stderr)
 
     report = purge.execute(plan)
     print(f"已删除 {len(report.removed)} 项，释放 {_human_size(report.freed)}。")
@@ -535,6 +552,11 @@ def cmd_purge(args: argparse.Namespace) -> int:
                 gone = False
             if ex_count and gone:
                 print(f"排除清单已随之删除：{ex_count} 条排除失效，被删内容下次导出会回来。")
+            elif gone and ex_error is not None:
+                # 清单真没了，而条数读不出来（上面那句 ⚠️ 已说过原因）。这一句说**结果**：
+                # 条数缺了，但「它没了 ⇒ 被删内容会回来」这条后果照样成立，不能因为数不出
+                # 条数就不说（M-6）。
+                print("排除清单已随之删除（条数读不出来）——被删内容下次导出会回来。")
         elif ex_count is not None:
             print(f"排除清单保留：{ex_count} 条（exclusions.db），重建索引后仍生效。")
     _render_residue(purge.verify(plan))
@@ -688,7 +710,7 @@ def _cmd_purge_excluded() -> int:
 
 
 def _cmd_purge_chat(args: argparse.Namespace) -> int:
-    from . import purge, store, usecases
+    from . import messages, purge, store, usecases
     targets = usecases.purge_chat_targets(args.chat, account=args.account)
     if isinstance(targets, usecases.NeedConfirm):
         return _need_confirm(args.chat, targets)
@@ -706,6 +728,24 @@ def _cmd_purge_chat(args: argparse.Namespace) -> int:
         # 而活消息一条都没有，本来就没有东西可删——说清楚，别默默重建。
         print(f"索引库不在（{store.DB_PATH}）——没有活消息可删；"
               "要解除排除请加 --undo。", file=sys.stderr)
+        # **导出物与索引库无关**：它落在 `media/<会话md5>/` 下，索引库不在并不会让它消失。
+        # 不说这句，用户会把「没有活消息可删」读成「这个会话在本工具里什么都不剩了」——
+        # 而那份解密后的图/视频/语音（外加可直接打开的 HTML）还摊在盘上（M-3）。
+        # 判据走 purge 的那一个 `_name_there`：不跟随符号链接、也不把 EACCES 吞成「不在」
+        # （CLI 不另写一套存活判据，同 M-4 的理由）；它抛 `OSError` 时什么都不说——
+        # 这句提示不该把命令本身弄成失败。
+        left = []
+        for t in targets:
+            d = paths.HOME_DIR / "media" / messages.chat_md5(t["chat_id"])
+            try:
+                if purge._name_there(d):
+                    left.append(d)
+            except OSError:
+                continue
+        if left:
+            dirs = "、".join(str(p) for p in dict.fromkeys(left))
+            print(f"该会话的导出物仍在盘上：{dirs}——索引库不在，本命令不会动它；"
+                  "要删它得先重跑 export 把索引建回来，或手工删除。", file=sys.stderr)
         return 0
     plan = purge.plan_chat(targets)
     _render_chat_plan(plan, args.chat)
@@ -933,7 +973,10 @@ def main(argv: list[str] | None = None) -> None:
         # `--all` 问「删哪一类文件」。混着给一律退 2——`purge --chat X --media` 若被接受，
         # 用户以为只删了那个会话，实际把整棵 media/ 清空了（不可逆）。
         if args.excluded:
-            if args.chat or args.undo or named or args.all:
+            # `--yes` 也是「其它 flag」（spec §3 的字面要求：与其它 flag 同给时退 2）：
+            # 这条命令一次查询、什么都不改，带 `--yes` 只说明用户以为它会动手——那种误解
+            # 必须当场停住，而不是安静地忽略一个「执行」开关（M-2）。
+            if args.chat or args.undo or named or args.all or args.yes:
                 p.error("--excluded 是全局查询，不能与其它参数同用")
         elif args.undo and not args.chat:
             # `--undo` 只对会话有意义。少了这一条，`purge --undo --media --yes` 会被当成

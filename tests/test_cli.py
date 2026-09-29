@@ -695,6 +695,43 @@ def test_purge_all_does_not_claim_an_empty_list_was_lost(tmp_path, monkeypatch, 
     assert "排除清单" not in out, f"空清单不该印「已随之删除」那句：{out!r}"
 
 
+def test_purge_index_says_when_the_exclusion_list_is_unreadable(tmp_path, monkeypatch,
+                                                                capsys):
+    """**「读不了」必须与「没有清单」分开说**（M-6）——两者此前都返回 `None`、都不出声，
+    而含义正相反：前者意味着**无法确认排除还在不在生效**（用户此刻最需要知道的一句），
+    后者是常态（`store.connect()` 每次都把清单文件建出来）。
+
+    夹具是「不是数据库的文件」：`ATTACH` 本身不报错，读它才报 `file is not a database`。
+    提示走 stderr、且**不影响退出码**——这句提示不该把销毁本身弄成失败。
+    """
+    home = _isolate(tmp_path, monkeypatch)
+    (home / "exclusions.db").write_bytes("这不是一个数据库".encode())
+    (home / "index.db").write_bytes(b"x" * 10)
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["purge", "--index", "--yes"])
+    assert ei.value.code == 0, "读不出来只是提示，不许把销毁本身弄成失败"
+    captured = capsys.readouterr()
+    assert "排除清单读不出来" in captured.err, f"这句必须印出来：{captured.err!r}"
+    assert "排除清单保留" not in captured.out, "读不出来时不许说「保留 N 条」"
+
+
+def test_purge_all_says_an_unreadable_list_is_gone_without_a_count(tmp_path, monkeypatch,
+                                                                   capsys):
+    """`--all` 把读不出来的清单**真删掉**时，后果那句话照样要说（M-6）：
+    条数缺了不代表「被删内容下次导出会回来」这条后果也缺了——那正是用户必须知道的。"""
+    home = _isolate(tmp_path, monkeypatch)
+    (home / "exclusions.db").write_bytes("这不是一个数据库".encode())
+    (home / "index.db").write_bytes(b"x" * 10)
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["purge", "--all", "--yes"])
+    assert ei.value.code == 0
+    assert not home.exists()
+    captured = capsys.readouterr()
+    assert "排除清单读不出来" in captured.err, "那句警告（读不出来）照旧要在 stderr 上"
+    # 「已随之删除」那句与它的兄弟（带条数的那句）同在 stdout：这里是同一句话的**缺数据形态**。
+    assert "条数读不出来" in captured.out and "下次导出会回来" in captured.out
+
+
 # ---------- T6：降级说明的出口（spec §7） ----------
 
 def test_recent_renders_degradation_to_stderr_not_stdout(env, monkeypatch, capsys):
@@ -1283,8 +1320,9 @@ def test_purge_chat_dry_run_shows_the_resolved_identity_and_the_moments_warning(
     out = capsys.readouterr().out
     assert "victim" in out, "必须印出解析到的会话真身"
     assert "朋友圈" in out and "仍可能留在其中" in out
-    # dry-run 的判据是「磁盘零变化」，而**墓碑也是磁盘状态**：只查 index.db 的大小，
-    # 一个会顺手写墓碑的实现照样能过。
+    # 判据是「不删任何东西、不改索引内容」——**不是「磁盘零变化」**（USAGE §7：要读索引的
+    # 命令都会把 `exclusions.db` ATTACH 进来，本机还没有它会因此建出一个空文件）。
+    # 墓碑也是磁盘状态：只查 index.db 的大小，一个会顺手写墓碑的实现照样能过。
     with store.open() as con:
         assert exclusions.count(con) == 0, "dry-run 不许写墓碑"
         assert store.chat_row_counts(con, "a", "victim")["messages"] == 1
@@ -1317,6 +1355,20 @@ def test_purge_excluded_lists_by_chat_md5(tmp_path, monkeypatch, capsys):
     assert ei.value.code == 0
     out = capsys.readouterr().out
     assert "aaaa" in out and "2" in out
+
+
+def test_purge_excluded_rejects_any_other_flag(tmp_path, monkeypatch, capsys):
+    """spec §3 的字面要求：`--excluded` 与其它 flag 同给时退 2——**`--yes` 也是「其它
+    flag」**（M-2）。带上它说明用户以为这条查询会动手；安静地忽略一个「执行」开关，等于
+    让那个误解留着。"""
+    _isolate(tmp_path, monkeypatch)
+    for argv in (["purge", "--excluded", "--yes"],
+                 ["purge", "--excluded", "--chat", "小李"],
+                 ["purge", "--excluded", "--media"],
+                 ["purge", "--excluded", "--all"]):
+        with pytest.raises(SystemExit) as ei:
+            cli.main(argv)
+        assert ei.value.code == 2, f"{argv} 应当退 2"
 
 
 def test_purge_undo_needs_yes(tmp_path, monkeypatch, capsys):
@@ -1544,6 +1596,35 @@ def test_purge_chat_without_an_index_does_not_rebuild_it(tmp_path, monkeypatch, 
     assert "索引库不在" in err and "--undo" in err
     with exclusions.standalone() as con:
         assert exclusions.count(con) == 1, "什么都没删（活消息本来就没有）"
+
+
+def test_purge_chat_without_an_index_names_the_leftover_export(tmp_path, monkeypatch, capsys):
+    """索引库不在那条路上，该会话的导出目录**仍在盘上**时要点名（M-3）。
+
+    不说这句，用户会把「没有活消息可删」读成「这个会话在本工具里什么都不剩了」——而那份
+    解密后的图/视频/语音（外加双击就能打开的 HTML）还摊在盘上，且本命令这一支一个字节
+    都不会动它。判据走 `purge._name_there`（不跟随符号链接）：这里用**悬空符号链接**钉住
+    这一点——`exists()` 会说「不在」，而那个名字确实还在。
+    """
+    home = _isolate(tmp_path, monkeypatch)
+    from agent_wechat import exclusions, messages
+    md5 = messages.chat_md5("victim")
+    with store.open() as con:
+        exclusions.add(con, [(f"a|{md5}|message_0.db|1", "a", md5)])
+    (home / "index.db").unlink()                   # 模拟 purge --index
+    media = home / "media"; media.mkdir()
+    (media / md5).symlink_to(media / "早就没有了")  # 悬空：名字还在，内容不在
+    _stub_resolution(monkeypatch, "victim")
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["purge", "--chat", "小李", "--yes"])
+    assert ei.value.code == 0
+    err = capsys.readouterr().err
+    assert "索引库不在" in err and "--undo" in err
+    assert "导出物仍在盘上" in err, f"盘上那份导出物必须点名：{err!r}"
+    assert str(media / md5) in err
+    assert not (home / "index.db").exists(), "删除路线不许把刚删掉的索引建回来"
+    with exclusions.standalone() as con:
+        assert exclusions.count(con) == 1, "这一支什么都不改"
 
 
 def test_purge_chat_undo_works_with_no_index_db_at_all(tmp_path, monkeypatch, capsys):

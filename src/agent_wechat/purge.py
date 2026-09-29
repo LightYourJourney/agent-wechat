@@ -558,9 +558,17 @@ def verify(plan: PurgePlan) -> ResidueReport:
     # （models/、tasks.json、散落明文）**两个桶都不进**，报告会说「计划内路径已清空」——
     # 正是本字段存在的意义所在的那种假象（spec §5.2 第 1 项）。
     planned = [i.artifact.path for i in plan.items] + [e.path for e in plan.loose]
-    # lexists 而非 exists：exists 跟随符号链接，断链会被判成「已删除」而链接文件明明还在——
-    # 在这门专门用来抓假象的字段里制造假象。
-    not_removed = tuple(p for p in planned if os.path.lexists(p))
+    # 判据收敛到 `_name_there`（模块里只留一个存活判据）：它不跟随符号链接（断链也算残留
+    # ——`exists()` 会把「链接还在」判成「已删除」，在这门专门用来抓假象的字段里制造假象），
+    # 也不把 `OSError` 吞成 False（`os.path.lexists` 会：父目录不可搜索时它会对残留报
+    # 「不在」，同样是假象，M-4）。它抛出的 `OSError` 就地翻成 `PurgeRefused`——「核查不了」
+    # 与「核查通过」必须分开，core 层也不许裸穿（同 `verify_chat`）。
+    try:
+        not_removed = tuple(p for p in planned if _name_there(p))
+    except OSError as exc:
+        raise errors.PurgeRefused(
+            f"核查失败，本次结果不可信：{exc}",
+            hint="请先修正权限（父目录需要读 + 进入权限），再重试") from exc
 
     planned_set = set(planned)
     try:
@@ -843,7 +851,7 @@ def execute_chat(plan: ChatPlan) -> tuple[ChatReport, ...]:
                 # ——那种情况只能等它自己 checkpoint，所以忽略失败，不因此让命令报错。
                 with contextlib.suppress(sqlite3.Error):
                     con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-        except sqlite3.Error as exc:
+        except (sqlite3.Error, OSError) as exc:
             # **这一层必须包住 `_open_index()` 本身**，不能只包 `BEGIN IMMEDIATE`——
             # `store.connect()` 每次都跑 `executescript(SCHEMA)`，而那是 DDL、要写锁。
             # 实测（本机 SQLite 3.50 / WAL，另一条连接持 `BEGIN IMMEDIATE` + 一次写）：
@@ -852,6 +860,9 @@ def execute_chat(plan: ChatPlan) -> tuple[ChatReport, ...]:
             #   · **新库**（SCHEMA 还没建过）→ `CREATE TABLE` 要写锁，异常就从 connect 里抛。
             # 两种形态都存在，所以包装范围不能跟着「哪一句抛」变：只包 BEGIN 的话，
             # 新库那条路上裸 `OperationalError` 会穿透出去，违反「core 层只抛项目异常」。
+            # `OSError` 与 `sqlite3.Error` 并列接住：`store.connect()` 第一句就是
+            # `paths.ensure_home_dirs()`（mkdir），它的失败以 `OSError` 冒出来——另三处
+            # （fail-closed 闸门 / `plan_chat` / `verify_chat`）本来就是这对二元组（M-1）。
             # 回滚不用手写：`store.open()` 的 except 分支已经做了。
             #
             # 消息只说**实际发生的事**：标题是**操作**（不是「拿不到写锁」——库损坏、磁盘满

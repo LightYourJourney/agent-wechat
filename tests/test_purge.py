@@ -529,7 +529,7 @@ def test_verify_reports_surviving_loose_entry(tmp_path):
 
 def test_verify_reports_dangling_symlink_as_present(tmp_path):
     """断链的链接文件仍在盘上。exists() 跟随符号链接会判它「已删除」，而链接明明还在——
-    在这门专门用来抓假象的字段里制造假象，故用 lexists。"""
+    在这门专门用来抓假象的字段里制造假象，故用不跟随链接的判据（`_name_there`）。"""
     home = tmp_path / "home"; home.mkdir(parents=True)
     (home / "passphrase.json").symlink_to(home / "gone.json")   # 目标不存在
     rep = purge.verify(purge.plan(frozenset({"keys"})))
@@ -1132,7 +1132,11 @@ def test_execute_chat_contains_a_failing_export_recheck(tmp_path, monkeypatch):
     with store.open() as con:
         store.upsert_batch(con, [_victim_row(1)])
     media = home / "media"; media.mkdir()
-    (media / VICTIM_MD5).symlink_to(media / "早就没有了")   # 先让 rmtree 走 ENOENT 那一支
+    link = media / VICTIM_MD5
+    link.symlink_to(media / "早就没有了")   # 先让 rmtree 走 ENOENT 那一支
+    # 前提断言（`test_plan_chat_does_not_report_a_dangling_export_symlink_as_removed` 同款）：
+    # 链接没造出来时 rmtree 走的是另一支，这条测试就测不到它要测的那个 handler。
+    assert os.path.lexists(link), "前提：悬空链接确实在盘上"
     plan = purge.plan_chat([{"account": "a", "chat_id": VICTIM, "chat_md5": VICTIM_MD5}])
 
     def boom(_p):
