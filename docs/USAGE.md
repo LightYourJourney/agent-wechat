@@ -562,8 +562,10 @@ agent-wechat purge --excluded              # 列出排除清单的规模（按�
   删除不可逆，必须让你当场看见删的是谁；跨账号时逐账号列出。
 - **保证的边界要说准**：这条命令保证的是「**索引里没有存活行 + 它们的 `msg_key` 进了排除
   清单**」，**不是「字节层面不存在」**。`secure_delete=ON` 只清 SQLite 自己释放的页，而 vec0
-  的 `preview` 列装的是相邻消息的正文——chunk 没整块清空时它仍可能留在**活跃页**里（实测
-  1200 行形态下开了 pragma 也能搜到 1–3 次）。要字节级清除只能 `purge --index` 后重跑 `export`。
+  的 `preview` 列装的是相邻消息的正文——chunk 没整块清空时它仍可能留在**活跃页**里：把
+  `index.db` 连同 `-wal` 读成字节去 grep，实测 1200 行形态下开了 pragma 也还能命中 1–3 次
+  （**不是**本工具的检索还能搜到它——索引查询里它已经没有了）。要字节级清除只能 `purge --index`
+  后重跑 `export`。
 
 **`exclusions.db`（排除清单）是唯一不可重建的产物**（spec §4.1③）：索引可重建（≈2.5–3 小时）、
 密钥可重新 bootstrap、`media/` 可联网重抓，而它不能——它没了，被删的内容下次 `export --full`
@@ -576,10 +578,12 @@ agent-wechat purge --excluded              # 列出排除清单的规模（按�
   能重新入库；要找回那批得重跑 `export --full`（那时它们不再被排除）。它在索引已被
   `purge --index` 删掉时**照样能用**——走排除清单那一支，不会把刚删掉的索引重建回来。
 
-**dry-run 不改索引内容，但别读成「磁盘零变化」**：要读索引的命令（`search` / `recent` /
-`export` 等，以及**索引库存在时**的 `purge --chat` 与 `--undo`）都会经 `store.connect()` 把
-`exclusions.db` ATTACH 进来——本机还没有它的，会因此**建出一个空文件**。只有 `purge --excluded`
-（以及索引库不在时的 `purge --chat` / `--undo`）走独立只读连接，一个文件都不落。
+**dry-run 不改索引内容，但别读成「磁盘零变化」**：要读索引的命令（`search` / `export` 等，
+以及**索引库存在时**的 `purge --chat` 与 `--undo`）都会经 `store.connect()` 把
+`exclusions.db` ATTACH 进来——本机还没有它的，会因此**建出一个空文件**。（`recent` 不在此列：
+它不读索引库，也就不会建出这个文件。）只有 `purge --excluded`（以及索引库不在时的 `purge --chat` /
+`--undo`）走独立连接（`exclusions.standalone()`，不经 `store.connect()`），一个文件都不落——
+注意它**不是只读连接**：`--undo --yes` 正是经它把墓碑删掉的。
 
 ## 8. 账号切换
 
