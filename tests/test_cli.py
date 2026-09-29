@@ -1217,3 +1217,345 @@ def test_cli_query_commands_do_not_print_msg_key(monkeypatch, capsys):
                                             account=None)) == 0
     out = capsys.readouterr().out
     assert "你好" in out and key not in out and "msg_key" not in out
+
+
+# ---------- `purge --chat` / `--undo` / `--excluded`（Task 7） ----------
+#
+# 这是用户唯一直接接触的一层：销毁不可逆，所以「删的是谁」「删掉了什么」「没删掉什么」
+# 三件事都必须出现在 stdout 上，且有测试盯着它们不被顺手删掉。
+
+def _chat_row(n: int = 1, chat_id: str = "victim", account: str = "a") -> dict:
+    """一条 messages 行；`chat_md5` 与 `chat_id` **自洽**。
+
+    不自洽的夹具（`chat_id="victim"` 配 `chat_md5="aaaa"`）会让「导出目录对不对」这类断言
+    变瞎——`tests/test_purge.py` 开篇记过这笔账。
+    """
+    from agent_wechat import messages
+    md5 = messages.chat_md5(chat_id)
+    return {"msg_key": f"{account}|{md5}|message_0.db|{n}", "account": account,
+            "chat_md5": md5, "chat_id": chat_id, "shard": "message_0.db", "local_id": n,
+            "server_id": n, "ts": 100, "msg_type": 1, "sender_id": None,
+            "sender_name": None, "is_self": 0, "content": "要删的", "media_hint": None}
+
+
+def _stub_resolution(monkeypatch, chat_id: str) -> None:
+    """只换掉**解析那一半**（`ChatContext` 会去开真实微信库与联系人缓存）。
+
+    `purge_chat_targets` 本身不换：这些用例要跑的正是「哪些账号该进 targets」这个判据。
+    """
+    class _StubCtx:
+        def __init__(self, account=None):
+            self.account = account
+
+        def resolve_optional(self, contact):
+            return chat_id
+
+    monkeypatch.setattr(usecases, "ChatContext", _StubCtx)
+
+
+def test_purge_chat_is_mutually_exclusive_with_scopes(tmp_path, monkeypatch, capsys):
+    _isolate(tmp_path, monkeypatch)
+    for argv in (["purge", "--chat", "小李", "--media"],
+                 ["purge", "--chat", "小李", "--all"]):
+        with pytest.raises(SystemExit) as ei:
+            cli.main(argv)
+        assert ei.value.code == 2, f"{argv} 应当退 2"
+
+
+def test_purge_chat_dry_run_shows_the_resolved_identity_and_the_moments_warning(
+        tmp_path, monkeypatch, capsys):
+    """计划表第一行必须印**解析真身**（这个项目栽过一次：61% 的会话按真名解析会静默落到裸 id），
+    并且必须说清朋友圈不在范围内——否则用户以为清干净了。"""
+    home = _isolate(tmp_path, monkeypatch)
+    from agent_wechat import exclusions
+    with store.open() as con:
+        store.upsert_batch(con, [{
+            "msg_key": "a|aaaa|message_0.db|1", "account": "a", "chat_md5": "aaaa",
+            "chat_id": "victim", "shard": "message_0.db", "local_id": 1, "server_id": 1,
+            "ts": 100, "msg_type": 1, "sender_id": None, "sender_name": None,
+            "is_self": 0, "content": "要删的", "media_hint": None}])
+    monkeypatch.setattr(usecases, "purge_chat_targets",
+                        lambda *a, **kw: [{"account": "a", "chat_id": "victim",
+                                           "chat_md5": "aaaa"}])
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["purge", "--chat", "小李"])
+    assert ei.value.code == 0
+    out = capsys.readouterr().out
+    assert "victim" in out, "必须印出解析到的会话真身"
+    assert "朋友圈" in out and "仍可能留在其中" in out
+    # dry-run 的判据是「磁盘零变化」，而**墓碑也是磁盘状态**：只查 index.db 的大小，
+    # 一个会顺手写墓碑的实现照样能过。
+    with store.open() as con:
+        assert exclusions.count(con) == 0, "dry-run 不许写墓碑"
+        assert store.chat_row_counts(con, "a", "victim")["messages"] == 1
+    assert (home / "index.db").stat().st_size > 0        # 一个字节没删
+
+
+def test_purge_excluded_lists_by_chat_md5(tmp_path, monkeypatch, capsys):
+    _isolate(tmp_path, monkeypatch)
+    from agent_wechat import exclusions
+    with store.open() as con:
+        exclusions.add(con, [("a|aaaa|message_0.db|1", "a", "aaaa"),
+                             ("a|aaaa|message_0.db|2", "a", "aaaa")])
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["purge", "--excluded"])
+    assert ei.value.code == 0
+    out = capsys.readouterr().out
+    assert "aaaa" in out and "2" in out
+
+
+def test_purge_undo_needs_yes(tmp_path, monkeypatch, capsys):
+    _isolate(tmp_path, monkeypatch)
+    from agent_wechat import exclusions
+    with store.open() as con:
+        exclusions.add(con, [("a|aaaa|message_0.db|1", "a", "aaaa")])
+    # 这一条 brief 里漏了桩（同族另外两条都有）。不桩的话 `purge_chat_targets` 会去解析
+    # **真实**微信库里的「小李」，「不带 --yes 不许动」就退化成一条恒真的假护栏：真机上
+    # targets 落到空列表、一段删除代码都没走到，那个 assert 自然成立。
+    monkeypatch.setattr(usecases, "purge_chat_targets",
+                        lambda *a, **kw: [{"account": "a", "chat_id": "victim",
+                                           "chat_md5": "aaaa"}])
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["purge", "--chat", "小李", "--undo"])
+    assert ei.value.code == 0
+    with store.open() as con:
+        assert exclusions.count(con) == 1, "不带 --yes 不许动"
+
+
+def test_purge_undo_yes_clears_the_tombstone_but_keeps_the_data_gone(
+        tmp_path, monkeypatch, capsys):
+    """**AC5 的后半，也是最容易漏的一半**：`--undo --yes` 之后清单里该会话的条目为 0，
+    而**数据仍然不在**——撤销只放开拦截，重导才把消息带回来。
+
+    少了后半句，这条命令的语义会被读成「撤销 = 恢复」——那正是它的输出里必须印死一句的原因。
+    """
+    home = _isolate(tmp_path, monkeypatch)
+    from agent_wechat import exclusions
+    with store.open() as con:
+        store.upsert_batch(con, [{
+            "msg_key": "a|aaaa|message_0.db|1", "account": "a", "chat_md5": "aaaa",
+            "chat_id": "victim", "shard": "message_0.db", "local_id": 1, "server_id": 1,
+            "ts": 100, "msg_type": 1, "sender_id": None, "sender_name": None,
+            "is_self": 0, "content": "要删的", "media_hint": None}])
+    monkeypatch.setattr(usecases, "purge_chat_targets",
+                        lambda *a, **kw: [{"account": "a", "chat_id": "victim",
+                                           "chat_md5": "aaaa"}])
+    with pytest.raises(SystemExit):
+        cli.main(["purge", "--chat", "小李", "--yes"])          # 先真删一次
+    with store.open() as con:
+        assert exclusions.count(con) == 1
+        assert con.execute("SELECT count(*) FROM messages").fetchone()[0] == 0
+
+    capsys.readouterr()
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["purge", "--chat", "小李", "--undo", "--yes"])
+    assert ei.value.code == 0
+    out = capsys.readouterr().out
+    assert "不会" in out and "export --full" in out, "必须写明撤销不恢复数据"
+    with store.open() as con:
+        assert exclusions.count(con) == 0, "撤销后清单里该会话应当为空"
+        assert con.execute("SELECT count(*) FROM messages").fetchone()[0] == 0, \
+            "撤销**不恢复数据**——消息要重跑 export --full 才回来"
+
+
+def test_purge_chat_plan_counts_a_shared_export_dir_once(tmp_path, monkeypatch, capsys):
+    """跨账号：两条 entry **共享同一个** `media/<md5>/`，体积只能算一遍。
+
+    导出物那行是用户判断「删了能省多少」的唯一依据；逐条累加会让同一个目录算两次
+    （1.2 MB 的目录印成 2.4 MB）。去重的口径与 `ChatResidue.export_dirs` 一致。
+    """
+    home = _isolate(tmp_path, monkeypatch)
+    from agent_wechat import messages
+    md5 = messages.md5_of("victim")
+    d = home / "media" / md5
+    d.mkdir(parents=True)
+    (d / "chat.html").write_bytes(b"x" * 1_200_000)
+    monkeypatch.setattr(usecases, "purge_chat_targets", lambda *a, **kw: [
+        {"account": "a", "chat_id": "victim", "chat_md5": md5},
+        {"account": "b", "chat_id": "victim", "chat_md5": md5}])
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["purge", "--chat", "小李"])
+    assert ei.value.code == 0
+    out = capsys.readouterr().out
+    assert out.count(str(d)) == 1, "同一个导出目录只该占一行"
+    assert "1.2 MB" in out and "2.4 MB" not in out, "共享目录的体积被算了两遍"
+
+
+def test_purge_chat_reports_an_undeletable_export_dir_and_exits_1(tmp_path, monkeypatch, capsys):
+    """`ChatReport.export_removed == False` 是「删了但没删掉」的**唯一**信号，
+    必须被用户看见、并因此退 1——Task 6 的安全论证依赖这条通道存在。
+
+    形状取**悬空符号链接**（裁决有意保留的那个不对称）：计划侧走 `exists()` 说「不存在」，
+    而 execute 的 re-check 与 verify 走不跟随链接的判据 → False + 残留。
+    """
+    home = _isolate(tmp_path, monkeypatch)
+    from agent_wechat import messages
+    md5 = messages.md5_of("victim")
+    media = home / "media"
+    media.mkdir()
+    link = media / md5
+    link.symlink_to(media / "早就没有了")
+    with store.open() as con:
+        store.upsert_batch(con, [_chat_row(1)])
+    monkeypatch.setattr(usecases, "purge_chat_targets", lambda *a, **kw: [
+        {"account": "a", "chat_id": "victim", "chat_md5": md5}])
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["purge", "--chat", "小李", "--yes"])
+    assert ei.value.code == 1, "导出物没删掉就必须退 1"
+    out = capsys.readouterr().out
+    assert "导出物" in out and "未能删除" in out, "「删了但没删掉」必须在报告里说出来"
+    assert str(link) in out, "核查那行要点名残留的是哪个目录"
+    # 计划侧那个**有意保留的不对称**（裁决要的）：它走 `exists()`，问的是「有没有内容可删」，
+    # 悬空链接答「没有」——所以计划表说「不存在」，而 execute 报失败、核查列残留。
+    # 谁要是把 plan 侧也改成不跟随链接的判据，这行会红。
+    assert "（不存在）" in out and "—" in out
+
+
+def test_purge_chat_exits_1_even_when_the_check_says_clean(tmp_path, monkeypatch, capsys):
+    """报告侧那一句**自己**也是退出码的判据（注入式判据，不是真夹具）。
+
+    今天 `export_removed == False` 必然伴随核查侧的残留，所以「只信核查」的写法也能过——
+    但那样「删了但没删掉」就只剩**一条**通道兜着，而那条通道（不跟随链接的判据）恰好是
+    本特性反复修过的地方。把核查换成一份干净的桩，报告侧那一句就成了唯一的判据：
+    摘掉 `all(r.export_removed ...)`，这条必红。
+    """
+    home = _isolate(tmp_path, monkeypatch)
+    from agent_wechat import messages, purge
+    md5 = messages.md5_of("victim")
+    media = home / "media"
+    media.mkdir()
+    (media / md5).symlink_to(media / "早就没有了")
+    with store.open() as con:
+        store.upsert_batch(con, [_chat_row(1)])
+    monkeypatch.setattr(usecases, "purge_chat_targets", lambda *a, **kw: [
+        {"account": "a", "chat_id": "victim", "chat_md5": md5}])
+    monkeypatch.setattr(purge, "verify_chat",
+                        lambda plan: purge.ChatResidue((), 1, 1, ()))
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["purge", "--chat", "小李", "--yes"])
+    assert ei.value.code == 1, "报告说导出物没删掉，就不能退 0"
+    assert "未能删除" in capsys.readouterr().out
+
+
+def test_purge_excluded_and_undo_do_not_recreate_the_index(tmp_path, monkeypatch, capsys):
+    """这两条命令是**紧跟销毁之后**跑的那两条，而 `store.open()` 会把刚删掉的 index.db
+    连同整个 schema 一起建回来（`_exclusion_count` 的开篇记的就是这笔账）。
+
+    `--excluded` 的用途之一正是「`purge --index` 之后看看清单还剩多少」；`--undo` 同理
+    ——它只碰 `exclusions.db`，跟索引库没有关系。
+    """
+    home = _isolate(tmp_path, monkeypatch)
+    from agent_wechat import exclusions
+    with store.open() as con:
+        exclusions.add(con, [("a|aaaa|message_0.db|1", "a", "aaaa")])
+    monkeypatch.setattr(usecases, "purge_chat_targets",
+                        lambda *a, **kw: [{"account": "a", "chat_id": "victim",
+                                           "chat_md5": "aaaa"}])
+    for argv in (["purge", "--excluded"], ["purge", "--chat", "小李", "--undo"]):
+        (home / "index.db").unlink(missing_ok=True)   # 模拟 purge --index（第二轮它已被证明不在）
+        with pytest.raises(SystemExit) as ei:
+            cli.main(argv)
+        assert ei.value.code == 0, argv
+        assert not (home / "index.db").exists(), f"{argv} 把刚删掉的索引建回来了"
+
+
+def test_purge_chat_undo_reaches_a_chat_whose_messages_are_already_gone(
+        tmp_path, monkeypatch, capsys):
+    """**撤销的落地形态**：`purge` 之后索引里一条消息都没有，而 `--undo` 必须还能解除排除。
+
+    目标集合若只按 `messages` 找会话，撤销会在这里报「没有可删的东西」并退 0——用户以为
+    撤销成功，重跑 `export --full` 却什么也回不来（墓碑还在），而输出里没有一个字说破。
+    （spec §5.6：撤销的存在理由就是「一次误删之后」——那时消息必然已经不在索引里。）
+    """
+    _isolate(tmp_path, monkeypatch)
+    from agent_wechat import exclusions, messages
+    md5 = messages.md5_of("victim")
+    with store.open() as con:
+        exclusions.add(con, [(f"a|{md5}|message_0.db|1", "a", md5)])
+    _stub_resolution(monkeypatch, "victim")           # 不桩 purge_chat_targets
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["purge", "--chat", "小李", "--undo", "--yes"])
+    assert ei.value.code == 0
+    out = capsys.readouterr().out
+    assert "已解除 1 条排除" in out
+    with store.open() as con:
+        assert exclusions.count(con) == 0, "消息没了也要能撤销"
+
+
+def test_purge_chat_targets_derives_the_md5_of_a_degraded_chat_id(tmp_path, monkeypatch):
+    """退化会话名（`md5:<hex>`）**不再哈希一次**：`chat_md5` 必须走 `messages.chat_md5`。
+
+    错法是全静默的（spec 终审 D1）：`media/<错 md5>/` 指向一个不存在的目录，真目录永远
+    删不掉，而核查对着空目录报一片 ✅。判别法：这里换回 `messages.md5_of`，这条必红。
+    """
+    _isolate(tmp_path, monkeypatch)
+    from agent_wechat import messages
+    with store.open() as con:
+        store.upsert_batch(con, [_chat_row(1, chat_id="md5:aaaa")])
+    _stub_resolution(monkeypatch, "md5:aaaa")
+    targets = usecases.purge_chat_targets("小李")
+    assert targets == [{"account": "a", "chat_id": "md5:aaaa", "chat_md5": "aaaa"}]
+    assert messages.md5_of("md5:aaaa") != "aaaa", "前提：走 md5_of 会得到另一个值"
+
+
+def test_purge_chat_targets_fans_out_over_every_account_with_the_chat(tmp_path, monkeypatch):
+    """跨账号：隐私不按账号分，凡是索引里有这个会话的账号都要出现在计划里。"""
+    _isolate(tmp_path, monkeypatch)
+    with store.open() as con:
+        store.upsert_batch(con, [_chat_row(1), _chat_row(1, account="b"),
+                                 _chat_row(1, chat_id="别的会话")])
+    _stub_resolution(monkeypatch, "victim")
+    targets = usecases.purge_chat_targets("小李")
+    assert [t["account"] for t in targets] == ["a", "b"], "别的会话的账号不该进来"
+
+
+def test_export_wires_the_skipped_note_to_stderr(monkeypatch, capsys):
+    """`on_skipped` 的 CLI 接线，三处之一（Task 4 留给本任务的遗留②）。
+
+    在此之前三处接线**零测试**：把 `cli.py` 里的 `on_skipped=_note_skipped` 摘掉，全量仍绿
+    ——而那意味着「成功但有保留」这唯一一条出口实际断线，用户只看到数字变小。
+    """
+    from agent_wechat import export
+
+    def fake_run_export(acct, **kw):
+        kw["on_skipped"](5)
+        return 1
+
+    monkeypatch.setattr(usecases, "export_plan",
+                        lambda **kw: usecases.ExportPlan("a", None, False))
+    monkeypatch.setattr(export, "run_export", fake_run_export)
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["export"])
+    assert ei.value.code == 0
+    out, err = capsys.readouterr()
+    assert "跳过 5 行（已排除）" in err
+    assert "跳过" not in out, "「成功但有保留」走 stderr，不污染 stdout（spec §7）"
+
+
+def test_media_rebuild_refs_wires_the_skipped_note_to_stderr(monkeypatch, capsys):
+    """三处之二：`media rebuild-refs` 只写 media_refs，**一条 messages 都不写**。"""
+    def fake_rebuild(account=None, progress=None, on_skipped=None):
+        on_skipped(7)
+        return 3
+
+    monkeypatch.setattr(usecases, "media_rebuild_refs", fake_rebuild)
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["media", "rebuild-refs"])
+    assert ei.value.code == 0
+    out, err = capsys.readouterr()
+    assert "跳过 7 行（已排除）" in err and "跳过" not in out
+
+
+def test_appmsg_rebuild_wires_the_skipped_note_to_stderr(monkeypatch, capsys):
+    """三处之三：`appmsg rebuild` 只写 msg_parts。"""
+    def fake_rebuild(account=None, progress=None, on_skipped=None):
+        on_skipped(11)
+        return {"parts": 1, "resolved": 0, "unresolved": 0, "rejected": 0,
+                "malformed": 0, "skipped": 11}
+
+    monkeypatch.setattr(usecases, "appmsg_rebuild_parts", fake_rebuild)
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["appmsg", "rebuild"])
+    assert ei.value.code == 0
+    out, err = capsys.readouterr()
+    assert "跳过 11 行（已排除）" in err and "跳过" not in out

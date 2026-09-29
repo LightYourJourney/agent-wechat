@@ -993,6 +993,49 @@ def chat_index(out_dir: str | None = None, account: str | None = None) -> ChatIn
     return ChatIndexResult(out_dir=str(out_root), file=str(target), chats=len(entries))
 
 
+def purge_chat_targets(contact: str, account: str | None = None) -> list[dict] | NeedConfirm:
+    """会话名 → 每个**索引里（或排除清单里）有它**的账号各一条 {account, chat_id, chat_md5}。
+
+    `chat_md5` 走 **`messages.chat_md5()`**，不是 `messages.md5_of()`：后者对退化形态
+    （`md5:<hex>`，`degraded_chat_id` 的产物）会**再哈希一次**，得到一个错的 md5。
+    错法是静默的——`media/<chat_md5>/` 指向不存在的目录、导出物删不掉，而核查会报
+    「0 行、目录不存在」一片 ✅（spec §5.1 第 1 步、终审 D1）。
+
+    跨账号：隐私不是按账号分的，凡是索引里有这个会话的账号都要删；`chat_md5` 与账号无关，
+    所以 `media/<chat_md5>/` 天然是共享的。
+
+    **`exclusions.excluded` 那一支不能省**：`--undo` 的存在理由就是「一次误删之后」
+    （spec §5.6），而那时这个会话在 `messages` 里**一条都不剩**——只按 messages 找会话的话，
+    撤销会拿到空清单、报一句「没有可删的东西」并退 0，墓碑原样留着，而用户以为已经撤销。
+    这一支不会留下删不掉的残留：`--undo` 按 (account, chat_md5) 把墓碑删干净之后，
+    这个账号下一次就不在并集里了。
+
+    这条 SQL 里的 `exclusions.excluded` 来自 `store.open()` 的 ATTACH（exclusions.py 的
+    模块 docstring 记了这条约定），所以这里必须走 `store.open()`、不能用裸连接。
+    """
+    chat_id = ChatContext(account).resolve_optional(contact)
+    if isinstance(chat_id, NeedConfirm):
+        return chat_id
+    if chat_id is None:
+        raise errors.ContactNotFound(f"找不到会话「{contact}」")
+    md5 = messages.chat_md5(chat_id)
+    try:
+        with store.open() as con:
+            rows = con.execute(
+                "SELECT account FROM messages WHERE chat_id=? "
+                "UNION SELECT account FROM exclusions.excluded WHERE chat_md5=? "
+                "ORDER BY account", (chat_id, md5)).fetchall()
+    except (sqlite3.Error, OSError) as exc:
+        # 与 plan_chat 同一口径：读不了索引/清单时裸 sqlite3.Error 会一路逃到 CLI 的
+        # `except AgentWeChatError` 之外，用户看到的是一整个 traceback 而不是一行拒绝。
+        raise errors.PurgeRefused(
+            f"读不出会话「{contact}」的销毁目标：{exc}",
+            hint="确认 index.db 可读、且没有别的进程正在写它（导出任务 / MCP server）；"
+                 "库损坏（file is not a database 等）时先 purge --index 删掉再重跑 export"
+        ) from exc
+    return [{"account": r[0], "chat_id": chat_id, "chat_md5": md5} for r in rows]
+
+
 def media_rebuild_refs(account: str | None = None, progress=None, on_skipped=None) -> int:
     """全量重扫微信库，只为存量历史回填 media_refs（spec §4.5）。幂等 upsert；
     **不写 messages**（消息内容不变，只有 refs 需要补）。分钟级，同步执行。

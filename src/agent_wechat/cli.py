@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import sqlite3
 import sys
@@ -154,10 +155,17 @@ def cmd_recent(args: argparse.Namespace) -> int:
 
 
 def _note_skipped(n: int) -> None:
-    """「跳过 N 条（已排除）」走 stderr——与 `_render_degradations` 同一条出口：
+    """「跳过 N 行（已排除）」走 stderr——与 `_render_degradations` 同一条出口：
     导出/回填**成功但有保留**（被 `purge --chat` 删掉的行仍在微信库里、被写入端挡下），
-    不该污染 stdout（那是给人看的表，也是管道里机器可读的部分，spec §7）。"""
-    _render_degradations([f"跳过 {n} 条（已排除）"])
+    不该污染 stdout（那是给人看的表，也是管道里机器可读的部分，spec §7）。
+
+    量词是**行**、不是「条」：三个调用点写的是三张不同的表——`export` 写 messages +
+    media_refs、`media rebuild-refs` 只写 media_refs、`appmsg rebuild` 只写 msg_parts——
+    而后两条**一条 messages 都不写**，所以「只数消息条数」在那里根本无从谈起（回调拿不到）。
+    说「条」会被读成消息条数，而它在后两条命令上恒不等于消息条数；说「行」三者都成立：
+    就是被排除清单挡下、没写进库的行数。
+    """
+    _render_degradations([f"跳过 {n} 行（已排除）：已销毁会话的这些行不再写入索引"])
 
 
 def cmd_export(args: argparse.Namespace) -> int:
@@ -467,13 +475,49 @@ def _exclusion_count() -> int | None:
         return None      # 读不出来就不说话：这句提示不该把销毁本身弄成失败
 
 
+@contextlib.contextmanager
+def _exclusions_con():
+    """只连排除清单的连接：`:memory:` + `ATTACH DATABASE ? AS exclusions`。
+
+    **绝不走 `store.open()`**：那条路会 `paths.ensure_home_dirs()` 并把整个索引 schema 建出来，
+    于是「看一眼排除清单」这个动作会把 `purge --index` 刚删掉的 index.db 当场重建——
+    而 `--excluded` 与 `--undo` 恰恰是紧跟在销毁之后跑的那两条（取舍与 `_exclusion_count`
+    同款，理由见那里）。别名与生产一致，`exclusions.py` 那几条 SQL 原样可用。
+
+    清单文件不存在时给一张**空表**（在内存里建同一份 schema），而不是让 ATTACH 顺手把它
+    建出来：一条只读的列清单命令不该在用户磁盘上落新文件。
+    """
+    from . import exclusions
+    p = exclusions.path()
+    con = sqlite3.connect(":memory:")
+    try:
+        if p.exists():
+            con.execute("ATTACH DATABASE ? AS exclusions", (str(p),))
+        else:
+            con.execute("ATTACH DATABASE ':memory:' AS exclusions")
+            con.executescript(exclusions.SCHEMA)
+        yield con
+    finally:
+        con.close()
+
+
 def cmd_purge(args: argparse.Namespace) -> int:
     """销毁本地产物。**默认 dry-run**：不带 --yes 只打印计划，一个字节不删。
 
     --all 的语义是「整个 HOME_DIR」（超集），不是具名范围的并集——这样才扫得掉
     `decrypt --out` 落在 HOME_DIR 下的散落明文（SECURITY.md §1 标为极高敏感）。
     """
+    # 两个轴各自分派：`--excluded` 是一次全局查询、`--chat` 是「删哪个会话」，两者都不碰
+    # 产物范围那份计划（`purge.plan()` 会枚举 HOME_DIR，而它们一个字节都不删）。
+    # `--excluded` 放在 purge 的惰性 import **之前**：它连产物表都不看，不该为一条只读清单
+    # 命令把 vector→sqlite_vec 那条链拉起来（本文件开篇的冷启动取舍）。
+    if args.excluded:
+        return _cmd_purge_excluded()
+
     from . import purge
+
+    if args.chat:
+        return _cmd_purge_chat(args)
 
     # 同样从产物表演绎，不手写第二份名单；`--<scope>` 这个约定由 tests/test_cli.py 的
     # test_every_named_scope_has_a_working_flag 逐条钉住。
@@ -582,6 +626,167 @@ def _render_degradations(degraded) -> None:
             print(f"⚠️  {d.effect}（{d.db} 的 {d.table} 结构不符）", file=sys.stderr)
 
 
+# ---------- `purge --chat` / `--undo` / `--excluded` ----------
+
+# 计划表与执行报告共用的五张表。顺序固定（不按字典序）：两次运行的输出可以直接 diff。
+_CHAT_TABLES = (
+    ("messages", "消息", "含 FTS 索引（由既有触发器跟随）"),
+    ("vectors", "向量", ""),
+    ("parts", "appmsg 部件", ""),
+    ("refs", "媒体引用", ""),
+    ("display_names", "群成员显示名", ""),
+)
+
+
+def _chat_export_dirs(plan: purge.ChatPlan) -> dict:
+    """导出物目录 → (体积, 计划时是否存在)，**按目录去重**。
+
+    跨账号 purge 里多条 entry 共享同一个 `media/<md5>/`（目录按会话 md5 分，与账号无关），
+    逐条累加会把同一个目录算两遍——而这一行是用户据以判断「删了能省多少」的唯一来源。
+    去重口径与核查侧的 `ChatResidue.export_dirs` 一致。
+    """
+    seen: dict = {}
+    for e in plan.entries:
+        seen.setdefault(e.export_dir, (e.export_size, e.export_exists))
+    return seen
+
+
+def _render_chat_plan(plan: purge.ChatPlan, query: str) -> None:
+    # 第一行印**解析真身**：这个项目栽过一次（61% 的会话按真名解析会静默落到裸 id），而销毁
+    # 不可逆——用户必须当场看见删的是谁，且一个会话名可能对应多个账号的同一份副本。
+    print(f"将删除（会话：{query} → {plan.entries[0].chat_id}）：")
+    for e in plan.entries:
+        print(f"  账号 {e.account}")
+        for key, label, note in _CHAT_TABLES:
+            n = e.counts.get(key, 0)
+            print(f"    {label:<12} {n:>7,} 条"
+                  f"{'    ' + note if note and n else ''}")
+    for d, (size, exists) in _chat_export_dirs(plan).items():
+        # 体积为 0 或「不存在」时印 —（与 _render_plan 同款）：0 B 会被读成「空目录」，
+        # 而这里的事实是「这个目录根本不在」。
+        print(f"  导出物  {d}   {_human_size(size) if exists else '—':>10}   "
+              f"解密后的图/视频/语音，及可直接打开的 chat/index.html"
+              f"{'' if exists else '（不存在）'}")
+    print(f"  随后列入永久排除：{sum(e.tombstone for e in plan.entries):,} 条"
+          "（**新消息不受影响**，照常进索引）")
+    # 这段警告不是客套：`moments/` 是一份 HTML 装所有人，没有按会话切分的目录结构，删掉
+    # 会话后那个人的动态与互动仍可能躺在里面——不说清楚，用户会以为清干净了（spec §3.1）。
+    print("\n⚠️ 不在本范围内：朋友圈导出（moments/ 是一份 HTML 装所有人，不按会话分目录）"
+          "——\n   那个人的动态与互动**仍可能留在其中**。")
+    print("删的是本工具的副本，不是微信里的记录（微信容器恒只读）。")
+
+
+def _render_chat_reports(reports) -> None:
+    """执行结果**逐条**打出来：哪个账号删掉了哪些行、墓碑新写了多少、导出物删没删掉。"""
+    print("\n已执行：")
+    for r in reports:
+        print(f"  账号 {r.account}")
+        for key, label, _ in _CHAT_TABLES:
+            print(f"    {label:<12} {r.deleted.get(key, 0):>7,} 行已删除")
+        # tombstone 是**本次真正新写进去的**条数（重跑同一个会话时为 0，幂等，spec §5.7）：
+        # 「该会话当前被挡住多少条」是核查那一侧的事，这里混着说会让重跑看起来像又挡了一批。
+        print(f"    本次新写入排除：{r.tombstone:,} 条")
+        # 这一行是「删了但没删掉」的**唯一**出口（文件系统上看不出别的东西）：不说出来，
+        # 报告就只剩一片 ✅，而东西还在。退出码也读它（见 _cmd_purge_chat）。
+        print("    导出物已删除" if r.export_removed
+              else "    ❌ 导出物未能删除（那个名字还在磁盘上）")
+
+
+def _cmd_purge_excluded() -> int:
+    """列出排除清单的规模（按会话分组）。**不打印会话名**——那要查索引，而这条命令可能在
+    `purge --index` 之后跑、索引已经不在了（spec §3）。"""
+    from . import exclusions
+    try:
+        with _exclusions_con() as con:
+            rows = exclusions.by_chat(con)
+    except (sqlite3.Error, OSError) as exc:
+        # 读不出来**不能**报「0 条」：那是「一条都没被挡」的意思，与事实相反，而用户正是
+        # 据这句话判断重导会不会把已删内容带回来。
+        raise errors.PurgeRefused(
+            f"排除清单读不出来：{exc}",
+            hint=f"检查 {exclusions.path()} 是否可读、是否损坏"
+        ) from exc
+    total = sum(n for _, n in rows)
+    print(f"排除清单（{exclusions.path().resolve()}）：{total:,} 条")
+    for md5, n in rows:
+        print(f"  {md5}   {n:,} 条")
+    return 0
+
+
+def _cmd_purge_chat(args: argparse.Namespace) -> int:
+    from . import purge, usecases
+    targets = usecases.purge_chat_targets(args.chat, account=args.account)
+    if isinstance(targets, usecases.NeedConfirm):
+        return _need_confirm(args.chat, targets)
+    if not targets:
+        # 「这个会话在索引里一条消息都没有」与「它一条都没被排除过」都要点到：后者是
+        # `--undo` 的空集形态，只说「没有可删的东西」会让用户以为撤销也没戏。
+        print(f"索引里没有会话「{args.chat}」的任何消息，排除清单里也没有它的条目"
+              "——没有可删的东西。", file=sys.stderr)
+        return 0
+    if args.undo:
+        return _cmd_purge_chat_undo(targets, yes=args.yes)
+    plan = purge.plan_chat(targets)
+    _render_chat_plan(plan, args.chat)
+    if not args.yes:
+        print("\n未删除任何文件。加 --yes 执行。")
+        return 0
+    reports = purge.execute_chat(plan)
+    _render_chat_reports(reports)
+    # 汇总。导出物**按目录去重**（见 _chat_export_dirs），且只数真删掉的那些——失败的那些
+    # 仍占着磁盘，算进「已释放」就是谎报。索引那句必须点明文件不会变小（spec §5.7）：
+    # vec0 只在整块清空时才回收空间，要真回收得 `purge --index` 或重跑 export。
+    freed = {e.export_dir: e.export_size
+             for e, r in zip(plan.entries, reports) if r.export_removed}
+    print(f"\n导出物 {_human_size(sum(freed.values()))} 已释放；"
+          f"索引内 {sum(sum(r.deleted.values()) for r in reports):,} 行已删除"
+          "（**索引文件不会因此变小**，要回收空间得 purge --index 或重跑 export）")
+    res = purge.verify_chat(plan)
+    print("\n核查：")
+    print(res.render())
+    # 四处判据缺一不可：导出物删掉了（报告侧）、墓碑写够了、索引里没有存活行、没有残留目录
+    # （核查侧）。`export_removed` 与 `export_still_there` 看似重复，但前者是「这一条报了什么」、
+    # 后者是「核查看见了什么」——把报告那一侧也接进退出码，就不存在「报告说没删掉、退出码 0」。
+    ok = (all(r.export_removed for r in reports) and res.tombstone_ok
+          and not res.leftover and not res.export_still_there)
+    return 0 if ok else 1
+
+
+def _cmd_purge_chat_undo(targets: list[dict], yes: bool) -> int:
+    """撤销：从排除清单里移出该会话。**只删墓碑，不恢复数据**——这句话必须印在输出里。
+
+    没有它，`--undo` 会被读成「恢复」：用户撤销后重跑 `export --full` 发现消息没回来，
+    会以为工具坏了（而它按设计工作：撤销只是放开拦截，spec §5.6）。
+    """
+    from . import exclusions
+    try:
+        with _exclusions_con() as con:
+            per = [(t["account"], t["chat_md5"],
+                    con.execute("SELECT count(*) FROM exclusions.excluded "
+                                "WHERE account=? AND chat_md5=?",
+                                (t["account"], t["chat_md5"])).fetchone()[0])
+                   for t in targets]
+            n = sum(x[2] for x in per)
+            print(f"将解除排除：{n} 条")
+            for acct, md5, k in per:
+                print(f"  {acct}  {md5}  {k} 条")
+            print("⚠️ 这**不会**把数据找回来——被删的消息要重跑 `export --full` 才回来"
+                  "（那时它们不再被排除）。")
+            if not yes:
+                print("\n未做任何改动。加 --yes 执行。")
+                return 0
+            for acct, md5, _ in per:
+                exclusions.remove_chat(con, acct, md5)
+            con.commit()          # remove_chat 不 commit（它的契约）：由调用方收口
+    except (sqlite3.Error, OSError) as exc:
+        raise errors.PurgeRefused(
+            f"撤销未执行：{exc}",
+            hint=f"检查 {exclusions.path()} 是否可读、是否损坏"
+        ) from exc
+    print(f"已解除 {n} 条排除。")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(prog="agent-wechat",
                                 description="macOS 微信聊天记录读取 + MCP Server（仅限本人已登录账号）")
@@ -652,6 +857,12 @@ def main(argv: list[str] | None = None) -> None:
     sp.add_argument("--tmp", action="store_true", help="解密临时目录")
     sp.add_argument("--all", action="store_true",
                     help="整个 ~/.agent-wechat（含 models/ 与散落文件），与具名范围互斥")
+    sp.add_argument("--chat", metavar="会话",
+                    help="按会话销毁（username 或展示名），与具名范围互斥")
+    sp.add_argument("--undo", action="store_true",
+                    help="从排除清单里移出该会话（**不恢复数据**，要重跑 export --full）")
+    sp.add_argument("--excluded", action="store_true", help="列出排除清单的规模")
+    sp.add_argument("--account", help="解析会话名用的账号（省略＝当前登录的那个）")
     sp.add_argument("--yes", action="store_true", help="真正执行删除")
     sp.set_defaults(fn=cmd_purge)
 
@@ -735,9 +946,18 @@ def main(argv: list[str] | None = None) -> None:
         names = [a.scope for a in _purge.artifacts() if a.scope]
         flags = " / ".join(f"--{s}" for s in names)
         named = any(getattr(args, s) for s in names)     # 开关缺失就是 AttributeError，响亮
-        if args.all and named:
+        # 三条轴各自独立：`--excluded` 是全局查询、`--chat` 问「删哪个会话」、具名范围与
+        # `--all` 问「删哪一类文件」。混着给一律退 2——`purge --chat X --media` 若被接受，
+        # 用户以为只删了那个会话，实际把整棵 media/ 清空了（不可逆）。
+        if args.excluded:
+            if args.chat or args.undo or named or args.all:
+                p.error("--excluded 是全局查询，不能与其它参数同用")
+        elif args.chat:
+            if named or args.all:
+                p.error("--chat 与具名范围/--all 互斥：它问的是「删哪个会话」，不是「删哪一类文件」")
+        elif args.all and named:
             p.error(f"--all 不能与具名范围同时使用：{flags}")
-        if not args.all and not named:
+        elif not args.all and not named:
             p.error(f"必须指定至少一个范围：{flags} / --all")
     try:
         code = args.fn(args)
