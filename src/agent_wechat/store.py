@@ -15,7 +15,7 @@ import sqlite3
 import time
 from collections.abc import Iterator, Sequence
 
-from . import messages, paths
+from . import exclusions, messages, paths
 
 DB_PATH = paths.HOME_DIR / "index.db"
 
@@ -158,11 +158,21 @@ DROP TABLE IF EXISTS vector_watermark;
 
 
 def connect(db_path: pathlib.Path | None = None) -> sqlite3.Connection:
-    """打开索引库连接（行工厂统一为 sqlite3.Row）。不负责关闭：用 open() 或自行 close()。"""
+    """打开索引库连接（行工厂统一为 sqlite3.Row）。不负责关闭：用 open() 或自行 close()。
+
+    同时 **ATTACH 排除清单**（design spec §5.4）：三处拦截点与 purge 的事务都要在 SQL 里
+    直接引用 `exclusions.excluded`，才能做到「判据与写入同事务」且「调用方无法忘记」。
+    `executescript` 会隐式提交，所以这两步必须在任何显式事务之前——它本来就在这儿。
+    """
     paths.ensure_home_dirs()
-    con = sqlite3.connect(db_path or DB_PATH)
+    db = db_path or DB_PATH
+    con = sqlite3.connect(db)
     con.row_factory = sqlite3.Row
+    ex_path = exclusions.path_for(pathlib.Path(db))
+    ex_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    con.execute("ATTACH DATABASE ? AS exclusions", (str(ex_path),))
     con.executescript(SCHEMA)
+    con.executescript(exclusions.SCHEMA)
     con.execute("PRAGMA synchronous=NORMAL")
     return con
 
