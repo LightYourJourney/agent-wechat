@@ -430,6 +430,33 @@ def _human_size(n: int) -> str:
     return f"{n / 1000**4:.2f} TB"      # ≥999.995 TB：再往上的单位没有实际用途
 
 
+def _exclusion_count() -> int | None:
+    """排除清单（`exclusions.db`）里的墓碑数；读不出来返回 None。**绝不抛**。
+
+    **刻意不走 `store.open()`**：那条路会 `paths.ensure_home_dirs()` 再把整个索引 schema
+    建出来，于是 `purge --index` 刚删掉的 index.db、`purge --all` 刚删掉的整个数据目录都会被
+    原样重建——「已删除」当场变成假象，紧接着的 verify 还会把重建出来的 index.db 报成
+    「计划内仍未删除」（实测：这两件事都发生了）。
+
+    只开一条内存连接、把清单文件 ATTACH 成 `exclusions`（与生产同一个别名，所以
+    `exclusions.count` 那句 SQL 原样可用），一个文件都不落。ATTACH 一个不存在的文件会把它
+    建出来，故先判存在。
+    """
+    from . import exclusions
+    try:
+        p = exclusions.path()
+        if not p.exists():
+            return None
+        con = sqlite3.connect(":memory:")
+        try:
+            con.execute("ATTACH DATABASE ? AS exclusions", (str(p),))
+            return exclusions.count(con)
+        finally:
+            con.close()
+    except Exception:
+        return None      # 读不出来就不说话：这句提示不该把销毁本身弄成失败
+
+
 def cmd_purge(args: argparse.Namespace) -> int:
     """销毁本地产物。**默认 dry-run**：不带 --yes 只打印计划，一个字节不删。
 
@@ -448,6 +475,10 @@ def cmd_purge(args: argparse.Namespace) -> int:
         _render_plan(plan)
         return 0
 
+    # 排除清单的规模必须在删除**之前**取：`--all` 会把它连文件一起删掉（它已是产物之一），
+    # 删完再读只剩 0 或「没有」——而那句提示说的是「失去了多少」（spec §4.1③）。
+    ex_count = _exclusion_count() if (args.index or args.all) else None
+
     report = purge.execute(plan)
     print(f"已删除 {len(report.removed)} 项，释放 {_human_size(report.freed)}。")
     if report.home_removed:
@@ -457,6 +488,17 @@ def cmd_purge(args: argparse.Namespace) -> int:
         print(f"数据目录本身已一并删除：{paths.HOME_DIR.resolve()}")
     for p, err in report.failed:
         print(f"  ⚠️ 未能删除 {p}：{err}", file=sys.stderr)
+    if ex_count is not None:
+        # 这两条是刻意响亮的：排除清单要么活过索引重建（--index），要么随全清一起没
+        # ——后者意味着被删内容下次导出会回来，用户必须当场知道（spec §4.1③）。
+        from . import exclusions as _ex
+        if args.all:
+            # 前提是它**真的**没了。部分失败时清单可能活着，那时说「已随之删除」是假话
+            # （它活着的话下面的残留核查会点名它）。计数只能是删之前那份，见 ex_count。
+            if not _ex.path().exists():
+                print(f"排除清单已随之删除：{ex_count} 条排除失效，被删内容下次导出会回来。")
+        else:
+            print(f"排除清单保留：{ex_count} 条（exclusions.db），重建索引后仍生效。")
     _render_residue(purge.verify(plan))
     return 1 if report.failed else 0
 

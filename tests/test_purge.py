@@ -36,8 +36,8 @@ def _never_touch_real_home(monkeypatch, tmp_path):
     # 遍历 known_artifacts() 而不是 artifacts()：后者只含有 CLI 开关的那几个，scope=None
     # 的（models/、tasks.json）同样会被删，也必须逐个确认路径被重定向过。
     arts = purge.known_artifacts()
-    assert len(arts) == 9, \
-        f"红线：清单条目数由 9 变为 {len(arts)}，必有产物未被保护，须先核对再改这个数"
+    assert len(arts) == 10, \
+        f"红线：清单条目数由 10 变为 {len(arts)}，必有产物未被保护，须先核对再改这个数"
     for a in arts:
         assert a.path != REAL_HOME and REAL_HOME not in a.path.parents, \
             f"红线：{a.path} 指向真实数据目录"
@@ -711,3 +711,14 @@ def test_execute_all_partial_failure_reports_survivor(tmp_path):
     assert r.freed == 100, f"freed 必须扣掉活下来的 500 B，实际 {r.freed}"
     assert r.home_removed is False
     assert any(x.name == "stuck" for x in rep.not_removed), "残留核查必须点名它"
+
+
+def test_exclusions_is_a_known_artifact():
+    """排除清单必须进产物表——否则 `--all` 会把它当散落文件印成「未知」，
+    而它是**唯一一个删了就不可重建**的东西（spec §4.1③）。"""
+    arts = {a.path.name: a for a in purge.known_artifacts()}
+    assert "exclusions.db" in arts
+    a = arts["exclusions.db"]
+    assert a.scope is None, "没有独立开关，只随 --all 一起走"
+    assert a.sensitive is True
+    assert "不可重建" in a.rebuild

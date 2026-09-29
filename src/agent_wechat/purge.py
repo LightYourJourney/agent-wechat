@@ -4,7 +4,8 @@
 
 两条不可违反的约定：
 - 路径的唯一来源是**拥有它的模块**（keys.CACHE_FILE / store.db_paths() /
-  decrypt.tmp_dir() / vector.MODEL_CACHE_DIR / tasks.TASKS_FILE / paths.HOME_DIR）。
+  decrypt.tmp_dir() / vector.MODEL_CACHE_DIR / tasks.TASKS_FILE / exclusions.path() /
+  paths.HOME_DIR）。
   本模块**不得**自己拼 "passphrase.json" 这类字面量——那是不随拥有者演进的第二份来源。
 - 引用其它模块的常量一律走 `from . import keys` + `keys.CACHE_FILE`，
   绝不 `from .keys import CACHE_FILE`：后者在导入时绑定值，测试 monkeypatch 会失效。
@@ -18,7 +19,7 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 
-from . import decrypt, errors, keys, media, moments, paths, store, tasks, vector
+from . import decrypt, errors, exclusions, keys, media, moments, paths, store, tasks, vector
 
 _run = subprocess.run          # 模块级替换点（同 account._run）：测试注入桩
 
@@ -92,6 +93,9 @@ def known_artifacts() -> tuple[Artifact, ...]:
         Artifact("tmp", decrypt.tmp_dir(), "dir", True, "无"),
         Artifact(None, vector.MODEL_CACHE_DIR, "dir", False, "重新下载"),
         Artifact(None, tasks.TASKS_FILE, "file", False, "无"),
+        # 唯一一个删了就不可重建的产物：它没了，被删的内容下次导出就全回来了（spec §4.1③）
+        Artifact(None, exclusions.path(), "file", True,
+                 "不可重建：它没了，被删内容下次导出会回来"),
     ]
     return tuple(out)
 

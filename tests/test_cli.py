@@ -603,6 +603,56 @@ def test_purge_dry_run_prints_plan_and_deletes_nothing(tmp_path, monkeypatch, ca
     assert (home / "index.db").exists()
 
 
+def test_purge_index_says_the_exclusion_list_survives(tmp_path, monkeypatch, capsys):
+    """`purge --index` 是常规操作（回收 5.6 GB / 强制重建）。它删完之后必须**响亮地**
+    告诉用户排除清单还在——否则用户会以为隐私删除随索引一起没了，
+    或者更糟：以为索引没了删除就没了、于是不敢重建。"""
+    # 用既有的 _isolate；预先塞两条墓碑
+    home = _isolate(tmp_path, monkeypatch)
+    from agent_wechat import exclusions, store
+    with store.open() as con:
+        exclusions.add(con, [("a|m|message_0.db|1", "a", "m"),
+                             ("a|m|message_0.db|2", "a", "m")])
+    (home / "index.db").write_bytes(b"x" * 10)
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["purge", "--index", "--yes"])
+    assert ei.value.code == 0
+    out = capsys.readouterr().out
+    assert "排除清单保留" in out and "2 条" in out
+    assert (home / "index.db").exists() is False
+
+
+@pytest.mark.xfail(strict=True,
+                   reason="后半段依赖 Task 4 的 store.upsert_batch → int 契约（今天返回 None，"
+                          "被排除的行照写）；Task 4 落地后本标记会 XPASS(strict) 变红，删掉它即可")
+def test_tombstone_survives_index_purge_and_reimport(tmp_path, monkeypatch):
+    """**AC4**：`purge --index` 之后排除清单必须还在，重建索引之后那批仍被拦。
+
+    这是不变式①（spec §4.1）——它没了，用户重建后以为早删干净的会话原样回来，
+    而**他不会知道**。所以这条必须真跑一遍：删索引 → 确认清单还在 → 重建 → 确认仍被拦。
+
+    **前半段（清单活过 `--index`）今天就成立**，红的是后半段：拦在写入端的判据是
+    Task 4 的（spec §5.4 第 1 条），本任务只负责产物表与提示。
+    """
+    home = _isolate(tmp_path, monkeypatch)
+    from agent_wechat import exclusions, store
+    with store.open() as con:
+        exclusions.add(con, [("a|aaaa|message_0.db|1", "a", "aaaa")])
+    (home / "index.db").write_bytes(b"x" * 10)
+    with pytest.raises(SystemExit):
+        cli.main(["purge", "--index", "--yes"])
+    assert (home / "exclusions.db").exists(), "排除清单必须活过 --index"
+    with store.open() as con:
+        assert exclusions.count(con) == 1
+        n = store.upsert_batch(con, [{
+            "msg_key": "a|aaaa|message_0.db|1", "account": "a", "chat_md5": "aaaa",
+            "chat_id": "victim", "shard": "message_0.db", "local_id": 1, "server_id": 1,
+            "ts": 100, "msg_type": 1, "sender_id": None, "sender_name": None,
+            "is_self": 0, "content": "本该删掉的", "media_hint": None}])
+        assert n == 1, "重建索引之后那条仍必须被拦"
+        assert con.execute("SELECT count(*) FROM messages").fetchone()[0] == 0
+
+
 # ---------- T6：降级说明的出口（spec §7） ----------
 
 def test_recent_renders_degradation_to_stderr_not_stdout(env, monkeypatch, capsys):
