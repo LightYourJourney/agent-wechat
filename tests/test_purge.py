@@ -1095,6 +1095,32 @@ def test_plan_chat_does_not_report_a_dangling_export_symlink_as_removed(tmp_path
     assert str(link) in res.render()
 
 
+def test_execute_chat_contains_a_failing_export_recheck(tmp_path, monkeypatch):
+    """re-check **自己抛的** OSError 必须被就地兜住（M-D）。
+
+    **这是一条注入式判据，不是真 TOCTOU 夹具**：单线程里造不出「`rmtree` 先以 ENOENT 失败、
+    紧接着父目录又不可搜索/不再是目录」那个窗口（把 `media` 换成普通文件的话，`rmtree` 先抛的
+    是 `NotADirectoryError`，根本走不到这个 handler）。所以把 `_name_there` 换成抛异常的桩。
+    判据本身是**真**的：Python 里处理器内抛出的异常不走同一 try 的同级 handler，没有那层兜底
+    它就会裸穿出去（删掉兜底那条 `except OSError` 即红），而那正是「core 层只抛项目异常」的
+    契约——同一个 EACCES 从 `rmtree` 来是 `removed = False`、从 `lstat` 来却是裸异常，太不一致。
+    """
+    home = tmp_path / "home"; home.mkdir(parents=True)
+    with store.open() as con:
+        store.upsert_batch(con, [_victim_row(1)])
+    media = home / "media"; media.mkdir()
+    (media / VICTIM_MD5).symlink_to(media / "早就没有了")   # 先让 rmtree 走 ENOENT 那一支
+    plan = purge.plan_chat([{"account": "a", "chat_id": VICTIM, "chat_md5": VICTIM_MD5}])
+
+    def boom(_p):
+        raise PermissionError(13, "Permission denied（桩）")
+
+    monkeypatch.setattr(purge, "_name_there", boom)
+    report = purge.execute_chat(plan)
+    assert report[0].export_removed is False, \
+        "判不出来 = 没删掉：不许报成功，更不许把裸 OSError 抛出 execute_chat"
+
+
 def test_plan_chat_turns_a_broken_index_into_purge_refused(tmp_path):
     """索引坏了/读不了时，裸 `sqlite3.DatabaseError` 不许逃到 CLI（F2）。
 

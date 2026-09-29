@@ -835,7 +835,16 @@ def execute_chat(plan: ChatPlan) -> tuple[ChatReport, ...]:
             # 「不在了」有两种：真的删掉了（幂等成功），以及 `media/<md5>` 是**悬空符号链接**
             # ——`rmtree` 会**跟随**它、报 FileNotFoundError，而链接本身原封不动。后者必须报
             # False：它是残留，报成功就是「说删了、东西还在」，随后核查还会跟着说干净。
-            removed = not _name_there(e.export_dir)
+            #
+            # 这次 re-check **自己抛的 OSError 不会被下面那个兄弟处理器接住**：Python 里
+            # 处理器内抛出的异常不走同一 try 的同级 handler。所以就地兜住、按同一口径记 False
+            # ——否则父目录在这两步之间变得不可搜索（EACCES）或不再是目录（NotADirectoryError）
+            # 时，同一个错误从 `rmtree` 来是 `removed = False`、从 `lstat` 来却是裸 OSError
+            # 穿透出去（违反「core 层只抛项目异常」）。
+            try:
+                removed = not _name_there(e.export_dir)
+            except OSError:
+                removed = False
         except OSError:
             removed = False          # 部分失败继续：按既有约定逐条报告、退 1
         # tombstone 报的是**本次真正新写进去的条数**（两阶段之和，见 _write_tombstone），
