@@ -298,6 +298,36 @@ def test_write_entry_points_read_exclusions_inside_the_write_transaction(name, t
             f"{name}：另一个写者没被挡住——判据读在写事务之外，窗口存在"
 
 
+def test_appmsg_rebuild_reports_rows_actually_written(tmp_path, monkeypatch):
+    """**I-3**：`parts` 报**实际落库**的条数，不许把被墓碑挡下的算进去。
+
+    回调与返回值的口径必须一致，否则 CLI 会印「完成：本轮写入 msg_parts N 条」而实际一条没写
+    ——同一份交付里另两处（`run_export` / `media_rebuild_refs` 的返回值）早已是落库口径，
+    所以这是不一致，不是设计选择。
+
+    **判别性**：把返回值改回缓冲计数（`return {"parts": parts, …}`）即红。
+    """
+    from agent_wechat import store, usecases
+
+    key = "acct|aaaa|message_0.db|1"
+    raw = "<msg><appmsg><title>标题</title><type>5</type></appmsg></msg>"
+
+    class _FakeReader:
+        def iter_parts_input(self):
+            yield 1001, key, raw
+
+    monkeypatch.setattr(usecases, "ChatContext", lambda acct=None: type(
+        "C", (), {"account": "acct", "reader": _FakeReader()})())
+    with store.open() as con:                     # 先落墓碑：这批载荷整批都该被挡下
+        exclusions.add(con, [(key, "acct", "aaaa")])
+    res = usecases.appmsg_rebuild_parts(account="acct")
+    assert res["skipped"] == 1, f"前提：那条载荷应当被墓碑挡下：{res}"
+    assert res["parts"] == 0, f"落库 0 条就得报 0：{res}"
+    with store.open() as con:
+        assert con.execute("SELECT count(*) FROM msg_parts").fetchone()[0] == 0, \
+            "前提：确实一行都没落库"
+
+
 def test_parts_write_after_the_temp_table_write_is_still_locked(tmp_path, monkeypatch):
     """`appmsg_rebuild_parts` 的**真实形态**：它先写 TEMP 表（sid_map）、再写 msg_parts。
 
@@ -347,7 +377,11 @@ def test_parts_write_after_the_temp_table_write_is_still_locked(tmp_path, monkey
 
     monkeypatch.setattr(store, "_filter_excluded", purge_in_the_window)
     res = usecases.appmsg_rebuild_parts(account="acct")
-    assert res["parts"] == 1, f"夹具没走到写入那一步：{res}"
+    # `parts == 1` 在这里**不是**「多报」：本测试挡住的正是那次墓碑写入，所以这一批
+    # `skipped == 0`、那一条载荷真的落库了（`parts` 自终审 I-3 起是**实际落库**数，
+    # 见 `test_appmsg_rebuild_reports_rows_actually_written`）。两句一起断言，把
+    # 「1 条缓冲 = 1 条落库」钉死——只写 `parts == 1` 的话，一个恒报缓冲数的实现照样过。
+    assert res["parts"] == 1 and res["skipped"] == 0, f"夹具没走到写入那一步：{res}"
     with store.open() as con:
         resurrected = con.execute(
             "SELECT count(*) FROM msg_parts t JOIN exclusions.excluded e "

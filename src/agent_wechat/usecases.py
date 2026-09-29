@@ -1080,18 +1080,19 @@ def appmsg_rebuild_parts(account: str | None = None, progress=None, on_skipped=N
     实测整次 37.5–38.7 s；同轮 `index.db` 增长 +232.8 MB（本机实测）。
 
     计数口径（**两组不同的分母**，别并排当同一个读）：
-      - `parts` / `rejected` / `malformed` = **本轮扫描**的条数（`parts` 是成功解析、
-        攒进批的条数——解析失败的不计；它**不等于**「扫到的 appmsg 条数」，也**不等于**
-        实际落库的条数：被排除清单挡下的那些同样计进 `parts`，见下面的 `skipped`）；
+      - `parts` / `rejected` / `malformed` = **本轮**的条数（`parts` 是成功解析**且真的
+        落库**的条数——解析失败的不计，被排除清单挡下的也不计：缓冲时计数减去 `skipped`
+        就是它；所以它**不等于**「扫到的 appmsg 条数」）；
       - `resolved` / `unresolved` = 跑完后**该账号整张 `msg_parts` 表**里 `ref_svrid`
-        非空的行中，回指解出来 / 没解出来的条数（同一个谓词 ⇒ 两者之和恒等于该谓词下的
+        非空的行中，回指解出来 / 没解出来的行数（同一个谓词 ⇒ 两者之和恒等于该谓词下的
         引用行数）。删改后再跑一次，这组随整表变化，而 `parts` 只反映本轮。
 
     `skipped` 是新增的键（既有键一个不动）：被排除清单挡下、**没落库**的条数——
     `appmsg rebuild` 直接回微信库重扫，被 `purge --chat` 删掉的会话每次都会读到，
     不拦的话它们的原始载荷（`raw_xml` 里是完整正文）会重新长回来（spec §5.4 第 2 条）。
-    它不是第三个分母：`parts` 在**缓冲时**计数，所以**包含**被挡下的那些，
-    `skipped ⊆ parts`、真正落库的是 `parts - skipped`。`on_skipped`：有行被排除时
+    它不是第三个分母：`skipped ⊆ 缓冲时计的数`，而 `parts` 报的就是那个差
+    （**实际落库**的条数——与 `run_export` / `media_rebuild_refs` 的返回值同款口径，
+    三处都只数真正写进库的行）。`on_skipped`：有行被排除时
     回调一次（与 `media_rebuild_refs` / `run_export` 同款，「成功但有保留」的出口）。
     """
     ctx = ChatContext(account)
@@ -1128,7 +1129,9 @@ def appmsg_rebuild_parts(account: str | None = None, progress=None, on_skipped=N
                 skipped += store.upsert_msg_parts(con, part_buf)
                 part_buf.clear()
             if wrote_parts and progress:
-                progress(parts)
+                # 进度报的也是**实际落库**的数（与 `run_export` / `media_rebuild_refs` 同款）：
+                # 报缓冲数会让进度条上的最后一个数比完成行还大，两句话对不上。
+                progress(parts - skipped)
 
         for sid, key, raw in ctx.reader.iter_parts_input():
             # `if sid` 一次挡掉两种「没有 server_id」：NULL 与 0（实测 15 个 0）。
@@ -1175,7 +1178,10 @@ def appmsg_rebuild_parts(account: str | None = None, progress=None, on_skipped=N
                         (len(prefix), prefix)).fetchone())
     if on_skipped is not None and skipped:
         on_skipped(skipped)
-    return {"parts": parts, "resolved": resolved, "unresolved": refs - resolved,
+    # `parts` 报的是**实际落库**的条数（缓冲数 − 被排除挡下的），与另两处（`run_export` /
+    # `media_rebuild_refs` 的返回值）同一口径：CLI 那句「本轮写入 msg_parts N 条」印的就是它，
+    # 报缓冲数会让用户被告知写入了 N 条而实际一条没写（终审 I-3）。
+    return {"parts": parts - skipped, "resolved": resolved, "unresolved": refs - resolved,
             "rejected": rejected, "malformed": malformed, "skipped": skipped}
 
 
