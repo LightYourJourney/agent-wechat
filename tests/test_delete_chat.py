@@ -47,6 +47,7 @@ def _seed(con):
     store.upsert_msg_parts(con, [(f"a|{VICTIM_MD5}|message_0.db|1", 57, None, None, b"<x/>")])
     store.upsert_media_refs(con, [(f"a|{VICTIM_MD5}|message_0.db|1", "image", "f" * 32, None)])
     store.upsert_msg_parts(con, [(f"a|{KEEPER_MD5}|message_0.db|1", 57, None, None, b"<k/>")])
+    store.upsert_media_refs(con, [(f"a|{KEEPER_MD5}|message_0.db|1", "video", "d" * 32, None)])
     # **孤儿行**：msg_key 属于 victim，但 messages 里没有对应的行。生产上真会出现——
     # `appmsg rebuild` / `media rebuild-refs` 只写 parts/refs、不写 messages。它带着完整的
     # appmsg 载荷，而「经 messages 子查询」那版**删除与计数都看不见它**（核查会对着残留正文报 ✅）。
@@ -60,7 +61,7 @@ def _seed(con):
 
 def test_delete_chat_removes_all_five_places(_temp_index):
     con = _temp_index
-    got = store.delete_chat(con, account="a", chat_id=VICTIM, chat_md5=VICTIM_MD5)
+    got = store.delete_chat(con, account="a", chat_id=VICTIM)
     # parts/refs 各 2：一条挂在存活消息上、一条是孤儿。**子查询版这里只会是 1**——孤儿看不见。
     assert got == {"messages": 2, "vectors": 0, "parts": 2, "refs": 2, "display_names": 1}
     assert store.chat_row_counts(con, "a", VICTIM) == {
@@ -78,11 +79,14 @@ def test_delete_chat_removes_all_five_places(_temp_index):
 def test_delete_chat_leaves_the_other_chat_untouched(_temp_index):
     """**反向断言**：范围泄漏在这门命令上不可逆，比正断言重要。"""
     con = _temp_index
-    store.delete_chat(con, account="a", chat_id=VICTIM, chat_md5=VICTIM_MD5)
-    # keeper 的五项一个不少：前缀是 `account|chat_md5|`，**多一个 `|` 少一个 `|` 都会串到别的会话**
-    # （keeper 的 parts 行就是用来钉这件事的：前缀写宽了会把它一起删掉）。
+    store.delete_chat(con, account="a", chat_id=VICTIM)
+    # keeper 的五项一个不少：前缀是 `account|chat_md5|`，**多一个 `|` 少一个 `|`、或者拿账户当前缀
+    # 都会串到别的会话**（keeper 在 parts/refs 里各有一行，就是用来钉这件事的——前缀写宽了会把它
+    # 一起删掉）。keeper 与 victim **同 account、前缀不同**：这正是「删除范围只能由 account+chat_id
+    # 唯一定出」的判据；把 `chat_md5` 换回调用方传参、或让它与 `chat_row_counts` 的派生不一致，
+    # 都会在这里或上一条断言的 `got` 上现形。
     assert store.chat_row_counts(con, "a", KEEPER) == {
-        "messages": 1, "vectors": 0, "parts": 1, "refs": 0, "display_names": 1}
+        "messages": 1, "vectors": 0, "parts": 1, "refs": 1, "display_names": 1}
     assert con.execute("SELECT count(*) FROM display_names WHERE chat_id=?", (KEEPER,)
                        ).fetchone()[0] == 1
     assert con.execute("SELECT count(*) FROM messages_fts").fetchone()[0] == 1, \
@@ -110,7 +114,7 @@ def test_rowid_reuse_regression(_temp_index):
         "  embedded INTEGER NOT NULL DEFAULT 0, skipped INTEGER NOT NULL DEFAULT 0);")
     con.execute("INSERT INTO vector_watermark VALUES ('m', 'a', 999999, 0)")
     con.commit()
-    store.delete_chat(con, account="a", chat_id=VICTIM, chat_md5=VICTIM_MD5)
+    store.delete_chat(con, account="a", chat_id=VICTIM)
     wm = con.execute("SELECT last_rowid FROM vector_watermark WHERE account='a'").fetchone()[0]
     assert wm == 1, f"水位线必须降到新的 max(id)=1，实际 {wm}"
     # 注意这条测试**不区分**「全局 max」与「该账号自己的 max」——本夹具只有一个账号，两者相同。
@@ -130,7 +134,7 @@ def test_delete_chat_without_any_vector_tables(_temp_index):
         "SELECT name FROM sqlite_master WHERE type='table'")}
     assert "vec_messages" not in names and "vector_watermark" not in names, \
         "前提：这个 fixture 刻意不建向量表"
-    got = store.delete_chat(con, account="a", chat_id=VICTIM, chat_md5=VICTIM_MD5)
+    got = store.delete_chat(con, account="a", chat_id=VICTIM)
     assert got["vectors"] == 0
     assert store.chat_row_counts(con, "a", VICTIM)["vectors"] == 0
 
@@ -161,7 +165,7 @@ def test_delete_chat_removes_vectors_of_that_chat_only(_temp_index):
     con.commit()
     assert store.chat_row_counts(con, "a", VICTIM)["vectors"] == 3
     assert store.chat_row_counts(con, "a", KEEPER)["vectors"] == 1
-    got = store.delete_chat(con, account="a", chat_id=VICTIM, chat_md5=VICTIM_MD5)
+    got = store.delete_chat(con, account="a", chat_id=VICTIM)
     assert got["vectors"] == 3, "孤儿向量也算数——它带着正文的嵌入"
     assert store.chat_row_counts(con, "a", VICTIM)["vectors"] == 0
     # keeper **逐条完好**：一条不多、一条不少，且 `acct_chat` 没被改

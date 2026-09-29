@@ -283,13 +283,17 @@ def chat_row_counts(con: sqlite3.Connection, account: str, chat_id: str) -> dict
     }
 
 
-def delete_chat(con: sqlite3.Connection, *, account: str, chat_id: str,
-                chat_md5: str) -> dict[str, int]:
+def delete_chat(con: sqlite3.Connection, *, account: str, chat_id: str) -> dict[str, int]:
     """删掉一个会话在本工具里的全部副本。**七处，一处不漏**（spec §5.1）。
 
     **调用方负责**：① 事务边界（自己 `BEGIN IMMEDIATE` / `commit`）；
     ② `PRAGMA secure_delete=ON`——实测默认设置下被删消息的正文仍留在 index.db 的 freelist
     页里、grep 得到（spec §2.2b）。本函数不设它，因为它是连接级设置、该由 purge 那条路径统一设。
+
+    **`chat_md5` 不收参数，和 `chat_row_counts` 一样就地派生**（`messages.chat_md5(chat_id)`）：
+    它是三处宽谓词的前缀来源，一旦由调用方传，就可能与本模块核查用的派生值不一致——那时
+    「按传入值删 parts/refs、按派生值核查」会**过删别的会话的行**（不可逆，且此前没有断言护着）。
+    一个值的唯一来源，调用方就不可能让它与核查不一致。
 
     顺序上只剩一条硬约束：
     - **墓碑必须先落**（由调用方在本函数之前写，同一事务）：先删后挡的话，崩在中间就是
@@ -301,8 +305,8 @@ def delete_chat(con: sqlite3.Connection, *, account: str, chat_id: str,
     """
     before = chat_row_counts(con, account, chat_id)
     a = (account, chat_id)
-    acct_chat = f"{account}|{chat_md5}"
-    pref = f"{account}|{chat_md5}|"
+    acct_chat = f"{account}|{messages.chat_md5(chat_id)}"
+    pref = acct_chat + "|"
     p = (len(pref), pref)
     if _has_table(con, "vec_messages"):                 # 轻装安装上不存在——见 _has_table
         # 按 **`acct_chat` 分区键**删，而不是按 `msg_rowid IN (SELECT id FROM messages …)`：
