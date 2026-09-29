@@ -242,6 +242,88 @@ def upsert_batch(con: sqlite3.Connection, rows: list[messages.MessageRow]) -> No
     con.commit()
 
 
+def _has_table(con: sqlite3.Connection, name: str) -> bool:
+    """该表在本连接上存不存在。**向量那三张表在轻装安装上根本不存在**——
+    它们在 `VECTOR_SCHEMA` 里，而 `store.connect()` 只跑 `SCHEMA`（`store.py:83` 的注释就是
+    写这件事的：「向量表不在本 SCHEMA：sqlite-vec 需运行时加载扩展后建表，owner 是 vector.py」）。
+    无条件查它们会让 purge --chat 直接崩在 `no such table`（spec §2.3 的警示框）。
+    """
+    return con.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (name,)).fetchone() is not None
+
+
+def chat_row_counts(con: sqlite3.Connection, account: str, chat_id: str) -> dict[str, int]:
+    """该会话在五张表里的存活条数。核查与测试共用，避免各处各写一套判据。"""
+    def n(sql, args):
+        return con.execute(sql, args).fetchone()[0]
+    ids = f"SELECT id FROM messages WHERE account=? AND chat_id=?"
+    keys = f"SELECT msg_key FROM messages WHERE account=? AND chat_id=?"
+    a = (account, chat_id)
+    return {
+        "messages": n("SELECT count(*) FROM messages WHERE account=? AND chat_id=?", a),
+        "vectors": (n(f"SELECT count(*) FROM vec_messages WHERE msg_rowid IN ({ids})", a)
+                    if _has_table(con, "vec_messages") else 0),
+        "parts": n(f"SELECT count(*) FROM msg_parts WHERE msg_key IN ({keys})", a),
+        "refs": n(f"SELECT count(*) FROM media_refs WHERE msg_key IN ({keys})", a),
+        "display_names": n("SELECT count(*) FROM display_names WHERE account=? AND chat_id=?", a),
+    }
+
+
+def delete_chat(con: sqlite3.Connection, *, account: str, chat_id: str,
+                chat_md5: str) -> dict[str, int]:
+    """删掉一个会话在本工具里的全部副本。**七处，一处不漏**（spec §5.1）。
+
+    **调用方负责**：① 事务边界（自己 `BEGIN IMMEDIATE` / `commit`）；
+    ② `PRAGMA secure_delete=ON`——实测默认设置下被删消息的正文仍留在 index.db 的 freelist
+    页里、grep 得到（spec §2.2b）。本函数不设它，因为它是连接级设置、该由 purge 那条路径统一设。
+
+    顺序有两条硬约束：
+    - **墓碑必须先落**（由调用方在本函数之前写，同一事务）：先删后挡的话，崩在中间就是
+      「删了但没挡」，那批东西会复活；先挡后删最坏只是「挡住了但没删掉」，核查看得见、重跑能收口。
+    - **`vec_messages` 必须早于 `messages`**：它的子查询依赖 `messages` 还在。
+    """
+    before = chat_row_counts(con, account, chat_id)
+    a = (account, chat_id)
+    ids = "SELECT id FROM messages WHERE account=? AND chat_id=?"
+    keys = "SELECT msg_key FROM messages WHERE account=? AND chat_id=?"
+    if _has_table(con, "vec_messages"):                 # 轻装安装上不存在——见 _has_table
+        con.execute(f"DELETE FROM vec_messages WHERE msg_rowid IN ({ids})", a)
+    con.execute(f"DELETE FROM msg_parts WHERE msg_key IN ({keys})", a)
+    con.execute(f"DELETE FROM media_refs WHERE msg_key IN ({keys})", a)
+    con.execute("DELETE FROM messages WHERE account=? AND chat_id=?", a)   # FTS 由触发器跟随
+    con.execute("DELETE FROM display_names WHERE account=? AND chat_id=?", a)
+    # 向量水位线：min 而非 max。**不要复用 vector._set_vector_watermark**——它的 upsert 写的是
+    # max(...)（单调不减），这一行 min 会被它当场吃掉、静默无效（spec §5.2 第 1 条）。
+    # 取**该账号自己的** max 即可（与那条 WHERE account=? 天然配对）。
+    # 早先这里写的是「max 必须全局」——2026-09-30 终审推翻了它：扫描谓词 `WHERE account=? AND
+    # id>?` 是按账号过滤的，降到该账号自己的新 max 时区间里一条存活行都没有，那个危害不存在；
+    # 而且实测 `_SELECT_ROWS` 的执行计划是 COVERING INDEX idx_msg_ts(account=?) + TEMP B-TREE
+    # FOR ORDER BY——它压根不用 id>? 做范围，连性能差别都没有。
+    # 这几行必须留在删除的**同一事务**里：先提交删除、再单独修水位线，中间崩一次就是
+    # 「行没了、水位线还停在旧高位」，此后复用的 id ≤ 水位线 → 静默不被嵌入
+    # （没有任何地方会报错，只有向量检索悄悄少结果）。
+    if _has_table(con, "vector_watermark"):
+        con.execute(
+            "UPDATE vector_watermark SET last_rowid = min(last_rowid, "
+            "  (SELECT COALESCE(max(id), 0) FROM messages WHERE account=?)) "
+            "WHERE account=?", (account, account))
+    if _has_table(con, "vector_meta"):
+        con.execute("UPDATE vector_meta SET embedded = max(0, embedded - ?)",
+                    (before["vectors"],))
+    return before
+
+
+def chat_md5_in_index(con: sqlite3.Connection, account: str) -> set[str]:
+    """该账号在索引里**仍有存活消息**的 chat_md5 集合。
+
+    一次扫描（不是每个会话一次 NOT EXISTS）：`messages` 上没有 chat_md5 的索引，
+    逐个查会退化成 N 次全表扫，而这里是 O(一次扫)。
+    """
+    return {r[0] for r in con.execute(
+        "SELECT DISTINCT chat_md5 FROM messages WHERE account=?", (account,))}
+
+
 def upsert_media_refs(con: sqlite3.Connection,
                       rows: list[tuple[str, str, str | None, str | None]]) -> None:
     """批量幂等写 media_refs。不 commit：由 upsert_batch 的 commit（同事务）或 store.open() 收口。"""
