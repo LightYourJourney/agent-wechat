@@ -871,10 +871,15 @@ def test_execute_chat_refuses_when_lock_is_held(tmp_path):
     holder.execute("BEGIN IMMEDIATE")
     holder.execute("INSERT INTO display_names VALUES ('a','x','y','z')")
     try:
-        with pytest.raises(errors.PurgeRefused):
+        with pytest.raises(errors.PurgeRefused) as ei:
             purge.execute_chat(plan)
     finally:
         holder.rollback(); holder.close()
+    # 消息不许说谎（F4/F6）：标题是**操作**（库损坏、磁盘满也会落到这一支），真因在 `{exc}` 里，
+    # 并带上本轮进度——「此前已完成的」不能被说成没发生。
+    msg = str(ei.value)
+    assert "删除未执行" in msg and "database is locked" in msg, msg
+    assert "本次计划 1 个会话" in msg and "此前已完成 0 个" in msg, msg
     # docstring 承诺了「索引零变化」就得真断言：没有这一句，一个「先删一半再抛」的实现
     # 也能让上面那条 pytest.raises 通过——**这门命令上那是最坏的形状**。
     with store.open() as con:
@@ -1011,3 +1016,164 @@ def test_chat_purge_on_a_machine_with_a_vector_index(tmp_path):
             "SELECT acct_chat, count(*) FROM vec_messages GROUP BY acct_chat"))
     assert left == {vector._acct_chat("a", KEEPER_MD5): 1}, f"victim 的向量必须真没了：{left}"
     assert purge.verify_chat(plan).leftover == ()
+
+
+# ---------- 评审 fix 轮（F1..F7）----------
+
+def test_plan_chat_refuses_more_than_one_chat(tmp_path):
+    """接口收的是 `list[dict]`，但 `ChatPlan` 只装得下一个 `export_dir`（F1）。
+
+    多会话时第 2..n 个的 `media/<md5>/` **从不删、从不核**，核查还会对着残留报 ✅——
+    今天 CLI 的 `--chat` 是单值（多会话不可达），但接口不能在这个形态下**静默漏删**：
+    要么正确处理、要么明拒。per-entry 化留给真需要多会话时。
+    """
+    home = tmp_path / "home"; home.mkdir(parents=True)
+    with pytest.raises(errors.PurgeRefused) as ei:
+        purge.plan_chat([{"account": "a", "chat_id": VICTIM, "chat_md5": VICTIM_MD5},
+                         {"account": "a", "chat_id": KEEPER, "chat_md5": KEEPER_MD5}])
+    assert "一次只支持一个会话" in str(ei.value)
+    assert "2" in str(ei.value), "拒绝时要说清收到几个"
+
+
+def test_plan_chat_turns_a_broken_index_into_purge_refused(tmp_path):
+    """索引坏了/读不了时，裸 `sqlite3.DatabaseError` 不许逃到 CLI（F2）。
+
+    `cli.py` 只 catch `AgentWeChatError`，裸异常 = 用户看到一整个 traceback。
+    夹具就是「不是数据库的文件」——这也正好是 brief 原版 dry-run 测试的那个夹具，
+    在这里它才是对的用法（那边它测的是 plan_chat 正常路径，于任何实现都红）。
+    """
+    home = tmp_path / "home"; home.mkdir(parents=True)
+    (home / "index.db").write_bytes(b"x" * 100)
+    with pytest.raises(errors.PurgeRefused) as ei:
+        purge.plan_chat([{"account": "a", "chat_id": VICTIM, "chat_md5": VICTIM_MD5}])
+    assert "读取索引失败" in str(ei.value), "要点名是哪一步失败"
+    assert isinstance(ei.value.__cause__, (sqlite3.Error, OSError)), "病因要留住"
+
+
+def test_verify_chat_turns_a_broken_index_into_purge_refused(tmp_path):
+    """同 F2：核查读不了库时必须**响亮报错**，不许静默返回「没残留」——
+    那是拿未知状态冒充 ✅，正是这门命令最不该有的假象。"""
+    home = tmp_path / "home"; home.mkdir(parents=True)
+    with store.open() as con:
+        store.upsert_batch(con, [_victim_row(1)])
+    plan = purge.plan_chat([{"account": "a", "chat_id": VICTIM, "chat_md5": VICTIM_MD5}])
+    (home / "index.db").write_bytes(b"x" * 100)
+    with pytest.raises(errors.PurgeRefused) as ei:
+        purge.verify_chat(plan)
+    assert "核查失败" in str(ei.value)
+    assert isinstance(ei.value.__cause__, (sqlite3.Error, OSError))
+
+
+def test_execute_chat_turns_secure_delete_on_before_any_delete(tmp_path, monkeypatch):
+    """`secure_delete` 必须在**任何 DELETE 之前**打开（spec §2.2b，F3 的尺寸无关判据）。
+
+    判据取**删除时刻的连接状态**：删掉实现里那行 `PRAGMA` 就红（本环境默认是 0）。
+    比字节判据稳：它不受 chunk 几何、活跃页、WAL 帧的影响。
+    """
+    home = tmp_path / "home"; home.mkdir(parents=True)
+    with store.open() as con:
+        store.upsert_batch(con, [_victim_row(1), _victim_row(2)])
+    seen = []
+    real = store.delete_chat
+
+    def spy(con, **kw):
+        seen.append(con.execute("PRAGMA secure_delete").fetchone()[0])
+        return real(con, **kw)
+
+    monkeypatch.setattr(purge.store, "delete_chat", spy)
+    purge.execute_chat(purge.plan_chat([{"account": "a", "chat_id": VICTIM,
+                                         "chat_md5": VICTIM_MD5}]))
+    assert seen == [1], f"删除那一刻 secure_delete={seen}（要的是 1）"
+
+
+def test_execute_chat_deletes_the_text_from_the_file_family(tmp_path):
+    """`secure_delete` 的字节侧护栏（spec §2.2b 实测二，F3）。
+
+    **先守卫守卫**：调用前标记必须真能在文件族里搜到——否则「命中 0」对任何实现都成立，
+    包括根本没删的那个。
+
+    **它守卫的是「DELETE 是在这个 pragma 下跑的」，不是「字节不存在」**：本命令的保证边界是
+    「无存活行 + msg_key 被挡」（见 `execute_chat` 的 docstring）。vec0 的 `preview` 装的是
+    **被删行前一条消息的显示正文**（真内容），chunk 没整块清空时它在**活跃页**里留着
+    （评审实测 1200 行形态下开了 pragma 也能搜到 1–3 次）。这里量的是 `messages.content`：
+    关掉 pragma 时它在 freelist 页里留着（实测 190 次命中），开着 + 关连接（+ 一次显式
+    checkpoint）之后是 0。
+    """
+    mark = "ZQXMARKERQXZ"
+    home = tmp_path / "home"; home.mkdir(parents=True)
+    with store.open() as con:
+        store.upsert_batch(con, [dict(_victim_row(1), content=mark),
+                                 dict(_victim_row(2), content=f"{mark}2")])
+
+    def hits() -> int:
+        return sum(p.read_bytes().count(mark.encode()) for p in home.iterdir())
+
+    assert hits() > 0, "守卫守卫：种下去的正文必须能在文件族里搜到"
+    purge.execute_chat(purge.plan_chat([{"account": "a", "chat_id": VICTIM,
+                                         "chat_md5": VICTIM_MD5}]))
+    assert hits() == 0, "被删正文仍留在文件族里（含 -wal）——DELETE 不是在这个 pragma 下跑的？"
+
+
+def test_execute_chat_truncates_the_wal_even_while_another_connection_is_open(tmp_path):
+    """另一个进程（MCP server）把库开着时，**关连接那一下既不清 `-wal` 也不回填**：
+    被删正文的旧页会原样留在文件族里，直到下一次 checkpoint。显式 `wal_checkpoint(TRUNCATE)`
+    让「文件族里不留被删正文」从「碰巧没人开着库」变成有意行为（F3）。"""
+    mark = "ZQXMARKERQXZ"
+    home = tmp_path / "home"; home.mkdir(parents=True)
+    with store.open() as con:
+        store.upsert_batch(con, [dict(_victim_row(1), content=mark),
+                                 dict(_victim_row(2), content=f"{mark}2")])
+    plan = purge.plan_chat([{"account": "a", "chat_id": VICTIM, "chat_md5": VICTIM_MD5}])
+    other = store.connect()                   # 别的进程：连接开着、不写
+    try:
+        purge.execute_chat(plan)
+        hits = sum(p.read_bytes().count(mark.encode()) for p in home.iterdir())
+        assert hits == 0, f"别的连接开着时被删正文仍留在文件族里（{hits} 次）"
+    finally:
+        other.close()
+
+
+def test_execute_chat_refuses_when_a_fresh_index_is_locked(tmp_path):
+    """**新库**形态：SCHEMA 还没建过时 `CREATE TABLE` 就要写锁，拒绝是从 fail-closed
+    闸门里抛出来的——但真因是**索引库被别的进程占着**，与排除清单毫无关系（F5）。
+
+    计划是手搭的：这条路上 `plan_chat` 自己就会先失败（它也要连库）。
+    只报「排除清单读不出来」+ 一个 `exclusions.db` 可读性 hint，会把用户支去查一个
+    没问题的文件——所以消息与 hint 必须覆盖两种原因。
+    """
+    home = tmp_path / "home"; home.mkdir(parents=True)
+    holder = sqlite3.connect(home / "index.db")
+    holder.execute("PRAGMA journal_mode=WAL")
+    holder.execute("BEGIN IMMEDIATE")
+    holder.execute("CREATE TABLE seed(x)")        # 拿住写锁，但**不建** messages 那些表
+    plan = purge.ChatPlan((purge.ChatEntry("a", VICTIM, VICTIM_MD5, {"messages": 1}, 1),),
+                          home / "media" / VICTIM_MD5, False, 0)
+    try:
+        with pytest.raises(errors.PurgeRefused) as ei:
+            purge.execute_chat(plan)
+    finally:
+        holder.rollback(); holder.close()
+    msg, hint = str(ei.value), ei.value.hint or ""
+    assert "database is locked" in msg, "真因要出现在消息里"
+    assert "导出任务" in hint, "锁那条修法要在 hint 里"
+    assert "exclusions.db" in hint, "排除清单那条修法也要在（两种原因都覆盖）"
+
+
+def test_verify_chat_derives_chat_md5_instead_of_trusting_the_plan(tmp_path):
+    """核查的 `chat_md5` **就地派生**，不复用计划里传进来的那个（F7）。
+
+    `_write_tombstone` 写的是 messages 行里的 `chat_md5` 列；核查按 `(account, chat_md5)`
+    数墓碑。两边一旦不同源，核查会读 0 → 误报「不可逆性未建立」（真出问题时也可能被垫成 ✅）。
+    判别形态用**退化会话名** `md5:<hex>`：它是 `chat_md5` 与 `md5_of` 唯一分道扬镳的地方，
+    这里故意传 `md5_of` 那一支（CLI 若用错帮手就是这个值）。
+    """
+    chat = messages.degraded_chat_id("aaaa")
+    home = tmp_path / "home"; home.mkdir(parents=True)
+    with store.open() as con:
+        store.upsert_batch(con, [_row(chat, "aaaa", 1)])
+    plan = purge.plan_chat([{"account": "a", "chat_id": chat,
+                             "chat_md5": messages.md5_of(chat)}])
+    purge.execute_chat(plan)
+    res = purge.verify_chat(plan)
+    assert res.tombstone_written == 1, "墓碑就在那儿，只是键要用派生的那个"
+    assert res.tombstone_ok is True

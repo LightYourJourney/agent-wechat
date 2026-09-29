@@ -23,7 +23,8 @@ import time
 from collections.abc import Iterator
 from dataclasses import dataclass
 
-from . import decrypt, errors, exclusions, keys, media, moments, paths, store, tasks, vector
+from . import (decrypt, errors, exclusions, keys, media, messages, moments, paths, store,
+               tasks, vector)
 
 _run = subprocess.run          # 模块级替换点（同 account._run）：测试注入桩
 
@@ -655,20 +656,43 @@ class ChatResidue:
 
 def plan_chat(resolved: list[dict], home: pathlib.Path | None = None) -> ChatPlan:
     """**纯只读**：只算将删什么，一个字节都不动。`resolved` 是
-    `[{"account":…, "chat_id":…, "chat_md5":…}, …]`（解析由 cli 层做，见 Task 7）。"""
+    `[{"account":…, "chat_id":…, "chat_md5":…}, …]`（解析由 cli 层做，见 Task 7）。
+
+    **只接受一个会话**（`len(resolved) > 1` 明拒）：`ChatPlan` 只装得下一个 `export_dir`
+    （`media/<chat_md5>/` 按 md5 分目录），多会话时第 2..n 个的导出物**从不删、也从不核**
+    ——核查还会对着残留报 ✅。今天 CLI 的 `--chat` 是单值（Task 7），多会话不可达；
+    但接口不该在这个形态下静默漏删：要么正确处理、要么明拒（要支持多会话得把 export_dir
+    逐条化，那是另一个改动）。`resolved == []` 是空计划：没有可漏的东西，照旧返回空 entries。
+    """
     home = home or paths.HOME_DIR
     _check_home_is_sane(home)
-    entries = []
-    for item in resolved:
-        with _open_index() as con:
-            counts = store.chat_row_counts(con, item["account"], item["chat_id"])
-        entries.append(ChatEntry(item["account"], item["chat_id"], item["chat_md5"],
-                                 counts, counts["messages"]))
-    md5 = resolved[0]["chat_md5"] if resolved else ""
-    d = home / "media" / md5
-    exists = d.exists()
-    return ChatPlan(tuple(entries), d, exists,
-                    _tree_size(d) if exists and not d.is_symlink() else 0)
+    if len(resolved) > 1:
+        raise errors.PurgeRefused(
+            f"一次只支持一个会话，收到 {len(resolved)} 个",
+            hint="`purge --chat` 是单值的（导出物按会话 md5 分目录，一个计划只装得下一个）；"
+                 "要清多个会话请逐个执行")
+    try:
+        entries = []
+        for item in resolved:
+            with _open_index() as con:
+                counts = store.chat_row_counts(con, item["account"], item["chat_id"])
+            entries.append(ChatEntry(item["account"], item["chat_id"], item["chat_md5"],
+                                     counts, counts["messages"]))
+        md5 = resolved[0]["chat_md5"] if resolved else ""
+        d = home / "media" / md5
+        exists = d.exists()
+        size = _tree_size(d) if exists and not d.is_symlink() else 0
+    except (sqlite3.Error, OSError) as exc:
+        # 索引打不开/读不了（损坏、权限、被别的进程占着）时，裸 `sqlite3.DatabaseError` /
+        # `sqlite3.OperationalError` 会一路逃到 CLI 的 `except AgentWeChatError` 之外——
+        # 用户看到的是一整个 traceback 而不是一行拒绝。core 层只抛项目异常（errors.py 开篇
+        # 契约），所以在模块边界翻，并点名**哪一步**失败。
+        raise errors.PurgeRefused(
+            f"读取索引失败，未生成销毁计划：{exc}",
+            hint="确认 index.db 可读、且没有别的进程正在写它（导出任务 / MCP server）；"
+                 "库损坏（file is not a database 等）时先 purge --index 删掉再重跑 export"
+        ) from exc
+    return ChatPlan(tuple(entries), d, exists, size)
 
 
 def _write_tombstone(con: sqlite3.Connection, account: str, chat_id: str) -> int:
@@ -699,6 +723,13 @@ def execute_chat(plan: ChatPlan) -> tuple[ChatReport, ...]:
 
     顺序不能反：先删后挡的话崩在中间就是「删了但没挡」——那批东西会复活；
     先挡后删最坏只是「挡住了但没删掉」，核查看得见、重跑能收口（spec §5.1）。
+
+    **保证的边界（诚实口径）**：本命令保证的是「索引里没有存活行 + 它们的 msg_key 进了排除
+    清单」。**不是**「字节层面不存在」：`secure_delete` 只清 SQLite 自己释放的页，而 vec0 的
+    `preview` 列装的是**被删行前一条消息的显示正文**（`vector.py:290`，真内容）——chunk 没整块
+    清空时它仍留在**活跃页**里（评审实测 1200 行形态下，开了本 pragma 也还能在 `messages` 与
+    `vec_messages_auxiliary` 的活跃页里搜到 1–3 次，dbstat 显示它们不在 freelist）。要字节级
+    清除只能重建：`purge --index` 后重跑 export。
     """
     out = []
     # fail-closed（spec §4.2）：读不出排除清单就没法建立不可逆性，这一次删除就只是「暂时看不见」。
@@ -707,9 +738,15 @@ def execute_chat(plan: ChatPlan) -> tuple[ChatReport, ...]:
         with _open_index() as con:
             exclusions.count(con)
     except (sqlite3.Error, OSError) as exc:
+        # 这条闸门开的是**整条连接**（`store.connect()` 会 ATTACH 排除清单并跑 SCHEMA），
+        # 所以异常有两个来源、修法完全不同，文案必须两个都点到。实测：**新库**形态下
+        # `CREATE TABLE` 就要写锁，异常是从 connect 里抛的——跟排除清单一点关系都没有，
+        # 只报「排除清单读不出来」会把用户支去查一个没问题的文件。
         raise errors.PurgeRefused(
-            f"排除清单读不出来，未做任何删除：{exc}",
-            hint=f"检查 {exclusions.path()} 是否可读——它没了，被删内容下次导出就会回来"
+            f"未做任何删除：排除清单或索引库不可用（{exc}）",
+            hint="看括号里的真因：`database is locked` → 有别的进程正在写索引"
+                 "（导出任务 / MCP server），等它结束后重试；"
+                 f"否则检查 {exclusions.path()} 是否可读——它没了，被删内容下次导出就会回来"
         ) from exc
     for e in plan.entries:
         try:
@@ -730,6 +767,12 @@ def execute_chat(plan: ChatPlan) -> tuple[ChatReport, ...]:
                 written += _write_tombstone(con, e.account, e.chat_id)
                 deleted = store.delete_chat(con, account=e.account, chat_id=e.chat_id)
                 con.commit()
+                # 删除提交后再显式 checkpoint 一次（**best-effort**，失败不管）：被删的正文
+                # 是在这条连接上删的，`-wal` 里可能还留着含它的旧帧，本来要等下一次 checkpoint
+                # （或碰巧关连接时）才落盘/截断。另一个进程（MCP server）持着库时这一步会失败
+                # ——那种情况只能等它自己 checkpoint，所以忽略失败，不因此让命令报错。
+                with contextlib.suppress(sqlite3.Error):
+                    con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         except sqlite3.Error as exc:
             # **这一层必须包住 `_open_index()` 本身**，不能只包 `BEGIN IMMEDIATE`——
             # `store.connect()` 每次都跑 `executescript(SCHEMA)`，而那是 DDL、要写锁。
@@ -740,9 +783,17 @@ def execute_chat(plan: ChatPlan) -> tuple[ChatReport, ...]:
             # 两种形态都存在，所以包装范围不能跟着「哪一句抛」变：只包 BEGIN 的话，
             # 新库那条路上裸 `OperationalError` 会穿透出去，违反「core 层只抛项目异常」。
             # 回滚不用手写：`store.open()` 的 except 分支已经做了。
+            #
+            # 消息只说**实际发生的事**：标题是**操作**（不是「拿不到写锁」——库损坏、磁盘满
+            # 都会落到这一支，真因在 `{exc}` 里），并带上本轮进度——不然「此前已完成的」
+            # 会被说成没发生（F1 之后 plan.entries 恒 ≤1 项，所以今天这两个数字恒为 1 / 0，
+            # 但这句话不该依赖那个前提）。
             raise errors.PurgeRefused(
-                f"拿不到写锁，未做任何删除：{exc}",
-                hint="有别的进程正在写索引（导出任务 / MCP server）；等它结束后重试") from exc
+                f"删除未执行：{e.account}/{e.chat_id} 未被删除"
+                f"（本次计划 {len(plan.entries)} 个会话，此前已完成 {len(out)} 个）：{exc}",
+                hint="`database is locked` → 有别的进程正在写索引（导出任务 / MCP server），"
+                     "等它结束后重试；库损坏（file is not a database 等）→ 先 purge --index "
+                     "删掉索引，再重跑 export") from exc
         removed = False
         if plan.export_exists:
             try:
@@ -763,17 +814,34 @@ def execute_chat(plan: ChatPlan) -> tuple[ChatReport, ...]:
 
 def verify_chat(plan: ChatPlan) -> ChatResidue:
     """核查。**第二项比第一项要紧**：墓碑没写成功时文件系统上看不出任何异常，
-    而下次 --full 会把它们全捞回来（spec §5.5）。"""
-    leftover = []
-    for e in plan.entries:
+    而下次 --full 会把它们全捞回来（spec §5.5）。
+
+    `chat_md5` **就地派生**（`messages.chat_md5(e.chat_id)`），不复用计划里传进来的那个：
+    墓碑行的 `chat_md5` 列来自 messages（`_write_tombstone` 的 `INSERT … SELECT`），两边必须
+    同一口径才能对上——与 `store.chat_row_counts` / `store.delete_chat` 同一模式。退化会话名
+    （`md5:<hex>`）正是两者分道扬镳的地方：调用方若拿了 `messages.md5_of` 那一支，传进来的
+    值与墓碑对不上，核查会读 0 → 误报「不可逆性未建立」（真出问题时同样可能被垫成 ✅）。
+    """
+    try:
+        leftover = []
+        for e in plan.entries:
+            with _open_index() as con:
+                counts = store.chat_row_counts(con, e.account, e.chat_id)
+            leftover += [f"{e.account}/{e.chat_id}:{k}={v}" for k, v in counts.items() if v]
         with _open_index() as con:
-            counts = store.chat_row_counts(con, e.account, e.chat_id)
-        leftover += [f"{e.account}/{e.chat_id}:{k}={v}" for k, v in counts.items() if v]
-    with _open_index() as con:
-        # **按会话数，不是全局总数**：全局数会被早先别的会话的排除垫高，于是「本次一条没写成」
-        # 也照样 ≥ 期望 → 核查报 ✅ 而不可逆性其实没建立。这条命令最不该有的假象。
-        written = sum(con.execute(
-            "SELECT count(*) FROM exclusions.excluded WHERE account=? AND chat_md5=?",
-            (e.account, e.chat_md5)).fetchone()[0] for e in plan.entries)
+            # **按会话数，不是全局总数**：全局数会被早先别的会话的排除垫高，于是「本次一条没写成」
+            # 也照样 ≥ 期望 → 核查报 ✅ 而不可逆性其实没建立。这条命令最不该有的假象。
+            written = sum(con.execute(
+                "SELECT count(*) FROM exclusions.excluded WHERE account=? AND chat_md5=?",
+                (e.account, messages.chat_md5(e.chat_id))).fetchone()[0]
+                for e in plan.entries)
+    except (sqlite3.Error, OSError) as exc:
+        # 同 plan_chat：读不了库时不许裸 sqlite3.Error 逃到 CLI。而且**「核查不了」必须与
+        # 「核查通过」区分开**——静默返回一个空 leftover 就是对着未知状态报 ✅。
+        raise errors.PurgeRefused(
+            f"核查失败，本次结果不可信：{exc}",
+            hint="确认 index.db / exclusions.db 可读且没有别的进程正在写索引"
+                 "（导出任务 / MCP server）；库损坏时先 purge --index 删掉再重跑 export"
+        ) from exc
     return ChatResidue(tuple(leftover), written, sum(e.tombstone for e in plan.entries),
                        plan.export_dir, plan.export_exists and plan.export_dir.exists())
