@@ -110,6 +110,19 @@ def test_delete_chat_refuses_when_vec_extension_not_loaded(_vec_index_db):
     assert isinstance(ei.value.__cause__, sqlite3.OperationalError)
 
 
+def test_vec_exec_passes_other_operational_errors_through(_vec_index_db, _temp_index):
+    """翻译**只认** `no such module` 一种：其它 OperationalError 原样透出。
+
+    这里要的是「没被翻译」这个否定断言——而它正好是个假护栏的高发区：断言类型本身就分得开
+    两条路径（PurgeRefused 是 RuntimeError，不是 sqlite3.Error），所以翻译写宽了、把语法错
+    也吞成「没加载扩展」时，这条会红。宽着翻译的代价是**误诊**：库损坏被说成扩展没加载，
+    排查会往完全错的方向走。
+    """
+    with pytest.raises(sqlite3.OperationalError) as ei:
+        store._vec_exec(_temp_index, "SELECT count(*) FROM vec_messages WHERE nope = 1")
+    assert "no such module" not in str(ei.value)
+
+
 def test_delete_chat_removes_all_five_places(_temp_index):
     con = _temp_index
     got = store.delete_chat(con, account="a", chat_id=VICTIM)
