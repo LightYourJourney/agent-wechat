@@ -142,11 +142,21 @@
 | 临时文件 | 解密明文仅在 `tmp/`（0700）短暂存在，单分片、用后即焚——**按消息查媒体归属（`media locate` / `get_message_media`）的语音本体判定也走这一条**；唯一例外是 `decrypt --out` 显式导出的明文库（见上表） |
 | 传输 | MCP 走 stdio；无网络监听、无云同步路径 |
 | 销毁 | `agent-wechat purge --all --yes` 清除**整个 `~/.agent-wechat/` 超集**——不只是「密钥 + 索引」，还包括 `media/`、`moments/`、`models/`、`tasks.json`、`tmp/` 等全部产物；不加 `--yes` 只预览，删完给出残留核查。手工 `rm -rf ~/.agent-wechat` 仍是等价后备 |
+| 按会话销毁 | `agent-wechat purge --chat <会话> --yes` 只删该会话在**本工具里的副本**（索引行、向量、appmsg 部件、媒体引用、群成员显示名、`media/<会话md5>/`），并把它们的 `msg_key` 逐条写进 `exclusions.db`——那批内容不会因重导复活（`export --full` / `appmsg rebuild` / `media rebuild-refs` / 名册重建四条路都在写入端被拦），而删除之后新来的消息照常进索引。**微信容器一个字节都不动**（只读红线不变）；**朋友圈导出不在范围内**（`moments/` 是一份 HTML 装所有人，不按会话分目录） |
 | 会话转录 | `~/.claude/projects/`、`~/.claude/file-history/` 等承载内容的位置**已移出 Time Machine 备份范围**（`tmutil addexclusion`），配置与插件照常备份。**注意：这是"移出备份"，不是"清除"——转录本身仍在盘上** |
 
 > **按消息查媒体归属**（`media locate` / MCP `get_message_media`）**不新增任何例外**：不联网、
 > 不写微信目录、不写产物根。但它**不是「零磁盘活动」**——判定语音本体要解密 `media_*.db`，
 > 明文只在 `tmp/`（0700）短暂存在、用后即焚（即上表「临时文件」那一行的机制，本条不改变它）。
+
+> **`exclusions.db` 是唯一不可重建的产物，且它的保证边界要说准**：其余产物都能重来（索引
+> ≈2.5–3 小时、密钥要重新 bootstrap、`media/` 要联网重抓），排除清单不能——它没了，`purge --chat`
+> 删掉的内容下次 `export --full` 就会回来。它**活过** `purge --index`（重建索引后排除仍生效），
+> 但**活不过** `purge --all`（全清就该什么都不剩，CLI 会当场报出有多少条排除随之失效）。
+> 而这条命令保证的是「索引里没有存活行 + 它们的 `msg_key` 进了排除清单」，**不是「字节层面
+> 不存在」**：`secure_delete` 只清 SQLite 自己释放的页，vec0 的 `preview` 列装的是相邻消息的
+> 正文，chunk 没整块清空时仍可能留在活跃页里被搜到。要字节级清除只能 `purge --index` 后重跑
+> `export`（实测与取舍见 `内部设计记录` §2.2b / §5.7）。
 
 **§6 里说的「§4 的清单」就是这七条**（上面「备份排除」与「会话转录」两行覆盖的路径；
 仓库外复查判的就是「命中的顶层位置有没有落在这七条**之外**」）：

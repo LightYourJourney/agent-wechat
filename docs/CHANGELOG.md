@@ -167,6 +167,44 @@
   里手写的范围校验）已改为从产物表演绎；`media/` 与 `moments/` 的路径同理收敛到各模块的
   `export_root()`——它们此前在 5 处内联拼写
 
+### 会话级销毁（`purge --chat` / `--undo` / `--excluded`）
+
+销毁的**第二个轴**：按会话删，且删除必须**永久**。既有的五个具名范围只回答「删哪一类文件」，
+`export --full` 一跑被删的就原样回来——那在「回收空间」的语义下正确，在**隐私**语义下不成立
+（设计见 `内部设计记录`）。
+
+- 新增 `agent-wechat purge --chat <会话> [--yes]`：删该会话在本工具里的副本——`messages`
+  （FTS 由既有触发器跟随）、向量、`msg_parts`、`media_refs`、`display_names`，以及
+  `media/<会话md5>/` 整份导出物；与具名范围 / `--all` **互斥**（退 2），默认 dry-run
+- 新增排除清单 `~/.agent-wechat/exclusions.db`（新模块 `exclusions.py`）：墓碑**逐条**刻在被删
+  那批 `msg_key` 上，由 `store.connect()` ATTACH 进索引连接，四个写入端（`upsert_batch` /
+  `upsert_msg_parts` / `upsert_media_refs` / `replace_roster`）在**同一个写事务里**按它拦——
+  于是 `export --full` / `appmsg rebuild` / `media rebuild-refs` / 名册重建（15 分钟一次自动
+  发生）四条复活路径全部堵住，而删除之后新来的消息照常进索引
+- 新增 `purge --chat <会话> --undo`：**只删墓碑，不恢复数据**——被删内容不会因此回来，只有
+  将来的新消息能重新入库；要找回须重跑 `export --full`（那时它们不再被排除）。索引已被
+  `purge --index` 删掉时照样可用
+- 新增 `purge --excluded`：列出排除清单的规模，按会话 md5 分组（不查索引，故 `purge --index`
+  之后也能跑）
+- `exclusions.db` 是**唯一不可重建**的产物（索引 ≈2.5–3 小时、密钥要重 bootstrap、`media/`
+  要联网重抓，它不能）：`purge --index` **不动它**，`purge --all` 会连它一起清——两种情况 CLI
+  各印一句，后者明说「被删内容下次导出会回来」
+- 两条顺序约束落在 `purge.execute_chat`：`PRAGMA secure_delete=ON` 在任何 DELETE 之前；墓碑
+  **先落**（独立事务提交，成文理由是跨库事务在 WAL 下不保证崩溃中途的原子性）再删，且删除事务
+  里从同一谓词重派生一次（`INSERT OR IGNORE`）
+- rowid 复用陷阱（`messages.id` 无 AUTOINCREMENT）：删掉持有最大 id 的行后，新消息会拿到
+  ≤ 向量水位线的 id、静默不被嵌入；`purge --chat` 在同一事务里把
+  `vector_watermark.last_rowid` 降到 `min(水位线, 该账号 max(id))`
+- **保证的边界**：是「索引里没有存活行 + 它们的 `msg_key` 进了排除清单」，**不是**「字节层面
+  不存在」——`secure_delete` 只清 SQLite 自己释放的页，而 vec0 的 `preview` 列装的是相邻消息的
+  正文，chunk 没整块清空时仍可能留在活跃页里。要字节级清除只能 `purge --index` 后重跑 `export`
+- 边界：**朋友圈不在范围内**（`moments/` 是一份 HTML 装所有人，不按会话分目录），计划表会把这句
+  原样印出来；只删本工具的副本，微信容器一个字节都不动
+- 计数诚实（`on_skipped` 契约）：导出 / 回填的返回值只数**实际入库**的行，被排除挡下的以一条
+  降级（stderr）报出「跳过 N 行（已排除）……」——量词是**行**不是「条」：`media rebuild-refs`
+  与 `appmsg rebuild` 一条 `messages` 都不写，回调拿不到消息条数
+- 只做 CLI，MCP 工具面零变化
+
 ### 群成员显示名
 
 - 群消息的「发送者」不再显示 wxid：索引库新增 `display_names` 名册表，查询时

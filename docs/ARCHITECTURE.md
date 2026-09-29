@@ -47,6 +47,8 @@ src/agent_wechat/
 ├── tasks.py        长任务注册表：后台线程 + 进度落盘 + 中断回收（不认识任何具体任务）
 ├── usecases.py     用例层：两个入口共享的入口策略（参数归一化、账号/会话解析、结果形状）
 ├── purge.py        数据销毁：清单 → 计划 → 执行 → 核查（只做 CLI，不进 MCP）
+├── exclusions.py   被销毁会话的排除清单（`exclusions.db` 的墓碑；**唯一不可重建的产物**，
+│                   由 `store.connect()` ATTACH 进来，写入端的拦截判据与写入同事务）
 ├── mcp_server.py   MCP 薄适配层（13 工具，只做参数编组与渲染）
 └── cli.py          命令行入口（只做参数编组与渲染）
 ```
