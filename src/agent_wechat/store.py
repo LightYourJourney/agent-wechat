@@ -363,9 +363,22 @@ def delete_chat(con: sqlite3.Connection, *, account: str, chat_id: str) -> dict[
             "UPDATE vector_watermark SET last_rowid = min(last_rowid, "
             "  (SELECT COALESCE(max(id), 0) FROM messages WHERE account=?)) "
             "WHERE account=?", (account, account))
-    if _has_table(con, "vector_meta"):
-        con.execute("UPDATE vector_meta SET embedded = max(0, embedded - ?)",
-                    (before["vectors"],))
+    # `embedded`（定义是「索引内当前行数」，见 VECTOR_SCHEMA 的 DDL 注释）**按实际重算**，
+    # 不做减法。减法有两处错：
+    # ① `vector_meta` 是**每模型一行**，减法要么漏 `WHERE model_id`（把所有行都减了），
+    #    要么得挑一行——而「该挑哪一行」在 store 层无法知道：`MODEL_ID` 是 vector.py 的常量，
+    #    `_foreign_model` 的 docstring 明说**刻意不看「最新一行」**（`built_at` 秒级分辨率下
+    #    取哪行是碰运气）。
+    # ② 减数是删除前的本会话分区行数（**含孤儿**），而孤儿从来没被计进 `embedded`。
+    # 重算不需要知道是哪一行：`vec_messages` **没有 `model_id` 列**（它是纯 vec0 表），换模型
+    # 走 `VECTOR_DROP` 整表重建（`vector_meta` 一起 DROP），所以表里的行恒属于唯一模型，
+    # `count(*)` 就是这个定义的直接实现，还顺带自愈历史漂移（例如本次删除前的值就是漂移的）。
+    # 代价：一次 O(表行数) 的 count 取代原来的 O(1) 减法，每次 `purge --chat` 一次。
+    # **这条 UPDATE 不能删掉**：`embedded == 0` 是空索引判据（`vector.py:367`）。
+    # 守卫要两张表都在——重算的来源是 `vec_messages`（`vector_meta` 存在而它不存在时无从重算，
+    # 那种状态只在手工建表的测试夹具里出现）。
+    if _has_table(con, "vec_messages") and _has_table(con, "vector_meta"):
+        _vec_exec(con, "UPDATE vector_meta SET embedded = (SELECT count(*) FROM vec_messages)")
     return before
 
 

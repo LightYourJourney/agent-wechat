@@ -223,3 +223,35 @@ def test_delete_chat_removes_vectors_of_that_chat_only(_temp_index):
     assert [tuple(r) for r in con.execute(
         "SELECT msg_rowid, acct_chat FROM vec_messages ORDER BY msg_rowid")] == [(1, keeper_key)]
     assert store.chat_row_counts(con, "a", KEEPER)["vectors"] == 1
+
+
+def test_delete_chat_recomputes_embedded_from_actual_rows(_temp_index):
+    """`vector_meta.embedded` 必须按**实际剩余行数**重算，不能按 `before["vectors"]` 做减法。
+
+    减法的两处错：① 没有 `WHERE model_id`（`vector_meta` 是每模型一行，所有行都会被减）；
+    ② 减数是本会话分区的行数、**含孤儿**，而孤儿从来没被计进 `embedded`
+    （`embedded` 的定义是「索引内当前行数」——重算才是这个定义的直接实现，还自愈历史漂移）。
+
+    这里把 `embedded` 故意写成漂移值 99：它与真实行数 3 对不上。减法版会得到 99-2=97
+    （减数是 **victim 分区**的 2 行，不含 keeper，也不含孤儿——这正是它错的地方），
+    重算版必须得到删除后 `vec_messages` 的真实剩余行数 1。
+    """
+    con = _temp_index
+    con.enable_load_extension(True)
+    sqlite_vec.load(con)
+    con.enable_load_extension(False)
+    con.executescript(store.VECTOR_SCHEMA)
+    emb = sqlite_vec.serialize_float32([0.1] * store.VECTOR_DIM)
+    victim_key = vector._acct_chat("a", VICTIM_MD5)
+    con.executemany(
+        "INSERT INTO vec_messages(msg_rowid, embedding, acct_chat, account, ts, preview) "
+        "VALUES (?,?,?,?,?,NULL)",
+        [(2, emb, victim_key, "a", 100), (999, emb, victim_key, "a", 900),  # 999 是孤儿
+         (1, emb, vector._acct_chat("a", KEEPER_MD5), "a", 300)])
+    con.execute("INSERT INTO vector_meta VALUES ('m', ?, 0, 99, 0)", (store.VECTOR_DIM,))
+    con.commit()
+    store.delete_chat(con, account="a", chat_id=VICTIM)
+    left = con.execute("SELECT count(*) FROM vec_messages").fetchone()[0]
+    got = con.execute("SELECT embedded FROM vector_meta WHERE model_id='m'").fetchone()[0]
+    assert left == 1, "前提：只该剩下 keeper 那一行"
+    assert got == left, f"embedded 必须等于删除后的真实行数 {left}（重算），实际 {got}"
