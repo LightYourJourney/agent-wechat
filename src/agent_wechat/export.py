@@ -40,7 +40,9 @@ def run_export(acct: str, chat_id: str | None = None, full: bool = False,
             resume = store.load_export_watermarks(con, acct)
         for rows, refs in r.iter_all(chat_id=chat_id, resume=resume):
             if refs:
-                # 先写 refs，再 upsert_batch——后者尾部的 commit 把两者收进同一事务（spec §4.3）
+                # 先写 refs，再 upsert_batch。refs 自己 BEGIN IMMEDIATE（判据的读也因此落在
+                # 写事务里，Task 4 fix1）；upsert_batch 复用同一事务并在尾部 commit——
+                # 两者同事务（spec §4.3），本批的读与写之间没有窗口。
                 skipped += store.upsert_media_refs(con, refs)
             dropped = store.upsert_batch(con, rows)
             skipped += dropped

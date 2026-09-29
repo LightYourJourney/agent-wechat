@@ -222,3 +222,136 @@ def test_msg_parts_and_media_refs_intercepts(tmp_path):
     assert [r[0] for r in con.execute(
         "SELECT substr(msg_key, -1) FROM media_refs")] == ["2"], "被排除的那条落库了"
     con.close()
+
+
+@pytest.mark.parametrize("name,table", [
+    ("upsert_batch", "messages"),
+    ("upsert_media_refs", "media_refs"),
+    ("upsert_msg_parts", "msg_parts"),
+])
+def test_write_entry_points_read_exclusions_inside_the_write_transaction(name, table,
+                                                                        tmp_path, monkeypatch):
+    """**三个写入口的排除判据都必须在写事务里读**（spec §5.4「判据与写入同事务」）。
+
+    钉的是**后果**，不是「有没有那句 BEGIN」——光有 BEGIN 也不够：判据若读在 BEGIN 之前，
+    窗口照样存在。构造：在 `_filter_excluded` **返回之后**、本函数写库之前，让**另一条连接**
+    （同进程，等价于另一个进程里的 `purge --chat`）把窗口里会发生的事做一遍
+    （阶段 1 写墓碑、阶段 2 删数据），`busy_timeout=0` 让它立刻报错而非挂 5 秒。
+
+    - 修好之后：本连接此刻已持写锁，那个写者**进不来**（实测 main 与 ATTACH 的 exclusions
+      两边都报 `database is locked`），窗口不存在 ⇒ 本批照常写入（没有墓碑）;
+    - 丢掉事务保护（这三个函数里**任一处**）：墓碑当场提交成功，随后的写把已删的行写回去，
+      而此后**没有任何东西会清它**（永久复活）⇒ 两条断言都红：
+      `blocked` 为假、`表 ⋈ excluded` 计数为 1。
+
+    `upsert_batch` 那句 BEGIN IMMEDIATE 是既有代码——它在本次修复前**没有任何测试**
+    （删掉它全套照样绿），这条把它一并护住。
+    """
+    import sqlite3
+    from agent_wechat import store
+
+    key = "a|aaaa|message_0.db|1"
+    msg = {"msg_key": key, "account": "a", "chat_md5": "aaaa", "chat_id": "victim",
+           "shard": "message_0.db", "local_id": 1, "server_id": 1, "ts": 100,
+           "msg_type": 1, "sender_id": None, "sender_name": None, "is_self": 0,
+           "content": "本该删掉的", "media_hint": None}
+    calls = {
+        "upsert_batch": lambda con: store.upsert_batch(con, [msg]),
+        "upsert_media_refs": lambda con: store.upsert_media_refs(
+            con, [(key, "image", "f" * 32, None)]),
+        "upsert_msg_parts": lambda con: store.upsert_msg_parts(
+            con, [(key, 57, None, None, b"<x/>")]),
+    }
+
+    real = store._filter_excluded
+    seen: dict = {}
+
+    def purge_in_the_window(con, keys):
+        out = real(con, keys)                 # ← 判据在这里读完，窗口从这里开始
+        other = None
+        try:
+            other = store.connect()
+            other.execute("PRAGMA busy_timeout=0")
+            exclusions.add(other, [(key, "a", "aaaa")])           # 阶段 1：墓碑
+            other.execute(f"DELETE FROM {table} WHERE msg_key=?", (key,))   # 阶段 2：删
+            other.commit()
+            seen["blocked"] = False
+        except sqlite3.OperationalError as e:
+            # `store.connect()` 自己在被锁时也会抛——那同样是「写者进不来」，一并算挡住。
+            seen["blocked"] = "locked" in str(e)
+        finally:
+            if other is not None:
+                other.rollback()
+                other.close()
+        return out
+
+    monkeypatch.setattr(store, "_filter_excluded", purge_in_the_window)
+    with store.open() as con:
+        assert calls[name](con) == 0, "没有墓碑提交成功，这一批本来就该照常写入"
+    with store.open() as con:
+        resurrected = con.execute(
+            f"SELECT count(*) FROM {table} t JOIN exclusions.excluded e "
+            "ON e.msg_key = t.msg_key").fetchone()[0]
+        assert resurrected == 0, \
+            f"{name}：墓碑已提交而那一行还在——已删的行被写回来了（永久复活）"
+        assert seen.get("blocked"), \
+            f"{name}：另一个写者没被挡住——判据读在写事务之外，窗口存在"
+
+
+def test_parts_write_after_the_temp_table_write_is_still_locked(tmp_path, monkeypatch):
+    """`appmsg_rebuild_parts` 的**真实形态**：它先写 TEMP 表（sid_map）、再写 msg_parts。
+
+    上面那条参数化测试用的是干净的连接（自动提交），所以 `upsert_msg_parts` 里那句
+    `if not con.in_transaction: BEGIN IMMEDIATE` 能触发。本形态**不能**：TEMP 写会先开出
+    一个 **deferred** 事务——`con.in_transaction` 为真（实测 True），而主库写锁还没拿到
+    （实测：此刻另一个连接**可以**提交墓碑）。于是判据的读与随后的写之间照样有窗口，
+    这个洞只能由**调用方**堵：`appmsg_rebuild_parts` 是这次写入的事务 owner
+    （commit 在 `store.open()` 出口），它在入口把事务开成 IMMEDIATE。
+
+    判别性：删掉 `usecases.appmsg_rebuild_parts` 入口那句 `BEGIN IMMEDIATE`，本测试红
+    （实测：墓碑提交成功、`msg_parts` 里那行载荷被写回来）。
+    """
+    import sqlite3
+    from agent_wechat import store, usecases
+
+    key = "acct|aaaa|message_0.db|1"
+    raw = "<msg><appmsg><title>标题</title><type>5</type></appmsg></msg>"
+
+    class _FakeReader:
+        def iter_parts_input(self):
+            yield 1001, key, raw
+
+    monkeypatch.setattr(usecases, "ChatContext", lambda acct=None: type(
+        "C", (), {"account": "acct", "reader": _FakeReader()})())
+
+    real = store._filter_excluded
+    seen: dict = {}
+
+    def purge_in_the_window(con, keys):
+        out = real(con, keys)
+        other = None
+        try:
+            other = store.connect()
+            other.execute("PRAGMA busy_timeout=0")
+            exclusions.add(other, [(key, "acct", "aaaa")])          # 阶段 1：墓碑
+            other.execute("DELETE FROM msg_parts WHERE msg_key=?", (key,))   # 阶段 2：删
+            other.commit()
+            seen["blocked"] = False
+        except sqlite3.OperationalError as e:
+            seen["blocked"] = "locked" in str(e)
+        finally:
+            if other is not None:
+                other.rollback()
+                other.close()
+        return out
+
+    monkeypatch.setattr(store, "_filter_excluded", purge_in_the_window)
+    res = usecases.appmsg_rebuild_parts(account="acct")
+    assert res["parts"] == 1, f"夹具没走到写入那一步：{res}"
+    with store.open() as con:
+        resurrected = con.execute(
+            "SELECT count(*) FROM msg_parts t JOIN exclusions.excluded e "
+            "ON e.msg_key = t.msg_key").fetchone()[0]
+        assert resurrected == 0, "墓碑已提交而载荷还在——appmsg 原始载荷被写回来了（永久复活）"
+        assert seen.get("blocked"), \
+            "appmsg rebuild 的入口没把事务开成 IMMEDIATE——判据读在写事务之外，窗口存在"

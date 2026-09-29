@@ -434,9 +434,25 @@ def upsert_media_refs(con: sqlite3.Connection,
     被排除的 `msg_key` 一条都不落库——`media rebuild-refs` 与 `export` 都是**全量重扫**
     微信库，不拦的话已删消息的媒体引用会重新长回来（spec §5.4 第 3 条），两个调用者
     共用本函数，所以拦在这里一处就够。
+
+    判据与写入同事务，与 `upsert_batch` 同款：没开事务就先 `BEGIN IMMEDIATE`。
+    **`store.open()` 的连接上，本函数是每轮重建的第一句写**——没有这句 BEGIN，判据的
+    SELECT 会跑在自动提交里，读与写之间就有一个窗口：`purge --chat` 在窗口里提交墓碑并
+    删完，本批随即把已删行的 refs 写回去，而此后**没有任何东西会清它**（永久复活）。
+    有了 BEGIN IMMEDIATE，本连接先拿到写锁，那个写者进不来（实测：main 与 ATTACH 的
+    exclusions 一起锁住，两边都报 `database is locked`）。
+
+    **这句 guard 只认「自动提交」这一种安全形态**：连接若已经在事务里，它不会（也不能）
+    再 BEGIN。事务**如果还没写过主库**——典型是只写过 TEMP 表——`con.in_transaction` 为真
+    而主库写锁并未拿到，本函数读得到的仍是「随时可能被改」的状态。那种调用方（今天的
+    `appmsg_rebuild_parts`）必须自己把它开成 `BEGIN IMMEDIATE`。
+
+    仍**不 commit**（契约不变，提交由调用方收口）；`rows` 为空时提前返回，不开事务。
     """
     if not rows:
         return 0
+    if not con.in_transaction:
+        con.execute("BEGIN IMMEDIATE")
     skip = _filter_excluded(con, [r[0] for r in rows])
     keep = [r for r in rows if r[0] not in skip]
     if keep:
@@ -550,9 +566,18 @@ def upsert_msg_parts(con: sqlite3.Connection,
 
     被排除的 `msg_key` 一条都不落库——`appmsg rebuild` 直接回微信库重扫，不拦的话
     被删消息的 appmsg 原始载荷（含完整正文）会重新长回来（spec §5.4 第 2 条）。
+
+    判据与写入同事务，与 `upsert_batch` 同款（理由与窗口形状见 `upsert_media_refs`：
+    `appmsg rebuild` 的第一批同样是一次运行里与本函数有关的唯一暴露点）。
+    **但本函数唯一的调用方 `appmsg_rebuild_parts` 恰是「已开 deferred 事务」的形态**
+    （它先写 TEMP 表 sid_map），那句 guard 在那里不触发——所以它在入口自己
+    `BEGIN IMMEDIATE`；这个洞在调用方堵，见 `usecases.appmsg_rebuild_parts`。
+    仍**不 commit**（契约不变，提交由调用方收口）；`rows` 为空时提前返回，不开事务。
     """
     if not rows:
         return 0
+    if not con.in_transaction:
+        con.execute("BEGIN IMMEDIATE")
     skip = _filter_excluded(con, [r[0] for r in rows])
     keep = [r for r in rows if r[0] not in skip]
     if keep:

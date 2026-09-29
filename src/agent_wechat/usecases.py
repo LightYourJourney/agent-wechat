@@ -1028,8 +1028,9 @@ def appmsg_rebuild_parts(account: str | None = None, progress=None, on_skipped=N
     实测整次 37.5–38.7 s；同轮 `index.db` 增长 +232.8 MB（本机实测）。
 
     计数口径（**两组不同的分母**，别并排当同一个读）：
-      - `parts` / `rejected` / `malformed` = **本轮扫描**的条数（`parts` 是成功解析并落库
-        的条数，解析失败的不落库，所以它不等于「扫到的 appmsg 条数」）；
+      - `parts` / `rejected` / `malformed` = **本轮扫描**的条数（`parts` 是成功解析、
+        攒进批的条数——解析失败的不计；它**不等于**「扫到的 appmsg 条数」，也**不等于**
+        实际落库的条数：被排除清单挡下的那些同样计进 `parts`，见下面的 `skipped`）；
       - `resolved` / `unresolved` = 跑完后**该账号整张 `msg_parts` 表**里 `ref_svrid`
         非空的行中，回指解出来 / 没解出来的条数（同一个谓词 ⇒ 两者之和恒等于该谓词下的
         引用行数）。删改后再跑一次，这组随整表变化，而 `parts` 只反映本轮。
@@ -1046,6 +1047,14 @@ def appmsg_rebuild_parts(account: str | None = None, progress=None, on_skipped=N
     parts = rejected = malformed = 0
     skipped = 0
     with store.open() as con:
+        # **入口就把事务开成 IMMEDIATE**：本函数是这次写入的事务 owner（commit 在
+        # `store.open()` 出口），而 `flush()` 里那句 TEMP 表（sid_map）的 INSERT 会先开出一个
+        # **deferred** 事务——`con.in_transaction` 为真、但主库写锁还没拿到
+        # （实测：`CREATE TEMP TABLE` 不会，TEMP 表的 INSERT 会；此刻另一个连接可以提交墓碑）。
+        # 于是 `upsert_msg_parts` 里那句 `if not con.in_transaction: BEGIN IMMEDIATE` 在
+        # **本形态下不触发**，排除判据的「读」与随后的「写」之间就有了窗口：窗口里落下的
+        # 墓碑会被本批的写绕过，被删消息的 appmsg 原始载荷永久复活（spec §5.4）。
+        con.execute("BEGIN IMMEDIATE")
         con.execute("CREATE TEMP TABLE sid_map("
                     "server_id INTEGER PRIMARY KEY, msg_key TEXT NOT NULL)")
         sid_buf: list[tuple[int, str]] = []
