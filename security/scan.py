@@ -31,6 +31,11 @@ PATTERNS = (
 
 SHAPE_LABEL = {"wxid": "wxid 形", "chatroom": "chatroom 形", "phone": "手机号形"}
 
+# 生成的依赖锁：内容是第三方包元数据，没有一处是本项目的。实测 `uv.lock` 单独贡献
+# 47 个手机号形假阳性（52 个手机号值里的 47 个）。跳过它不是网开一面——那里面
+# 本来就不可能有本项目流出的标识。
+SKIP_NAMES = frozenset({"uv.lock"})
+
 FIXTURE_KEYWORDS = ("test", "fake", "dummy", "sample", "example", "placeholder",
                     "abc", "123")
 
@@ -84,7 +89,8 @@ def _read(path):
 def scan_repo():
     """→ [(relpath, lineno, shape, value)]。
 
-    **只跳过 security/allowlist.txt**：它是「已批准的占位符」的注册表，扫它会让
+    **只跳过 `security/allowlist.txt` 与 `SKIP_NAMES` 里的生成文件**：前者是
+    「已批准的占位符」的注册表，扫它会让
     §4.3 的不变式 1（清单项必须在仓库里出现）**永远为真**——那是假护栏。
 
     **不跳过 scan.py 自身**：实测它不自匹配（`wxid_[A-Za-z0-9_-]{4,}` 这串字面量里
@@ -94,6 +100,8 @@ def scan_repo():
     skip = {ALLOWLIST_PATH.resolve()}
     out = []
     for rel in _tracked_files():
+        if Path(rel).name in SKIP_NAMES:
+            continue
         path = REPO_ROOT / rel
         if path.resolve() in skip:
             continue

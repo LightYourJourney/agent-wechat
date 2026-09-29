@@ -132,6 +132,23 @@ def test_repo_scope_comes_from_git(scan, monkeypatch):
     assert calls == [("ls-files", "-z")], "枚举必须走 git，不许自己去 walk 目录树"
 
 
+def test_scan_repo_skips_generated_lockfiles(scan, tmp_path, monkeypatch):
+    """生成的依赖锁不进扫描面——那里面全是第三方包元数据。
+
+    `uv.lock` 单独贡献 47 个手机号形假阳性（52 个手机号值里的 47 个），
+    不跳过它，「仓库内只有几十个 distinct、可管理」这个前提就是假的。
+    """
+    (tmp_path / "uv.lock").write_text('hash "13800138000"\n', encoding="utf-8")
+    (tmp_path / "real.py").write_text("hit " + FAKE + "\n", encoding="utf-8")
+    monkeypatch.setattr(scan, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(scan, "_tracked_files", lambda: ["uv.lock", "real.py"])
+    monkeypatch.setattr(scan, "ALLOWLIST_PATH", tmp_path / "allowlist.txt")
+
+    rels = {rel for rel, _n, _s, _v in scan.scan_repo()}
+
+    assert rels == {"real.py"}, "uv.lock 不许进扫描面；真实文件必须照扫不误"
+
+
 def test_allowlist_parses_values_ignoring_comments(scan, tmp_path):
     p = tmp_path / "allowlist.txt"
     p.write_text("# 注释行\n\n" + FAKE + "  全仓库通用夹具\n"
@@ -338,9 +355,13 @@ def test_text_mode_is_fail_closed_on_undecodable_input(scan, tmp_path, capsys):
     assert "utf-8" in capsys.readouterr().err.lower()
 
 
-def test_text_mode_reports_hits_without_values(scan, tmp_path, capsys):
+def test_text_mode_reports_hits_without_values(scan, tmp_path, monkeypatch, capsys):
+    """豁免清单必须打桩——`FAKE` 自己就在本仓库里（它在 `tests/test_scan.py` 与计划文档里），
+    所以 Task 7 把它登记进真清单之后，这条会**跟着变红**。判据不该依赖仓库当前登记了什么。
+    """
     msg = tmp_path / "msg"
     msg.write_text("subject\n\nbody mentions " + FAKE + "\n", encoding="utf-8")
+    monkeypatch.setattr(scan, "ALLOWLIST_PATH", tmp_path / "allowlist.txt")
     rc = scan.main(["--text", str(msg)])
     out = capsys.readouterr().out
     assert rc == scan.EXIT_HITS
