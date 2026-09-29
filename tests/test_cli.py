@@ -622,17 +622,12 @@ def test_purge_index_says_the_exclusion_list_survives(tmp_path, monkeypatch, cap
     assert (home / "index.db").exists() is False
 
 
-@pytest.mark.xfail(strict=True,
-                   reason="后半段依赖 Task 4 的 store.upsert_batch → int 契约（今天返回 None，"
-                          "被排除的行照写）；Task 4 落地后本标记会 XPASS(strict) 变红，删掉它即可")
-def test_tombstone_survives_index_purge_and_reimport(tmp_path, monkeypatch):
-    """**AC4**：`purge --index` 之后排除清单必须还在，重建索引之后那批仍被拦。
+def test_exclusions_survive_index_purge(tmp_path, monkeypatch):
+    """**AC4 前半、不变式①（spec §4.1）**：`purge --index` 之后排除清单必须**还在**。
 
-    这是不变式①（spec §4.1）——它没了，用户重建后以为早删干净的会话原样回来，
-    而**他不会知道**。所以这条必须真跑一遍：删索引 → 确认清单还在 → 重建 → 确认仍被拦。
-
-    **前半段（清单活过 `--index`）今天就成立**，红的是后半段：拦在写入端的判据是
-    Task 4 的（spec §5.4 第 1 条），本任务只负责产物表与提示。
+    它没了，用户重建后以为早删干净的会话原样回来，而**他不会知道**——所以这条不挂任何
+    标记：它是全套里唯一一条断言「清单活过 --index」的测试（上面那条只断言那句提示，
+    不断言文件本身）。与后半（重导后仍被拦）是两个不同的东西，故意分开两条。
     """
     home = _isolate(tmp_path, monkeypatch)
     from agent_wechat import exclusions, store
@@ -644,6 +639,25 @@ def test_tombstone_survives_index_purge_and_reimport(tmp_path, monkeypatch):
     assert (home / "exclusions.db").exists(), "排除清单必须活过 --index"
     with store.open() as con:
         assert exclusions.count(con) == 1
+
+
+@pytest.mark.xfail(strict=True,
+                   reason="依赖 Task 4 的 store.upsert_batch → int 契约（今天返回 None，"
+                          "被排除的行照写）；Task 4 落地后本标记会 XPASS(strict) 变红，删掉它即可")
+def test_reimport_after_index_purge_is_still_blocked(tmp_path, monkeypatch):
+    """**AC4 后半**：重建索引之后，那批仍必须被拦（spec §5.4 第 1 条）。
+
+    拦在**写入端**的判据是 Task 4 的（`_filter_excluded` + `upsert_batch` 的返回值），
+    本任务只负责产物表与提示，所以这条今天红——`upsert_batch` 返回 None 且照写。
+    """
+    home = _isolate(tmp_path, monkeypatch)
+    from agent_wechat import exclusions, store
+    with store.open() as con:
+        exclusions.add(con, [("a|aaaa|message_0.db|1", "a", "aaaa")])
+    (home / "index.db").write_bytes(b"x" * 10)
+    with pytest.raises(SystemExit):
+        cli.main(["purge", "--index", "--yes"])
+    with store.open() as con:          # 重建索引（store.open 会把 schema 建回来）
         n = store.upsert_batch(con, [{
             "msg_key": "a|aaaa|message_0.db|1", "account": "a", "chat_md5": "aaaa",
             "chat_id": "victim", "shard": "message_0.db", "local_id": 1, "server_id": 1,
@@ -651,6 +665,38 @@ def test_tombstone_survives_index_purge_and_reimport(tmp_path, monkeypatch):
             "is_self": 0, "content": "本该删掉的", "media_hint": None}])
         assert n == 1, "重建索引之后那条仍必须被拦"
         assert con.execute("SELECT count(*) FROM messages").fetchone()[0] == 0
+
+
+def test_purge_all_says_how_many_exclusions_are_lost(tmp_path, monkeypatch, capsys):
+    """`--all` 是真把清单删掉的那条路，它必须报出**失去了多少条**（spec §4.1③）——
+    而这个数只能是删**之前**那份：删完文件就没了，那时读只剩 0 或「没有」。"""
+    home = _isolate(tmp_path, monkeypatch)
+    from agent_wechat import exclusions, store
+    with store.open() as con:
+        exclusions.add(con, [("a|m|message_0.db|1", "a", "m"),
+                             ("a|m|message_0.db|2", "a", "m")])
+    (home / "index.db").write_bytes(b"x" * 10)
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["purge", "--all", "--yes"])
+    assert ei.value.code == 0
+    out = capsys.readouterr().out
+    assert not home.exists()
+    assert "排除清单已随之删除：2 条" in out, f"--all 必须报出删前那份计数：{out!r}"
+
+
+def test_purge_all_does_not_claim_an_empty_list_was_lost(tmp_path, monkeypatch, capsys):
+    """空清单是**常态**：`store.connect()` 每次都把 exclusions.db 建出来，所以每个跑过一次
+    工具的用户都有它。此时「已随之删除：0 条排除失效」是假话——没有任何东西失效。"""
+    home = _isolate(tmp_path, monkeypatch)
+    with store.open():                 # 只把清单文件建出来，一条墓碑都不写
+        pass
+    (home / "index.db").write_bytes(b"x" * 10)
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["purge", "--all", "--yes"])
+    assert ei.value.code == 0
+    out = capsys.readouterr().out
+    assert not home.exists()
+    assert "排除清单" not in out, f"空清单不该印「已随之删除」那句：{out!r}"
 
 
 # ---------- T6：降级说明的出口（spec §7） ----------

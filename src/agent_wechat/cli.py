@@ -488,16 +488,26 @@ def cmd_purge(args: argparse.Namespace) -> int:
         print(f"数据目录本身已一并删除：{paths.HOME_DIR.resolve()}")
     for p, err in report.failed:
         print(f"  ⚠️ 未能删除 {p}：{err}", file=sys.stderr)
-    if ex_count is not None:
+    if args.index or args.all:
         # 这两条是刻意响亮的：排除清单要么活过索引重建（--index），要么随全清一起没
         # ——后者意味着被删内容下次导出会回来，用户必须当场知道（spec §4.1③）。
         from . import exclusions as _ex
         if args.all:
-            # 前提是它**真的**没了。部分失败时清单可能活着，那时说「已随之删除」是假话
-            # （它活着的话下面的残留核查会点名它）。计数只能是删之前那份，见 ex_count。
-            if not _ex.path().exists():
+            # 两个前提，缺一个这句话就是假的：
+            # · 条数不为 0——`store.connect()` 每次都会把清单文件建出来，所以「空清单」是
+            #   常态（每个用过本工具的用户都有它），那时没有任何东西失效；
+            # · 它**真的**没了——部分失败时清单可能活着，那时说「已随之删除」也是假话
+            #   （它活着的话下面的残留核查会点名它）。
+            # 计数只能是删之前那份，见 ex_count。
+            # exists() 在父目录不可搜索时抛 EACCES 而不是返回 False（purge.py 记过这件事），
+            # 判不出来就当它还在：状态提示绝不能把销毁本身弄成失败。
+            try:
+                gone = not _ex.path().exists()
+            except OSError:
+                gone = False
+            if ex_count and gone:
                 print(f"排除清单已随之删除：{ex_count} 条排除失效，被删内容下次导出会回来。")
-        else:
+        elif ex_count is not None:
             print(f"排除清单保留：{ex_count} 条（exclusions.db），重建索引后仍生效。")
     _render_residue(purge.verify(plan))
     return 1 if report.failed else 0
