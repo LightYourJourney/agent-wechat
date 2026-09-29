@@ -34,9 +34,9 @@ KEEPER = "keeper"
 KEEPER_MD5 = messages.md5_of(KEEPER)
 
 
-def _row(chat_id: str, chat_md5: str, n: int) -> dict:
+def _row(chat_id: str, chat_md5: str, n: int, account: str = "a") -> dict:
     """一条 messages 行（键集合 == messages.ROW_COLUMNS，与 `upsert_batch` 的契约一致）。"""
-    return {"msg_key": f"a|{chat_md5}|message_0.db|{n}", "account": "a",
+    return {"msg_key": f"{account}|{chat_md5}|message_0.db|{n}", "account": account,
             "chat_md5": chat_md5, "chat_id": chat_id, "shard": "message_0.db",
             "local_id": n, "server_id": n, "ts": 100 + n, "msg_type": 1,
             "sender_id": None, "sender_name": None, "is_self": 0,
@@ -970,7 +970,7 @@ def test_execute_chat_is_idempotent_and_tolerates_missing_export(tmp_path):
     with store.open() as con:
         store.upsert_batch(con, [_victim_row(1)])
     plan = purge.plan_chat([{"account": "a", "chat_id": VICTIM, "chat_md5": VICTIM_MD5}])
-    assert plan.export_exists is False
+    assert plan.entries[0].export_exists is False
     purge.execute_chat(plan)
     again = purge.execute_chat(plan)
     assert again[0].deleted["messages"] == 0
@@ -1020,19 +1020,55 @@ def test_chat_purge_on_a_machine_with_a_vector_index(tmp_path):
 
 # ---------- 评审 fix 轮（F1..F7）----------
 
-def test_plan_chat_refuses_more_than_one_chat(tmp_path):
-    """接口收的是 `list[dict]`，但 `ChatPlan` 只装得下一个 `export_dir`（F1）。
+def test_plan_chat_purges_every_entry_not_just_the_first(tmp_path):
+    """两条**不同会话**的 entry：第二条的导出目录也必须被删、被核（F1'）。
 
-    多会话时第 2..n 个的 `media/<md5>/` **从不删、从不核**，核查还会对着残留报 ✅——
-    今天 CLI 的 `--chat` 是单值（多会话不可达），但接口不能在这个形态下**静默漏删**：
-    要么正确处理、要么明拒。per-entry 化留给真需要多会话时。
+    早先那版把 `export_dir` 放在 `ChatPlan` 上、只取 `resolved[0]` 的值：第 2..n 条既不删
+    也不核，核查还会对着残留报 ✅。导出物逐条挂在 entry 上之后自然正确——这条把它钉住。
+
+    核查分两步断言（删之前 / 删之后）：只查第一条的实现会在**第一步**露馅（只报得出 d1），
+    永远报 False 的实现在第二步露馅。
     """
     home = tmp_path / "home"; home.mkdir(parents=True)
-    with pytest.raises(errors.PurgeRefused) as ei:
-        purge.plan_chat([{"account": "a", "chat_id": VICTIM, "chat_md5": VICTIM_MD5},
-                         {"account": "a", "chat_id": KEEPER, "chat_md5": KEEPER_MD5}])
-    assert "一次只支持一个会话" in str(ei.value)
-    assert "2" in str(ei.value), "拒绝时要说清收到几个"
+    with store.open() as con:
+        store.upsert_batch(con, [_victim_row(1), _keeper_row(1)])
+    d1 = home / "media" / VICTIM_MD5
+    d2 = home / "media" / KEEPER_MD5
+    for d in (d1, d2):
+        d.mkdir(parents=True); (d / "chat.html").write_text("导出物")
+    plan = purge.plan_chat([{"account": "a", "chat_id": VICTIM, "chat_md5": VICTIM_MD5},
+                            {"account": "a", "chat_id": KEEPER, "chat_md5": KEEPER_MD5}])
+    assert {e.export_dir for e in plan.entries} == {d1, d2}, "每个会话各算自己的目录"
+    assert set(purge.verify_chat(plan).export_dirs) == {d1, d2}, "核查要看得见两个都还在"
+    reports = purge.execute_chat(plan)
+    assert [r.export_removed for r in reports] == [True, True]
+    assert not d1.exists() and not d2.exists(), "第二条的目录也必须被删"
+    assert purge.verify_chat(plan).export_still_there is False
+
+
+def test_plan_chat_shares_one_export_dir_across_accounts(tmp_path):
+    """跨账号：同一个会话在两个账号里都有 → 两条 entry **共享同一个** `media/<md5>/`
+    （目录按会话 md5 分，与账号无关，spec §5.1 第 1 步）。
+
+    于是删除必须**幂等**：第一条真把它删了，第二条看到的是「已经不在了」——那也算成功。
+    非幂等的实现（目录不存在即报 False）会让一次正常的跨账号 purge 以「导出物没删掉」退 1。
+    """
+    home = tmp_path / "home"; home.mkdir(parents=True)
+    with store.open() as con:
+        store.upsert_batch(con, [_victim_row(1), _row(VICTIM, VICTIM_MD5, 1, account="b")])
+    media = home / "media" / VICTIM_MD5
+    media.mkdir(parents=True); (media / "chat.html").write_text("导出物")
+    plan = purge.plan_chat([{"account": "a", "chat_id": VICTIM, "chat_md5": VICTIM_MD5},
+                            {"account": "b", "chat_id": VICTIM, "chat_md5": VICTIM_MD5}])
+    assert {e.export_dir for e in plan.entries} == {media}, "同一个会话，同一个目录"
+    assert purge.verify_chat(plan).export_dirs == (media,), "共享的目录只报一次（去重）"
+    reports = purge.execute_chat(plan)
+    assert [r.export_removed for r in reports] == [True, True], \
+        "第二条看到的是「已经不在了」——那也是成功（幂等）"
+    assert not media.exists()
+    res = purge.verify_chat(plan)
+    assert res.export_still_there is False
+    assert "导出目录仍在" not in res.render()
 
 
 def test_plan_chat_turns_a_broken_index_into_purge_refused(tmp_path):
@@ -1146,8 +1182,9 @@ def test_execute_chat_refuses_when_a_fresh_index_is_locked(tmp_path):
     holder.execute("PRAGMA journal_mode=WAL")
     holder.execute("BEGIN IMMEDIATE")
     holder.execute("CREATE TABLE seed(x)")        # 拿住写锁，但**不建** messages 那些表
-    plan = purge.ChatPlan((purge.ChatEntry("a", VICTIM, VICTIM_MD5, {"messages": 1}, 1),),
-                          home / "media" / VICTIM_MD5, False, 0)
+    plan = purge.ChatPlan((purge.ChatEntry(
+        "a", VICTIM, VICTIM_MD5, {"messages": 1}, 1,
+        home / "media" / VICTIM_MD5, False, 0),))
     try:
         with pytest.raises(errors.PurgeRefused) as ei:
             purge.execute_chat(plan)
@@ -1157,6 +1194,28 @@ def test_execute_chat_refuses_when_a_fresh_index_is_locked(tmp_path):
     assert "database is locked" in msg, "真因要出现在消息里"
     assert "导出任务" in hint, "锁那条修法要在 hint 里"
     assert "exclusions.db" in hint, "排除清单那条修法也要在（两种原因都覆盖）"
+
+
+def test_verify_chat_turns_an_unsearchable_media_parent_into_purge_refused(tmp_path):
+    """`media/` 父目录不可搜索时，`Path.exists()` 抛 EACCES——而 **EACCES 不在 pathlib 的
+    _IGNORED_ERRNOS 里**（3.12），所以它不会退化成 False，而是抛 `PermissionError`。
+    核查里那几个 `exists()` 必须在 try 之内、并翻成 `PurgeRefused`（F2'）：否则用户看到的
+    是一整个 traceback，而这门命令的全部价值就是「把『删干净了没有』说清楚」。
+    """
+    home = tmp_path / "home"; home.mkdir(parents=True)
+    with store.open() as con:
+        store.upsert_batch(con, [_victim_row(1)])
+    media = home / "media"
+    (media / VICTIM_MD5).mkdir(parents=True)
+    plan = purge.plan_chat([{"account": "a", "chat_id": VICTIM, "chat_md5": VICTIM_MD5}])
+    os.chmod(media, 0o000)                    # 可读可进入都没有：判不出来
+    try:
+        with pytest.raises(errors.PurgeRefused) as ei:
+            purge.verify_chat(plan)
+    finally:
+        os.chmod(media, 0o700)                # 不还原的话 pytest 自己清不掉这棵树
+    assert "核查失败" in str(ei.value)
+    assert isinstance(ei.value.__cause__, OSError)
 
 
 def test_verify_chat_derives_chat_md5_instead_of_trusting_the_plan(tmp_path):

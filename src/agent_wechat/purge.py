@@ -603,20 +603,24 @@ def _open_index() -> Iterator[sqlite3.Connection]:
 
 @dataclass(frozen=True)
 class ChatEntry:
-    """一个账号下、某个会话的待删账。"""
+    """一个账号下、某个会话的待删账（导出物是**逐条**的）。
+
+    跨账号 purge 时多条 entry 会指向**同一个** `media/<md5>/`：目录按会话 md5 分，
+    与账号无关（spec §5.1 第 1 步）。所以删除/核查都得幂等，且不许只看第一条。
+    """
     account: str
     chat_id: str
     chat_md5: str
     counts: dict[str, int]      # messages/vectors/parts/refs/display_names
     tombstone: int              # 将写入的排除条数（= counts["messages"]）
+    export_dir: pathlib.Path
+    export_exists: bool
+    export_size: int
 
 
 @dataclass(frozen=True)
 class ChatPlan:
     entries: tuple[ChatEntry, ...]
-    export_dir: pathlib.Path
-    export_exists: bool
-    export_size: int
 
 
 @dataclass(frozen=True)
@@ -632,8 +636,13 @@ class ChatResidue:
     leftover: tuple[str, ...]        # 核查后仍在的表/路径
     tombstone_written: int
     tombstone_expected: int
-    export_dir: pathlib.Path         # render() 要印它，别漏了这个字段
-    export_still_there: bool
+    export_dirs: tuple[pathlib.Path, ...]   # 核查时**仍在**的导出目录（去重）；render() 要印它们
+
+    @property
+    def export_still_there(self) -> bool:
+        """是否还有导出目录留着。**派生自 `export_dirs`**，不另存一个 bool：
+        两个字段能各说各话，而这里说的正是「核查有没有看见残留」。"""
+        return bool(self.export_dirs)
 
     @property
     def tombstone_ok(self) -> bool:
@@ -643,8 +652,8 @@ class ChatResidue:
         lines = []
         for x in self.leftover:
             lines.append(f"  ❌ 计划内仍未删除：{x}")
-        if self.export_still_there:
-            lines.append(f"  ❌ 导出目录仍在：{self.export_dir}")
+        for d in self.export_dirs:
+            lines.append(f"  ❌ 导出目录仍在：{d}")
         if self.tombstone_ok:
             lines.append(f"  ✅ 排除清单：{self.tombstone_written} 条（不可逆性已建立）")
         else:
@@ -658,41 +667,44 @@ def plan_chat(resolved: list[dict], home: pathlib.Path | None = None) -> ChatPla
     """**纯只读**：只算将删什么，一个字节都不动。`resolved` 是
     `[{"account":…, "chat_id":…, "chat_md5":…}, …]`（解析由 cli 层做，见 Task 7）。
 
-    **只接受一个会话**（`len(resolved) > 1` 明拒）：`ChatPlan` 只装得下一个 `export_dir`
-    （`media/<chat_md5>/` 按 md5 分目录），多会话时第 2..n 个的导出物**从不删、也从不核**
-    ——核查还会对着残留报 ✅。今天 CLI 的 `--chat` 是单值（Task 7），多会话不可达；
-    但接口不该在这个形态下静默漏删：要么正确处理、要么明拒（要支持多会话得把 export_dir
-    逐条化，那是另一个改动）。`resolved == []` 是空计划：没有可漏的东西，照旧返回空 entries。
+    **多条 entry 是常态，不是异常**：CLI 的 `--chat` 收的是一个**会话名**，而
+    `usecases.purge_chat_targets` 把它解析成「每个索引里有它的账号各一条」——跨账号 purge
+    天生就是多条。所以导出物**逐条挂在 entry 上**（dir / exists / size 各自算），
+    execute 与 verify 各自处理自己的那一份。
+    （早先那版把三个字段放在 `ChatPlan` 上、只取 `resolved[0]` 的值：第 2..n 条既不删也不核，
+    核查还会对着残留报 ✅。）
+
+    `chat_md5` **就地派生**（`messages.chat_md5(item["chat_id"])`），不用 `item["chat_md5"]`：
+    与 `verify_chat` / `store.chat_row_counts` / `store.delete_chat` 同一口径。调用方哪天若
+    用 `md5_of` 解析退化会话名（`md5:<hex>`），传进来的值会指向一个**不存在**的目录——
+    真目录永远删不掉，而核查看不见（与 F7 同一模式）。
     """
     home = home or paths.HOME_DIR
     _check_home_is_sane(home)
-    if len(resolved) > 1:
-        raise errors.PurgeRefused(
-            f"一次只支持一个会话，收到 {len(resolved)} 个",
-            hint="`purge --chat` 是单值的（导出物按会话 md5 分目录，一个计划只装得下一个）；"
-                 "要清多个会话请逐个执行")
     try:
         entries = []
         for item in resolved:
             with _open_index() as con:
                 counts = store.chat_row_counts(con, item["account"], item["chat_id"])
-            entries.append(ChatEntry(item["account"], item["chat_id"], item["chat_md5"],
-                                     counts, counts["messages"]))
-        md5 = resolved[0]["chat_md5"] if resolved else ""
-        d = home / "media" / md5
-        exists = d.exists()
-        size = _tree_size(d) if exists and not d.is_symlink() else 0
+            md5 = messages.chat_md5(item["chat_id"])
+            d = home / "media" / md5
+            exists = d.exists()
+            entries.append(ChatEntry(
+                item["account"], item["chat_id"], md5, counts, counts["messages"],
+                d, exists, _tree_size(d) if exists and not d.is_symlink() else 0))
     except (sqlite3.Error, OSError) as exc:
         # 索引打不开/读不了（损坏、权限、被别的进程占着）时，裸 `sqlite3.DatabaseError` /
         # `sqlite3.OperationalError` 会一路逃到 CLI 的 `except AgentWeChatError` 之外——
         # 用户看到的是一整个 traceback 而不是一行拒绝。core 层只抛项目异常（errors.py 开篇
         # 契约），所以在模块边界翻，并点名**哪一步**失败。
+        # `exists()` / `_tree_size()` 也在 try 里：`media/` 父目录不可搜索时 pathlib 抛 EACCES
+        # （EACCES 不在它忽略的 errno 里），同样不许裸穿。
         raise errors.PurgeRefused(
             f"读取索引失败，未生成销毁计划：{exc}",
             hint="确认 index.db 可读、且没有别的进程正在写它（导出任务 / MCP server）；"
                  "库损坏（file is not a database 等）时先 purge --index 删掉再重跑 export"
         ) from exc
-    return ChatPlan(tuple(entries), d, exists, size)
+    return ChatPlan(tuple(entries))
 
 
 def _write_tombstone(con: sqlite3.Connection, account: str, chat_id: str) -> int:
@@ -794,13 +806,19 @@ def execute_chat(plan: ChatPlan) -> tuple[ChatReport, ...]:
                 hint="`database is locked` → 有别的进程正在写索引（导出任务 / MCP server），"
                      "等它结束后重试；库损坏（file is not a database 等）→ 先 purge --index "
                      "删掉索引，再重跑 export") from exc
-        removed = False
-        if plan.export_exists:
-            try:
-                shutil.rmtree(plan.export_dir)
-                removed = True
-            except OSError:
-                removed = False          # 部分失败继续：按既有约定逐条报告、退 1
+        # 删**这条 entry 自己的**导出物目录。**幂等**：目录不在了也算成功（沿用既有约定
+        # 「计划生成后已被删掉」= 成功）——跨账号的两条 entry 共享同一个 `media/<md5>/`，
+        # 第一条把它删掉之后，第二条看到的就是「不存在」，那必须报 True：
+        # 否则一次正常的跨账号 purge 会以「导出物没删掉」退 1（假失败）。
+        # 判据取**当下**的文件系统，不用计划时刻的 `e.export_exists`：plan → --yes 之间
+        # 目录可能被删掉、也可能被重新导出出来，后者同样该删（本命令要的正是它消失）。
+        try:
+            shutil.rmtree(e.export_dir)
+            removed = True
+        except FileNotFoundError:
+            removed = True
+        except OSError:
+            removed = False          # 部分失败继续：按既有约定逐条报告、退 1
         # tombstone 报的是**本次真正新写进去的条数**（两阶段之和，见 _write_tombstone），
         # 既不是计划值、也不是「该会话当前被挡住的条数」：
         #  · 计划值会让「写入失败」照样报成功（测试用桩把写入变成 0 时，计划值仍是 N）；
@@ -835,6 +853,12 @@ def verify_chat(plan: ChatPlan) -> ChatResidue:
                 "SELECT count(*) FROM exclusions.excluded WHERE account=? AND chat_md5=?",
                 (e.account, messages.chat_md5(e.chat_id))).fetchone()[0]
                 for e in plan.entries)
+        # 导出物**逐条**查，并去重（跨账号的两条 entry 共享同一个 `media/<md5>/`）：
+        # 只查第一条会在多会话时漏报；只回一个 bool 则说不出「哪个还在」。
+        # `exists()` 必须在 try 里：`media/` 父目录不可搜索时 pathlib 抛 EACCES
+        # （EACCES 不在它忽略的 errno 里），那也要翻成 PurgeRefused，不许裸穿。
+        surviving = tuple(dict.fromkeys(
+            e.export_dir for e in plan.entries if e.export_dir.exists()))
     except (sqlite3.Error, OSError) as exc:
         # 同 plan_chat：读不了库时不许裸 sqlite3.Error 逃到 CLI。而且**「核查不了」必须与
         # 「核查通过」区分开**——静默返回一个空 leftover 就是对着未知状态报 ✅。
@@ -844,4 +868,4 @@ def verify_chat(plan: ChatPlan) -> ChatResidue:
                  "（导出任务 / MCP server）；库损坏时先 purge --index 删掉再重跑 export"
         ) from exc
     return ChatResidue(tuple(leftover), written, sum(e.tombstone for e in plan.entries),
-                       plan.export_dir, plan.export_exists and plan.export_dir.exists())
+                       surviving)
