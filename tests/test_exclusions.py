@@ -57,8 +57,8 @@ def test_derived_columns_match_msg_key(tmp_path):
     assert acct == parts[0] and md5 == parts[1]
 
 
-def test_remove_chat_uses_substr_not_like(tmp_path):
-    """account 里的 `_` 与 `%` 都是 LIKE 的通配符——必须走 substr（同 store.count_media_refs）。"""
+def test_remove_chat_is_exact_match_not_like(tmp_path):
+    """删得准，靠的是等值而不是 LIKE——`_` 与 `%` 都是 LIKE 的通配符，而这里用等值更直接。"""
     import sqlite3
     con = sqlite3.connect(str(tmp_path / "x.db"))
     con.execute("ATTACH DATABASE ? AS exclusions", (str(tmp_path / "ex.db"),))
@@ -78,5 +78,7 @@ def test_connect_attaches_and_creates_the_table(tmp_path):
         assert con.execute(
             "SELECT count(*) FROM exclusions.excluded").fetchone()[0] == 0
         assert (tmp_path / "exclusions.db").exists(), "ATTACH 应当建出同目录的排除清单"
+        assert con.execute("SELECT count(*) FROM main.sqlite_master "
+                           "WHERE name IN ('excluded','idx_excluded_chat')").fetchone()[0] == 0
     finally:
         con.close()
