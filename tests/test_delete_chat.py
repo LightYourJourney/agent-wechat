@@ -171,6 +171,23 @@ def test_rowid_reuse_regression(_temp_index):
     # 注意这条测试**不区分**「全局 max」与「该账号自己的 max」——本夹具只有一个账号，两者相同。
     # 也不必区分：2026-09-30 终审推翻了「必须全局」那条约束（扫描按账号过滤，危害不存在；
     # 执行计划也不用 id>? 做范围，性能也无差别）。别为了让它们可区分而往夹具里加第二个账号。
+    #
+    # 但水位线本身只是**中间量**，docstring 宣称保的是「新消息永远不被嵌入」这个后果。
+    # 下面用**纯 SQL**（不经 vector.py）把后果钉住：删除后新插一条消息，它的 id 必须 > 水位线
+    # ——那正是扫描谓词 `WHERE account = ? AND id > ?`（`vector.py:213-217` 的 _SELECT_ROWS）
+    # 会扫到它的直接证据。少了这条，水位线取错行（比如取成别的账号、或干脆没降）时上面那条
+    # 断言仍可能绿，而新消息已经静默不被嵌入了。
+    new_key = f"a|{KEEPER_MD5}|message_0.db|2"
+    con.execute(
+        "INSERT INTO messages (msg_key, account, chat_md5, chat_id, shard, local_id, server_id,"
+        " ts, msg_type, sender_id, sender_name, is_self, content, media_hint, exported_at)"
+        " VALUES (?, 'a', ?, ?, 'message_0.db', 2, 2, 400, 1, NULL, NULL, 0, '新消息', NULL, 400)",
+        (new_key, KEEPER_MD5, KEEPER))
+    con.commit()
+    new_id = con.execute("SELECT id FROM messages WHERE msg_key=?", (new_key,)).fetchone()[0]
+    assert new_id > wm, (
+        f"新消息 id={new_id} 必须 > 水位线 {wm}：id ≤ 水位线时扫描谓词 id>水位线 扫不到它，"
+        "它会永远不被嵌入，而没有任何地方会报错（只有向量检索悄悄少结果）")
 
 
 def test_delete_chat_without_any_vector_tables(_temp_index):
