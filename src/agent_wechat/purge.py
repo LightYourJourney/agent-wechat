@@ -12,11 +12,15 @@
 """
 from __future__ import annotations
 
+import contextlib
 import glob
 import os
 import pathlib
 import shutil
+import sqlite3
 import subprocess
+import time
+from collections.abc import Iterator
 from dataclasses import dataclass
 
 from . import decrypt, errors, exclusions, keys, media, moments, paths, store, tasks, vector
@@ -575,3 +579,201 @@ def verify(plan: PurgePlan) -> ResidueReport:
         tm_excluded=_tmutil(["isexcluded", str(paths.HOME_DIR)]),
         snapshots=_tmutil(["listlocalsnapshots", "/"]),
     )
+
+
+# ---------- 会话级销毁（`purge --chat`）：计划 → 执行 → 核查 ----------
+
+@contextlib.contextmanager
+def _open_index() -> Iterator[sqlite3.Connection]:
+    """purge 的库连接：`store.open()` 的连接 + **尽力加载 sqlite-vec**。
+
+    **为什么必须在这里收口**：`store.connect()` 从不加载扩展（加载是 `vector.connect()` 的
+    职责，见 vector.py 的模块 docstring），而装了向量索引的机器上（本机即是）
+    `chat_row_counts` / `delete_chat` **第一句**就碰 `vec_messages`——store 侧已把
+    `no such module: vec0` 翻成 PurgeRefused（`store._vec_exec` 的契约），于是 plan /
+    execute / verify 三处会全部死在第一句。把「purge 的连接必须能碰向量表」这条知识收在
+    本函数一处，而不是散在三处 `with` 块里靠后来人记得。轻装安装上没有向量表，
+    `vector.load` 返回 False 也无妨——`store._has_table` 自会跳过那几处。
+    """
+    with store.open() as con:
+        vector.load(con)
+        yield con
+
+
+@dataclass(frozen=True)
+class ChatEntry:
+    """一个账号下、某个会话的待删账。"""
+    account: str
+    chat_id: str
+    chat_md5: str
+    counts: dict[str, int]      # messages/vectors/parts/refs/display_names
+    tombstone: int              # 将写入的排除条数（= counts["messages"]）
+
+
+@dataclass(frozen=True)
+class ChatPlan:
+    entries: tuple[ChatEntry, ...]
+    export_dir: pathlib.Path
+    export_exists: bool
+    export_size: int
+
+
+@dataclass(frozen=True)
+class ChatReport:
+    account: str
+    deleted: dict[str, int]
+    tombstone: int
+    export_removed: bool
+
+
+@dataclass(frozen=True)
+class ChatResidue:
+    leftover: tuple[str, ...]        # 核查后仍在的表/路径
+    tombstone_written: int
+    tombstone_expected: int
+    export_dir: pathlib.Path         # render() 要印它，别漏了这个字段
+    export_still_there: bool
+
+    @property
+    def tombstone_ok(self) -> bool:
+        return self.tombstone_written >= self.tombstone_expected
+
+    def render(self) -> str:
+        lines = []
+        for x in self.leftover:
+            lines.append(f"  ❌ 计划内仍未删除：{x}")
+        if self.export_still_there:
+            lines.append(f"  ❌ 导出目录仍在：{self.export_dir}")
+        if self.tombstone_ok:
+            lines.append(f"  ✅ 排除清单：{self.tombstone_written} 条（不可逆性已建立）")
+        else:
+            lines.append(
+                f"  ❌ 不可逆性未建立：排除清单只有 {self.tombstone_written} 条，"
+                f"本次应写 {self.tombstone_expected} 条——**被删内容下次导出会回来**")
+        return "\n".join(lines)
+
+
+def plan_chat(resolved: list[dict], home: pathlib.Path | None = None) -> ChatPlan:
+    """**纯只读**：只算将删什么，一个字节都不动。`resolved` 是
+    `[{"account":…, "chat_id":…, "chat_md5":…}, …]`（解析由 cli 层做，见 Task 7）。"""
+    home = home or paths.HOME_DIR
+    _check_home_is_sane(home)
+    entries = []
+    for item in resolved:
+        with _open_index() as con:
+            counts = store.chat_row_counts(con, item["account"], item["chat_id"])
+        entries.append(ChatEntry(item["account"], item["chat_id"], item["chat_md5"],
+                                 counts, counts["messages"]))
+    md5 = resolved[0]["chat_md5"] if resolved else ""
+    d = home / "media" / md5
+    exists = d.exists()
+    return ChatPlan(tuple(entries), d, exists,
+                    _tree_size(d) if exists and not d.is_symlink() else 0)
+
+
+def _write_tombstone(con: sqlite3.Connection, account: str, chat_id: str) -> int:
+    """把该会话当前**全部**消息写进排除清单，返回本次新写入的条数。
+
+    **必须从同一个谓词派生**（`INSERT … SELECT`），不许「先在内存里读一个 msg_key 集合、
+    再照着写」：后者在「读集合」与「写墓碑」之间留一个窗口，那期间写进来的新消息不在墓碑里、
+    却会被随后的谓词 DELETE 一并删掉——**删了但没挡**，下次 `--full` 复活（spec §5.1）。
+
+    **它被调用两次**（两段式，见 `execute_chat`）：① 独立事务里落一次（耐久），
+    ② 删除事务里再落一次（盖住两次之间的窗口行）。`INSERT OR IGNORE` 让第二次是幂等的
+    ——所以两次 `rowcount` 之和恰是**本次新增**的条数，重复的既不计入也不会真的写第二遍。
+
+    单独成函数是为了**可注入**：`tests/test_purge.py` 的「墓碑没写成 → 核查必须报
+    不可逆性未建立」那条测试要把它换成不写库的桩。桩打在 `exclusions.add` 上没用——
+    本函数走的是裸 SQL。
+    """
+    cur = con.execute(
+        "INSERT OR IGNORE INTO exclusions.excluded "
+        "(msg_key, account, chat_md5, excluded_at) "
+        "SELECT msg_key, account, chat_md5, ? FROM messages "
+        "WHERE account=? AND chat_id=?", (int(time.time()), account, chat_id))
+    return cur.rowcount
+
+
+def execute_chat(plan: ChatPlan) -> tuple[ChatReport, ...]:
+    """执行：**墓碑先落，然后才删**，两段式（spec §5.4）。
+
+    顺序不能反：先删后挡的话崩在中间就是「删了但没挡」——那批东西会复活；
+    先挡后删最坏只是「挡住了但没删掉」，核查看得见、重跑能收口（spec §5.1）。
+    """
+    out = []
+    # fail-closed（spec §4.2）：读不出排除清单就没法建立不可逆性，这一次删除就只是「暂时看不见」。
+    # 宁可什么都不做，也不做一个看起来成功的假删除。
+    try:
+        with _open_index() as con:
+            exclusions.count(con)
+    except (sqlite3.Error, OSError) as exc:
+        raise errors.PurgeRefused(
+            f"排除清单读不出来，未做任何删除：{exc}",
+            hint=f"检查 {exclusions.path()} 是否可读——它没了，被删内容下次导出就会回来"
+        ) from exc
+    for e in plan.entries:
+        try:
+            with _open_index() as con:
+                con.execute("PRAGMA secure_delete=ON")   # 必须在任何 DELETE 之前（spec §2.2b 实测）
+                # ---- ① 墓碑先落，**独立提交一次** ----
+                # 跨库事务在 WAL main 下**不保证崩溃中途的原子性**（spec §5.4 引 SQLite 官方原文：
+                # 多库事务的原子性以「main 不是 WAL」为前提）。这一段事务只改 exclusions.db 一个
+                # 文件，所以提交它没有跨库问题、崩溃也丢不了——而它要防的那一支是最坏的：
+                # 删除落了、墓碑没落，被删内容的 msg_key 随行消失，墓碑再也补不回来。
+                con.execute("BEGIN IMMEDIATE")
+                written = _write_tombstone(con, e.account, e.chat_id)
+                con.commit()
+                # ---- ② 再派生一次 + 删除，同一事务 ----
+                # 重派生是为了盖住「① 提交之后、② 删除之前别人写进来的行」：那些行会被下面的
+                # 谓词 DELETE 删掉，必须同时被墓碑挡住。INSERT OR IGNORE，幂等。
+                con.execute("BEGIN IMMEDIATE")
+                written += _write_tombstone(con, e.account, e.chat_id)
+                deleted = store.delete_chat(con, account=e.account, chat_id=e.chat_id)
+                con.commit()
+        except sqlite3.Error as exc:
+            # **这一层必须包住 `_open_index()` 本身**，不能只包 `BEGIN IMMEDIATE`——
+            # `store.connect()` 每次都跑 `executescript(SCHEMA)`，而那是 DDL、要写锁。
+            # 实测（本机 SQLite 3.50 / WAL，另一条连接持 `BEGIN IMMEDIATE` + 一次写）：
+            #   · 表已齐全的库（跑过一次的机器、以及全部测试）→ connect 成功，
+            #     异常从 phase ① 的 `BEGIN IMMEDIATE` 抛；
+            #   · **新库**（SCHEMA 还没建过）→ `CREATE TABLE` 要写锁，异常就从 connect 里抛。
+            # 两种形态都存在，所以包装范围不能跟着「哪一句抛」变：只包 BEGIN 的话，
+            # 新库那条路上裸 `OperationalError` 会穿透出去，违反「core 层只抛项目异常」。
+            # 回滚不用手写：`store.open()` 的 except 分支已经做了。
+            raise errors.PurgeRefused(
+                f"拿不到写锁，未做任何删除：{exc}",
+                hint="有别的进程正在写索引（导出任务 / MCP server）；等它结束后重试") from exc
+        removed = False
+        if plan.export_exists:
+            try:
+                shutil.rmtree(plan.export_dir)
+                removed = True
+            except OSError:
+                removed = False          # 部分失败继续：按既有约定逐条报告、退 1
+        # tombstone 报的是**本次真正新写进去的条数**（两阶段之和，见 _write_tombstone），
+        # 既不是计划值、也不是「该会话当前被挡住的条数」：
+        #  · 计划值会让「写入失败」照样报成功（测试用桩把写入变成 0 时，计划值仍是 N）；
+        #  ·「当前被挡住的条数」在重跑时会把上一次写的**再报一遍**——那一次其实一条没写
+        #    （`INSERT OR IGNORE` 全命中），而这门命令的幂等契约（spec §5.7）要求第二次报 0。
+        #「当前被挡住的条数」是核查那一侧的事（`ChatResidue.tombstone_written`），
+        # 它读的是排除清单的实际条数——核查才是证明不可逆性的那个字段。
+        out.append(ChatReport(e.account, deleted, written, removed))
+    return tuple(out)
+
+
+def verify_chat(plan: ChatPlan) -> ChatResidue:
+    """核查。**第二项比第一项要紧**：墓碑没写成功时文件系统上看不出任何异常，
+    而下次 --full 会把它们全捞回来（spec §5.5）。"""
+    leftover = []
+    for e in plan.entries:
+        with _open_index() as con:
+            counts = store.chat_row_counts(con, e.account, e.chat_id)
+        leftover += [f"{e.account}/{e.chat_id}:{k}={v}" for k, v in counts.items() if v]
+    with _open_index() as con:
+        # **按会话数，不是全局总数**：全局数会被早先别的会话的排除垫高，于是「本次一条没写成」
+        # 也照样 ≥ 期望 → 核查报 ✅ 而不可逆性其实没建立。这条命令最不该有的假象。
+        written = sum(con.execute(
+            "SELECT count(*) FROM exclusions.excluded WHERE account=? AND chat_md5=?",
+            (e.account, e.chat_md5)).fetchone()[0] for e in plan.entries)
+    return ChatResidue(tuple(leftover), written, sum(e.tombstone for e in plan.entries),
+                       plan.export_dir, plan.export_exists and plan.export_dir.exists())

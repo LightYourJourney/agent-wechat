@@ -6,14 +6,91 @@
 """
 import os
 import pathlib
+import sqlite3
 
 import pytest
+import sqlite_vec
 
-from agent_wechat import decrypt, errors, keys, paths, purge, store, tasks, vector
+from agent_wechat import (decrypt, errors, exclusions, keys, messages, paths, purge,
+                          store, tasks, vector)
 
 # 导入时取值：此刻 autouse fixture 尚未 patch，paths.HOME_DIR 就是真实路径。
 # 不重述 paths 的解析逻辑（它读 AGENT_WECHAT_HOME）——那正是 purge.py 明令禁止的第二份来源。
 REAL_HOME = paths.HOME_DIR
+
+
+# ---------- `purge --chat` 的夹具助手 ----------
+
+# victim 用**自洽**的一对 (chat_id → chat_md5)：`chat_md5` 必须等于 `messages.chat_md5(chat_id)`。
+# 计划里的 `{"chat_id": …, "chat_md5": …}`、messages 行的 `chat_md5` 列、vec0 的 `acct_chat`
+# 分区键**三处是同一个值**——生产上必然如此（export 侧 chat_md5 是源头、chat_id 由它解析，
+# `messages.chat_md5(chat_id)` 必然回到原值），而两列不一致的夹具编码的是生产上不存在的形态。
+# 代价实测过：`chat_id="victim"` 配 `chat_md5="aaaa"` 时，`chat_row_counts` 按
+# `md5("victim")` 数向量、而种进去的那行走的是 "aaaa" 那一路 → 数出来 0，
+# 「向量行有没有被删掉」这条断言当场变瞎（正是「夹具与现实形态不符」那一类）。
+VICTIM = "victim"
+VICTIM_MD5 = messages.md5_of(VICTIM)          # 不从被测代码反推，本条即定义
+KEEPER = "keeper"
+KEEPER_MD5 = messages.md5_of(KEEPER)
+
+
+def _row(chat_id: str, chat_md5: str, n: int) -> dict:
+    """一条 messages 行（键集合 == messages.ROW_COLUMNS，与 `upsert_batch` 的契约一致）。"""
+    return {"msg_key": f"a|{chat_md5}|message_0.db|{n}", "account": "a",
+            "chat_md5": chat_md5, "chat_id": chat_id, "shard": "message_0.db",
+            "local_id": n, "server_id": n, "ts": 100 + n, "msg_type": 1,
+            "sender_id": None, "sender_name": None, "is_self": 0,
+            "content": f"消息 {n}", "media_hint": None}
+
+
+def _victim_row(n: int) -> dict:
+    return _row(VICTIM, VICTIM_MD5, n)
+
+
+def _keeper_row(n: int) -> dict:
+    """留在索引里的另一个会话：没有它，「删干净了」与「把索引删空了」分不开。"""
+    return _row(KEEPER, KEEPER_MD5, n)
+
+
+class _BrokenExclusions:
+    """`count()` 抛 `sqlite3.DatabaseError` = 「排除清单读不出来」（spec §4.2 的 fail-closed 闸门）。
+
+    只打桩 `count`，别的一概不假装：`execute_chat` 的闸门走的正是它。`path()` 也要给——
+    拒绝时构造的 hint 会读它，缺了就会在构造异常的路上抛 AttributeError，
+    把「清单读不出来」变成「测试自己写错了」。
+    """
+
+    def count(self, con) -> int:
+        raise sqlite3.DatabaseError("disk I/O error（桩）")
+
+    def path(self) -> pathlib.Path:
+        return paths.HOME_DIR / "exclusions.db"
+
+
+def _load_vec(con) -> None:
+    """裸 `sqlite_vec.load`：夹具与断言都要**独立于被测代码**（不用 vector.load）。"""
+    con.enable_load_extension(True)
+    sqlite_vec.load(con)
+    con.enable_load_extension(False)
+
+
+def _install_vector_index(con) -> None:
+    """把库变成「装了向量索引的机器」：建 vec0 表，并给**每条消息**种一行向量。
+
+    vec0 的 metadata 列（`account` / `ts`）**不许 NULL**，两列都必须给值——只给 account
+    会报 `Expected integer for INTEGER metadata column ts, received NULL`。
+    `acct_chat` 走 `vector._acct_chat`（构建侧与查询侧共用的那个分区键）。
+    """
+    _load_vec(con)
+    con.executescript(store.VECTOR_SCHEMA)
+    rows = con.execute("SELECT id, account, chat_md5, ts FROM messages").fetchall()
+    con.executemany(
+        "INSERT INTO vec_messages(msg_rowid, embedding, acct_chat, account, ts, preview) "
+        "VALUES (?,?,?,?,?,NULL)",
+        [(r["id"], sqlite_vec.serialize_float32([0.1] * store.VECTOR_DIM),
+          vector._acct_chat(r["account"], r["chat_md5"]), r["account"], r["ts"])
+         for r in rows])
+    con.commit()
 
 
 @pytest.fixture(autouse=True)
@@ -722,3 +799,215 @@ def test_exclusions_is_a_known_artifact():
     assert a.scope is None, "没有独立开关，只随 --all 一起走"
     assert a.sensitive is True
     assert "不可重建" in a.rebuild
+
+
+# ---------- `purge --chat`：plan / execute / verify ----------
+
+def test_plan_chat_touches_nothing(tmp_path):
+    """dry-run 的本质是「没动手」，不是「返回值对」——两个库都要逐字节不变。
+
+    **夹具是真库，不是两个垃圾文件。** brief 原版往 index.db / exclusions.db 各写 100 字节
+    `b"x"`——plan_chat 必须从索引里数行，而垃圾字节连 `store.connect()` 的
+    `executescript(SCHEMA)` 都过不去（`file is not a database`），于是那条测试对**任何**
+    实现都红，红的还不是它要守的东西。改用真库后判据反而更硬：真库打开是读、关闭是 checkpoint，
+    实测两个文件的字节与 mtime 都不变；而写墓碑动的是 exclusions.db、写索引动的是 index.db，
+    两边的字节都在比。Task 7 的 dry-run 测试同样是真库形态（判据：墓碑 0 条 + 消息还在）。
+    """
+    home = tmp_path / "home"; home.mkdir(parents=True)
+    with store.open() as con:
+        store.upsert_batch(con, [_victim_row(1), _victim_row(2)])
+    before = {p.name: p.read_bytes() for p in home.iterdir()}
+    plan = purge.plan_chat([{"account": "a", "chat_id": VICTIM, "chat_md5": VICTIM_MD5}])
+    after = {p.name: p.read_bytes() for p in home.iterdir()}
+    assert before == after, "dry-run 动了磁盘"
+    assert plan.entries[0].counts["messages"] == 2, \
+        "计划必须真的数过索引——这条同时证明上面那两行是被读过的，不是碰巧没动"
+
+
+def test_execute_chat_writes_the_tombstone_and_reports_it(tmp_path):
+    """**核查要能证明不可逆性已经建立**（spec §5.5）：墓碑没写成功时，
+    索引干净、目录没了、报告一片 ✅——而下次 --full 全捞回来。"""
+    home = tmp_path / "home"; home.mkdir(parents=True)
+    with store.open() as con:
+        store.upsert_batch(con, [_victim_row(1), _victim_row(2)])
+    report = purge.execute_chat(purge.plan_chat(
+        [{"account": "a", "chat_id": VICTIM, "chat_md5": VICTIM_MD5}]))
+    with store.open() as con:
+        assert exclusions.count(con) == 2
+        assert store.chat_row_counts(con, "a", VICTIM)["messages"] == 0
+    assert report[0].tombstone == 2
+
+
+def test_verify_chat_flags_a_missing_tombstone(tmp_path, monkeypatch):
+    """注入桩让墓碑写入失败 → 核查必须报「不可逆性未建立」并退 1，而不是报成功。"""
+    home = tmp_path / "home"; home.mkdir(parents=True)
+    with store.open() as con:
+        store.upsert_batch(con, [_victim_row(1)])
+    # 桩打在 `_write_tombstone` 上：它是写墓碑的**唯一**入口，而核查读的是排除清单的实际条数。
+    # 桩打在 exclusions.add 上没用——execute_chat 走的是裸 SQL（见 _write_tombstone 的 docstring）。
+    monkeypatch.setattr(purge, "_write_tombstone", lambda *a, **k: 0)
+    plan = purge.plan_chat([{"account": "a", "chat_id": VICTIM, "chat_md5": VICTIM_MD5}])
+    purge.execute_chat(plan)
+    res = purge.verify_chat(plan)
+    assert res.tombstone_ok is False
+    assert "不可逆性未建立" in res.render()
+
+
+def test_execute_chat_refuses_when_lock_is_held(tmp_path):
+    """拿不到写锁 → PurgeRefused，不许裸 OperationalError 穿透（Global Constraints）。
+
+    **注意这条路径的入口不只一个**：`store.connect()` 每次都跑 `executescript(SCHEMA)`，
+    那也是要写锁的——所以异常可能是从 `store.open()` 里抛出来的，而不是 `BEGIN IMMEDIATE`。
+    实测（本机 SQLite 3.50 / WAL）：**种子库**（本夹具、以及跑过一次的机器）connect 成功、
+    异常从 phase ① 的 `BEGIN IMMEDIATE` 抛；**新库**（SCHEMA 还没建过）才从 connect 抛。
+    实现里那层 `except` 仍必须包住前者（见 execute_chat）；本测试只断言「翻成了 PurgeRefused
+    且索引零变化」，不假定它从哪一行抛出——把包装范围绑在「哪一句抛」上就是下一次的洞。
+    """
+    home = tmp_path / "home"; home.mkdir(parents=True)
+    with store.open() as con:                     # 先种数据，否则「零变化」是个空断言
+        store.upsert_batch(con, [_victim_row(1), _victim_row(2)])
+    plan = purge.plan_chat([{"account": "a", "chat_id": VICTIM, "chat_md5": VICTIM_MD5}])
+    holder = store.connect()                      # 另开一条连接持住写事务
+    holder.execute("BEGIN IMMEDIATE")
+    holder.execute("INSERT INTO display_names VALUES ('a','x','y','z')")
+    try:
+        with pytest.raises(errors.PurgeRefused):
+            purge.execute_chat(plan)
+    finally:
+        holder.rollback(); holder.close()
+    # docstring 承诺了「索引零变化」就得真断言：没有这一句，一个「先删一半再抛」的实现
+    # 也能让上面那条 pytest.raises 通过——**这门命令上那是最坏的形状**。
+    with store.open() as con:
+        assert store.chat_row_counts(con, "a", VICTIM)["messages"] == 2
+        assert exclusions.count(con) == 0, "拒绝执行时不许落下墓碑"
+
+
+def test_crash_between_tombstone_and_delete_is_recoverable(tmp_path):
+    """**停在安全的那一侧**（Review Focus 3）：墓碑已提交、删除未提交时，
+    状态必须是「挡住了但没删掉」——核查看得见、重跑能收口；
+    反过来（删了但没挡）那批东西会复活，是这条命令最坏的形状。"""
+    home = tmp_path / "home"; home.mkdir(parents=True)
+    with store.open() as con:
+        store.upsert_batch(con, [_victim_row(1), _victim_row(2)])
+        # 模拟「墓碑落了、删除没跑」：只写墓碑
+        con.execute("INSERT OR IGNORE INTO exclusions.excluded "
+                    "(msg_key, account, chat_md5, excluded_at) "
+                    "SELECT msg_key, account, chat_md5, 0 FROM messages "
+                    "WHERE account='a' AND chat_id=?", (VICTIM,))
+    plan = purge.plan_chat([{"account": "a", "chat_id": VICTIM, "chat_md5": VICTIM_MD5}])
+    res = purge.verify_chat(plan)
+    assert res.leftover, "核查必须看见那两行还在"
+    assert res.tombstone_ok, "墓碑已经落了，这一侧是安全的"
+    purge.execute_chat(plan)                 # 重跑收口
+    assert purge.verify_chat(plan).leftover == ()
+
+
+def test_execute_chat_blocks_a_row_that_lands_between_the_two_phases(tmp_path, monkeypatch):
+    """两段式里 phase ② 的**重派生**不是装饰（spec §5.4 的不变式「墓碑覆盖被删集合」）。
+
+    一条在「墓碑已提交、删除还没跑」之间落进 `messages` 的消息会被谓词 DELETE 删掉，
+    它必须同时进墓碑——否则**删了但没挡**，下次 `--full` 又回来（本命令最坏的形状）。
+
+    注入点：在 `_write_tombstone` 的**第一次**调用之后塞一行——等价于「另一个写者在窗口里
+    提交了一行」。真并发在这个夹具里造不出来（spec §5.4 说造不出来：phase ① 写的是
+    exclusions.db 另一个库文件，主库那把写锁管不到它），所以按该节给的办法注入一行。
+    **把 phase ② 改成「先删再派生」，这条会红**：那时重派生扫到的 messages 已经空了，
+    窗口行被删掉却没被挡住；`report[0].tombstone` 也同时钉住「两阶段之和」这个计数契约。
+    """
+    home = tmp_path / "home"; home.mkdir(parents=True)
+    with store.open() as con:
+        store.upsert_batch(con, [_victim_row(1), _victim_row(2)])
+    real = purge._write_tombstone
+    calls = []
+
+    def spy(con, account, chat_id):
+        n = real(con, account, chat_id)
+        calls.append(n)
+        if len(calls) == 1:            # phase ① 之后落进来的一行：phase ① 的墓碑覆盖不到它
+            store.upsert_batch(con, [_victim_row(3)])
+        return n
+
+    monkeypatch.setattr(purge, "_write_tombstone", spy)
+    plan = purge.plan_chat([{"account": "a", "chat_id": VICTIM, "chat_md5": VICTIM_MD5}])
+    report = purge.execute_chat(plan)
+    with store.open() as con:
+        assert store.chat_row_counts(con, "a", VICTIM)["messages"] == 0, "窗口行也要被删掉"
+        blocked = {r[0].rsplit("|", 1)[1]
+                   for r in con.execute("SELECT msg_key FROM exclusions.excluded")}
+    assert blocked == {"1", "2", "3"}, f"被删的都必须被挡住，实际挡住 {blocked}"
+    assert report[0].tombstone == 3, "报告要含 phase ② 补写的那条（两阶段之和）"
+
+
+def test_verify_chat_counts_only_this_chats_exclusions(tmp_path, monkeypatch):
+    """核查数的是**本次这个会话**的排除条数，不是清单的全局总数（spec §5.5）。
+
+    全局数会被早先别的会话的排除垫高：一条本该报「不可逆性未建立」的核对上了别人的墓碑，
+    于是报 ✅——而这次删掉的东西一条都没被挡住、下次 `--full` 全回来。
+    """
+    home = tmp_path / "home"; home.mkdir(parents=True)
+    other = messages.md5_of("另一个会话")       # 形状照生产：chat_md5 是 md5，不是随便一个串
+    with store.open() as con:
+        store.upsert_batch(con, [_victim_row(1), _victim_row(2)])
+        exclusions.add(con, [(f"a|{other}|message_0.db|1", "a", other),
+                             (f"a|{other}|message_0.db|2", "a", other)])
+    monkeypatch.setattr(purge, "_write_tombstone", lambda *a, **k: 0)
+    plan = purge.plan_chat([{"account": "a", "chat_id": VICTIM, "chat_md5": VICTIM_MD5}])
+    purge.execute_chat(plan)
+    res = purge.verify_chat(plan)
+    assert res.tombstone_written == 0, "别的会话的 2 条不能算进本次"
+    assert res.tombstone_ok is False
+    assert "不可逆性未建立" in res.render()
+
+
+def test_execute_chat_is_idempotent_and_tolerates_missing_export(tmp_path):
+    """幂等 + 导出目录不存在都算成功（spec §5.7）。第二次要 0 条、不报错。"""
+    home = tmp_path / "home"; home.mkdir(parents=True)
+    with store.open() as con:
+        store.upsert_batch(con, [_victim_row(1)])
+    plan = purge.plan_chat([{"account": "a", "chat_id": VICTIM, "chat_md5": VICTIM_MD5}])
+    assert plan.export_exists is False
+    purge.execute_chat(plan)
+    again = purge.execute_chat(plan)
+    assert again[0].deleted["messages"] == 0
+    assert again[0].tombstone == 0
+
+
+def test_execute_chat_refuses_when_the_exclusion_list_is_unreadable(tmp_path, monkeypatch):
+    """**fail-closed**（spec §4.2）：读不出排除清单就没法建立不可逆性，
+    那么这次删除就只是「暂时看不见」——宁可什么都不做，也不做一个看起来成功的假删除。"""
+    home = tmp_path / "home"; home.mkdir(parents=True)
+    with store.open() as con:
+        store.upsert_batch(con, [_victim_row(1)])
+    monkeypatch.setattr(purge, "exclusions", _BrokenExclusions())
+    with pytest.raises(errors.PurgeRefused):
+        purge.execute_chat(purge.plan_chat(
+            [{"account": "a", "chat_id": VICTIM, "chat_md5": VICTIM_MD5}]))
+    with store.open() as con:
+        assert store.chat_row_counts(con, "a", VICTIM)["messages"] == 1, "一行都不许删"
+
+
+def test_chat_purge_on_a_machine_with_a_vector_index(tmp_path):
+    """**装了向量索引的机器上**（本机即是）走完整的 plan → execute → verify。
+
+    这是「purge 的连接必须能碰向量表」落地的唯一直接证据：`store.connect()` 从不加载
+    sqlite-vec，三处连接若都开裸连接，plan 的第一句 `chat_row_counts` 就抛 PurgeRefused
+    ——而此前**没有任何测试**跑过「purge 在装了索引的机器上」这条路（Task 3 的修复只覆盖
+    到 store 层，`tests/test_delete_chat.py` 两个用例走的正是裸连接会抛的那两支）。
+    """
+    home = tmp_path / "home"; home.mkdir(parents=True)
+    with store.open() as con:
+        store.upsert_batch(con, [_victim_row(1), _victim_row(2), _keeper_row(1)])
+        _install_vector_index(con)          # victim 2 条、keeper 1 条
+    plan = purge.plan_chat([{"account": "a", "chat_id": VICTIM, "chat_md5": VICTIM_MD5}])
+    assert plan.entries[0].counts["vectors"] == 2, \
+        "计划阶段就该数得到向量行——数不到说明这条连接不认识 vec_messages"
+    purge.execute_chat(plan)
+    with store.open() as con:
+        _load_vec(con)
+        # 判据是**全表分组**，不是「victim 那个键下还剩几条」：后者用的是被测代码那套派生
+        # （`messages.chat_md5` ↔ 行里的 chat_md5 列），派生错时它会**跟着一起错**、
+        # 报 0 而向量其实还在——本次删除最坏的那个形状。全表分组验的是「留下的只有 keeper」。
+        left = dict(con.execute(
+            "SELECT acct_chat, count(*) FROM vec_messages GROUP BY acct_chat"))
+    assert left == {vector._acct_chat("a", KEEPER_MD5): 1}, f"victim 的向量必须真没了：{left}"
+    assert purge.verify_chat(plan).leftover == ()

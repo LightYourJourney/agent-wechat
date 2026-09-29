@@ -50,6 +50,31 @@ def connect() -> sqlite3.Connection:
     return con
 
 
+def load(con: sqlite3.Connection) -> bool:
+    """尽力把 sqlite-vec 装进一条**别人开的**连接。装上了 True，装不上 False，**不抛**。
+
+    与 connect() 的分工：那个是 owner（开连接、建表、装不上就 fail-fast），本函数只做
+    「把扩展注册到这条连接上」这一件事。存在的理由是 purge：`store.connect()` 从不加载扩展，
+    而 purge 的 plan/execute/verify 要碰 `vec_messages`（装了索引的机器上，第一条
+    `chat_row_counts` 就会被 `store._vec_exec` 翻成 PurgeRefused）。
+
+    **best-effort 是刻意的**：轻装安装上根本没有向量表，扩展装不装无关紧要
+    （`store._has_table` 自会跳过那几处）；装了索引而扩展真坏掉时，仍由 `store._vec_exec`
+    响亮抛 PurgeRefused——那才是该报错的地方，本函数抢着报只会把「表在、扩展不在」变成
+    「所有安装一律崩」。`enable_load_extension` 用完立刻关回去（finally），
+    不让这条连接一直带着「可加载任意动态库」的权限。
+    """
+    try:
+        con.enable_load_extension(True)
+        try:
+            sqlite_vec.load(con)
+        finally:
+            con.enable_load_extension(False)
+        return True
+    except Exception:
+        return False
+
+
 def should_embed(row: sqlite3.Row | messages.MessageRow) -> bool:
     """文本与带标题的 appmsg 才入向量；纯媒体占位与过短消息跳过（spec §5）。"""
     if row["msg_type"] not in EMBED_TYPES:
