@@ -805,9 +805,14 @@ def execute_chat(plan: ChatPlan) -> tuple[ChatReport, ...]:
     # 套判据：只拒绝目标逃出 HOME_DIR（或判不出来）的链接，树内目标随 rmtree 一并删除。
     links = _escaping_links(plan, paths.HOME_DIR)
     if links:
+        # **总数放最前**：`errors.redact` 会把超过 300 字符的消息从尾部剪掉，而一对
+        # 「绝对路径的链接 → 目标」就 ~150 字符起——全部列出来必被剪，用户连「有几处」
+        # 都看不到（实测三个链接时消息断在第二处中间）。列第一处足够定位（它们同在该
+        # 导出目录树内），其余按计数说明。
         raise errors.PurgeRefused(
-            "导出目录里有链接指向数据目录之外，拒绝删除："
-            + "、".join(f"{p} → {_link_target(p)}" for p in links),
+            f"导出目录里有 {len(links)} 处链接指向数据目录之外，拒绝删除："
+            f"{links[0]} → {_link_target(links[0])}"
+            + (f"（另有 {len(links) - 1} 处，同在该目录树内）" if len(links) > 1 else ""),
             hint="删链接不会删目标，会造成「已清干净」的假象；请手工处理这些链接后重试")
     out = []
     # fail-closed（spec §4.2）：读不出排除清单就没法建立不可逆性，这一次删除就只是「暂时看不见」。

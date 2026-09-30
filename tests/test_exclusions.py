@@ -326,6 +326,39 @@ def test_appmsg_rebuild_reports_rows_actually_written(tmp_path, monkeypatch):
             "前提：确实一行都没落库"
 
 
+def test_appmsg_rebuild_progress_reports_written_rows(tmp_path, monkeypatch):
+    """进度回调报的也是**实际落库**的数——与返回值、另两处（`run_export` /
+    `media_rebuild_refs`）同口径。
+
+    钉的**不是**「最后一格等于完成行」：`flush` 只在**批满**时调 `progress`，循环末尾那次
+    `flush(False)` 不调，所以最后一格天然小于完成行。要钉的是「回调那一刻报的是落库数、
+    不是缓冲数」——报缓冲数会让进度条一路虚高，与完成行对不上。
+
+    **判别性**：把 `progress(parts - skipped)` 改回 `progress(parts)` 即红。
+    """
+    from agent_wechat import store, usecases
+    monkeypatch.setattr(store, "BATCH", 2)          # 攒满 2 条即 flush，好让回调跑起来
+    rows = [(f"acct|aaaa|message_0.db|{i}",
+             f"<msg><appmsg><title>t{i}</title><type>5</type></appmsg></msg>")
+            for i in (1, 2, 3)]
+
+    class _FakeReader:
+        def iter_parts_input(self):
+            for i, (key, raw) in enumerate(rows, start=1001):
+                yield i, key, raw
+
+    monkeypatch.setattr(usecases, "ChatContext", lambda acct=None: type(
+        "C", (), {"account": "acct", "reader": _FakeReader()})())
+    with store.open() as con:               # 挡住第一条：那一批就是「缓冲 2 − 落库 1」
+        exclusions.add(con, [(rows[0][0], "acct", "aaaa")])
+    seen: list[int] = []
+    res = usecases.appmsg_rebuild_parts(account="acct", progress=seen.append)
+    assert seen == [1], (
+        f"那一批缓冲了 2 条、被墓碑挡下 1 条，所以回调那一刻的落库数是 1"
+        f"（报缓冲数会得到 2）：{seen}")
+    assert (res["parts"], res["skipped"]) == (2, 1), res
+
+
 def test_parts_write_after_the_temp_table_write_is_still_locked(tmp_path, monkeypatch):
     """`appmsg_rebuild_parts` 的**真实形态**：它先写 TEMP 表（sid_map）、再写 msg_parts。
 

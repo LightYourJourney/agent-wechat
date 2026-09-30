@@ -1522,6 +1522,36 @@ def test_purge_chat_refuses_an_escaping_link_before_deleting_anything(
     assert secret.read_text() == "外面那份明文"
 
 
+def test_purge_chat_puts_the_link_count_before_redaction_can_hide_it(
+        tmp_path, monkeypatch, capsys):
+    """拒绝消息把**总数**放在最前——`errors.redact` 会把超过 300 字符的消息从尾部剪掉，
+    而一对「绝对路径的链接 → 目标」就 ~150 字符起：全列出来必被剪，用户连「有几处」都看不到。
+
+    上一条测试用**相对目标**绕开了这个上限（它注释里也写明了），于是上限本身无人守。
+
+    **判别性**：把消息改回 `"、".join(f"{p} → {_link_target(p)}" for p in links)` 即红——
+    被剪之后连「3 处」这个数字都不出现。
+    """
+    home = _isolate(tmp_path, monkeypatch)
+    from agent_wechat import messages
+    md5 = messages.chat_md5("victim")
+    with store.open() as con:
+        store.upsert_batch(con, [_chat_row(1)])
+    export_dir = home / "media" / md5
+    export_dir.mkdir(parents=True)
+    outside = tmp_path / "outside"; outside.mkdir()
+    for i in range(3):
+        (outside / f"s{i}.txt").write_text("外面那份明文")
+        (export_dir / f"leak{i}.txt").symlink_to(f"../../../outside/s{i}.txt")
+    monkeypatch.setattr(usecases, "purge_chat_targets", lambda *a, **kw: [
+        {"account": "a", "chat_id": "victim", "chat_md5": md5}])
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["purge", "--chat", "小李", "--yes"])
+    assert ei.value.code == 1, "拒绝就必须退 1"
+    err = capsys.readouterr().err
+    assert "3 处" in err, f"被 300 字上限剪掉之前，必须先说清有几处：{err!r}"
+
+
 def test_purge_chat_exits_1_even_when_the_check_says_clean(tmp_path, monkeypatch, capsys):
     """报告侧那一句**自己**也是退出码的判据（注入式判据，不是真夹具）。
 
