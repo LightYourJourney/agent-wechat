@@ -10,6 +10,7 @@
 ├── passphrase.json         # 密钥缓存（0600），按账号分键
 ├── index.db                # 本地检索库（SQLite, WAL 模式，明文 + FileVault）
 ├── index.db-wal / -shm     # WAL 伴生文件
+├── exclusions.db           # 排除清单：被销毁会话的墓碑；**唯一不可重建的产物**（见 §3、§9）
 ├── tasks.json              # 导出长任务的状态与进度
 ├── media/                  # 媒体导出产物（图片/语音 WAV/视频，0700，明文）
 ├── moments/                # 朋友圈导出产物（单文件 HTML + 媒体，0700，明文）
@@ -159,6 +160,34 @@ CREATE INDEX IF NOT EXISTS idx_parts_ref ON msg_parts(ref_msg_key)
   的 XML 一个字节都不进 `messages`）。
 - 与 `media_refs` 的分工：那张表回答「媒体本体在不在、在哪」，这张表回答「appmsg 的内容是
   什么」。两者都以 `msg_key` 为主键，存量历史都只由显式的重建动作回填。
+
+**排除清单表 `excluded`**——**它在另一个库文件里**（`exclusions.db`，不是 `index.db`），
+DDL 归 `exclusions.py` 的 `exclusions.SCHEMA`，由 `store.connect()` 把它 `ATTACH` 成
+`exclusions` 之后与索引同事务读写（`purge` 的删除路径就靠这个 ATTACH 把墓碑与删除放进
+两个库）：
+
+```sql
+CREATE TABLE IF NOT EXISTS exclusions.excluded (
+    msg_key     TEXT PRIMARY KEY,   -- account|chat_md5|shard|local_id，与 messages.msg_key 逐字相同
+    account     TEXT NOT NULL,      -- 从 msg_key 派生，存下来只为能建索引
+    chat_md5    TEXT NOT NULL,      -- 同上
+    excluded_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS exclusions.idx_excluded_chat ON excluded(account, chat_md5);
+```
+
+- 一行 = 一条「被用户明确要求销毁过」的消息。**它是本工具唯一删了就不可重建的产物**：
+  `index.db` 能重扫微信库重建、`media/` 能联网重抓、密钥能重新 bootstrap，而这张表没了，
+  被删的会话会在下一次全量导出时**整批复活**（见 §9）。
+- `account` / `chat_md5` 两列是 `msg_key` 前两段的投影，存下来只为能建上面那条索引：
+  四条复活路径里的名册重建那条按 **`(account, chat_md5)` 整会话**判（逐条判要解析全表
+  `msg_key`）。投影失真会让那条判据错拦或漏拦，所以**删除按前缀谓词**
+  （`substr(msg_key, 1, ?) = ?`，与 `store.delete_chat` / `chat_row_counts` 同源），
+  不把正确性押在这两列忠实上——它们只服务于查询性能。
+- 写入端只有 `purge --chat`，且用 `INSERT … SELECT … FROM messages WHERE account=? AND
+  chat_id=?` **从同一谓词派生**（不是先在内存里读一个 `msg_key` 集合再照着写）；
+  读出端是那四条复活路径上的拦截判据（模块职责见 ARCHITECTURE.md 的模块清单）
+  与 `purge --excluded`。
 
 ## 4. 去重主键与增量策略
 
@@ -323,5 +352,8 @@ for chat, in con.execute("SELECT DISTINCT chat_id FROM messages"):
 
 ## 9. 备份与销毁
 
-- 备份：拷贝 `index.db`（+`-wal`/`-shm`）即可；`~/.agent-wechat/` 已排除出 Time Machine
+- 备份：拷贝 `index.db`（+`-wal`/`-shm`）**与 `exclusions.db`** 即可；`~/.agent-wechat/` 已排除出
+  Time Machine。**`exclusions.db` 不能漏**：它是唯一不可重建的产物，只恢复 `index.db` 的话，
+  被销毁的会话会在下次 `export --full` 时**整批复活**——索引里没有墓碑可拦，而文件系统上看
+  不出任何异常
 - 销毁：`agent-wechat purge --all --yes`（密钥缓存与全部索引一并清除；微信源数据不受影响）。默认 dry-run，手工 `rm -rf ~/.agent-wechat` 仍是等价后备
