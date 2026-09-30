@@ -1362,3 +1362,26 @@ def test_media_rebuild_refs_cannot_revive_a_purged_chat(tmp_path, monkeypatch):
         assert store.chat_row_counts(con, "a", VICTIM)["refs"] == 0, \
             "media rebuild-refs 把已删会话的媒体引用写回来了"
         assert con.execute("SELECT count(*) FROM media_refs").fetchone()[0] == 0
+
+
+def test_verify_counts_the_tombstone_by_prefix_not_the_derived_columns():
+    """核查数墓碑走 `msg_key` 前缀（`exclusions.count_chat`），与删除端 / 撤销端**同源**——
+    不押在 `account` / `chat_md5` 两个派生列的忠实上。
+
+    那两列只在「逐字等于 `msg_key` 的前两段」时才与前缀等价，而 spec §4 只是**要求**它们忠实。
+    核查端若另立一套判据，同一个会话就会在删除侧被判「不可逆性已建立」、在核查侧被判「未建立」。
+
+    **判别性**：把计数改回 `account=? AND chat_md5=?`，下面那条**派生列写错**的墓碑就数不到
+    —— `tombstone_written` 变 0、核查误报「不可逆性未建立」并退 1。
+    """
+    from agent_wechat import exclusions, store
+    rows = [_victim_row(1)]
+    with store.open() as con:
+        store.upsert_batch(con, rows)
+        # 墓碑的 msg_key 属于该会话，**两列故意写错**（模拟投影失真）。
+        exclusions.add(con, [(rows[0]["msg_key"], "别的账号", "别的md5")])
+    plan = purge.plan_chat([{"account": "a", "chat_id": VICTIM, "chat_md5": VICTIM_MD5}])
+    res = purge.verify_chat(plan)
+    assert res.tombstone_written == 1, (
+        f"msg_key 属于该会话，前缀就数得到它——派生列失真不该影响核查：{res}")
+    assert res.tombstone_ok, "核查不该因为派生列失真而误报「不可逆性未建立」"

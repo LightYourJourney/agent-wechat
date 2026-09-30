@@ -183,7 +183,9 @@ CREATE INDEX IF NOT EXISTS exclusions.idx_excluded_chat ON excluded(account, cha
   四条复活路径里的名册重建那条按 **`(account, chat_md5)` 整会话**判（逐条判要解析全表
   `msg_key`）。投影失真会让那条判据错拦或漏拦，所以**删除按前缀谓词**
   （`substr(msg_key, 1, ?) = ?`，与 `store.delete_chat` / `chat_row_counts` 同源），
-  不把正确性押在这两列忠实上——它们只服务于查询性能。
+  不把**删除**的正确性押在这两列忠实上——在删除这条路上它们只服务于查询性能。
+  （名册那条判据仍读它们，所以「投影失真」在这里有两处后果：删除侧不再受影响，
+  名册侧会**错拦或漏拦**——那是另一个消费者的账，别混起来读。）
 - 写入端只有 `purge --chat`，且用 `INSERT … SELECT … FROM messages WHERE account=? AND
   chat_id=?` **从同一谓词派生**（不是先在内存里读一个 `msg_key` 集合再照着写）；
   读出端是那四条复活路径上的拦截判据（模块职责见 ARCHITECTURE.md 的模块清单）

@@ -937,10 +937,12 @@ def verify_chat(plan: ChatPlan) -> ChatResidue:
         with _open_index() as con:
             # **按会话数，不是全局总数**：全局数会被早先别的会话的排除垫高，于是「本次一条没写成」
             # 也照样 ≥ 期望 → 核查报 ✅ 而不可逆性其实没建立。这条命令最不该有的假象。
-            written = sum(con.execute(
-                "SELECT count(*) FROM exclusions.excluded WHERE account=? AND chat_md5=?",
-                (e.account, messages.chat_md5(e.chat_id))).fetchone()[0]
-                for e in plan.entries)
+            # 判据走 `exclusions.count_chat`（`msg_key` 前缀）——与删除端（`store.delete_chat`）、
+            # 撤销端（`exclusions.remove_chat`）**同源**，不押在 `account` / `chat_md5` 两个派生列
+            # 的忠实上（那两个列只有「逐字等于 `msg_key` 的前两段」时才与前缀等价，而 §4 只是
+            # 要求它们忠实）。判据同源，两处就不可能对同一个会话给出不同的答案。
+            written = sum(exclusions.count_chat(con, e.account, messages.chat_md5(e.chat_id))
+                          for e in plan.entries)
         # 导出物**逐条**查，并去重（跨账号的两条 entry 共享同一个 `media/<md5>/`）：
         # 只查第一条会在多会话时漏报；只回一个 bool 则说不出「哪个还在」。
         # 存活判据是 `_name_there`（**不跟随符号链接**）：悬空链接在这个字段里也算残留——
