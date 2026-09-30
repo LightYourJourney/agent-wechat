@@ -959,3 +959,44 @@ def verify_chat(plan: ChatPlan) -> ChatResidue:
         ) from exc
     return ChatResidue(tuple(leftover), written, sum(e.tombstone for e in plan.entries),
                        surviving)
+
+
+@dataclass(frozen=True)
+class UndoEntry:
+    """撤销的一条目标：哪个账号、哪个会话、清单里有多少条待解除。"""
+    account: str
+    chat_md5: str
+    count: int
+
+
+def undo_chat(targets: list[dict], *, apply: bool = False) -> tuple[UndoEntry, ...]:
+    """把该会话的墓碑从排除清单里移出。**只删墓碑，不恢复数据**（spec §5.6）。
+
+    与 plan/execute/verify 同族，所以住在 core 而不是入口层：那三件事都由本模块拥有，
+    撤销却整个住在 `cli.py` 里，别的入口就没法复用它——而 `--undo` 恰恰是「一次误删之后」
+    的那条救援路径，不该只有 CLI 走得到。
+
+    `apply=False` 只数、一个字都不改（投币前的预览）；`apply=True` 删净并提交。两者返回
+    的都是**删之前**数出来的条数——入口要把它印给用户（`0 条` 也是一种要印出来的事实）。
+
+    不写 `store.open()`：它的 `connect()` 会 `ensure_home_dirs()` + `executescript(SCHEMA)`，
+    索引库不在时（`purge --index` 之后，而这正是撤销最可能被跑的时刻）会把刚删掉的
+    `index.db` 连 schema 建回来——静默撤销那次索引 purge。走 `exclusions.standalone()`：
+    `:memory:` + ATTACH，清单文件不存在时给一张**内存里的空表**，一个字节都不落盘。
+    """
+    try:
+        with exclusions.standalone() as con:
+            per = [UndoEntry(t["account"], t["chat_md5"],
+                             exclusions.count_chat(con, t["account"], t["chat_md5"]))
+                   for t in targets]
+            if apply:
+                for e in per:
+                    exclusions.remove_chat(con, e.account, e.chat_md5)
+                con.commit()      # remove_chat 不 commit（它的契约）：由调用方收口
+    except (sqlite3.Error, OSError) as exc:
+        # 读不出来就一行拒绝，不许裸异常穿到 CLI 的漏斗之外（core 层只抛项目异常）。
+        raise errors.PurgeRefused(
+            f"撤销未执行：{exc}",
+            hint=f"检查 {exclusions.path()} 是否可读、是否损坏"
+        ) from exc
+    return tuple(per)

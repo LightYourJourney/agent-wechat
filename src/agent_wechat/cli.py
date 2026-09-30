@@ -775,37 +775,28 @@ def _cmd_purge_chat(args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
-def _cmd_purge_chat_undo(targets: list[dict], yes: bool) -> int:
+def _cmd_purge_chat_undo(targets: list[dict], *, yes: bool) -> int:
     """撤销：从排除清单里移出该会话。**只删墓碑，不恢复数据**——这句话必须印在输出里。
 
     没有它，`--undo` 会被读成「恢复」：用户撤销后重跑 `export --full` 发现消息没回来，
     会以为工具坏了（而它按设计工作：撤销只是放开拦截，spec §5.6）。
+
+    业务规则（逐账号数、逐账号删、commit）在 core 的 `purge.undo_chat`：它此前整个住在这里，
+    而 plan/execute/verify 都由 `purge` 拥有——同一族的第四件事放在入口层，别的入口就复用它
+    不到，且撤销是**唯一会写排除清单**的动作，更该与清单的读写端（`exclusions`）挨着。
+    本函数只剩渲染与退出码。
     """
-    from . import exclusions
-    try:
-        with exclusions.standalone() as con:
-            per = [(t["account"], t["chat_md5"],
-                    con.execute("SELECT count(*) FROM exclusions.excluded "
-                                "WHERE account=? AND chat_md5=?",
-                                (t["account"], t["chat_md5"])).fetchone()[0])
-                   for t in targets]
-            n = sum(x[2] for x in per)
-            print(f"将解除排除：{n} 条")
-            for acct, md5, k in per:
-                print(f"  {acct}  {md5}  {k} 条")
-            print("⚠️ 这**不会**把数据找回来——被删的消息要重跑 `export --full` 才回来"
-                  "（那时它们不再被排除）。")
-            if not yes:
-                print("\n未做任何改动。加 --yes 执行。")
-                return 0
-            for acct, md5, _ in per:
-                exclusions.remove_chat(con, acct, md5)
-            con.commit()          # remove_chat 不 commit（它的契约）：由调用方收口
-    except (sqlite3.Error, OSError) as exc:
-        raise errors.PurgeRefused(
-            f"撤销未执行：{exc}",
-            hint=f"检查 {exclusions.path()} 是否可读、是否损坏"
-        ) from exc
+    from . import purge
+    per = purge.undo_chat(targets, apply=yes)
+    n = sum(e.count for e in per)
+    print(f"将解除排除：{n} 条")
+    for e in per:
+        print(f"  {e.account}  {e.chat_md5}  {e.count} 条")
+    print("⚠️ 这**不会**把数据找回来——被删的消息要重跑 `export --full` 才回来"
+          "（那时它们不再被排除）。")
+    if not yes:
+        print("\n未做任何改动。加 --yes 执行。")
+        return 0
     print(f"已解除 {n} 条排除。")
     return 0
 

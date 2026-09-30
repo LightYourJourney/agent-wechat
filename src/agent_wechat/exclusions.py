@@ -86,6 +86,17 @@ def add(con: sqlite3.Connection, rows: list[tuple[str, str, str]]) -> int:
     return len(rows)
 
 
+def count_chat(con: sqlite3.Connection, account: str, chat_md5: str) -> int:
+    """该会话在清单里有多少条——**与 `remove_chat` 同一个谓词**，两者必须同源。
+
+    此前这条计数写在入口层（`cli._cmd_purge_chat_undo` 的行内 SQL），与删除分处两个文件：
+    预览说 N 条、实际删掉 M 条这种各说各话，正是「两处各写一遍同一个判据」的产物。
+    """
+    return con.execute(
+        "SELECT count(*) FROM exclusions.excluded WHERE account=? AND chat_md5=?",
+        (account, chat_md5)).fetchone()[0]
+
+
 def remove_chat(con: sqlite3.Connection, account: str, chat_md5: str) -> int:
     """按 `(account, chat_md5)` 精确删——**不用 LIKE**：`_` 与 `%` 都是通配符。"""
     cur = con.execute("DELETE FROM exclusions.excluded WHERE account=? AND chat_md5=?",
