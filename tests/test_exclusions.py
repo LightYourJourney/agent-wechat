@@ -330,17 +330,20 @@ def test_appmsg_rebuild_progress_reports_written_rows(tmp_path, monkeypatch):
     """进度回调报的也是**实际落库**的数——与返回值、另两处（`run_export` /
     `media_rebuild_refs`）同口径。
 
-    钉的**不是**「最后一格等于完成行」：`flush` 只在**批满**时调 `progress`，循环末尾那次
-    `flush(False)` 不调，所以最后一格天然小于完成行。要钉的是「回调那一刻报的是落库数、
-    不是缓冲数」——报缓冲数会让进度条一路虚高，与完成行对不上。
+    钉的是两件事：① 回调那一刻报的是**落库**数、不是缓冲数（报缓冲数会让进度条一路虚高，
+    与完成行对不上）；② 它是**累计值**、不是增量（增量会让进度条往回跳）。
 
-    **判别性**：把 `progress(parts - skipped)` 改回 `progress(parts)` 即红。
+    它**不**钉「最后一格等于完成行」——`flush` 只在**批满**时调 `progress`，循环末尾那次
+    `flush(False)` 不调，所以最后一格天然小于完成行（终审建议的断言就是这么错的：实测在
+    **正确**的代码上也失败）。
+
+    **判别性**：`progress(parts)` → `[2, 4]`；改成增量 → `[1, 2]`。两者都红。
     """
     from agent_wechat import store, usecases
     monkeypatch.setattr(store, "BATCH", 2)          # 攒满 2 条即 flush，好让回调跑起来
     rows = [(f"acct|aaaa|message_0.db|{i}",
              f"<msg><appmsg><title>t{i}</title><type>5</type></appmsg></msg>")
-            for i in (1, 2, 3)]
+            for i in (1, 2, 3, 4, 5)]
 
     class _FakeReader:
         def iter_parts_input(self):
@@ -353,10 +356,11 @@ def test_appmsg_rebuild_progress_reports_written_rows(tmp_path, monkeypatch):
         exclusions.add(con, [(rows[0][0], "acct", "aaaa")])
     seen: list[int] = []
     res = usecases.appmsg_rebuild_parts(account="acct", progress=seen.append)
-    assert seen == [1], (
-        f"那一批缓冲了 2 条、被墓碑挡下 1 条，所以回调那一刻的落库数是 1"
-        f"（报缓冲数会得到 2）：{seen}")
-    assert (res["parts"], res["skipped"]) == (2, 1), res
+    # 两次回调：第 1 批后落库 1（2 缓冲 − 1 被挡）、第 2 批后落库 3（4 − 1）。
+    assert seen == [1, 3], (
+        f"两次回调都该报**累计**落库数（第 1 批 2−1=1，第 2 批 4−1=3）——"
+        f"报缓冲数会得到 [2, 4]、报增量会得到 [1, 2]：{seen}")
+    assert (res["parts"], res["skipped"]) == (4, 1), res
 
 
 def test_parts_write_after_the_temp_table_write_is_still_locked(tmp_path, monkeypatch):
