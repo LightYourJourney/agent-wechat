@@ -1392,6 +1392,34 @@ def test_purge_chat_with_no_messages_still_plans_and_removes_the_export(
             "别的会话一个字节都不许动"
 
 
+def test_purge_chat_without_a_value_exits_2(tmp_path, monkeypatch, capsys):
+    """`--chat` 缺值退 2（spec §6 第二行）。
+
+    argparse 恰好覆盖住，但「恰好」不是判据：一旦有人把它改成 `nargs="?"` 或给个 default，
+    缺值就会静默退化成另一条路（`--chat --yes` 尤其危险——它看起来像一条完整的命令）。
+    """
+    _isolate(tmp_path, monkeypatch)
+    for argv in (["purge", "--chat"], ["purge", "--chat", "--yes"]):
+        with pytest.raises(SystemExit) as ei:
+            cli.main(argv)
+        assert ei.value.code == 2, f"{argv} 应当退 2"
+
+
+def test_chat_table_keys_match_store_chat_row_counts(tmp_path, monkeypatch):
+    """`cli._CHAT_TABLES` 与 `store.chat_row_counts` 的键集是**两处手抄**的。
+
+    读回那一侧是静默的 `e.counts.get(key, 0)`：键集一旦漂移（改了一处、漏了另一处），
+    渲染会对着 12,345 行印 **0 条**——一门专门用来回答「删掉了什么」的命令，印出来的
+    是最坏的那种假象。不引入新类型（那是判断题），把两处钉在一起就够。
+    """
+    _isolate(tmp_path, monkeypatch)
+    with store.open() as con:
+        counts = store.chat_row_counts(con, "a", "victim")
+    assert {k for k, _, _ in cli._CHAT_TABLES} == set(counts), (
+        f"键集漂移：渲染表 {sorted(k for k, _, _ in cli._CHAT_TABLES)} "
+        f"vs store {sorted(counts)}")
+
+
 def test_purge_undo_needs_the_chat_flag(tmp_path, monkeypatch, capsys):
     """`--undo` 只对会话有意义（评审 F2）。
 

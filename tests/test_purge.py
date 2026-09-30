@@ -1320,3 +1320,45 @@ def test_verify_chat_derives_chat_md5_instead_of_trusting_the_plan(tmp_path):
     res = purge.verify_chat(plan)
     assert res.tombstone_written == 1, "墓碑就在那儿，只是键要用派生的那个"
     assert res.tombstone_ok is True
+
+
+def test_media_rebuild_refs_cannot_revive_a_purged_chat(tmp_path, monkeypatch):
+    """四条复活路径里的第三条**端到端**（spec §7）：删完之后跑 `media rebuild-refs`。
+
+    它全量重扫**微信库**（事实三），被删的会话在那里一条不少——拦得住拦不住全看写入端。
+    此前只有 store 层的拦截有测试（`test_msg_parts_and_media_refs_intercepts` 直接调
+    `store.upsert_media_refs`）：那条钉的是「拦截函数本身对」，**驱动 usecase/CLI 那一层
+    没有**——`media_rebuild_refs` 若哪天换成另一条写入路径（或忘了带 `account`），
+    store 层那条照样绿，而已删消息的媒体引用会重新长回来：正文不会复活，但
+    `count_media_refs` **刻意不 join** `messages`，于是核查里那句「0 行」不再成立。
+
+    判别性：摘掉 `store.upsert_media_refs` 里的 `_filter_excluded`，下面两条断言即时红。
+    """
+    from agent_wechat import usecases
+
+    ref = (f"a|{VICTIM_MD5}|message_0.db|1", "image", "f" * 32, None)
+    with store.open() as con:
+        store.upsert_batch(con, [_victim_row(1)])
+        store.upsert_media_refs(con, [ref])
+    with store.open() as con:                       # 前提：先有一条，否则「仍是 0」是空话
+        assert store.chat_row_counts(con, "a", VICTIM)["refs"] == 1
+
+    purge.execute_chat(purge.plan_chat(
+        [{"account": "a", "chat_id": VICTIM, "chat_md5": VICTIM_MD5}]))
+    with store.open() as con:
+        assert store.chat_row_counts(con, "a", VICTIM)["refs"] == 0, "前提：已被删干净"
+
+    class _Reader:
+        def iter_all(self, **_kw):
+            yield [], [ref]        # 微信库里那条还在——这正是这条路要拦的东西
+
+    monkeypatch.setattr(usecases, "ChatContext", lambda acct=None: type(
+        "C", (), {"account": "a", "reader": _Reader()})())
+    on_skipped: list[int] = []
+    n = usecases.media_rebuild_refs("a", on_skipped=on_skipped.append)
+    assert on_skipped == [1], "挡下了就要走「成功但有保留」那条出口"
+    assert n == 0, "被墓碑挡下的行不许计入「已回填」的条数（计数契约）"
+    with store.open() as con:
+        assert store.chat_row_counts(con, "a", VICTIM)["refs"] == 0, \
+            "media rebuild-refs 把已删会话的媒体引用写回来了"
+        assert con.execute("SELECT count(*) FROM media_refs").fetchone()[0] == 0
