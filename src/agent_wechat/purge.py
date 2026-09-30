@@ -5,7 +5,7 @@
 两条不可违反的约定：
 - 路径的唯一来源是**拥有它的模块**（keys.CACHE_FILE / store.db_paths() /
   decrypt.tmp_dir() / vector.MODEL_CACHE_DIR / tasks.TASKS_FILE / exclusions.path() /
-  paths.HOME_DIR）。
+  media.export_root() / paths.HOME_DIR）。
   本模块**不得**自己拼 "passphrase.json" 这类字面量——那是不随拥有者演进的第二份来源。
 - 引用其它模块的常量一律走 `from . import keys` + `keys.CACHE_FILE`，
   绝不 `from .keys import CACHE_FILE`：后者在导入时绑定值，测试 monkeypatch 会失效。
@@ -687,7 +687,7 @@ def _name_there(p: pathlib.Path) -> bool:
     return True
 
 
-def plan_chat(resolved: list[dict], home: pathlib.Path | None = None) -> ChatPlan:
+def plan_chat(resolved: list[dict]) -> ChatPlan:
     """**纯只读**：只算将删什么，一个字节都不动。`resolved` 是
     `[{"account":…, "chat_id":…, "chat_md5":…}, …]`（解析由 cli 层做，见 Task 7）。
 
@@ -702,16 +702,18 @@ def plan_chat(resolved: list[dict], home: pathlib.Path | None = None) -> ChatPla
     与 `verify_chat` / `store.chat_row_counts` / `store.delete_chat` 同一口径。调用方哪天若
     用 `md5_of` 解析退化会话名（`md5:<hex>`），传进来的值会指向一个**不存在**的目录——
     真目录永远删不掉，而核查看不见（与 F7 同一模式）。
+
+    `home` 参数**没有过调用方**（全仓 grep 为零），已删：导出根的拥有者是
+    `media.export_root()`，本模块开篇那条「不得自己拼字面量」禁的正是这种第二份来源。
     """
-    home = home or paths.HOME_DIR
-    _check_home_is_sane(home)
+    _check_home_is_sane(paths.HOME_DIR)
     try:
         entries = []
         for item in resolved:
             with _open_index() as con:
                 counts = store.chat_row_counts(con, item["account"], item["chat_id"])
             md5 = messages.chat_md5(item["chat_id"])
-            d = home / "media" / md5
+            d = media.export_root() / md5
             exists = d.exists()
             entries.append(ChatEntry(
                 item["account"], item["chat_id"], md5, counts, counts["messages"],

@@ -710,7 +710,7 @@ def _cmd_purge_excluded() -> int:
 
 
 def _cmd_purge_chat(args: argparse.Namespace) -> int:
-    from . import messages, purge, store, usecases
+    from . import media, messages, purge, store, usecases
     targets = usecases.purge_chat_targets(args.chat, account=args.account)
     if isinstance(targets, usecases.NeedConfirm):
         return _need_confirm(args.chat, targets)
@@ -736,7 +736,7 @@ def _cmd_purge_chat(args: argparse.Namespace) -> int:
         # 这句提示不该把命令本身弄成失败。
         left = []
         for t in targets:
-            d = paths.HOME_DIR / "media" / messages.chat_md5(t["chat_id"])
+            d = media.export_root() / messages.chat_md5(t["chat_id"])
             try:
                 if purge._name_there(d):
                     left.append(d)
