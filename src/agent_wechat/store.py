@@ -328,7 +328,7 @@ def chat_row_counts(con: sqlite3.Connection, account: str, chat_id: str) -> dict
     用 `md5_of` 会对 `md5:<hex>` 再哈希一次、得到错的 md5）。就地派生而不是加一个参数，
     是为了不动这个方法已有的全部调用点。**不能用 `LIKE`**：`account` 里含 `_` 与 `%`。
     """
-    def n(sql, args):
+    def n(sql: str, args: tuple) -> int:
         return con.execute(sql, args).fetchone()[0]
     acct_chat = f"{account}|{messages.chat_md5(chat_id)}"
     pref = acct_chat + "|"

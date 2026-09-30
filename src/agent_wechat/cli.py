@@ -672,7 +672,7 @@ def _render_chat_plan(plan: purge.ChatPlan, query: str) -> None:
     print("删的是本工具的副本，不是微信里的记录（微信容器恒只读）。")
 
 
-def _render_chat_reports(reports) -> None:
+def _render_chat_reports(reports: tuple[purge.ChatReport, ...]) -> None:
     """执行结果**逐条**打出来：哪个账号删掉了哪些行、墓碑新写了多少、导出物删没删掉。"""
     print("\n已执行：")
     for r in reports:
