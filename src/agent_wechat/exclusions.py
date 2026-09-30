@@ -111,7 +111,7 @@ def remove_chat(con: sqlite3.Connection, account: str, chat_md5: str) -> int:
     """按 `msg_key` 前缀删该会话的全部条目——**不用 LIKE**：`_` 与 `%` 都是通配符。
 
     **不用 `account=? AND chat_md5=?`**：那两个派生列只有忠实（逐字等于 `msg_key` 的前两段）
-    时才与前缀等价，而 §4 只是**要求**它们忠实——判据不该建立在一个「要求」上，何况
+    时才与前缀等价，而 design spec §4 只是**要求**它们忠实——判据不该建立在一个「要求」上，何况
     `store.delete_chat` / `store.chat_row_counts` 删/数同一件事时走的就是这条前缀。
     删除端与核查端读同一段 `msg_key`，两处就不可能对同一个会话给出不同的答案。
 
