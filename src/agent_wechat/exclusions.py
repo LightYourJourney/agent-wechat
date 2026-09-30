@@ -86,21 +86,41 @@ def add(con: sqlite3.Connection, rows: list[tuple[str, str, str]]) -> int:
     return len(rows)
 
 
+def _chat_prefix(account: str, chat_md5: str) -> tuple[int, str]:
+    """`(前缀长度, 前缀)` 二元组，供 `substr(msg_key, 1, ?) = ?` 用。
+
+    `count_chat` 与 `remove_chat` 共用它：两者的谓词必须同源，一旦分道扬镳，
+    「预览说 N 条、实际删掉 M 条」这种各说各话就会成立。
+    """
+    pref = f"{account}|{chat_md5}|"
+    return (len(pref), pref)
+
+
 def count_chat(con: sqlite3.Connection, account: str, chat_md5: str) -> int:
-    """该会话在清单里有多少条——**与 `remove_chat` 同一个谓词**，两者必须同源。
+    """该会话在清单里有多少条——**与 `remove_chat` 同一个谓词**（见 `_chat_prefix`）。
 
     此前这条计数写在入口层（`cli._cmd_purge_chat_undo` 的行内 SQL），与删除分处两个文件：
     预览说 N 条、实际删掉 M 条这种各说各话，正是「两处各写一遍同一个判据」的产物。
     """
-    return con.execute(
-        "SELECT count(*) FROM exclusions.excluded WHERE account=? AND chat_md5=?",
-        (account, chat_md5)).fetchone()[0]
+    n, pref = _chat_prefix(account, chat_md5)
+    return con.execute("SELECT count(*) FROM exclusions.excluded "
+                       "WHERE substr(msg_key, 1, ?) = ?", (n, pref)).fetchone()[0]
 
 
 def remove_chat(con: sqlite3.Connection, account: str, chat_md5: str) -> int:
-    """按 `(account, chat_md5)` 精确删——**不用 LIKE**：`_` 与 `%` 都是通配符。"""
-    cur = con.execute("DELETE FROM exclusions.excluded WHERE account=? AND chat_md5=?",
-                      (account, chat_md5))
+    """按 `msg_key` 前缀删该会话的全部条目——**不用 LIKE**：`_` 与 `%` 都是通配符。
+
+    **不用 `account=? AND chat_md5=?`**：那两个派生列只有忠实（逐字等于 `msg_key` 的前两段）
+    时才与前缀等价，而 §4 只是**要求**它们忠实——判据不该建立在一个「要求」上，何况
+    `store.delete_chat` / `store.chat_row_counts` 删/数同一件事时走的就是这条前缀。
+    删除端与核查端读同一段 `msg_key`，两处就不可能对同一个会话给出不同的答案。
+
+    谓词与 `_write_tombstone` 的 `INSERT … SELECT` 也同源：那条写的是
+    `account|chat_md5|…` 形态的 `msg_key`，前缀删与它天然配对。
+    """
+    n, pref = _chat_prefix(account, chat_md5)
+    cur = con.execute("DELETE FROM exclusions.excluded WHERE substr(msg_key, 1, ?) = ?",
+                      (n, pref))
     return cur.rowcount
 
 

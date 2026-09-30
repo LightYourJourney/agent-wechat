@@ -68,6 +68,28 @@ def test_remove_chat_is_exact_match_not_like(tmp_path):
     assert left == ["abc"], f"`a_c` 的前缀误伤了别的账号：{left}"
 
 
+def test_chat_ops_go_by_msg_key_prefix_not_the_derived_columns(tmp_path):
+    """判据是 `msg_key` 前缀，不是 `account` / `chat_md5` 两个派生列（spec §5.6）。
+
+    两列只有**忠实**（逐字等于 `msg_key` 的前两段）时才与前缀等价，而 §4 只是**要求**
+    它们忠实——`store.delete_chat` / `store.chat_row_counts` 删/数同一件事走的都是前缀，
+    撤销端换成派生列就成了同一件事的第二套判据。
+
+    判别法：把谓词改回 `account=? AND chat_md5=?`，下面那行**派生列故意写错**的墓碑
+    就既数不到、也删不掉（计数与删除必须一起改——只改一个，预览与实际删掉的条数分家）。
+    """
+    import sqlite3
+    con = sqlite3.connect(str(tmp_path / "x.db"))
+    con.execute("ATTACH DATABASE ? AS exclusions", (str(tmp_path / "ex.db"),))
+    con.executescript(exclusions.SCHEMA)
+    exclusions.add(con, [("a|m1|message_0.db|1", "别的账号", "别的md5"),   # 派生列失真
+                         ("a|m2|message_0.db|1", "a", "m2")])
+    assert exclusions.count_chat(con, "a", "m1") == 1
+    assert exclusions.remove_chat(con, "a", "m1") == 1
+    assert exclusions.count_chat(con, "a", "m1") == 0
+    assert exclusions.count_chat(con, "a", "m2") == 1, "别的会话不该被前缀误伤"
+
+
 def test_connect_attaches_and_creates_the_table(tmp_path):
     """`store.connect()` 之后，排除表必须在同一个连接上可见、且已建好。"""
     from agent_wechat import store
