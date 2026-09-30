@@ -1329,6 +1329,69 @@ def test_purge_chat_dry_run_shows_the_resolved_identity_and_the_moments_warning(
     assert (home / "index.db").stat().st_size > 0        # 一个字节没删
 
 
+def test_purge_chat_plan_warns_about_the_write_lock(tmp_path, monkeypatch, capsys):
+    """spec §5.3 点名要求计划表写明的这一句：「执行期间正在跑的导出任务会因写锁而失败」。
+
+    为什么非印不可：purge 在读任何东西**之前**就 `BEGIN IMMEDIATE` 取写锁（SQLite 同时只
+    允许一个写者），正在跑的导出下一批写入会等满 5 秒然后 `database is locked`；而**提前
+    拦截做不到**——purge 是独立进程，`tasks` 注册表一读就把磁盘上的 running 改判成 failed。
+    于是这张表是用户唯一能提前知道的出口。判别法：删掉那行 print，这条当场红。
+    """
+    _isolate(tmp_path, monkeypatch)
+    from agent_wechat import messages
+    with store.open() as con:
+        store.upsert_batch(con, [_chat_row(1)])
+    monkeypatch.setattr(usecases, "purge_chat_targets", lambda *a, **kw: [
+        {"account": "a", "chat_id": "victim", "chat_md5": messages.md5_of("victim")}])
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["purge", "--chat", "小李"])
+    assert ei.value.code == 0
+    out = capsys.readouterr().out
+    assert "执行期间正在跑的导出任务会因写锁而失败" in out, \
+        "spec §5.3 要求计划表写明这一句（另一侧无法阻止，只能先说）"
+    assert "写锁" in out and "导出" in out
+
+
+def test_purge_chat_with_no_messages_still_plans_and_removes_the_export(
+        tmp_path, monkeypatch, capsys):
+    """**空会话不许早退**（spec §5.7 / 评审 §2.1.2）：计划表照印、导出物照删、退 0。
+
+    可达形态（就是这条夹具）：索引还在，但这个会话**一条消息都没有**——`purge --index`
+    之后索引被逐会话重建、它还没被重新导出。此时 `media/<md5>/` 里解密出的图/语音/HTML
+    仍摊在盘上，而「没有可删的东西 + 退 0」的实现一个字都不说、也一个字节都不删。
+
+    判别性：退回早退版（stderr 一句、退 0）之后，这条在**三处**同时红——没有计划表那一行、
+    导出目录还在、`--yes` 的退出码仍然 0 但什么都没删。
+    """
+    home = _isolate(tmp_path, monkeypatch)
+    from agent_wechat import exclusions, messages
+    md5 = messages.chat_md5("victim")
+    d = home / "media" / md5
+    d.mkdir(parents=True)
+    (d / "chat.html").write_bytes("<html>解密后的会话</html>".encode())
+    with store.open() as con:                  # 索引在，但这个会话一行都没有
+        store.upsert_batch(con, [_chat_row(1, chat_id="别的会话")])
+    _stub_resolution(monkeypatch, "victim")    # 不桩 purge_chat_targets：要跑的正是空集那条路
+
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["purge", "--chat", "小李"])
+    assert ei.value.code == 0
+    out = capsys.readouterr().out
+    assert "victim" in out, "计划表第一行仍要印解析真身（销毁不可逆）"
+    assert str(d) in out, "导出物那一行必须印出来——它就是这一趟唯一要删的东西"
+    assert "0 条" in out
+    assert d.exists(), "dry-run 不许删东西"
+
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["purge", "--chat", "小李", "--yes"])
+    assert ei.value.code == 0
+    assert not d.exists(), "AC2 的「导出目录消失」在空会话形态下也必须可达"
+    with store.open() as con:
+        assert exclusions.count(con) == 0, "没有消息就没有墓碑可写（spec §5.7）"
+        assert con.execute("SELECT count(*) FROM messages").fetchone()[0] == 1, \
+            "别的会话一个字节都不许动"
+
+
 def test_purge_undo_needs_the_chat_flag(tmp_path, monkeypatch, capsys):
     """`--undo` 只对会话有意义（评审 F2）。
 

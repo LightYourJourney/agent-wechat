@@ -996,6 +996,9 @@ def chat_index(out_dir: str | None = None, account: str | None = None) -> ChatIn
 def purge_chat_targets(contact: str, account: str | None = None) -> list[dict] | NeedConfirm:
     """会话名 → 每个**索引里（或排除清单里）有它**的账号各一条 {account, chat_id, chat_md5}。
 
+    **空集也回一条**（`account` 为空串，见下），所以调用方拿到的列表恒非空：会话名解析
+    不出会抛 `ContactNotFound`、有歧义会回 `NeedConfirm`，两者都不走这条路。
+
     `chat_md5` 走 **`messages.chat_md5()`**，不是 `messages.md5_of()`：后者对退化形态
     （`md5:<hex>`，`degraded_chat_id` 的产物）会**再哈希一次**，得到一个错的 md5。
     错法是静默的——`media/<chat_md5>/` 指向不存在的目录、导出物删不掉，而核查会报
@@ -1007,8 +1010,7 @@ def purge_chat_targets(contact: str, account: str | None = None) -> list[dict] |
     **`exclusions.excluded` 那一支不能省**：`--undo` 的存在理由就是「一次误删之后」
     （spec §5.6），而那时这个会话在 `messages` 里**一条都不剩**——只按 messages 找会话的话，
     撤销会拿到空清单、报一句「没有可删的东西」并退 0，墓碑原样留着，而用户以为已经撤销。
-    这一支不会留下删不掉的残留：`--undo` 按 (account, chat_md5) 把墓碑删干净之后，
-    这个账号下一次就不在并集里了。
+    这一支不会留下删不掉的残留：`--undo` 把这批墓碑删干净之后，这个账号下一次就不在并集里了。
 
     **`index.db` 不存在时一个字节都不许建**：`store.open()`（→ `store.connect()` →
     `executescript(SCHEMA)`）会把刚被 `purge --index` 删掉的索引连 schema 一起建回来，
@@ -1042,6 +1044,15 @@ def purge_chat_targets(contact: str, account: str | None = None) -> list[dict] |
             hint="确认 index.db 可读、且没有别的进程正在写它（导出任务 / MCP server）；"
                  "库损坏（file is not a database 等）时先 purge --index 删掉再重跑 export"
         ) from exc
+    if not rows:
+        # 空集**不是「无事可做」**，恰好相反：索引里没有活行，不代表 `media/<md5>/` 不在盘上
+        # ——`purge --index` 之后逐会话重建的那个窗口里，解密出的图片/语音/HTML 还摊在盘上，
+        # 而命令会报一句「没有可删的东西」退 0（spec §5.7 只要求「不写墓碑」，没要求跳过
+        # 计划与核查）。所以这里回一条**账号为空**的目标，让计划 → 执行 → 核查照常走一遍：
+        # 导出物只取决于 chat_md5、与账号无关，于是计划表印得出那一行、`--yes` 删得掉它。
+        # 索引侧各项恒为 0 且不会误伤——`account` 是账号目录名，生产上不可能为空，所以
+        # `account=''` / 前缀 `'|md5|'` 一个真实行都命不中；墓碑也因此自然为 0 条。
+        return [{"account": "", "chat_id": chat_id, "chat_md5": md5}]
     return [{"account": r[0], "chat_id": chat_id, "chat_md5": md5} for r in rows]
 
 

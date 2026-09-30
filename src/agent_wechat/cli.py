@@ -652,11 +652,15 @@ def _render_chat_plan(plan: purge.ChatPlan, query: str) -> None:
     # 不可逆——用户必须当场看见删的是谁，且一个会话名可能对应多个账号的同一份副本。
     print(f"将删除（会话：{query} → {plan.entries[0].chat_id}）：")
     for e in plan.entries:
-        print(f"  账号 {e.account}")
-        for key, label, note in _CHAT_TABLES:
-            n = e.counts.get(key, 0)
-            print(f"    {label:<12} {n:>7,} 条"
-                  f"{'    ' + note if note and n else ''}")
+        # 账号为空串 = 索引里没有任何账号有这个会话（`purge_chat_targets` 的「空集也回一条」，
+        # 为的是这条会话的导出物仍进计划）。此时没有账号块可印，但下面的导出物那一行照常
+        # ——它只取决于 chat_md5、与账号无关，而它恰恰是这一趟唯一要删的东西。
+        if e.account:
+            print(f"  账号 {e.account}")
+            for key, label, note in _CHAT_TABLES:
+                n = e.counts.get(key, 0)
+                print(f"    {label:<12} {n:>7,} 条"
+                      f"{'    ' + note if note and n else ''}")
     for d, (size, exists) in _chat_export_dirs(plan).items():
         # 体积为 0 或「不存在」时印 —（与 _render_plan 同款）：0 B 会被读成「空目录」，
         # 而这里的事实是「这个目录根本不在」。
@@ -669,6 +673,14 @@ def _render_chat_plan(plan: purge.ChatPlan, query: str) -> None:
     # 会话后那个人的动态与互动仍可能躺在里面——不说清楚，用户会以为清干净了（spec §3.1）。
     print("\n⚠️ 不在本范围内：朋友圈导出（moments/ 是一份 HTML 装所有人，不按会话分目录）"
           "——\n   那个人的动态与互动**仍可能留在其中**。")
+    # 这一句是 spec §5.3 点名要求写进计划表的（原文：「另一侧无法阻止，所以计划表要写明：
+    # 执行期间正在跑的导出任务会因写锁而失败」）。它说的是**本命令对别人做了什么**：
+    # 读任何东西之前就 `BEGIN IMMEDIATE` 取写锁（SQLite 同时只允许一个写者），于是正在跑的
+    # export 的下一批写入会等满 Python sqlite3 的默认 timeout=5 秒，然后抛 `database is locked`。
+    # 提前拦截做不到——purge 是独立进程，`tasks._ensure_loaded()` 一读磁盘就把 running 改判
+    # 成 failed（spec §5.3 末段），所以唯一诚实的做法就是把它印在用户据以说 --yes 的那张表上。
+    print("⚠️ 执行期间正在跑的导出任务会因写锁而失败——本命令先取写锁再读，"
+          "同一时刻只有一个写者；\n   等导出跑完再执行，或让它下一轮重试。")
     print("删的是本工具的副本，不是微信里的记录（微信容器恒只读）。")
 
 
@@ -676,9 +688,10 @@ def _render_chat_reports(reports: tuple[purge.ChatReport, ...]) -> None:
     """执行结果**逐条**打出来：哪个账号删掉了哪些行、墓碑新写了多少、导出物删没删掉。"""
     print("\n已执行：")
     for r in reports:
-        print(f"  账号 {r.account}")
-        for key, label, _ in _CHAT_TABLES:
-            print(f"    {label:<12} {r.deleted.get(key, 0):>7,} 行已删除")
+        if r.account:      # 空串 = 索引侧无事可做（同 _render_chat_plan），不印空的账号块
+            print(f"  账号 {r.account}")
+            for key, label, _ in _CHAT_TABLES:
+                print(f"    {label:<12} {r.deleted.get(key, 0):>7,} 行已删除")
         # tombstone 是**本次真正新写进去的**条数（重跑同一个会话时为 0，幂等，spec §5.7）：
         # 「该会话当前被挡住多少条」是核查那一侧的事，这里混着说会让重跑看起来像又挡了一批。
         print(f"    本次新写入排除：{r.tombstone:,} 条")
@@ -715,11 +728,14 @@ def _cmd_purge_chat(args: argparse.Namespace) -> int:
     if isinstance(targets, usecases.NeedConfirm):
         return _need_confirm(args.chat, targets)
     if not targets:
-        # 「这个会话在索引里一条消息都没有」与「它一条都没被排除过」都要点到：后者是
-        # `--undo` 的空集形态，只说「没有可删的东西」会让用户以为撤销也没戏。
-        print(f"索引里没有会话「{args.chat}」的任何消息，排除清单里也没有它的条目"
-              "——没有可删的东西。", file=sys.stderr)
-        return 0
+        # 契约：`purge_chat_targets` 对「索引里一条消息都没有」的会话也会回**一条**目标
+        # （账号为空串；导出物只取决于 chat_md5，与账号无关）。走到这里说明那条契约破了。
+        # **不许退回「stderr 一句 + 退 0」**——那正是本轮修掉的缺陷形态：索引已重建、
+        # `media/<md5>/` 还在盘上时，命令报「没有可删的东西」，而解密出的图/语音/HTML
+        # 原封不动，还没有一个字说破。
+        raise errors.PurgeRefused(
+            f"解析不出会话「{args.chat}」的销毁目标",
+            hint="索引与排除清单里都没有它——这不是预期形态，请报告这个形状")
     if args.undo:
         return _cmd_purge_chat_undo(targets, yes=args.yes)
     if not store.DB_PATH.exists():
@@ -791,7 +807,8 @@ def _cmd_purge_chat_undo(targets: list[dict], *, yes: bool) -> int:
     n = sum(e.count for e in per)
     print(f"将解除排除：{n} 条")
     for e in per:
-        print(f"  {e.account}  {e.chat_md5}  {e.count} 条")
+        if e.account:      # 空串 = 索引里没有它、清单里也没有（同 _render_chat_plan）
+            print(f"  {e.account}  {e.chat_md5}  {e.count} 条")
     print("⚠️ 这**不会**把数据找回来——被删的消息要重跑 `export --full` 才回来"
           "（那时它们不再被排除）。")
     if not yes:
