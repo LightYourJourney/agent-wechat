@@ -165,9 +165,19 @@
 
 `~/.claude/projects`、`~/.claude/file-history`、`~/.claude/plans`、`~/.claude/history.jsonl`、
 `~/.claude/bash-commands.log`、`~/.claude/cost-tracker.log`、`~/.codex/sessions`。
-**这七条已移出 Time Machine 备份范围，但转录本身仍在盘上**（见上表「会话转录」行）；
-`~/.claude/plugins`、`~/.claude/skills`、`~/.codex/plugins` **不在**清单里，仍是 `[Included]`
-——粒度判据是「承载对话内容的目录出备份，配置与插件照常备份」。
+**这七条现均在 Time Machine 排除范围内**（2026-10-10 实测），**但转录本身仍在盘上**
+（见上表「会话转录」行）；`~/.claude/plugins`、`~/.claude/skills`、`~/.codex/plugins`
+**不在**清单里，仍是 `[Included]`——粒度判据是「承载对话内容的目录出备份，配置与插件照常备份」。
+
+**其中 `~/.claude/bash-commands.log` 这条排除是脆的，不是一次做完就完事。** 它是活跃日志：
+Time Machine 的排除是绑在 **inode** 上的扩展属性，文件一旦被重建（换了个 inode），排除就
+随旧 inode 一起消失。本机实测发生过一次——该文件 2026-09-30 14:42:59 被重建，排除当场失效，
+直到 10-10 复查才发现。所以这条要**定期复查、丢了重做**：
+
+- 判据：`tmutil isexcluded <路径>`（答 `[Excluded]` / `[Included]`）；
+  **不要用 `xattr -p com_apple_backup_excludeItem <路径>`**——真实属性名带
+  `com.apple.metadata:` 前缀，短名恒返回「无」，拿它判会把已排除的路径读成没排除；
+- 补做：`tmutil addexclusion <路径>`。
 
 **用户侧建议**：
 
@@ -201,7 +211,7 @@
 |---|---|---|
 | 1 | `--out DIR` 导出（`moments` / `media` / `chat export` / `decrypt --out`） | **无**。明文写到任意目录，不受 Time Machine 排除、不受 `purge` 覆盖，**只靠人记得删**。刻意不加自动排除：一次性目录加上排除只会留下悬空配置 |
 | 2 | **git 提交**（含提交信息） | `pre-commit` + `commit-msg` 两个钩子，命中即拦。**这是本仓库唯一反复复发过的出口（2026-09-13 / 09-17 / 09-27 三次）**。⚠️ **两个钩子都不入本仓库**（它们写在共享 hooks 目录里，不受版本控制），**每个 clone / 每台机器都要按 `security/README.md` 重装**；**截至本次提交它们尚未安装**——在装上之前，这一行的机制**实际是零**，git 出口没有任何自动拦截 |
-| 3 | 备份 | 承载内容的位置已 `tmutil addexclusion`（见 §4）。**清单是短的、人工确认的**——不要照抄扫描输出（扫描会把第三方插件夹具也列进来） |
+| 3 | 备份 | 承载内容的位置已 `tmutil addexclusion`（见 §4），**当下七条全在排除范围内**。⚠️ 其中 `~/.claude/bash-commands.log` 是**活跃日志**：文件重建后排除随旧 inode 一起丢失（实测发生过一次），**要定期用 `tmutil isexcluded` 复查、丢了就 `tmutil addexclusion` 重做**。**清单是短的、人工确认的**——不要照抄扫描输出（扫描会把第三方插件夹具也列进来） |
 | 4 | `/tmp` | 一次性清理，不改配置。系统重启也会清 |
 | 5 | MCP 信封 → LLM | **无机制，且已不可撤回**（见 §1） |
 
