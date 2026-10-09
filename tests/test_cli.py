@@ -1769,7 +1769,7 @@ def test_purge_chat_without_an_index_names_the_leftover_export(tmp_path, monkeyp
 
     不说这句，用户会把「没有活消息可删」读成「这个会话在本工具里什么都不剩了」——而那份
     解密后的图/视频/语音（外加双击就能打开的 HTML）还摊在盘上，且本命令这一支一个字节
-    都不会动它。判据走 `purge._name_there`（不跟随符号链接）：这里用**悬空符号链接**钉住
+    都不会动它。判据走 `purge.name_there`（不跟随符号链接）：这里用**悬空符号链接**钉住
     这一点——`exists()` 会说「不在」，而那个名字确实还在。
     """
     home = _isolate(tmp_path, monkeypatch)

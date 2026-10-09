@@ -750,7 +750,7 @@ def _cmd_purge_excluded() -> int:
 
 
 def _cmd_purge_chat(args: argparse.Namespace) -> int:
-    from . import media, messages, purge, store, usecases
+    from . import purge, store, usecases
     targets = usecases.purge_chat_targets(args.chat, account=args.account)
     if isinstance(targets, usecases.NeedConfirm):
         return _need_confirm(args.chat, targets)
@@ -774,14 +774,16 @@ def _cmd_purge_chat(args: argparse.Namespace) -> int:
         # **导出物与索引库无关**：它落在 `media/<会话md5>/` 下，索引库不在并不会让它消失。
         # 不说这句，用户会把「没有活消息可删」读成「这个会话在本工具里什么都不剩了」——
         # 而那份解密后的图/视频/语音（外加可直接打开的 HTML）还摊在盘上（M-3）。
-        # 判据走 purge 的那一个 `_name_there`：不跟随符号链接、也不把 EACCES 吞成「不在」
+        # 判据走 purge 的那一个 `name_there`：不跟随符号链接、也不把 EACCES 吞成「不在」
         # （CLI 不另写一套存活判据，同 M-4 的理由）；它抛 `OSError` 时什么都不说——
         # 这句提示不该把命令本身弄成失败。
+        # 目录同样走 purge 的那一个 `chat_export_dir`：导出根与会话 md5 的单一来源都在 core
+        # （CLI 自己拼一遍就是同一件事的第二个说法，改了一处漏一处的老毛病）。
         left = []
         for t in targets:
-            d = media.export_root() / messages.chat_md5(t["chat_id"])
+            d = purge.chat_export_dir(t["chat_id"])
             try:
-                if purge._name_there(d):
+                if purge.name_there(d):
                     left.append(d)
             except OSError:
                 continue

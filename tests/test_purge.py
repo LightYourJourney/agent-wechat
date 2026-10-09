@@ -529,7 +529,7 @@ def test_verify_reports_surviving_loose_entry(tmp_path):
 
 def test_verify_reports_dangling_symlink_as_present(tmp_path):
     """断链的链接文件仍在盘上。exists() 跟随符号链接会判它「已删除」，而链接明明还在——
-    在这门专门用来抓假象的字段里制造假象，故用不跟随链接的判据（`_name_there`）。"""
+    在这门专门用来抓假象的字段里制造假象，故用不跟随链接的判据（`name_there`）。"""
     home = tmp_path / "home"; home.mkdir(parents=True)
     (home / "passphrase.json").symlink_to(home / "gone.json")   # 目标不存在
     rep = purge.verify(purge.plan(frozenset({"keys"})))
@@ -1123,7 +1123,7 @@ def test_execute_chat_contains_a_failing_export_recheck(tmp_path, monkeypatch):
 
     **这是一条注入式判据，不是真 TOCTOU 夹具**：单线程里造不出「`rmtree` 先以 ENOENT 失败、
     紧接着父目录又不可搜索/不再是目录」那个窗口（把 `media` 换成普通文件的话，`rmtree` 先抛的
-    是 `NotADirectoryError`，根本走不到这个 handler）。所以把 `_name_there` 换成抛异常的桩。
+    是 `NotADirectoryError`，根本走不到这个 handler）。所以把 `name_there` 换成抛异常的桩。
     判据本身是**真**的：Python 里处理器内抛出的异常不走同一 try 的同级 handler，没有那层兜底
     它就会裸穿出去（删掉兜底那条 `except OSError` 即红），而那正是「core 层只抛项目异常」的
     契约——同一个 EACCES 从 `rmtree` 来是 `removed = False`、从 `lstat` 来却是裸异常，太不一致。
@@ -1142,7 +1142,7 @@ def test_execute_chat_contains_a_failing_export_recheck(tmp_path, monkeypatch):
     def boom(_p):
         raise PermissionError(13, "Permission denied（桩）")
 
-    monkeypatch.setattr(purge, "_name_there", boom)
+    monkeypatch.setattr(purge, "name_there", boom)
     report = purge.execute_chat(plan)
     assert report[0].export_removed is False, \
         "判不出来 = 没删掉：不许报成功，更不许把裸 OSError 抛出 execute_chat"
