@@ -168,9 +168,17 @@
   "started_at": 1789044000, "finished_at": 1789044110, "error": null }
 ```
 
-`status`: `running` / `done` / `failed`；失败时 `error` 含中文原因。向量索引任务
-（`kind: "vector"`）额外带 `rebuild`，`rows` 为本轮**已嵌入行数**，`skipped` 为**本轮**按
-规则跳过的行数（非文本/无标题的 appmsg、正文短于 2 字符的消息）。
+`status`: `running` / `done` / `failed`；失败时 `error` 含中文原因。`rows` 与 `skipped`
+**按 kind 各有各的口径，别混用**：
+
+- `kind: "export"`（`export_full_history`）：`rows` = 本轮**实际写入索引的行数**——
+  不是「读到多少行」。被排除清单挡下的行（已销毁会话的那些）不计入，所以它不再等于
+  导出扫描过的行数。有行被挡下时另带 `skipped` = 被挡下的**行数**；挡下 0 行时不出这个
+  字段。口径是**跨表**的：消息行与属于它们的媒体引用行都在内，故 `skipped` ≥ 被挡下的
+  消息行数（量词只能是「行」，同 CLI 的 `_note_skipped`）。
+- `kind: "vector"`（`build_vector_index`）：`rows` = 本轮**已嵌入行数**，`skipped` =
+  **本轮**按规则跳过的行数（非文本/无标题的 appmsg、正文短于 2 字符的消息）；该任务
+  额外带 `rebuild`。
 
 ---
 

@@ -211,8 +211,8 @@
 - **`rows` 的语义随之变了**（CLI 与 MCP 同源，有意为之，spec §5.4）：`export_full_history`
   完成后的任务 `rows` 读的就是上面那个返回值，于是从「**读到**多少行」变成「**写入**多少行」；
   CLI 侧同源的还有 `appmsg rebuild`——`parts` 报的是**落库**条数，被墓碑挡下的不再计进去。
-  MCP 面没有单独的文档承诺（`get_task_status` 只列字段名），agent 若据 `rows` 判断导入了多少，
-  读到的就是新口径
+  **MCP 面的承诺补在 `docs/TOOLS.md` §5**（两个 kind 的 `rows` 分开写清，并记上被排除挡下
+  时随任务记录带回的 `skipped`），agent 若据 `rows` 判断导入了多少，读到的就是新口径
 - 只做 CLI，MCP 工具面零变化
 
 ### 群成员显示名
