@@ -6,7 +6,13 @@
   1. 纯标准库，且兼容 Python 3.9（钩子可能落到 /usr/bin/python3 = 3.9.6）
   2. **默认绝不打印命中值本身**——打印了，它自己就成了出口（spec §4.4）
   3. fail-closed：任何内部错误都非 0 退出，且与「发现泄漏」用不同退出码（spec §4.5）
+
+**类型注解齐全**（docs/CONTRIBUTING.md §6），但注解**一律不得在运行时求值**：本文件要能在
+3.9.6 上 import（上面第 1 条），而 `X | None` 这类写法在 3.9 的求值位置会抛 `TypeError`。
+`from __future__ import annotations`（3.7+、纯标准库）把注解推迟成字符串，正好满足两边。
 """
+from __future__ import annotations
+
 import argparse
 import hashlib
 import re
@@ -52,12 +58,12 @@ class ScannerError(Exception):
     """扫描器自身出错——与「发现泄漏」是两回事（退出码 2 对 1）。"""
 
 
-def fingerprint(value):
+def fingerprint(value: str) -> str:
     """值的稳定不透明标识。用它代替值本身出现在输出里（spec §4.4）。"""
     return hashlib.sha256(value.encode("utf-8")).hexdigest()[:8]
 
 
-def hits_in_text(text):
+def hits_in_text(text: str) -> list[tuple[int, int, str, str]]:
     """→ [(start, end, shape, value)]，按出现位置排序。"""
     found = []
     for shape, pattern in PATTERNS:
@@ -67,7 +73,7 @@ def hits_in_text(text):
     return found
 
 
-def _git(*args):
+def _git(*args: str) -> str:
     exe = shutil.which("git")
     if exe is None:
         raise ScannerError("PATH 上找不到 git；本扫描器需要 git 来枚举文件与读取 diff")
@@ -79,19 +85,19 @@ def _git(*args):
     return r.stdout
 
 
-def _tracked_files():
+def _tracked_files() -> list[str]:
     """tracked 文件——正是「可能被提交」的那一面，.gitignore 天然生效。"""
     return [p for p in _git("ls-files", "-z").split("\0") if p]
 
 
-def _read(path):
+def _read(path: Path) -> str | None:
     try:
         return path.read_text(encoding="utf-8")
     except (UnicodeDecodeError, OSError):
         return None          # 二进制 / 不可读：跳过，不算错误
 
 
-def scan_repo():
+def scan_repo() -> list[tuple[str, int, str, str]]:
     """→ [(relpath, lineno, shape, value)]。
 
     **只跳过 `security/allowlist.txt` 与 `SKIP_NAMES` 里的生成文件**：前者是
@@ -119,7 +125,7 @@ def scan_repo():
     return out
 
 
-def collect_values():
+def collect_values() -> dict[str, dict]:
     """逐值汇总（spec §4.4 的 --values 视图）。
 
     返回的 value 只在内存里流转——任何出口都必须先过 fingerprint()。
@@ -136,7 +142,7 @@ def collect_values():
     return agg
 
 
-def load_allowlist(path=None):
+def load_allowlist(path: str | Path | None = None) -> set[str]:
     """→ set(值)。`#` 起注释；第一个空白之前的 token 是值，其后是说明。
 
     文件不存在时返回空集：效果是「全部按未登记处理」，方向是 fail-closed（spec §4.3）。
@@ -152,7 +158,7 @@ def load_allowlist(path=None):
     return values
 
 
-def allow_value(key):
+def allow_value(key: str) -> str:
     """把 fingerprint == key 的值写进豁免清单。返回写入的行（**调用方不得打印它**）。
 
     **为什么编号是 sha256[:8] 指纹，而不是递增序号**：序号会**随命中集合漂移**——
@@ -176,7 +182,7 @@ def allow_value(key):
     return line
 
 
-def verify_allowlist():
+def verify_allowlist() -> list[str]:
     """spec §4.3 不变式 1 → 死条目的指纹列表。
 
     判据是 scan_repo() 的产物；它**刻意跳过 allowlist.txt 自身**，否则清单里每一项
@@ -193,7 +199,7 @@ def verify_allowlist():
     return sorted(fingerprint(v) for v in load_allowlist() - seen)
 
 
-def _b_side_path(token):
+def _b_side_path(token: str) -> str | None:
     """二进制行里的 `b/<路径>` → `<路径>`；删除那一侧是 `/dev/null` → None。"""
     token = token.strip()
     if len(token) >= 2 and token.startswith('"') and token.endswith('"'):
@@ -203,7 +209,7 @@ def _b_side_path(token):
     return token[2:] if token.startswith("b/") else token
 
 
-def staged_added_lines(diff_text=None):
+def staged_added_lines(diff_text: str | None = None) -> list[tuple[str, int, str]]:
     """→ [(relpath, lineno, text)]，**只含新增行**（spec §4.4：不必为文件旧账负责）。
 
     **`+++ ` 只在「本文件的第一个 hunk 之前」才算文件头。**
@@ -279,7 +285,7 @@ def staged_added_lines(diff_text=None):
     return out
 
 
-def text_hits(path):
+def text_hits(path: str | Path) -> list[tuple[str, int, str, str]]:
     """扫一个给定文件（用于 commit-msg 的提交信息）。→ [(relpath, lineno, shape, value)]"""
     p = Path(path)
     try:
@@ -293,7 +299,7 @@ def text_hits(path):
             for _, _, shape, value in hits_in_text(line)]
 
 
-def _build_parser():
+def _build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description="扫描形状像真机标识的字符串（绝不打印值）")
     ap.add_argument("--all", action="store_true",
                     help="扫全部 tracked 文件（逐处）——这是**默认行为**，本开关保留为显式别名")
@@ -308,7 +314,7 @@ def _build_parser():
     return ap
 
 
-def _run(args):
+def _run(args: argparse.Namespace) -> int:
     if args.verify_allowlist:
         try:
             dead = verify_allowlist()
@@ -387,7 +393,7 @@ def _run(args):
     return EXIT_HITS if unregistered else EXIT_CLEAN
 
 
-def main(argv=None):
+def main(argv: list[str] | None = None) -> int:
     """薄壳：**任何**逃出 `_run` 的异常都以 `EXIT_ERROR` 退出。
 
     各分支内部仍保留自己的 `except Exception`（消息更具体）；这一层只作兜底，
