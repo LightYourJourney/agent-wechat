@@ -1385,3 +1385,32 @@ def test_verify_counts_the_tombstone_by_prefix_not_the_derived_columns():
     assert res.tombstone_written == 1, (
         f"msg_key 属于该会话，前缀就数得到它——派生列失真不该影响核查：{res}")
     assert res.tombstone_ok, "核查不该因为派生列失真而误报「不可逆性未建立」"
+
+
+def test_undo_chat_derives_the_md5_instead_of_trusting_the_target():
+    """`undo_chat` 的 `chat_md5` **就地派生**（`messages.chat_md5(t["chat_id"])`），不读入参
+    里那一个——与 plan / delete / verify 同一口径。
+
+    它是同族四个动作里唯一还信调用方的。今天生产调用方
+    （`usecases.purge_chat_targets`）传的值是对的，所以这是**潜在**缺陷；但 `--undo` 是误删
+    之后的救援路径，调用方哪天用 `md5_of` 解析退化会话名（`md5:<hex>`），传进来的 md5 就指向
+    另一个前缀——撤销**静默不生效**（一条都不删，输出还报「已解除 0 条」），而这是最不该
+    静默失败的那条路。
+
+    判别性：入参里故意把 `chat_md5` 写成 `"0"*32`，撤销照样要把该会话的墓碑删净；
+    实现换回 `t["chat_md5"]` 即红（返回的 `UndoEntry.chat_md5` 也会是那个错值——入口就是拿
+    它印给用户的）。
+    """
+    from agent_wechat import exclusions, store
+    rows = [_victim_row(n) for n in (1, 2)]
+    with store.open() as con:
+        store.upsert_batch(con, rows)
+        exclusions.add(con, [(r["msg_key"], "a", VICTIM_MD5) for r in rows])
+    wrong = "0" * 32
+    per = purge.undo_chat([{"account": "a", "chat_id": VICTIM, "chat_md5": wrong}], apply=True)
+    assert [e.chat_md5 for e in per] == [VICTIM_MD5], \
+        f"返回的必须是派生值（入口拿它印给用户）：{per}"
+    assert [e.count for e in per] == [2], per
+    with exclusions.standalone() as con:
+        assert exclusions.count(con) == 0, \
+            "入参 md5 写错也要撤销得了——判据按 chat_id 派生，不押在调用方身上"

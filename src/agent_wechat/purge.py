@@ -997,6 +997,12 @@ def undo_chat(targets: list[dict], *, apply: bool = False) -> tuple[UndoEntry, .
     `apply=False` 只数、一个字都不改（投币前的预览）；`apply=True` 删净并提交。两者返回
     的都是**删之前**数出来的条数——入口要把它印给用户（`0 条` 也是一种要印出来的事实）。
 
+    `chat_md5` **就地派生**（`messages.chat_md5(t["chat_id"])`），不用 `t["chat_md5"]`：
+    与 `plan_chat` / `verify_chat` / `store.chat_row_counts` / `store.delete_chat` 同一口径。
+    调用方哪天若用 `md5_of` 解析退化会话名（`md5:<hex>`），传进来的值指向另一个前缀——
+    撤销会**静默不生效**（一条都不删，输出报「已解除 0 条」），而 `--undo` 恰恰是误删之后
+    的救援路径，最不该静默失败（同 `plan_chat` 那段记的 F7 模式）。
+
     不写 `store.open()`：它的 `connect()` 会 `ensure_home_dirs()` + `executescript(SCHEMA)`，
     索引库不在时（`purge --index` 之后，而这正是撤销最可能被跑的时刻）会把刚删掉的
     `index.db` 连 schema 建回来——静默撤销那次索引 purge。走 `exclusions.standalone()`：
@@ -1004,9 +1010,11 @@ def undo_chat(targets: list[dict], *, apply: bool = False) -> tuple[UndoEntry, .
     """
     try:
         with exclusions.standalone() as con:
-            per = [UndoEntry(t["account"], t["chat_md5"],
-                             exclusions.count_chat(con, t["account"], t["chat_md5"]))
-                   for t in targets]
+            per = []
+            for t in targets:
+                md5 = messages.chat_md5(t["chat_id"])      # 就地派生，理由见 docstring
+                per.append(UndoEntry(t["account"], md5,
+                                     exclusions.count_chat(con, t["account"], md5)))
             if apply:
                 for e in per:
                     exclusions.remove_chat(con, e.account, e.chat_md5)
