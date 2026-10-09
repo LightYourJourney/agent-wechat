@@ -297,11 +297,17 @@ def export_history(contact: str | None = None, full: bool = False,
     plan = export_plan(contact=contact, full=full, account=account)
     if isinstance(plan, NeedConfirm):
         return plan
+
+    def _run(tid: str) -> int:
+        # 计数契约的两半（spec §5.4）：返回值只数**实际入库**的行，被排除挡下的另计并以
+        # `skipped` 随任务记录带回 MCP 信封（与 vector 任务同名字段——`tasks.status()`
+        # 原样透出，入口不需要再翻译）。只修 `rows` 那一半的话，agent 见数少了却不知道
+        # 少在哪：「导出成功」与实际发生的事不一致，正是 spec §7 要消灭的形态。
+        return export.run_export(plan.account, chat_id=plan.chat_id, full=plan.full,
+                                 on_skipped=lambda n: tasks.update(tid, skipped=n))
+
     # chat_id 一并记进任务元数据（tasks.json 已发布字段），与旧 export.start_task 一致
-    task_id = tasks.start(
-        "export",
-        lambda _tid: export.run_export(plan.account, chat_id=plan.chat_id, full=plan.full),
-        account=plan.account, chat_id=plan.chat_id)
+    task_id = tasks.start("export", _run, account=plan.account, chat_id=plan.chat_id)
     return {"task_id": task_id, "status": "running"}
 
 

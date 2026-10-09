@@ -197,7 +197,10 @@ def test_export_task_is_visible_through_get_task_status(monkeypatch, tmp_path):
     monkeypatch.setattr(tasks, "TASKS_FILE", tmp_path / "tasks.json")
     monkeypatch.setattr(tasks, "_loaded_path", None)
     monkeypatch.setattr(account, "resolve_account", lambda a: "acct")
-    monkeypatch.setattr(export, "run_export", lambda acct, chat_id=None, full=False: 3)
+    # 形参表必须跟着 export.run_export 走：runner 现在多传 on_skipped，桩不接就成
+    # `TypeError`→任务 failed，而本测试问的是**登记/持久化/查询**这条链，不是那个接线
+    monkeypatch.setattr(export, "run_export",
+                        lambda acct, chat_id=None, full=False, on_skipped=None: 3)
 
     res = _call(mcp_server.export_full_history)
     for _ in range(200):                      # 后台线程，等待完成

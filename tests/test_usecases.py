@@ -5,11 +5,13 @@ C2 的核心断言在这里：**同一个 contact + 同一个 limit，两个入�
 """
 import json
 import sqlite3
+import time
 from types import SimpleNamespace
 
 import pytest
 
-from agent_wechat import account, cli, errors, mcp_server, paths, reader, search, store, usecases, vector
+from agent_wechat import (account, cli, errors, mcp_server, messages, paths, reader, search,
+                          store, tasks, usecases, vector)
 # 合成微信目录（真实 sqlcipher 解密链路；路径全部指向 tmp_path，绝不碰真实数据）
 from test_reader_export_pipeline import ACCT, FRIEND, env, wechat  # noqa: F401
 
@@ -272,6 +274,67 @@ def test_export_without_contact_keeps_full_scope(stub):
     plan = usecases.export_plan(contact=None, full=True)
     assert (plan.account, plan.chat_id, plan.full) == ("acct", None, True)
     assert stub.get("readers") is None
+
+
+def _wait_done(tid, timeout=5.0):
+    """轮询到任务不再是 running。"""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        st = tasks.status(tid)
+        if st["status"] != "running":
+            return st
+        time.sleep(0.01)
+    raise AssertionError(f"任务 {tid} 未在 {timeout}s 内结束")
+
+
+def test_export_task_carries_skipped_rows_beside_rows(tmp_path, monkeypatch):
+    """计数契约的**另一半**（spec §5.4）：`rows` 只数实际入库的行，被排除挡下的那些另计、
+    并以一条降级报出。CLI 侧接了 `on_skipped`，MCP 侧此前没接——任务记录里只有变小了的
+    `rows`，agent 见数少了却不知道少在哪，正是「报告与事实不一致」。
+
+    判据落在**任务记录**上：种一个被排除的会话 + 一个正常的，跑 MCP 那条路
+    （`usecases.export_history` + 轮询到 done），断言 `skipped` = 被挡下的行数、`rows`
+    只数正常那个。去掉 runner 里的 `on_skipped`，`skipped` 键整个不存在，本测试即红。
+    """
+    from agent_wechat import exclusions
+    monkeypatch.setattr(tasks, "TASKS_FILE", tmp_path / "tasks.json")
+    monkeypatch.setattr(tasks, "_loaded_path", None)
+    monkeypatch.setattr(account, "resolve_account", lambda a: "acct")
+
+    def _row(md5, chat_id, local_id):
+        return {"msg_key": messages.row_key("acct", md5, "message_0.db", local_id),
+                "account": "acct", "chat_md5": md5, "chat_id": chat_id,
+                "shard": "message_0.db", "local_id": local_id, "server_id": local_id,
+                "ts": 100 + local_id, "msg_type": messages.TYPE_TEXT, "sender_id": None,
+                "sender_name": None, "is_self": 0, "content": "正文", "media_hint": None}
+
+    victim = messages.chat_md5("victim")
+    keep = messages.chat_md5("keep")
+    victim_rows = [_row(victim, "victim", n) for n in (1, 2)]
+    keep_rows = [_row(keep, "keep", n) for n in (1, 2, 3)]
+    # 墓碑必须种在 store.connect() 那条路上（run_export 内部走 store.open() → DB_PATH）
+    con = store.connect()
+    exclusions.add(con, [(r["msg_key"], "acct", victim) for r in victim_rows])
+    con.commit()
+    con.close()
+
+    class _R:
+        def __init__(self, acct):
+            pass
+
+        def iter_all(self, **kw):
+            yield victim_rows + keep_rows, []      # 微信库里那两条「还在」
+
+    monkeypatch.setattr(reader, "MessageReader", _R)
+
+    res = usecases.export_history(full=True)
+    st = _wait_done(res["task_id"])
+    assert st["status"] == "done", st
+    assert st["rows"] == len(keep_rows), f"rows 只数入库的：{st}"
+    assert st.get("skipped") == len(victim_rows), f"被挡下的行必须另计：{st}"
+    con = store.connect()
+    assert con.execute("SELECT count(*) FROM messages").fetchone()[0] == len(keep_rows)
+    con.close()
 
 
 # ---------- media_export：单会话 + limit 只余下界（CLI 与 MCP 共用此入口） ----------
