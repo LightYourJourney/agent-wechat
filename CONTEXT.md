@@ -58,7 +58,7 @@ MCP 与 CLI 两个入口共享的一层：参数归一化、账号/会话解析�
 
 ## 分区键（partition key）
 `vec_messages` 的 `acct_chat` 列，`"{account}|{chat_md5}"`——把 KNN 扫描面缩到单会话；
-构建与查询两侧共用。出处：`vector._acct_chat`、`store.VECTOR_SCHEMA`。
+构建与查询两侧共用。出处：`messages.acct_chat`、`store.VECTOR_SCHEMA`。
 
 ## 媒体提示（appmsg 哨兵）
 非文本消息的正文占位；appmsg 带标题时形如 `[appmsg: 标题]`，无标题为 `[appmsg]`。
