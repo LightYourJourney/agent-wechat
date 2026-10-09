@@ -15,6 +15,7 @@ from __future__ import annotations
 import contextlib
 import pathlib
 import sqlite3
+import time
 from collections.abc import Iterator
 
 from . import paths
@@ -74,16 +75,26 @@ def standalone() -> Iterator[sqlite3.Connection]:
 
 
 def add(con: sqlite3.Connection, rows: list[tuple[str, str, str]]) -> int:
-    """批量写墓碑。幂等（`INSERT OR IGNORE`）。不 commit：由调用方收口。"""
+    """批量写墓碑。幂等（`INSERT OR IGNORE`）。不 commit：由调用方收口。
+
+    **返回本次真正新写进去的条数**（与 `purge._write_tombstone` 同口径）：重复的既不计入、
+    也不会真的写第二遍，所以同一个会话重跑返回 0。此前返回 `len(rows)`——重跑报 2 条而实际
+    入库 0 条，与写端的承诺正相反（`_write_tombstone` 的 docstring 写着「只数本次真正新写
+    进去的条数」）。
+
+    计数用 `con.total_changes` 的前后差，不用 `executemany` 的 `rowcount`：后者在
+    `OR IGNORE` 下不可靠。`total_changes` 数的是这条连接上真正改了行的语句数，被 IGNORE
+    掉的 INSERT 一条都不计。
+    """
     if not rows:
         return 0
-    import time
     now = int(time.time())
+    before = con.total_changes
     con.executemany(
         "INSERT OR IGNORE INTO exclusions.excluded "
         "(msg_key, account, chat_md5, excluded_at) VALUES (?,?,?,?)",
         [(k, a, m, now) for k, a, m in rows])
-    return len(rows)
+    return con.total_changes - before
 
 
 def _chat_prefix(account: str, chat_md5: str) -> tuple[int, str]:

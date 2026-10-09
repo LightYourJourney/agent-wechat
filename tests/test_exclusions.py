@@ -36,8 +36,10 @@ def test_add_is_idempotent_and_count_matches(tmp_path):
     con.execute("ATTACH DATABASE ? AS exclusions", (str(tmp_path / "ex.db"),))
     con.executescript(exclusions.SCHEMA)
     rows = [("a|m1|message_0.db|1", "a", "m1"), ("a|m1|message_0.db|2", "a", "m1")]
-    assert exclusions.add(con, rows) == 2
-    assert exclusions.add(con, rows) == 2, "重复写入必须幂等（INSERT OR IGNORE）"
+    assert exclusions.add(con, rows) == 2, "第一次写 2 条新的"
+    # 返回值是**本次真正新写入的条数**（与 `purge._write_tombstone` 同口径），不是入参长度：
+    # 后者恒等于 len(rows)，去掉 `OR IGNORE` 也照样绿——那种断言钉不住它自称钉的幂等。
+    assert exclusions.add(con, rows) == 0, "重复写入必须真正幂等（INSERT OR IGNORE）"
     assert exclusions.count(con) == 2
     assert exclusions.by_chat(con) == [("m1", 2)]
 
