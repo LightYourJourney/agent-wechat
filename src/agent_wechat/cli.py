@@ -482,6 +482,19 @@ def _exclusion_count() -> tuple[int | None, str | None]:
         return None, str(exc)   # 读不出来要报出来，但这句提示不该把销毁本身弄成失败
 
 
+def _note_exclusion_unreadable(ex_error: str) -> None:
+    """「排除清单读不出来」那**一句**（M-6）——计划表与 `--yes` 两条路共用。
+
+    **读不出来与「没有清单」含义正相反**，所以只此一句、且必须单独说：后者是「没有任何
+    东西失效」（`store.connect()` 每次都会把清单建出来，空清单是常态），前者是**无法确认
+    排除还在不在生效**——它若失效，被删内容下次导出就会回来。合并或静默都会把用户此刻最
+    需要知道的那件事丢掉。走 stderr：与 `_note_skipped` / `_render_degradations` 同一条
+    「成功但有保留」的出口。
+    """
+    print(f"⚠️ 排除清单读不出来（{ex_error}）——无法确认它是否还在生效；"
+          "它若失效，被删内容下次导出就会回来。", file=sys.stderr)
+
+
 def cmd_purge(args: argparse.Namespace) -> int:
     """销毁本地产物。**默认 dry-run**：不带 --yes 只打印计划，一个字节不删。
 
@@ -507,22 +520,21 @@ def cmd_purge(args: argparse.Namespace) -> int:
                        if s and getattr(args, s))
     plan = purge.plan(scopes, all_=args.all)
 
-    if not args.yes:
-        _render_plan(plan)
-        return 0
-
-    # 排除清单的规模必须在删除**之前**取：`--all` 会把它连文件一起删掉（它已是产物之一），
-    # 删完再读只剩 0 或「没有」——而那句提示说的是「失去了多少」（spec §4.1③）。
+    # 排除清单的规模必须在**渲染与删除之前**取：`--all` 会把它连文件一起删掉（它已是产物
+    # 之一），删完再读只剩 0 或「没有」——而这两处提示说的都是「失去了多少」（spec §4.1③）。
+    # 提前到渲染前是因为 dry-run 也要印它：那是用户**唯一**能先看到后果的地方。
     ex_count = ex_error = None
     if args.index or args.all:
         ex_count, ex_error = _exclusion_count()
+
+    if not args.yes:
+        _render_plan(plan, ex_count, ex_error)
+        return 0
+
     if ex_error is not None:
-        # **读不出来与「没有清单」含义正相反**，所以这句必须单独说（M-6）：前者意味着
-        # 无法确认排除还在不在生效。它也必须印在**删除之前**——`--all` 正要把这份清单
-        # 连文件一起清掉，那之后再说「读不出来」就分不清是哪种了。走 stderr：与
-        # `_note_skipped` / `_render_degradations` 同一条「成功但有保留」的出口。
-        print(f"⚠️ 排除清单读不出来（{ex_error}）——无法确认它是否还在生效；"
-              "它若失效，被删内容下次导出就会回来。", file=sys.stderr)
+        # 必须印在**删除之前**：`--all` 正要把这份清单连文件一起清掉，那之后再说
+        # 「读不出来」就分不清是哪种了（为什么单独一句见 `_note_exclusion_unreadable`）。
+        _note_exclusion_unreadable(ex_error)
 
     report = purge.execute(plan)
     print(f"已删除 {len(report.removed)} 项，释放 {_human_size(report.freed)}。")
@@ -563,8 +575,10 @@ def cmd_purge(args: argparse.Namespace) -> int:
     return 1 if report.failed else 0
 
 
-def _render_plan(plan: purge.PurgePlan) -> None:
-    from . import purge      # 与 cmd_purge 同一惰性策略：purge 的 import 链带起 vector→sqlite_vec
+def _render_plan(plan: purge.PurgePlan, ex_count: int | None = None,
+                 ex_error: str | None = None) -> None:
+    # 与 cmd_purge 同一惰性策略：purge 的 import 链带起 vector→sqlite_vec
+    from . import exclusions, purge
     print("将删除：")
     # 绝对目标必须先印：下面每行的路径都可能与用户以为的那个目录无关（AGENT_WECHAT_HOME
     # 被设成空值时全都相对当前工作目录），而「将删除：」这四个字是这张表唯一的上下文。
@@ -585,6 +599,19 @@ def _render_plan(plan: purge.PurgePlan) -> None:
         # 体积由 purge 侧算（目录走整树，见 _loose_entry）：CLI 不再自己量一遍，那是第二份来源。
         print(f"  {'all':<7} {e.path}  {_human_size(e.size):>10}  "
               f"{'未知':<4} 不属于任何已知产物")
+    # 排除清单是**唯一一个删了就不可重建**的产物，spec §4.1③ 要求计划表为它单列一句。
+    # 判据是「这份计划里含不含那一项」，按**路径**比对——不按文案：文案是这里渲染出来的
+    # 东西，拿它当判据等于自己给自己出题。含不含天然分开了两条路：`--all` 会清掉它、
+    # `--index` 不会（清单必须活过索引重建）。
+    if any(i.artifact.path == exclusions.path() for i in plan.items):
+        if ex_error is not None:
+            # 读不出来**不能**说成「0 条」——那是「一条都没被挡」的意思，与事实相反，而
+            # 用户正是据这句话判断重导会不会把已删内容带回来（M-6）。
+            _note_exclusion_unreadable(ex_error)
+        elif ex_count:
+            print(f"  不可重建：{ex_count:,} 条排除随之失效，被删内容下次导出会回来")
+        # 条数为 0 或清单不在：不印。`store.connect()` 每次都会把清单文件建出来，空清单是
+        # 常态（`cmd_purge` 的 --all 分支在删除后记着同一笔账）——「0 条失效」是噪音。
     print("\n未删除任何文件。加 --yes 执行。")
 
 

@@ -354,6 +354,51 @@ def test_render_plan_shows_tree_size_for_directory(tmp_path, monkeypatch, capsys
     assert "—" not in out, f"不该再有「—」占位（它等于让用户看不见要删多少）：{out!r}"
 
 
+def test_purge_dry_run_spells_out_the_unrebuildable_exclusion_count(tmp_path, monkeypatch, capsys):
+    """spec §4.1③：排除清单是**唯一一个删了就不可重建**的产物，`--all` 的计划表必须为它
+    单列一句给出条数。dry-run 是用户**唯一**能先看到后果的地方，而条数此前只在 `--yes`
+    分支取、且印在删除**之后**——「这一删我会失去多少」在最该看到的地方看不到。
+
+    两半都要钉，缺一半就是个假判据：
+    · `--all` 印条数（清单确实会随之失效）；
+    · `--index` **不印**——清单必须活过索引重建（spec §4.1①），在那儿说「随之失效」是假话。
+    """
+    home = _isolate(tmp_path, monkeypatch)
+    from agent_wechat import exclusions, store
+    con = store.connect()
+    md5 = "a" * 32
+    exclusions.add(con, [(f"acct|{md5}|message_0.db|{n}", "acct", md5) for n in range(3)])
+    con.commit()
+    con.close()
+
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["purge", "--index"])            # 不加 --yes
+    assert ei.value.code == 0
+    out = capsys.readouterr().out
+    assert "不可重建" not in out, f"清单活过索引重建，--index 不许说它失效：{out!r}"
+
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["purge", "--all"])              # 不加 --yes
+    assert ei.value.code == 0
+    out = capsys.readouterr().out
+    assert "不可重建：3 条排除随之失效，被删内容下次导出会回来" in out, \
+        f"计划表必须给出条数（它是不可重建的那一项）：{out!r}"
+    assert exclusions.path().exists(), "dry-run 一个字节都不该动"
+    with exclusions.standalone() as con:
+        assert exclusions.count(con) == 3
+
+    # 第三路：读不出来。按 M-6 单独一句降级（**不能静默**），且**不许**说成「0 条」——
+    # 那是「一条都没被挡」的意思，与事实正相反，而用户正是据这句话判断重导会不会把已删
+    # 内容带回来。判据落在渲染分支上，故只把「读」这一下换成桩。
+    monkeypatch.setattr(cli, "_exclusion_count", lambda: (None, "坏掉了"))
+    with pytest.raises(SystemExit):
+        cli.main(["purge", "--all"])
+    captured = capsys.readouterr()
+    assert "排除清单读不出来（坏掉了）" in captured.err, \
+        f"读不出来必须出声（它说的是「无法确认还在不在生效」）：{captured.err!r}"
+    assert "不可重建：0 条" not in captured.out, captured.out
+
+
 def test_purge_all_dry_run_renders_loose_rows(tmp_path, monkeypatch, capsys):
     """--all 的 `plan.loose` 渲染分支此前**从未被执行过**：测试全用具名范围，
     报告的冒烟也用 `--index`。那儿一个格式串写坏会静默发布，而它正是
