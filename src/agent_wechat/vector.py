@@ -122,11 +122,6 @@ def query_text(q: str) -> str:
     return QUERY_INSTRUCTION + q.strip()
 
 
-def _acct_chat(account: str, chat_md5: str) -> str:
-    """vec0 分区键 "{account}|{chat_md5}"。构建与查询两侧共用，防格式漂移。"""
-    return f"{account}|{chat_md5}"
-
-
 class FastEmbedEmbedder:
     """fastembed 懒加载封装：模型只在首次使用时载入（首次会下载 ~95MB 公共资产）。
 
@@ -283,7 +278,7 @@ def _build_account(con: sqlite3.Connection, acct: str, embedder: FastEmbedEmbedd
             break
         for row in page:
             last_id = row["id"]
-            chat_key = _acct_chat(row["account"], row["chat_md5"])
+            chat_key = messages.acct_chat(row["account"], row["chat_md5"])
             prev = prev_by_chat.get(chat_key)
             if should_embed(row):
                 buf_texts.append(doc_text(row, prev))
@@ -401,7 +396,7 @@ def semantic_search(query: str, chat_id: str | None = None, limit: int = 10,
             # 特判 reader 的 "md5:<hex>" 退化 id（见 messages.chat_md5），
             # 否则该会话永远过滤不到任何消息（静默返回空）
             sql += " AND acct_chat = ?"
-            args.append(_acct_chat(account, messages.chat_md5(chat_id)))
+            args.append(messages.acct_chat(account, messages.chat_md5(chat_id)))
         rows = con.execute(sql, args).fetchall()
         if not rows:
             return {"mode": "semantic", "model": MODEL_ID, "total": 0, "hits": []}

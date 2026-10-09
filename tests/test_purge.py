@@ -79,7 +79,7 @@ def _install_vector_index(con) -> None:
 
     vec0 的 metadata 列（`account` / `ts`）**不许 NULL**，两列都必须给值——只给 account
     会报 `Expected integer for INTEGER metadata column ts, received NULL`。
-    `acct_chat` 走 `vector._acct_chat`（构建侧与查询侧共用的那个分区键）。
+    `acct_chat` 走 `messages.acct_chat`（构建侧、查询侧与删除谓词共用的那个分区键）。
     """
     _load_vec(con)
     con.executescript(store.VECTOR_SCHEMA)
@@ -88,7 +88,7 @@ def _install_vector_index(con) -> None:
         "INSERT INTO vec_messages(msg_rowid, embedding, acct_chat, account, ts, preview) "
         "VALUES (?,?,?,?,?,NULL)",
         [(r["id"], sqlite_vec.serialize_float32([0.1] * store.VECTOR_DIM),
-          vector._acct_chat(r["account"], r["chat_md5"]), r["account"], r["ts"])
+          messages.acct_chat(r["account"], r["chat_md5"]), r["account"], r["ts"])
          for r in rows])
     con.commit()
 
@@ -1015,7 +1015,7 @@ def test_chat_purge_on_a_machine_with_a_vector_index(tmp_path):
         # 报 0 而向量其实还在——本次删除最坏的那个形状。全表分组验的是「留下的只有 keeper」。
         left = dict(con.execute(
             "SELECT acct_chat, count(*) FROM vec_messages GROUP BY acct_chat"))
-    assert left == {vector._acct_chat("a", KEEPER_MD5): 1}, f"victim 的向量必须真没了：{left}"
+    assert left == {messages.acct_chat("a", KEEPER_MD5): 1}, f"victim 的向量必须真没了：{left}"
     assert purge.verify_chat(plan).leftover == ()
 
 

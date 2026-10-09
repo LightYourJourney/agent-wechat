@@ -314,6 +314,18 @@ def _vec_exec(con: sqlite3.Connection, sql: str, args: tuple = ()) -> sqlite3.Cu
                  "（store.connect() 不加载扩展）") from e
 
 
+def _msg_key_prefix(account: str, chat_md5: str) -> tuple[int, str]:
+    """`(前缀长度, 前缀)` 二元组，供 `substr(msg_key, 1, ?) = ?` 用。
+
+    `chat_row_counts` 与 `delete_chat` 共用它（此前是两处逐字重复的三行）：两者的谓词必须
+    同源，一旦分道扬镳，「核查说 N 行、实际删掉 M 行」这种各说各话就会成立。
+    前缀的第一段由 `messages.acct_chat` 派生——vec0 分区键与 `msg_key` 的第一段本来就是
+    同一个值，各拼一遍就是第二份来源。
+    """
+    pref = messages.acct_chat(account, chat_md5) + "|"
+    return (len(pref), pref)
+
+
 def chat_row_counts(con: sqlite3.Connection, account: str, chat_id: str) -> dict[str, int]:
     """该会话在五张表里的存活条数。核查与测试共用，避免各处各写一套判据。
 
@@ -330,9 +342,9 @@ def chat_row_counts(con: sqlite3.Connection, account: str, chat_id: str) -> dict
     """
     def n(sql: str, args: tuple) -> int:
         return con.execute(sql, args).fetchone()[0]
-    acct_chat = f"{account}|{messages.chat_md5(chat_id)}"
-    pref = acct_chat + "|"
-    p = (len(pref), pref)
+    md5 = messages.chat_md5(chat_id)
+    acct_chat = messages.acct_chat(account, md5)
+    p = _msg_key_prefix(account, md5)
     a = (account, chat_id)
     return {
         "messages": n("SELECT count(*) FROM messages WHERE account=? AND chat_id=?", a),
@@ -367,9 +379,9 @@ def delete_chat(con: sqlite3.Connection, *, account: str, chat_id: str) -> dict[
     """
     before = chat_row_counts(con, account, chat_id)
     a = (account, chat_id)
-    acct_chat = f"{account}|{messages.chat_md5(chat_id)}"
-    pref = acct_chat + "|"
-    p = (len(pref), pref)
+    md5 = messages.chat_md5(chat_id)
+    acct_chat = messages.acct_chat(account, md5)
+    p = _msg_key_prefix(account, md5)
     if _has_table(con, "vec_messages"):                 # 轻装安装上不存在——见 _has_table
         # 按 **`acct_chat` 分区键**删，而不是按 `msg_rowid IN (SELECT id FROM messages …)`：
         # 后者会漏掉孤儿向量（消息行已经不在了的那些），而孤儿正是隐私删除最该清的东西。

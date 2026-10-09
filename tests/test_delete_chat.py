@@ -77,7 +77,7 @@ def _vec_index_db(_temp_index, tmp_path):
         "INSERT INTO vec_messages(msg_rowid, embedding, acct_chat, account, ts, preview) "
         "VALUES (?,?,?,?,?,NULL)",
         (2, sqlite_vec.serialize_float32([0.1] * store.VECTOR_DIM),
-         vector._acct_chat("a", VICTIM_MD5), "a", 100))
+         messages.acct_chat("a", VICTIM_MD5), "a", 100))
     con.commit()
     return tmp_path / "index.db"
 
@@ -224,8 +224,8 @@ def test_delete_chat_removes_vectors_of_that_chat_only(_temp_index):
     """**七处里唯一没有直接覆盖的一处**：`vec_messages` 是虚表，前面几条测试都只跑到
     `_has_table` 为假的分支（轻装安装）。这条真加载 sqlite_vec、真建表、真种向量、真删。
 
-    删的是 **`acct_chat` 分区键**（`vector._acct_chat`，生产写入与查询共用同一个函数——
-    用它而不是在测试里手拼，正是为了钉住 store 内联的 `f"{account}|{chat_md5}"` 与它同格式），
+    删的是 **`acct_chat` 分区键**（`messages.acct_chat`，生产写入、查询、删除谓词共用同一个
+    函数——用它而不是在测试里手拼，正是为了钉住三处同格式），
     不是 `msg_rowid IN (SELECT id FROM messages …)`：后者会漏掉**孤儿向量**（消息行早就不在了的
     那些），而孤儿带着正文的嵌入、正是隐私删除最该清掉的东西。
     """
@@ -235,8 +235,8 @@ def test_delete_chat_removes_vectors_of_that_chat_only(_temp_index):
     con.enable_load_extension(False)
     con.executescript(store.VECTOR_SCHEMA)      # 真 DDL（含 acct_chat 分区键），不手抄一份
     emb = sqlite_vec.serialize_float32([0.1] * store.VECTOR_DIM)
-    victim_key = vector._acct_chat("a", VICTIM_MD5)
-    keeper_key = vector._acct_chat("a", KEEPER_MD5)
+    victim_key = messages.acct_chat("a", VICTIM_MD5)
+    keeper_key = messages.acct_chat("a", KEEPER_MD5)
     # msg_rowid 与夹具里 messages.id 对齐：keeper=1、victim=2,3；999 是孤儿（messages 里没有它）。
     con.executemany(
         "INSERT INTO vec_messages(msg_rowid, embedding, acct_chat, account, ts, preview) "
@@ -387,12 +387,12 @@ def test_delete_chat_recomputes_embedded_from_actual_rows(_temp_index):
     con.enable_load_extension(False)
     con.executescript(store.VECTOR_SCHEMA)
     emb = sqlite_vec.serialize_float32([0.1] * store.VECTOR_DIM)
-    victim_key = vector._acct_chat("a", VICTIM_MD5)
+    victim_key = messages.acct_chat("a", VICTIM_MD5)
     con.executemany(
         "INSERT INTO vec_messages(msg_rowid, embedding, acct_chat, account, ts, preview) "
         "VALUES (?,?,?,?,?,NULL)",
         [(2, emb, victim_key, "a", 100), (999, emb, victim_key, "a", 900),  # 999 是孤儿
-         (1, emb, vector._acct_chat("a", KEEPER_MD5), "a", 300)])
+         (1, emb, messages.acct_chat("a", KEEPER_MD5), "a", 300)])
     con.execute("INSERT INTO vector_meta VALUES ('m', ?, 0, 99, 0)", (store.VECTOR_DIM,))
     con.commit()
     store.delete_chat(con, account="a", chat_id=VICTIM)

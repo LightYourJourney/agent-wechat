@@ -141,6 +141,17 @@ def sticker_name_of(text: str) -> str | None:
 
 # ---------- 行 ----------
 
+def acct_chat(account: str, chat_md5: str) -> str:
+    """vec0 分区键 `"{account}|{chat_md5}"`。构建与查询两侧共用，防格式漂移。
+
+    它同时是 `msg_key` 的**第一段**——`row_key` 写的就是 `{account}|{chat_md5}|…`——所以
+    写路径（嵌向量）、检索路径（按会话过滤）、删除与核查谓词（`acct_chat=?` 与
+    `substr(msg_key,1,?)`）三处**必须同源**：各写一遍格式，某天改了一处而没改另一处，
+    「删了却查不出来 / 查了却删不掉」就是静默发生的。
+    """
+    return f"{account}|{chat_md5}"
+
+
 def row_key(account: str, chat_md5: str, shard: str, local_id: int) -> str:
     """去重主键：四字段缺一不可（local_id 在会话内、分片内均会重复）。"""
     return f"{account}|{chat_md5}|{shard}|{local_id}"
