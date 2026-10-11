@@ -399,6 +399,27 @@ def test_purge_dry_run_spells_out_the_unrebuildable_exclusion_count(tmp_path, mo
     assert "不可重建：0 条" not in captured.out, captured.out
 
 
+def test_the_unrebuildable_line_goes_by_the_flag_not_by_the_path(capsys):
+    """「不可重建：N 条排除随之失效」那句的判据是 `Artifact.unrebuildable` 这个**标志**，
+    不是「路径等于排除清单」——所以这条用的是个**假产物**：路径故意不是
+    `exclusions.path()`，照样要印。
+
+    判别法（本轮实测）：把 `cli.py` 的判据换回 `i.artifact.path == exclusions.path()`，
+    **这条红**，而上面那条走 `--all` 的仍绿——那正是按路径比对那版的盲区：第二件不可重建的
+    产物会被静默漏掉，真产物改名/换路径也会连带把这句话弄丢。标志不依赖任何一个路径。
+    """
+    from agent_wechat import exclusions, purge
+    fake = purge.Artifact(None, pathlib.Path("/nowhere/not-the-exclusions-db"), "file", True,
+                          "重新导出：需联网抓 CDN", unrebuildable=True)
+    # 这条断言护的是**本测试自己的判别力**：假产物的路径一旦与真产物重合，两种判据都会印，
+    # 这条就退化成「怎么改都绿」的假护栏。
+    assert fake.path != exclusions.path()
+    plan = purge.PurgePlan(frozenset(), True, (purge.PlanItem(fake, False, 0, False),), ())
+    cli._render_plan(plan, 7, None)
+    out = capsys.readouterr().out
+    assert "不可重建：7 条排除随之失效" in out, f"判据必须是 unrebuildable 标志：{out!r}"
+
+
 def test_purge_all_dry_run_renders_loose_rows(tmp_path, monkeypatch, capsys):
     """--all 的 `plan.loose` 渲染分支此前**从未被执行过**：测试全用具名范围，
     报告的冒烟也用 `--index`。那儿一个格式串写坏会静默发布，而它正是
