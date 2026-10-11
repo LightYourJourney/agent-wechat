@@ -399,6 +399,38 @@ def test_purge_dry_run_spells_out_the_unrebuildable_exclusion_count(tmp_path, mo
     assert "不可重建：0 条" not in captured.out, captured.out
 
 
+def test_exclusion_count_keeps_the_missing_file_sentinel(tmp_path, monkeypatch):
+    """`_exclusion_count` 的四态各是各的，**不许合并**（那是 M-6 契约的下半截）。
+
+    `(None, None)`（文件不在）与 `(0, None)`（清单在、0 条）在下游**不同义**：`--index`
+    执行末尾那句「排除清单保留：N 条」判的是 `ex_count is not None`——哨兵丢了，就会对着
+    一份**不存在**的清单说「保留 0 条、重建索引后仍生效」。
+
+    **这条的判别性**：`_exclusion_count` 现在走 `exclusions.standalone()`，而它对缺失文件
+    给的是内存空表（读出来 0 条）。删掉那句存在性检查，第一格就从 `(None, None)` 变成
+    `(0, None)`——本条的第一次断言即红（复审实测：删掉后 test_cli + test_purge +
+    test_exclusions 共 190 条全绿，只有本条会红）。
+    """
+    home = _isolate(tmp_path, monkeypatch)
+    from agent_wechat import exclusions, messages, store
+
+    assert cli._exclusion_count() == (None, None), "文件不在 → 哨兵，不是「读到 0 条」"
+
+    with store.open():                       # 空清单：文件已建出来（schema 在、0 行）
+        pass
+    assert cli._exclusion_count() == (0, None), "空清单就是 0 条，与「没清单」是两回事"
+
+    md5 = messages.chat_md5("victim")
+    with store.open() as con:
+        exclusions.add(con, [(f"acct|{md5}|message_0.db|{n}", "acct", md5) for n in range(3)])
+        con.commit()
+    assert cli._exclusion_count() == (3, None)
+
+    (home / "exclusions.db").write_bytes(b"not a database at all")
+    count, err = cli._exclusion_count()
+    assert count is None and err, "读不出来要报原因（**绝不抛**，也绝不报成 0 条）"
+
+
 def test_the_unrebuildable_line_goes_by_the_flag_not_by_the_path(capsys):
     """「不可重建：N 条排除随之失效」那句的判据是 `Artifact.unrebuildable` 这个**标志**，
     不是「路径等于排除清单」——所以这条用的是个**假产物**：路径故意不是
