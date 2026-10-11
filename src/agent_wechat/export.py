@@ -1,11 +1,15 @@
 """导出管道：流式、幂等、断点续传。任务登记在 usecases 层，这里只有管道。"""
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from . import reader, store
 
 
 def run_export(acct: str, chat_id: str | None = None, full: bool = False,
-               progress=None, on_reader=None, on_skipped=None,
+               progress: Callable[[int], None] | None = None,
+               on_reader: Callable[[reader.MessageReader], None] | None = None,
+               on_skipped: Callable[[int], None] | None = None,
                _reader_factory=None) -> int:
     """全量/增量导出。恒定内存：reader 流式产批 → store 批量幂等 upsert。
 

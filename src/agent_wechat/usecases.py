@@ -29,7 +29,7 @@ from . import appmsg, chatview, errors, exclusions, export, keys, messages, path
 from . import chat_index as index_html
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
     # 仅类型检查期：media 顶层拉起 cryptography，运行时在 media_export 内惰性 import
     from . import media
@@ -1062,7 +1062,9 @@ def purge_chat_targets(contact: str, account: str | None = None) -> list[dict] |
     return [{"account": r[0], "chat_id": chat_id, "chat_md5": md5} for r in rows]
 
 
-def media_rebuild_refs(account: str | None = None, progress=None, on_skipped=None) -> int:
+def media_rebuild_refs(account: str | None = None,
+                       progress: Callable[[int], None] | None = None,
+                       on_skipped: Callable[[int], None] | None = None) -> int:
     """全量重扫微信库，只为存量历史回填 media_refs（spec §4.5）。幂等 upsert；
     **不写 messages**（消息内容不变，只有 refs 需要补）。分钟级，同步执行。
 
@@ -1086,7 +1088,9 @@ def media_rebuild_refs(account: str | None = None, progress=None, on_skipped=Non
     return n
 
 
-def appmsg_rebuild_parts(account: str | None = None, progress=None, on_skipped=None) -> dict:
+def appmsg_rebuild_parts(account: str | None = None,
+                         progress: Callable[[int], None] | None = None,
+                         on_skipped: Callable[[int], None] | None = None) -> dict:
     """全量重扫微信库回填 msg_parts（spec §4.1）。幂等；**只写 msg_parts**——
     不碰 messages / FTS / 向量 / 水位线。
 
