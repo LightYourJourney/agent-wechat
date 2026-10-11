@@ -37,12 +37,19 @@ class Artifact:
     （「已知产物：向量模型缓存」），而那些行现在都进了 items 段，靠 scope + sensitive +
     rebuild 三列说话。最后一个读者消失之后，label 就成了没人核对、会静默漂移的第二份来源
     ——正是本模块开篇禁止的那件事，而它恰好是 media/ 与 moments/ 漏掉的那次事故的成因。
+
+    `unrebuildable` 与上面那条告诫**同源、不冲突**：「删了就不可重建」这条事实的**结构化
+    形式**在这里（出处即本表），`rebuild` 那段自由文本只管展示代价。判据不与文本重叠——
+    计划表该不该为一项单列「不可重建：…」读的是这个布尔；拿 `rebuild` 的措辞或路径比对当
+    判据，等于让渲染层自己给自己出题，文案改一个词就静默失效。第二件不可重建的产物出现时，
+    它在这里标 True 即可，入口层不必再认一遍。
     """
     scope: str | None   # 具名范围的开关名；None = 有拥有者但没有开关，只随 --all 一起删
     path: pathlib.Path
     kind: str           # "file" | "dir"：决定 unlink 还是 rmtree，不靠调用方猜
     sensitive: bool
-    rebuild: str        # 重建代价，写进计划表
+    rebuild: str        # 重建代价，写进计划表（**只负责展示**；判据见 unrebuildable）
+    unrebuildable: bool = False   # 删了就回不来的产物；计划表据它单列一句（spec §4.1③）
 
 
 def _holders(path: pathlib.Path) -> list[int]:
@@ -100,7 +107,7 @@ def known_artifacts() -> tuple[Artifact, ...]:
         Artifact(None, tasks.TASKS_FILE, "file", False, "无"),
         # 唯一一个删了就不可重建的产物：它没了，被删的内容下次导出就全回来了（spec §4.1③）
         Artifact(None, exclusions.path(), "file", True,
-                 "不可重建：它没了，被删内容下次导出会回来"),
+                 "不可重建：它没了，被删内容下次导出会回来", unrebuildable=True),
     ]
     return tuple(out)
 

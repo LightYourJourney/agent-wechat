@@ -581,7 +581,7 @@ def _render_plan(plan: purge.PurgePlan, ex_count: int | None,
     # ——spec §4.1③ 要求计划表把「不可重建：N 条排除随之失效」印出来，而这条表是用户
     # 据以说 --yes 的唯一依据。一个能省掉参数的默认值，就是让那句在该印的时候消失的入口。
     # 与 cmd_purge 同一惰性策略：purge 的 import 链带起 vector→sqlite_vec
-    from . import exclusions, purge
+    from . import purge
     print("将删除：")
     # 绝对目标必须先印：下面每行的路径都可能与用户以为的那个目录无关（AGENT_WECHAT_HOME
     # 被设成空值时全都相对当前工作目录），而「将删除：」这四个字是这张表唯一的上下文。
@@ -603,10 +603,11 @@ def _render_plan(plan: purge.PurgePlan, ex_count: int | None,
         print(f"  {'all':<7} {e.path}  {_human_size(e.size):>10}  "
               f"{'未知':<4} 不属于任何已知产物")
     # 排除清单是**唯一一个删了就不可重建**的产物，spec §4.1③ 要求计划表为它单列一句。
-    # 判据是「这份计划里含不含那一项」，按**路径**比对——不按文案：文案是这里渲染出来的
-    # 东西，拿它当判据等于自己给自己出题。含不含天然分开了两条路：`--all` 会清掉它、
-    # `--index` 不会（清单必须活过索引重建）。
-    if any(i.artifact.path == exclusions.path() for i in plan.items):
+    # 判据是 `Artifact.unrebuildable`——「不可重建」这条事实的结构化出处
+    # （`purge.known_artifacts` 声明它），不是这里的文案、也不是按路径现推：文案是本函数
+    # 渲染出来的东西，拿它当判据等于自己给自己出题。含不含天然分开了两条路：`--all`
+    # 会清掉它、`--index` 不会（清单必须活过索引重建）。
+    if any(i.artifact.unrebuildable for i in plan.items):
         if ex_error is not None:
             # 读不出来**不能**说成「0 条」——那是「一条都没被挡」的意思，与事实相反，而
             # 用户正是据这句话判断重导会不会把已删内容带回来（M-6）。
