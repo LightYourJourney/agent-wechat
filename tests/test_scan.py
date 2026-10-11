@@ -543,6 +543,35 @@ def test_main_wrapper_is_fail_closed(scan, monkeypatch, capsys):
     assert "扫描器出错" in capsys.readouterr().err
 
 
+def test_run_owns_a_boundary_covering_the_print_loop(scan, tmp_path, monkeypatch, capsys):
+    """`_run` 自己那层边界必须收住**落在打印循环里**的异常——**所以这条直调 `_run`**。
+
+    `main` 的兜底会把同一个异常也变成 2，于是端到端 `main(...)` 在新旧两种结构下**同码**：
+    本模块原先**没有一处调 `_run(`** 全走 `main`，把函数级 `try` 拆回「每个分支各包一个」
+    也不会有任何测试变红（复审实测）。要钉住「边界在 `_run` 里」就只能直接调它。
+
+    桩打在 `--values` 打印循环里那处 `SHAPE_LABEL` 取值上——它**正是旧版分支 try 之外**的
+    位置，也就是「新加一步忘了放进边界」那个坑的形状。判别性自证：把边界还原成旧结构后，
+    本条的 `scan._run(args)` 会**抛穿**（RuntimeError 逃进用例），即红。
+    """
+    (tmp_path / "x.txt").write_text("hit " + FAKE + "\n", encoding="utf-8")
+    monkeypatch.setattr(scan, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(scan, "_tracked_files", lambda: ["x.txt"])
+    monkeypatch.setattr(scan, "ALLOWLIST_PATH", tmp_path / "allowlist.txt")
+
+    class Boom(dict):
+        def __getitem__(self, key):
+            raise RuntimeError("变异：SHAPE_LABEL 查询必抛")
+
+    monkeypatch.setattr(scan, "SHAPE_LABEL", Boom(scan.SHAPE_LABEL))
+    args = scan._build_parser().parse_args(["--values"])
+
+    rc = scan._run(args)
+
+    assert rc == scan.EXIT_ERROR, "异常落在打印循环里，_run 也要自己收口（不能只靠 main）"
+    assert "扫描器出错" in capsys.readouterr().err
+
+
 @pytest.mark.parametrize("argv", [[], ["--values"], ["--staged"]])
 def test_broken_allowlist_is_fail_closed_on_every_entry(scan, tmp_path, monkeypatch, argv):
     """三条入口在清单不可读时都必须退出 2。
