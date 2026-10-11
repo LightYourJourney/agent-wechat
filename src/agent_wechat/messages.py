@@ -152,6 +152,22 @@ def acct_chat(account: str, chat_md5: str) -> str:
     return f"{account}|{chat_md5}"
 
 
+def msg_key_prefix(account: str, chat_md5: str) -> str:
+    """会话级 `msg_key` 前缀 `"{account}|{chat_md5}|"`：前两段（即分区键）+ 分隔符。
+
+    写路径（嵌向量）、归属过滤（`usecases.message_parts` 按它筛 keys）、删除与核查谓词
+    （`store.chat_row_counts` / `store.delete_chat` / `exclusions.count_chat` /
+    `exclusions.remove_chat` 的 `substr(msg_key, 1, ?) = ?`）**必须同源**：各拼一遍格式，
+    某天改了一处而没改另一处，「预览说 N 条、实际删掉 M 条」「核查说 N 行、实际删掉 M 行」
+    这种各说各话就是**静默**成立的。第一段由 `acct_chat` 派生不另拼——vec0 分区键与
+    `msg_key` 的第一段本来就是同一个值，多拼一次就是多一份来源。
+
+    喂 `substr(msg_key, 1, ?) = ?` 的调用方就地打包 `(len(p), p)`：`(长度, 值)` 是那条
+    SQL 的形状，不是这里的格式，允许各写各的。
+    """
+    return acct_chat(account, chat_md5) + "|"
+
+
 def row_key(account: str, chat_md5: str, shard: str, local_id: int) -> str:
     """去重主键：四字段缺一不可（local_id 在会话内、分片内均会重复）。"""
     return f"{account}|{chat_md5}|{shard}|{local_id}"

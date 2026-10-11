@@ -881,7 +881,7 @@ def message_parts(contact: str, *, keys: Sequence[str],
     chat_id = ctx.resolve(contact)
     if isinstance(chat_id, NeedConfirm):
         return chat_id
-    prefix = f"{ctx.account}|{messages.chat_md5(chat_id)}|"
+    prefix = messages.msg_key_prefix(ctx.account, messages.chat_md5(chat_id))
     # 去重保序在**这里**做（与 `message_media` 的 `list(dict.fromkeys(keys))` 同位置）：
     # 入口只管把逗号串拆成 list，归属过滤与去重是入口策略。
     wanted = list(dict.fromkeys(k for k in keys if k.startswith(prefix)))

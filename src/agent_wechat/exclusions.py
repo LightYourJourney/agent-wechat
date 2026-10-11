@@ -18,7 +18,7 @@ import sqlite3
 import time
 from collections.abc import Iterator
 
-from . import paths
+from . import messages, paths
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS exclusions.excluded (
@@ -97,25 +97,15 @@ def add(con: sqlite3.Connection, rows: list[tuple[str, str, str]]) -> int:
     return con.total_changes - before
 
 
-def _chat_prefix(account: str, chat_md5: str) -> tuple[int, str]:
-    """`(前缀长度, 前缀)` 二元组，供 `substr(msg_key, 1, ?) = ?` 用。
-
-    `count_chat` 与 `remove_chat` 共用它：两者的谓词必须同源，一旦分道扬镳，
-    「预览说 N 条、实际删掉 M 条」这种各说各话就会成立。
-    """
-    pref = f"{account}|{chat_md5}|"
-    return (len(pref), pref)
-
-
 def count_chat(con: sqlite3.Connection, account: str, chat_md5: str) -> int:
-    """该会话在清单里有多少条——**与 `remove_chat` 同一个谓词**（见 `_chat_prefix`）。
+    """该会话在清单里有多少条——**与 `remove_chat` 同一个谓词**（见 `messages.msg_key_prefix`）。
 
     此前这条计数写在入口层（`cli._cmd_purge_chat_undo` 的行内 SQL），与删除分处两个文件：
     预览说 N 条、实际删掉 M 条这种各说各话，正是「两处各写一遍同一个判据」的产物。
     """
-    n, pref = _chat_prefix(account, chat_md5)
+    p = messages.msg_key_prefix(account, chat_md5)
     return con.execute("SELECT count(*) FROM exclusions.excluded "
-                       "WHERE substr(msg_key, 1, ?) = ?", (n, pref)).fetchone()[0]
+                       "WHERE substr(msg_key, 1, ?) = ?", (len(p), p)).fetchone()[0]
 
 
 def remove_chat(con: sqlite3.Connection, account: str, chat_md5: str) -> int:
@@ -127,11 +117,13 @@ def remove_chat(con: sqlite3.Connection, account: str, chat_md5: str) -> int:
     删除端与核查端读同一段 `msg_key`，两处就不可能对同一个会话给出不同的答案。
 
     谓词与 `_write_tombstone` 的 `INSERT … SELECT` 也同源：那条写的是
-    `account|chat_md5|…` 形态的 `msg_key`，前缀删与它天然配对。
+    `account|chat_md5|…` 形态的 `msg_key`，前缀删与它天然配对。前缀本身
+    （`messages.msg_key_prefix`）与 `count_chat` 共用——两者的谓词必须同源，一旦分道扬镳，
+    「预览说 N 条、实际删掉 M 条」这种各说各话就会成立。
     """
-    n, pref = _chat_prefix(account, chat_md5)
+    p = messages.msg_key_prefix(account, chat_md5)
     cur = con.execute("DELETE FROM exclusions.excluded WHERE substr(msg_key, 1, ?) = ?",
-                      (n, pref))
+                      (len(p), p))
     return cur.rowcount
 
 
