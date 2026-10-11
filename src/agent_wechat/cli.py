@@ -575,8 +575,11 @@ def cmd_purge(args: argparse.Namespace) -> int:
     return 1 if report.failed else 0
 
 
-def _render_plan(plan: purge.PurgePlan, ex_count: int | None = None,
-                 ex_error: str | None = None) -> None:
+def _render_plan(plan: purge.PurgePlan, ex_count: int | None,
+                 ex_error: str | None) -> None:
+    # ex_count / ex_error **必须由调用方给**（不给默认值）：它们为空时下面①那句会静默不印
+    # ——spec §4.1③ 要求计划表把「不可重建：N 条排除随之失效」印出来，而这条表是用户
+    # 据以说 --yes 的唯一依据。一个能省掉参数的默认值，就是让那句在该印的时候消失的入口。
     # 与 cmd_purge 同一惰性策略：purge 的 import 链带起 vector→sqlite_vec
     from . import exclusions, purge
     print("将删除：")
