@@ -463,21 +463,22 @@ def _exclusion_count() -> tuple[int | None, str | None]:
     原样重建——「已删除」当场变成假象，紧接着的 verify 还会把重建出来的 index.db 报成
     「计划内仍未删除」（实测：这两件事都发生了）。
 
-    只开一条内存连接、把清单文件 ATTACH 成 `exclusions`（与生产同一个别名，所以
-    `exclusions.count` 那句 SQL 原样可用），一个文件都不落。ATTACH 一个不存在的文件会把它
-    建出来，故先判存在。
+    连接不在这里手搓：`exclusions.standalone()` 做的正是这件事（`:memory:` + 把清单文件
+    ATTACH 成 `exclusions`，与生产同一个别名，所以 `exclusions.count` 那句 SQL 原样可用；
+    缺失文件给内存空表、不在磁盘上落新文件），`--excluded` / `--undo` / `plan_chat` 三处
+    生产调用点走的也是它——同一条配方写两遍，迟早会漂成两种。
+
+    **「文件不在」仍先判一次**：`standalone()` 对缺失文件给的是空表，读出来是 0 条，于是
+    `(None, None)` 会塌进 `(0, None)`。两者在 `--index` 那条路上**不同义**——执行末尾
+    「排除清单保留：N 条」判的是 `ex_count is not None`，把哨兵丢了就会对着一份不存在的
+    清单说「保留 0 条、重建索引后仍生效」。
     """
     from . import exclusions
     try:
-        p = exclusions.path()
-        if not p.exists():
+        if not exclusions.path().exists():   # 哨兵：缺失不是 0 条（见 docstring 末段）
             return None, None
-        con = sqlite3.connect(":memory:")
-        try:
-            con.execute("ATTACH DATABASE ? AS exclusions", (str(p),))
+        with exclusions.standalone() as con:
             return exclusions.count(con), None
-        finally:
-            con.close()
     except Exception as exc:
         return None, str(exc)   # 读不出来要报出来，但这句提示不该把销毁本身弄成失败
 
