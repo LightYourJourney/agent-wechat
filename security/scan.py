@@ -315,46 +315,38 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _run(args: argparse.Namespace) -> int:
-    if args.verify_allowlist:
-        try:
+    """各模式的分派。**整个函数体就是那条 fail-closed 边界**（`main` 那层只作兜底）。
+
+    边界只此一处，所以新加分支**不可能**漏掉它——不必再靠「每次记得抄三行 except」。
+    """
+    try:
+        if args.verify_allowlist:
             dead = verify_allowlist()
-        except Exception as exc:
-            print("scan: 扫描器出错：%s" % exc, file=sys.stderr)
-            return EXIT_ERROR
-        if dead:
-            for key in dead:
-                print("死条目 #%s——它在仓库里一次都没命中，请从豁免清单删掉" % key)
-            return EXIT_HITS
-        return EXIT_CLEAN
+            if dead:
+                for key in dead:
+                    print("死条目 #%s——它在仓库里一次都没命中，请从豁免清单删掉" % key)
+                return EXIT_HITS
+            return EXIT_CLEAN
 
-    if args.allow:
-        try:
+        if args.allow:
             allow_value(args.allow)
-        except Exception as exc:
-            print("scan: 扫描器出错：%s" % exc, file=sys.stderr)
-            return EXIT_ERROR
-        print("已登记 #%s 到 security/allowlist.txt" % args.allow)
-        return EXIT_CLEAN
+            print("已登记 #%s 到 security/allowlist.txt" % args.allow)
+            return EXIT_CLEAN
 
-    if args.values:
-        try:
+        if args.values:
             table = collect_values()
-            allow = load_allowlist()      # 读文件，必须在边界之内（同上）
-        except Exception as exc:
-            print("scan: 扫描器出错：%s" % exc, file=sys.stderr)
-            return EXIT_ERROR
-        for key in sorted(table, key=lambda k: (table[k]["shape"], k)):
-            e = table[key]
-            low = e["value"].lower()
-            fixture = "是" if any(w in low for w in FIXTURE_KEYWORDS) else "否"
-            state = "已登记" if e["value"] in allow else "未登记"
-            print("#%s  %s · %d 字符 · 出现于 %s · %d 次 · 夹具关键词：%s · %s"
-                  % (key, SHAPE_LABEL[e["shape"]], len(e["value"]),
-                     "、".join(sorted(e["dirs"])), e["count"], fixture, state))
-        return EXIT_HITS if table else EXIT_CLEAN
+            allow = load_allowlist()      # 读文件，在边界之内（本函数整个函数体就是边界）
+            for key in sorted(table, key=lambda k: (table[k]["shape"], k)):
+                e = table[key]
+                low = e["value"].lower()
+                fixture = "是" if any(w in low for w in FIXTURE_KEYWORDS) else "否"
+                state = "已登记" if e["value"] in allow else "未登记"
+                print("#%s  %s · %d 字符 · 出现于 %s · %d 次 · 夹具关键词：%s · %s"
+                      % (key, SHAPE_LABEL[e["shape"]], len(e["value"]),
+                         "、".join(sorted(e["dirs"])), e["count"], fixture, state))
+            return EXIT_HITS if table else EXIT_CLEAN
 
-    if args.staged or args.text:
-        try:
+        if args.staged or args.text:
             if args.text:
                 hits = text_hits(args.text)
             else:
@@ -365,10 +357,17 @@ def _run(args: argparse.Namespace) -> int:
                 hits = [(rel, n, shape, value)
                         for rel, n, text in added
                         for _, _, shape, value in hits_in_text(text)]
-            allow = load_allowlist()      # 读文件，必须在边界之内（同前两处）
-        except Exception as exc:
-            print("scan: 扫描器出错：%s" % exc, file=sys.stderr)
-            return EXIT_ERROR
+            allow = load_allowlist()      # 读文件，在边界之内（同上）
+            unregistered = [h for h in hits if h[3] not in allow]
+            for rel, lineno, shape, value in unregistered:
+                shown = value if args.show_values else "%d 字符" % len(value)
+                print("%s:%d  %s · %s · 未登记" % (rel, lineno, SHAPE_LABEL[shape], shown))
+            if args.show_values and unregistered:
+                print("⚠️ 上面打印了命中值本身——它已进入你的会话记录。", file=sys.stderr)
+            return EXIT_HITS if unregistered else EXIT_CLEAN
+
+        hits = scan_repo()
+        allow = load_allowlist()          # 读文件，在边界之内
         unregistered = [h for h in hits if h[3] not in allow]
         for rel, lineno, shape, value in unregistered:
             shown = value if args.show_values else "%d 字符" % len(value)
@@ -376,28 +375,21 @@ def _run(args: argparse.Namespace) -> int:
         if args.show_values and unregistered:
             print("⚠️ 上面打印了命中值本身——它已进入你的会话记录。", file=sys.stderr)
         return EXIT_HITS if unregistered else EXIT_CLEAN
-
-    try:
-        hits = scan_repo()
-        allow = load_allowlist()          # 读文件，必须在边界之内
-    except Exception as exc:
+    except Exception as exc:      # 唯一的函数级边界：任何分支的异常都从这里退 2
         print("scan: 扫描器出错：%s" % exc, file=sys.stderr)
         return EXIT_ERROR
-
-    unregistered = [h for h in hits if h[3] not in allow]
-    for rel, lineno, shape, value in unregistered:
-        shown = value if args.show_values else "%d 字符" % len(value)
-        print("%s:%d  %s · %s · 未登记" % (rel, lineno, SHAPE_LABEL[shape], shown))
-    if args.show_values and unregistered:
-        print("⚠️ 上面打印了命中值本身——它已进入你的会话记录。", file=sys.stderr)
-    return EXIT_HITS if unregistered else EXIT_CLEAN
 
 
 def main(argv: list[str] | None = None) -> int:
     """薄壳：**任何**逃出 `_run` 的异常都以 `EXIT_ERROR` 退出。
 
-    各分支内部仍保留自己的 `except Exception`（消息更具体）；这一层只作兜底，
-    防的是「新加一个分支时忘了把读文件/调外部命令的那步放进边界」——
+    **边界分两层**（订正，2026-10-12，终局评审）：`_run` 那层包住它**整个函数体**，
+    是主边界——新加分支**不可能忘**带边界，这比「每个分支各写一个 `except`」更强；
+    这里只作兜底。此前这层的 docstring 说各分支保留自己的 `except` 是因为「消息更
+    具体」，实测那六处消息**逐字相同**（`grep -c '扫描器出错'` 由 6 降到 2），那条
+    理由在代码里不成立。
+
+    兜底防的仍是「新加一个分支时忘了把读文件/调外部命令的那步放进边界」——
     那个坑在本计划里已经出现过三次。
 
     `parse_args` 故意留在 `try` **之外**：参数错误应当照常以 argparse 自己的
