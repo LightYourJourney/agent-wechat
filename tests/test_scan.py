@@ -108,6 +108,18 @@ def test_path_marker_notation_does_not_self_match(scan):
     assert scan.hits_in_text("/Users/<用户名>/x") == []
 
 
+def test_path_value_never_ends_with_a_dot(scan):
+    """句末标点不许被吃进值：`/Users/<名字>.` 的值必须与不带点的那次相同。
+
+    否则同一个用户名产出**两个指纹**（带点 / 不带点），而 README 说命中的是**第一段**
+    ——值要与后面跟什么无关。判据是「末位不能是点」，不是「至少两个字符」：
+    1 个字符的用户名仍要能命中。把字符类写成两段式（如 `[A-Za-z0-9._-][A-Za-z0-9_-]`），
+    后面那半会红。
+    """
+    assert [v for _s, _e, _sh, v in scan.hits_in_text(PATH_FAKE + ".")] == [PATH_FAKE]
+    assert [v for _s, _e, _sh, v in scan.hits_in_text("/Users/" + "a")] == ["/Users/" + "a"]
+
+
 def test_the_two_functional_configs_are_exempt_for_the_path_shape(scan):
     """CONTRIBUTING §4 明文豁免的两个功能性本机配置——**只豁免路径形**。
 
@@ -190,6 +202,58 @@ def test_allow_refuses_the_path_shape(scan, tmp_path, monkeypatch, capsys):
     assert rc == scan.EXIT_ERROR
     assert allow.read_bytes() == before, "拒绝之后清单必须一个字节都没变"
     assert "/Users/you" in err, "要说清正解：改写文字，用钦定占位符"
+
+
+def test_hand_copied_path_entry_is_inert_and_dead(scan, tmp_path, monkeypatch, capsys):
+    """**本轮最重要的一条**：豁免清单对路径形**整体失效**——手抄一行进去，既不生效、
+    又被判成死条目。
+
+    `--allow` 只是**前门**（上一条钉的）。少关后门时，编辑者直接往 `allowlist.txt` 里
+    粘一行真路径，`_run` 会把它当合法豁免（命中被放行），`verify_allowlist` 的 `seen`
+    也把它算作「在仓库里命中过」⇒ 不是死条目。于是那条真路径**真的登记成功了**，
+    而 README 与 CONTRIBUTING 却写着「永不登记」——实测与宣称相反。
+
+    两条断言分别对应**两处**判据：删掉 `unregistered_hits` 里的 `not allowlistable(...)`
+    → 前两条红；删掉 `seen` 里那个条件 → 后两条红。`--staged` 那半钉的是**钩子那条路**
+    （生产路径），它与默认视图共用 `unregistered_hits`——两处调用点任一漏改，这半就红。
+    """
+    (tmp_path / "x.txt").write_text("hit " + PATH_FAKE + "/x\n", encoding="utf-8")
+    allow = tmp_path / "allowlist.txt"
+    allow.write_text(PATH_FAKE + "  手抄进来的一行真路径\n", encoding="utf-8")
+    monkeypatch.setattr(scan, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(scan, "_tracked_files", lambda: ["x.txt"])
+    monkeypatch.setattr(scan, "ALLOWLIST_PATH", allow)
+    monkeypatch.setattr(scan, "staged_added_lines",
+                        lambda *a, **k: [("x.txt", 1, "hit " + PATH_FAKE + "/x\n")])
+
+    assert scan.main(["--all"]) == scan.EXIT_HITS, "清单里的路径条目不许豁免它"
+    assert scan.main(["--staged"]) == scan.EXIT_HITS, "钩子那条路同样不许豁免它"
+    capsys.readouterr()
+
+    rc = scan.main(["--verify-allowlist"])
+    out = capsys.readouterr().out
+    assert rc == scan.EXIT_HITS, "手抄的路径条目必须被判成死条目"
+    assert scan.fingerprint(PATH_FAKE) in out, "要按指纹点出是那一条"
+    assert PATH_FAKE not in out, "报死条目同样不打印值"
+
+
+def test_values_view_marks_path_values_as_unregistrable(scan, tmp_path, monkeypatch, capsys):
+    """路径形的 `state` 列必须是「不可登记」，不能是「已登记 / 未登记」。
+
+    显示「未登记」是在暗示「登记一下就好了」——而那件事做不到（清单对路径形整体失效）。
+    与「命中照样被拦却显示已登记」是同一类假话：列的语义要与扫描器的行为一致。
+    """
+    (tmp_path / "x.txt").write_text("hit " + PATH_FAKE + "/x\n", encoding="utf-8")
+    monkeypatch.setattr(scan, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(scan, "_tracked_files", lambda: ["x.txt"])
+    monkeypatch.setattr(scan, "ALLOWLIST_PATH", tmp_path / "allowlist.txt")
+
+    rc = scan.main(["--values"])
+    out = capsys.readouterr().out
+
+    assert "不可登记" in out
+    assert PATH_FAKE not in out, "加一列不等于放宽掩码原则"
+    assert rc == scan.EXIT_HITS
 
 
 def test_every_pattern_has_a_label(scan):

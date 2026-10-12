@@ -37,11 +37,14 @@ ALLOWLIST_PATH = REPO_ROOT / "security" / "allowlist.txt"
 # 字符集**刻意是 ASCII**：放宽成「非斜杠任意字符」会让文档描述脱敏规则用的记号
 # `/Users/<用户名>` 自匹配，而它没有登记这条退路（只能去改写历史记录）。
 # **不做大小写折叠**：折叠会拿 `/users/<id>` 这类 URL 片段换假阳性，同样没有退路。
+# 末位**不能是点**（所以是 `*` + 一个不含点的收尾字符，而不是 `+`）：`/Users/<用户名>.`
+# 这种句末标点若被吃进值，同一个用户名就会产出两个指纹（带点 / 不带点），与「命中的是
+# 第一段」冲突。**不是「至少两个字符」**——1 个字符的用户名仍要命中。
 PATTERNS = (
     ("wxid", re.compile(r"wxid_[A-Za-z0-9_-]{4,}")),
     ("chatroom", re.compile(r"[0-9]{6,}@chatroom")),
     ("phone", re.compile(r"1[3-9][0-9]{9}")),
-    ("path", re.compile(r"/Users/(?!(?:you|Shared)(?![A-Za-z0-9._-]))[A-Za-z0-9._-]+")),
+    ("path", re.compile(r"/Users/(?!(?:you|Shared)(?![A-Za-z0-9._-]))[A-Za-z0-9._-]*[A-Za-z0-9_-]")),
 )
 
 SHAPE_LABEL = {"wxid": "wxid 形", "chatroom": "chatroom 形", "phone": "手机号形",
@@ -96,6 +99,29 @@ def path_exempt(rel: str, shape: str) -> bool:
     47 个未登记。这条判据的测试也按那个教训写——两处任一漏掉都会红。
     """
     return shape == "path" and rel in PATH_EXEMPT_FILES
+
+
+def allowlistable(shape: str) -> bool:
+    """这个形状的值能不能进豁免清单。只有路径形不能——清单的规矩是「只许放假值」，
+    而路径形的值只能是真路径；登记它等于把真实用户名写进一个会被提交的文件。
+
+    **这一条判据要卡住两侧**（只卡一侧等于没卡）：`allow_value` 卡「写」（前门），
+    `unregistered_hits` 与 `verify_allowlist` 卡「读」（后门）。手抄一行进清单时，
+    前门根本不在路上——后门那两侧才是「永不登记」这句话真正成立的地方。
+    """
+    return shape != "path"
+
+
+def unregistered_hits(hits: list[tuple[str, int, str, str]],
+                      allow: set[str]) -> list[tuple[str, int, str, str]]:
+    """会被拦下的命中。路径形**不看清单**（见 allowlistable）——于是手抄进去的条目
+    既不生效、又会被 --verify-allowlist 当死条目揪出来。
+
+    **两个 `_run` 分支共用它**（`--staged`/`--text` 与默认）：规则只写一处，就不会再出现
+    「默认视图看清单、`--staged` 不看」那种两条路各说各话——2026-09-29 的 Critical 1
+    （跳过规则只落在 `scan_repo()` 一处）正是这个形状。
+    """
+    return [h for h in hits if not allowlistable(h[2]) or h[3] not in allow]
 
 
 def _git(*args: str) -> str:
@@ -207,14 +233,16 @@ def allow_value(key: str) -> str:
         raise ScannerError("这个编号不在命中表里——编号是值的 sha256 前 8 位小写十六进制"
                            "（先跑 --values 看有哪些），**不要把值本身粘进来**")
     entry = table[key]
-    if entry["shape"] == "path":
-        # 唯一的自动守卫，且必须在这里：登记一个真路径**不会**被 §4.3 的不变式 1 抓到
-        # ——那个值仍在原文里命中，不算死条目。于是「钩子拦下 → 顺手 --allow」会把
-        # 真路径合法化进一个会被提交的文件，正是这条红线要拦的事。
+    if not allowlistable(entry["shape"]):
+        # 前门这一处必须拦：登记一个真路径**不会**被 §4.3 的不变式 1 抓到——那个值仍在
+        # 原文里命中，不算死条目。于是「钩子拦下 → 顺手 --allow」会把真路径合法化进一个
+        # 会被提交的文件，正是这条红线要拦的事。
+        # **但它只是前门**：手抄那一侧由 `unregistered_hits` 与 `verify_allowlist` 关
+        # （见 allowlistable）——只关前门时，手抄一行照样豁免，而文档会宣称「永不登记」。
         raise ScannerError(
             "本机路径形不能登记进豁免清单——登记它等于把真实用户名写进一个会被提交的"
             "文件，且 §4.3 的不变式 1 查不出来。请改写那处文字：占位符一律用 "
-            "/Users/you；CONTRIBUTING §4 的那两个功能性配置文件由扫描器按文件名"
+            "/Users/you；CONTRIBUTING §4 的那两个功能性配置文件由扫描器按 (文件, 形状)"
             "豁免，不需要登记")
     line = "%s  %s · %d 字符 · --allow %s 登记" % (
         entry["value"], entry["shape"], len(entry["value"]), key)
@@ -236,7 +264,10 @@ def verify_allowlist() -> list[str]:
     if not ALLOWLIST_PATH.exists():
         raise ScannerError("豁免清单 %s 不存在——「没有清单」不是「清单干净」"
                            % ALLOWLIST_PATH)
-    seen = {value for _, _, _, value in scan_repo()}
+    # **只收可登记的形状**：路径形的值不算「在仓库里命中过」。否则手抄一行真路径进清单
+    # 会被算成有效条目（不是死条目），而它对路径形本来就不生效（见 allowlistable）——
+    # 于是 `--allow` 拒绝写、手抄又不报死条目，「永不登记」就只剩一句宣示。
+    seen = {value for _, _, shape, value in scan_repo() if allowlistable(shape)}
     return sorted(fingerprint(v) for v in load_allowlist() - seen)
 
 
@@ -381,7 +412,12 @@ def _run(args: argparse.Namespace) -> int:
                 e = table[key]
                 low = e["value"].lower()
                 fixture = "是" if any(w in low for w in FIXTURE_KEYWORDS) else "否"
-                state = "已登记" if e["value"] in allow else "未登记"
+                # 不可登记的形状**不看清单**（见 allowlistable）：显示「已登记」而命中
+                # 照样被拦是假话，显示「未登记」则在暗示「登记一下就好了」——同样做不到。
+                if allowlistable(e["shape"]):
+                    state = "已登记" if e["value"] in allow else "未登记"
+                else:
+                    state = "不可登记"
                 print("#%s  %s · %d 字符 · 出现于 %s · %d 次 · 夹具关键词：%s · %s"
                       % (key, SHAPE_LABEL[e["shape"]], len(e["value"]),
                          "、".join(sorted(e["dirs"])), e["count"], fixture, state))
@@ -400,7 +436,7 @@ def _run(args: argparse.Namespace) -> int:
                         for _, _, shape, value in hits_in_text(text)
                         if not path_exempt(rel, shape)]
             allow = load_allowlist()      # 读文件，在边界之内（同上）
-            unregistered = [h for h in hits if h[3] not in allow]
+            unregistered = unregistered_hits(hits, allow)
             for rel, lineno, shape, value in unregistered:
                 shown = value if args.show_values else "%d 字符" % len(value)
                 print("%s:%d  %s · %s · 未登记" % (rel, lineno, SHAPE_LABEL[shape], shown))
@@ -410,7 +446,7 @@ def _run(args: argparse.Namespace) -> int:
 
         hits = scan_repo()
         allow = load_allowlist()          # 读文件，在边界之内
-        unregistered = [h for h in hits if h[3] not in allow]
+        unregistered = unregistered_hits(hits, allow)
         for rel, lineno, shape, value in unregistered:
             shown = value if args.show_values else "%d 字符" % len(value)
             print("%s:%d  %s · %s · 未登记" % (rel, lineno, SHAPE_LABEL[shape], shown))
