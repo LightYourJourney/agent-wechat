@@ -108,6 +108,29 @@ def test_path_marker_notation_does_not_self_match(scan):
     assert scan.hits_in_text("/Users/<用户名>/x") == []
 
 
+def test_excluded_segment_followed_by_a_sentence_dot_is_still_the_placeholder(scan):
+    """`you` / `Shared` 后面跟句末点时，它们**仍是那两个被排除的成分**——不许命中。
+
+    F6 定下「成分末位不能是点」之后，`/Users/<you>.` 的成分**就是 `you`**（那个点已经是
+    句末标点、不再属于成分），所以按同一条规则必须排除——否则「占位符 `you` 永不命中」
+    这条承诺不成立。
+
+    **但只放过「点 + 什么都没了」**：`you.x` 是**另一个用户名**（成分 `you.x`，末位是 `x`，
+    合法），必须照抓。把排除简化成「后面不接成分字符」那一层（即删掉新增的第二层），
+    第三条断言会红；把第一层的字符类写回含点的旧式，第一条会红。
+    """
+    assert scan.hits_in_text("/Users/" + "you.") == [], "占位符 + 句末点，不许命中"
+    assert scan.hits_in_text("/Users/" + "Shared.") == [], "系统目录 + 句末点，不许命中"
+    hits = scan.hits_in_text("/Users/" + "you.x")
+    assert [v for _s, _e, _sh, v in hits] == ["/Users/" + "you.x"], \
+        "you.x 是另一个用户名，不许跟着 you 一起被排除"
+    # 回归：排除只认**整段相等**
+    for name in ("yours", "you2", "Shared2"):
+        assert [h[2] for h in scan.hits_in_text("/Users/" + name + "/x")] == ["path"], \
+            name + " 不是被排除的那两段，必须命中"
+    assert scan.hits_in_text("/Users/" + "you" + "/x") == [], "整段等于 you 仍要排除"
+
+
 def test_path_value_never_ends_with_a_dot(scan):
     """句末标点不许被吃进值：`/Users/<名字>.` 的值必须与不带点的那次相同。
 

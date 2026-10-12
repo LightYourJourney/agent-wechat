@@ -31,9 +31,15 @@ ALLOWLIST_PATH = REPO_ROOT / "security" / "allowlist.txt"
 # [0-9a-f]{32} 刻意不在列：任何 md5 都长这样，仓库里有 2786 个 distinct（spec §4.2）。
 #
 # 路径形（spec §4.2 订正，2026-10-12）取的是**第一段**、不是整条路径——值稳定，指纹才稳。
-# 两段结构性排除：`you`（仓库钦定的占位符，CONTRIBUTING §4；今天有 28 处合法命中）与
-# `Shared`（macOS 系统目录，不是用户名）。排除只认**整段相等**（靠 lookahead 里那层
-# `(?![A-Za-z0-9._-])`），所以 `yours` / `you2` 照抓。
+# 两段结构性排除：`you`（仓库钦定的占位符，CONTRIBUTING §4；`daf9067` 实测有 28 处合法
+# 命中——数字带树，别写成「今天」）与
+# `Shared`（macOS 系统目录，不是用户名）。排除只认**整段相等**：`(?![A-Za-z0-9_-])`
+# 那层管「后面不再接成分字符」，所以 `yours` / `you2` 照抓。
+# **那两层 lookahead 是一对，别简化成一层**：末位不能是点之后（见下），末尾那个点已
+# 不属于成分——`you` / `Shared` 后接句末点时，成分就是它们本身（占位符 + 标点），必须
+# 排除；可**只留一层**就会把「`you` + 点 + 更多成分字符」也放过，而那是**另一个用户名**
+# （成分形如 `you.x`，末位 `x`，合法）。第二层 `(?!\.[A-Za-z0-9._-])` 正是「点后面还有
+# 成分字符 ⇒ 那不是句末标点」这半边；去掉它等于在 `you.*` / `Shared.*` 整个命名空间上失明。
 # 字符集**刻意是 ASCII**：放宽成「非斜杠任意字符」会让文档描述脱敏规则用的记号
 # `/Users/<用户名>` 自匹配，而它没有登记这条退路（只能去改写历史记录）。
 # **不做大小写折叠**：折叠会拿 `/users/<id>` 这类 URL 片段换假阳性，同样没有退路。
@@ -44,7 +50,9 @@ PATTERNS = (
     ("wxid", re.compile(r"wxid_[A-Za-z0-9_-]{4,}")),
     ("chatroom", re.compile(r"[0-9]{6,}@chatroom")),
     ("phone", re.compile(r"1[3-9][0-9]{9}")),
-    ("path", re.compile(r"/Users/(?!(?:you|Shared)(?![A-Za-z0-9._-]))[A-Za-z0-9._-]*[A-Za-z0-9_-]")),
+    ("path", re.compile(
+        r"/Users/(?!(?:you|Shared)(?![A-Za-z0-9_-])(?!\.[A-Za-z0-9._-]))"
+        r"[A-Za-z0-9._-]*[A-Za-z0-9_-]")),
 )
 
 SHAPE_LABEL = {"wxid": "wxid 形", "chatroom": "chatroom 形", "phone": "手机号形",
