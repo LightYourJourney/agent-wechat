@@ -108,22 +108,28 @@ def test_path_marker_notation_does_not_self_match(scan):
     assert scan.hits_in_text("/Users/<用户名>/x") == []
 
 
-def test_excluded_segment_followed_by_a_sentence_dot_is_still_the_placeholder(scan):
-    """`you` / `Shared` 后面跟句末点时，它们**仍是那两个被排除的成分**——不许命中。
+def test_excluded_segment_followed_by_trailing_dots_is_still_the_placeholder(scan):
+    """`you` / `Shared` 后面跟着**一串点**时，它们仍是那两个被排除的成分——不许命中。
 
     F6 定下「成分末位不能是点」之后，`/Users/<you>.` 的成分**就是 `you`**（那个点已经是
-    句末标点、不再属于成分），所以按同一条规则必须排除——否则「占位符 `you` 永不命中」
-    这条承诺不成立。
+    句末标点、不再属于成分），按同一条规则必须排除——否则「占位符 `you` 永不命中」这条
+    承诺不成立。同一个道理覆盖**一串**点：句末省略号（`..`）同样只能是标点。
 
-    **但只放过「点 + 什么都没了」**：`you.x` 是**另一个用户名**（成分 `you.x`，末位是 `x`，
-    合法），必须照抓。把排除简化成「后面不接成分字符」那一层（即删掉新增的第二层），
-    第三条断言会红；把第一层的字符类写回含点的旧式，第一条会红。
+    判据是「吃掉一串点之后，后面的字符必须**不是**成分字符」——那才是真正的成分边界。
+    **点后面还有成分字符就是另一个用户名**：`you.x` / `you..x` 必须照抓。
+    把排除里的 `\\.*` 删掉，本用例的省略号那两条会红（`you` 后面那个点又会被当成成分字符，
+    于是整段相等判据失效）；只保留尾巴不接成分字符那半边，`you.x` 那两条会红。
     """
+    # 点串只能是标点 ⇒ 不命中
     assert scan.hits_in_text("/Users/" + "you.") == [], "占位符 + 句末点，不许命中"
+    assert scan.hits_in_text("/Users/" + "you" + "..") == [], "占位符 + 省略号，不许命中"
     assert scan.hits_in_text("/Users/" + "Shared.") == [], "系统目录 + 句末点，不许命中"
-    hits = scan.hits_in_text("/Users/" + "you.x")
-    assert [v for _s, _e, _sh, v in hits] == ["/Users/" + "you.x"], \
-        "you.x 是另一个用户名，不许跟着 you 一起被排除"
+    assert scan.hits_in_text("/Users/" + "Shared" + "..") == [], "系统目录 + 省略号，不许命中"
+    # 点后面还有成分字符 ⇒ 另一个用户名，必须照抓
+    for name in ("you.x", "you" + "..x"):
+        hits = scan.hits_in_text("/Users/" + name)
+        assert [v for _s, _e, _sh, v in hits] == ["/Users/" + name], \
+            name + " 是另一个用户名，不许跟着 you 一起被排除"
     # 回归：排除只认**整段相等**
     for name in ("yours", "you2", "Shared2"):
         assert [h[2] for h in scan.hits_in_text("/Users/" + name + "/x")] == ["path"], \
