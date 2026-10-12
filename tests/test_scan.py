@@ -32,10 +32,11 @@ def scan():
 FAKE = "wxid_qz7x2m4k9p1v3n8b"
 
 
-def test_patterns_match_the_three_shapes(scan):
-    shapes = {s for _, _, s, _ in scan.hits_in_text(
-        "a " + FAKE + " b 12345678901@chatroom c 13800138000 d")}
-    assert shapes == {"wxid", "chatroom", "phone"}, "三种形状都要抓到"
+def test_patterns_match_the_four_shapes(scan):
+    text = ("a " + FAKE + " b 12345678901@chatroom c 13800138000 d "
+            "e /Users/" + "somebody f")
+    assert {s for _, _, s, _ in scan.hits_in_text(text)} == \
+        {"wxid", "chatroom", "phone", "path"}, "四种形状都要抓到"
 
 
 def test_wxid_requires_four_chars_after_prefix(scan):
@@ -57,6 +58,161 @@ def test_phone_boundaries(scan):
 def test_hex32_is_not_a_pattern(scan):
     """[0-9a-f]{32} 有 2786 个 distinct，是任何 md5，纯噪声——spec §4.2 明确排除。"""
     assert scan.hits_in_text("d41d8cd98f00b204e9800998ecf8427e") == []
+
+
+# ---------- 第四种形状：本机路径（CONTRIBUTING §4 的红线；spec §4.2 订正 2026-10-12）----------
+#
+# 夹具**只能拼接**：本形状没有「登记成假值」这条出路（--allow 会拒绝它——登记等于把
+# 真实用户名写进一个会被提交的文件），所以源码里任何完整字面量都会让本仓自己的钩子
+# 拦下这次提交。`you` 与 `Shared` 是形状层面排除的，可以直接写成字面量。
+
+PATH_FAKE = "/Users/" + "somebody"
+
+
+def test_path_shape_catches_local_home_but_not_the_two_exclusions(scan):
+    hits = scan.hits_in_text(PATH_FAKE + "/x/y")
+    assert [h[2] for h in hits] == ["path"]
+    assert [v for _s, _e, _sh, v in hits] == [PATH_FAKE], \
+        "命中的是**第一段**（用户名），不是整条路径——值要稳定，指纹才稳"
+    assert scan.hits_in_text("/Users/you/x") == [], "占位符是仓库钦定的，不许命中"
+    assert scan.hits_in_text("/Users/Shared/x") == [], "macOS 系统目录不是用户名"
+    assert scan.hits_in_text("/Users/") == [], "只有 /Users/ 不算泄漏"
+
+
+def test_path_exclusions_are_component_anchored_not_prefix(scan):
+    """排除只认**整段相等**：`yours` / `you2` / `Shared2` 都是另外的用户名。
+
+    把 lookahead 写成 `(?!you)` 这种前缀判据，这条会红。
+    """
+    for name in ("yours", "you2", "Shared2"):
+        assert [h[2] for h in scan.hits_in_text("/Users/" + name + "/x")] == ["path"], \
+            name + " 不是被排除的那两段，必须命中"
+
+
+def test_path_shape_is_case_sensitive_by_design(scan):
+    """`/users/<id>` **不**命中——这是写进 SECURITY.md 覆盖边界的**已知漏面**。
+
+    折叠大小写的代价是把 `/users/<id>` 这类 URL 片段变成假阳性，而本形状没有
+    豁免清单这条退路（唯一解法是改写文字）。加 re.IGNORECASE，这条会红。
+    """
+    assert scan.hits_in_text("/users/" + "somebody/x") == []
+
+
+def test_path_marker_notation_does_not_self_match(scan):
+    """文档描述脱敏规则时用的记号 `/Users/<用户名>` 不许命中。
+
+    字符集是 ASCII 的、`<` 不在类内——这是**刻意的**：那个记号出现在
+    `内部记录/` 的验收记录里，若判成命中，它没有登记这条退路，
+    只能去改写历史记录。把字符类放宽成「非斜杠的任意字符」，这条会红。
+    """
+    assert scan.hits_in_text("/Users/<用户名>/x") == []
+
+
+def test_the_two_functional_configs_are_exempt_for_the_path_shape(scan):
+    """CONTRIBUTING §4 明文豁免的两个功能性本机配置——**只豁免路径形**。
+
+    两条断言的顺序是刻意的：**先**证明形状在这份真文本上确实命中，否则「0 命中」
+    也可能只是文件里根本没有路径形，这条测试就什么都没证明；**再**证明 `scan_repo()`
+    把它们排除了。删掉豁免判据 → 第二条红。
+    """
+    for rel in (".mcp.json", ".codex/config.toml"):
+        text = (ROOT / rel).read_text(encoding="utf-8")
+        assert [h for h in scan.hits_in_text(text) if h[2] == "path"], \
+            "%s 里没有路径形命中——那这条测试证明不了豁免" % rel
+        assert not [h for h in scan.scan_repo() if h[0] == rel and h[2] == "path"], \
+            "%s 的路径形该被豁免（它是 §4 的功能性本机配置）" % rel
+
+
+def test_the_exemption_is_per_shape_not_per_file(scan, tmp_path, monkeypatch):
+    """豁免按 (文件, 形状)，**不是**把这两个文件整份跳掉（那是 `SKIP_NAMES` 的做法）。
+
+    变异：豁免实现成「文件名命中就整份 continue」，这条会红——其余形状必须照扫，
+    否则这两个文件成了整份盲区。
+    """
+    (tmp_path / ".mcp.json").write_text(
+        '{"a": "' + PATH_FAKE + '/x", "b": "' + FAKE + '"}\n', encoding="utf-8")
+    monkeypatch.setattr(scan, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(scan, "_tracked_files", lambda: [".mcp.json"])
+    monkeypatch.setattr(scan, "ALLOWLIST_PATH", tmp_path / "allowlist.txt")
+
+    assert {(rel, shape) for rel, _n, shape, _v in scan.scan_repo()} == \
+        {(".mcp.json", "wxid")}, "路径形豁免了，其余形状必须照扫"
+
+
+def test_staged_applies_the_same_path_exemption(scan, tmp_path, monkeypatch, capsys):
+    """`--staged` 那条入口也要过**同一个**判据——而且**走真解析器**（不桩 `staged_added_lines`）。
+
+    桩掉它等于把「git 的 `b/<路径>` 解析出来与 `PATH_EXEMPT_FILES` 里那个常量是不是
+    同一个串」这层整个跳过；那正是豁免失效的一个真实途径。这里只桩 `_git`（拿不到
+    真实暂存区），后面全走真代码。
+
+    2026-09-29 的 Critical 1 就是「跳过规则只落在一处」：`--all` 说干净、`--staged`
+    说未登记。删掉 `--staged` 那一处的豁免 → 第一条断言红；第二条是正向对照：
+    同样一行落在别的文件里必须拦下。
+    """
+    line = '  "a": "' + PATH_FAKE + '/x"'
+    (tmp_path / ".mcp.json").write_text("{}\n", encoding="utf-8")
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "x.md").write_text("老内容\n", encoding="utf-8")
+    monkeypatch.setattr(scan, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(scan, "ALLOWLIST_PATH", tmp_path / "allowlist.txt")
+    args = scan._build_parser().parse_args(["--staged"])
+
+    def diff(path):
+        return ("diff --git a/%s b/%s\n--- a/%s\n+++ b/%s\n@@ -1,0 +1 @@\n+%s\n"
+                % (path, path, path, path, line))
+
+    monkeypatch.setattr(scan, "_git", lambda *a: diff(".mcp.json"))
+    assert scan._run(args) == scan.EXIT_CLEAN, "功能性配置的路径形改动不该拦"
+    assert capsys.readouterr().out == "", "放行时不该印任何一行"
+
+    monkeypatch.setattr(scan, "_git", lambda *a: diff("docs/x.md"))
+    assert scan._run(args) == scan.EXIT_HITS, "同样一行在别的文件里必须拦"
+
+
+def test_allow_refuses_the_path_shape(scan, tmp_path, monkeypatch, capsys):
+    """路径形永不登记——登记它等于把真实用户名写进一个会被提交的文件。
+
+    而 §4.3 的不变式 1 **查不出来**：那个值仍在原文里命中，不算死条目。所以这层
+    拒绝是唯一的自动守卫。删掉它 → 清单被写入一行，这条红。
+    """
+    allow = tmp_path / "allowlist.txt"
+    allow.write_text("# 空\n", encoding="utf-8")
+    (tmp_path / "doc.md").write_text("见 " + PATH_FAKE + "/x\n", encoding="utf-8")
+    monkeypatch.setattr(scan, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(scan, "_tracked_files", lambda: ["doc.md"])
+    monkeypatch.setattr(scan, "ALLOWLIST_PATH", allow)
+    before = allow.read_bytes()
+
+    rc = scan.main(["--allow", scan.fingerprint(PATH_FAKE)])
+
+    err = capsys.readouterr().err
+    assert rc == scan.EXIT_ERROR
+    assert allow.read_bytes() == before, "拒绝之后清单必须一个字节都没变"
+    assert "/Users/you" in err, "要说清正解：改写文字，用钦定占位符"
+
+
+def test_every_pattern_has_a_label(scan):
+    """`--values` 用 `SHAPE_LABEL[shape]` 取值；漏一个就是运行期 KeyError（退 2）。"""
+    assert {s for s, _p in scan.PATTERNS} == set(scan.SHAPE_LABEL)
+
+
+def test_this_test_file_has_no_path_shape_literal(scan):
+    """夹具必须拼接——本文件自己的源码里不许有路径形字面量。
+
+    否则本仓的钩子会拦下这次提交，而路径形**没有**「登记成假值」这条路可绕。
+    """
+    src = Path(__file__).read_text(encoding="utf-8")
+    assert [h for h in scan.hits_in_text(src) if h[2] == "path"] == []
+
+
+def test_the_repo_has_no_unregistered_path_hits(scan):
+    """本仓今天的路径形命中为 0——那 4 处真路径全部落在两个被豁免的功能性配置里。
+
+    它同时钉住两件事：豁免有效、仓库里没有别的真路径。（与验收 #3 的第 3 条对新形状
+    是同一件事，但走代码路径而不是命令行。）
+    """
+    assert [h for h in scan.scan_repo() if h[2] == "path"] == []
 
 
 def test_output_never_contains_the_value(scan, tmp_path, monkeypatch, capsys):

@@ -29,13 +29,29 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 ALLOWLIST_PATH = REPO_ROOT / "security" / "allowlist.txt"
 
 # [0-9a-f]{32} 刻意不在列：任何 md5 都长这样，仓库里有 2786 个 distinct（spec §4.2）。
+#
+# 路径形（spec §4.2 订正，2026-10-12）取的是**第一段**、不是整条路径——值稳定，指纹才稳。
+# 两段结构性排除：`you`（仓库钦定的占位符，CONTRIBUTING §4；今天有 28 处合法命中）与
+# `Shared`（macOS 系统目录，不是用户名）。排除只认**整段相等**（靠 lookahead 里那层
+# `(?![A-Za-z0-9._-])`），所以 `yours` / `you2` 照抓。
+# 字符集**刻意是 ASCII**：放宽成「非斜杠任意字符」会让文档描述脱敏规则用的记号
+# `/Users/<用户名>` 自匹配，而它没有登记这条退路（只能去改写历史记录）。
+# **不做大小写折叠**：折叠会拿 `/users/<id>` 这类 URL 片段换假阳性，同样没有退路。
 PATTERNS = (
     ("wxid", re.compile(r"wxid_[A-Za-z0-9_-]{4,}")),
     ("chatroom", re.compile(r"[0-9]{6,}@chatroom")),
     ("phone", re.compile(r"1[3-9][0-9]{9}")),
+    ("path", re.compile(r"/Users/(?!(?:you|Shared)(?![A-Za-z0-9._-]))[A-Za-z0-9._-]+")),
 )
 
-SHAPE_LABEL = {"wxid": "wxid 形", "chatroom": "chatroom 形", "phone": "手机号形"}
+SHAPE_LABEL = {"wxid": "wxid 形", "chatroom": "chatroom 形", "phone": "手机号形",
+               "path": "本机路径形"}
+
+# CONTRIBUTING §4 明文豁免的两个**功能性**本机配置：它们写的就是运行这台机器所需的
+# 真实路径，且 JSON/TOML 不展开 `~`。豁免**按 (文件, 形状)**、不按文件——其余三种形状
+# 在这两个文件里照扫（别让它们成为整份盲区）。也**不能**改用 allowlist.txt 登记：那等于
+# 把真实用户名写进一个会被提交的文件，正是这条红线要拦的事。
+PATH_EXEMPT_FILES = frozenset({".mcp.json", ".codex/config.toml"})
 
 # 生成的依赖锁：内容是第三方包元数据，没有一处是本项目的。实测 `uv.lock` 单独贡献
 # 47 个手机号形假阳性（52 个手机号值里的 47 个）。跳过它不是网开一面——那里面
@@ -73,6 +89,15 @@ def hits_in_text(text: str) -> list[tuple[int, int, str, str]]:
     return found
 
 
+def path_exempt(rel: str, shape: str) -> bool:
+    """这一处 (文件, 形状) 是否豁免。**两个调用点都必须过它**（`scan_repo` / `--staged`）。
+
+    2026-09-29 的 Critical 1 就是跳过规则只落在一处：`--all` 说干净、`--staged` 说
+    47 个未登记。这条判据的测试也按那个教训写——两处任一漏掉都会红。
+    """
+    return shape == "path" and rel in PATH_EXEMPT_FILES
+
+
 def _git(*args: str) -> str:
     exe = shutil.which("git")
     if exe is None:
@@ -104,6 +129,11 @@ def scan_repo() -> list[tuple[str, int, str, str]]:
     「已批准的占位符」的注册表，扫它会让
     §4.3 的不变式 1（清单项必须在仓库里出现）**永远为真**——那是假护栏。
 
+    另有一条**按 (文件, 形状)** 的豁免（`path_exempt`）：CONTRIBUTING §4 那两个
+    功能性本机配置的路径形不报——它们的真实路径是运行这台机器所需，且没有
+    「登记成假值」这条路（登记等于把真实用户名写进一个会被提交的文件）。
+    注意它**不是**整份跳过：其余三种形状在那两个文件里照扫。
+
     **不跳过 scan.py 自身**：实测它不自匹配（`wxid_[A-Za-z0-9_-]{4,}` 这串字面量里
     `[` 不在字符类内，匹配不上；跑出来 0 命中）。多一条跳过规则等于白开一个洞——
     真标识粘进这个文件就没人管了。
@@ -121,6 +151,8 @@ def scan_repo() -> list[tuple[str, int, str, str]]:
             continue
         for lineno, line in enumerate(text.splitlines(), 1):
             for _, _, shape, value in hits_in_text(line):
+                if path_exempt(rel, shape):
+                    continue
                 out.append((rel, lineno, shape, value))
     return out
 
@@ -175,6 +207,15 @@ def allow_value(key: str) -> str:
         raise ScannerError("这个编号不在命中表里——编号是值的 sha256 前 8 位小写十六进制"
                            "（先跑 --values 看有哪些），**不要把值本身粘进来**")
     entry = table[key]
+    if entry["shape"] == "path":
+        # 唯一的自动守卫，且必须在这里：登记一个真路径**不会**被 §4.3 的不变式 1 抓到
+        # ——那个值仍在原文里命中，不算死条目。于是「钩子拦下 → 顺手 --allow」会把
+        # 真路径合法化进一个会被提交的文件，正是这条红线要拦的事。
+        raise ScannerError(
+            "本机路径形不能登记进豁免清单——登记它等于把真实用户名写进一个会被提交的"
+            "文件，且 §4.3 的不变式 1 查不出来。请改写那处文字：占位符一律用 "
+            "/Users/you；CONTRIBUTING §4 的那两个功能性配置文件由扫描器按文件名"
+            "豁免，不需要登记")
     line = "%s  %s · %d 字符 · --allow %s 登记" % (
         entry["value"], entry["shape"], len(entry["value"]), key)
     with ALLOWLIST_PATH.open("a", encoding="utf-8") as fh:
@@ -356,7 +397,8 @@ def _run(args: argparse.Namespace) -> int:
                           file=sys.stderr)
                 hits = [(rel, n, shape, value)
                         for rel, n, text in added
-                        for _, _, shape, value in hits_in_text(text)]
+                        for _, _, shape, value in hits_in_text(text)
+                        if not path_exempt(rel, shape)]
             allow = load_allowlist()      # 读文件，在边界之内（同上）
             unregistered = [h for h in hits if h[3] not in allow]
             for rel, lineno, shape, value in unregistered:
