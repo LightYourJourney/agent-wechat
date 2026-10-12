@@ -935,3 +935,74 @@ def test_check_hooks_warns_about_bypassed_copies_without_changing_the_code(
     out = capsys.readouterr()
     assert rc == scan.EXIT_CLEAN, "警告不许改退出码"
     assert "旁路" in out.err or "已被旁路" in out.err
+
+
+def test_check_hooks_rejects_a_wrong_config_value(scan, tmp_path, monkeypatch, capsys):
+    _lay_out_hooks(scan, tmp_path, monkeypatch, config=".githooks")
+    rc = scan.main(["--check-hooks"])
+    out = capsys.readouterr()
+    assert rc == scan.EXIT_HITS
+    assert ".githooks" in out.out, "要把**当前实际值**印出来，别只说「配置不对」"
+
+
+def test_check_hooks_rejects_an_empty_config_value(scan, tmp_path, monkeypatch, capsys):
+    """空串 ≠ 未设置：git 把空串读作「停用钩子」且不回落 `.git/hooks`。"""
+    _lay_out_hooks(scan, tmp_path, monkeypatch, config="")
+    rc = scan.main(["--check-hooks"])
+    out = capsys.readouterr()
+    assert rc == scan.EXIT_HITS
+    assert "停用" in out.out
+
+
+def test_check_hooks_reports_missing_dir_as_wrong_config_not_local_edit(
+        scan, tmp_path, monkeypatch, capsys):
+    """**优先级用例**：配置对、但目录不存在（切到旧提交）——必须报「指错」（机制停着），
+    不是「未提交的本地改动」。删掉 `if not src.is_dir():` 那段，这条会红（会掉进下面的 diff 判据）。"""
+    _lay_out_hooks(scan, tmp_path, monkeypatch, config="security/hooks", diff_rc=1)
+    import shutil as _sh
+    _sh.rmtree(tmp_path / "security" / "hooks")
+    rc = scan.main(["--check-hooks"])
+    out = capsys.readouterr()
+    assert rc == scan.EXIT_HITS
+    assert "停" in out.out and "不存在" in out.out
+    assert "工作区与 HEAD 不一致" not in out.out, "别把机制停着说成本地改动"
+
+
+def test_check_hooks_names_the_exec_bit_loss_separately(scan, tmp_path, monkeypatch, capsys):
+    """执行位与 diff 是两种成因，要**分别指名**。先 os.access 再 diff——本机 filemode=true 时
+    `chmod -x` 也让 diff 非 0，只靠 diff 会把它说成「未提交的改动」。删掉 os.access 那段，这条红。"""
+    _lay_out_hooks(scan, tmp_path, monkeypatch, config="security/hooks",
+                   exec_bit=False, diff_rc=1)
+    rc = scan.main(["--check-hooks"])
+    out = capsys.readouterr()
+    assert rc == scan.EXIT_HITS
+    assert "执行位丢了" in out.out
+
+
+def test_check_hooks_reports_local_edit_and_a_missing_half(scan, tmp_path, monkeypatch, capsys):
+    """目录在而**少了一份**（半死）属于「本地改动」，不是「正常」。"""
+    _lay_out_hooks(scan, tmp_path, monkeypatch, config="security/hooks",
+                   drop="pre-commit", diff_rc=1)
+    rc = scan.main(["--check-hooks"])
+    out = capsys.readouterr()
+    assert rc == scan.EXIT_HITS
+    assert "工作区与 HEAD 不一致" in out.out
+
+
+def test_check_hooks_does_not_vouch_for_foreign_hooks(scan, tmp_path, monkeypatch, capsys):
+    """共享目录里是**别人的**同名钩子（内容不同）→ 不算旧机制，也不许建议删。"""
+    _lay_out_hooks(scan, tmp_path, monkeypatch, config=None, copies=True, copy_from_src=False)
+    rc = scan.main(["--check-hooks"])
+    out = capsys.readouterr()
+    assert rc == scan.EXIT_HITS
+    assert "旧机制" not in out.out, "内容不同就不是我们的旧机制"
+    assert "别人的" in out.out
+
+
+def test_check_hooks_is_not_composable_with_other_modes(scan, tmp_path, monkeypatch, capsys):
+    """`--check-hooks --all` 走的是**检查**（先命中者生效）——别新造组合语义。"""
+    _lay_out_hooks(scan, tmp_path, monkeypatch, config="security/hooks")
+    rc = scan.main(["--check-hooks", "--all"])
+    out = capsys.readouterr()
+    assert rc == scan.EXIT_CLEAN
+    assert "钩子正常" in out.out and "未登记" not in out.out
