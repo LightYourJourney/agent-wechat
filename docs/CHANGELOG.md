@@ -648,9 +648,11 @@
   免得扫描器坏掉被读成「没问题」）
 - **两个 git 钩子，命中即拦**：`pre-commit` 走 `scan.py --staged`（只扫暂存区的**新增行**）、
   `commit-msg` 走 `scan.py --text <文件>`（**连提交信息一起扫**——2026-09-27 那次真标识就躺在
-  提交信息里，只装 `pre-commit` 会漏掉这条已实际发生过的路径）。**两个钩子都不入库**：
-  装在该检出的**共享 hooks 目录**（`git rev-parse --git-common-dir` 下的 `hooks/`，
-  主检出与它的所有 worktree 共用），换 clone 或换机器要重装；装法与理由见 `security/README.md`
+  提交信息里，只装 `pre-commit` 会漏掉这条已实际发生过的路径）。
+  ~~**两个钩子都不入库**：装在该检出的**共享 hooks 目录**（`git rev-parse --git-common-dir`
+  下的 `hooks/`，主检出与它的所有 worktree 共用），换 clone 或换机器要重装~~
+  **（2026-10-13 订正：已改为「源入库 + `core.hooksPath`」——钩子源随仓库入库、`pull` 后
+  立即生效、不需要重装；见本文件末尾新增的那一节）**；装法与理由见 `security/README.md`
 - **豁免清单 `security/allowlist.txt`**：只许放**假值**（夹具里那类）。加条目走
   `scan.py --allow <指纹>`，**不要手抄**——手抄意味着你先把值读了出来；
   `--verify-allowlist` 检查死条目（在仓库里一次都没命中的条目）。`--values` 是逐值汇总视图
@@ -721,6 +723,19 @@ CONTRIBUTING §4 那条「本机绝对路径不得入库」（示例与夹具用
   头部注释）
 - 验收：七个变异各能红一条测试（两处豁免各漏一处、`--allow` 不拒、排除退化成前缀判据、
   加大小写折叠、字符类放宽、豁免改成按文件整份跳过）
+
+### 提交钩子改为「源入库 + core.hooksPath」
+
+- **钩子源随仓库入库**（`security/hooks/`，带执行位）：换 clone / 换机器不再需要照抄两个文件，
+  跑一次 `git config core.hooksPath security/hooks` 即可；`git pull` 后**立即生效、不需要重装**
+- **「装了但没执行位」结构性消失**：执行位由 git 跟踪；旧机制那条「拷进去忘了 `chmod +x`、
+  git 静默跳过」的失效形态不复存在（**订正**：实测 git 2.56 会打一句 advice 提示，
+  见 `security/README.md`）
+- **新增 `security/scan.py --check-hooks`**：报安装状态的五态（未装 / 旧机制 / 配置指错 /
+  本地改动 / 正常），外加一句「共享 hooks 目录里还有已被旁路的同名文件」的警告（不改退出码）
+- **`.git/hooks/` 被整体旁路**：以后别往那儿放钩子（不会跑）
+- 已知边界：自检是**拉取式**的（不主动跑就不说话）；Windows 上 `core.filemode=false` 会丢
+  执行位，本项目 macOS-only
 
 ### 其他规划
 
