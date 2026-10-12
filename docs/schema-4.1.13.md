@@ -120,6 +120,25 @@ caption**；`language_` **全部是 `'default'`**（925/925）。
 - `kNonStoreEmoticonTable.aes_key` 那把密钥**解不出**本机 `business/emoticon/Persist`
   下的贴纸文件（spec 附录 C.3 有证明）——所以这张表只用来取名字，与贴纸文件解密无关。
 
+**另外两张表（2026-10-12 spike 观测；本项目不读，只记形态以免将来重测）：**
+
+```sql
+-- 容器寻址表：把一个贴纸 md5 映到它在两股流里的位置（列名带尾下划线，同上一张表）
+CREATE TABLE kStoreEmoticonFilesTable(
+  package_id_ TEXT, md5_ TEXT, type_ INTEGER, sort_order_ INTEGER,
+  emoticon_size_ INTEGER, emoticon_offset_ INTEGER,
+  thumb_size_ INTEGER, thumb_offset_ INTEGER);
+```
+
+- 实测（2026-10-12，微信 4.1.13.63）：**82 行 / 5 个包**（= 本机装的商店表情包）。
+  `md5_` 是**贴纸自己的 md5**，所以容器切片与 `business/emoticon/` 的散文件**可以直接对号**
+  ——不是「两套索引」。
+- `kNonStoreEmoticonTable` 的 md5 列叫 **`md5`（无尾下划线）**，与上一张表**不同名**，别混。
+  实测 748 行（2026-10-12；2026-09-22 当时 743）——**748 个逐个带 `cdn_url`、逐个有散文件**，
+  而 `kStoreEmoticonFilesTable` 那 82 个**一个都没有**：两表**交集为 0**，是两批人。
+- 出处与实测口径：`内部设计记录` §8。
+  **`schema.py` 的 `stickers` 只声明名字表**——上面这两张表**不在**产品读取范围内。
+
 ## 对去重键的直接影响
 
 同会话跨分片 local_id 重复（不同消息）→ 检索库主键必须为
