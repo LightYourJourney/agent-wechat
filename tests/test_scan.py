@@ -7,6 +7,7 @@
      （0 干净 / 1 有命中 / 2 出错）。
 """
 import importlib.util
+import os
 import subprocess
 from pathlib import Path
 
@@ -835,3 +836,28 @@ def test_broken_allowlist_is_fail_closed_on_every_entry(scan, tmp_path, monkeypa
     monkeypatch.setattr(scan, "staged_added_lines", lambda *a, **k: [])
 
     assert scan.main(argv) == scan.EXIT_ERROR
+
+
+HOOKS_SRC = Path(__file__).resolve().parent.parent / "security" / "hooks"
+
+
+def test_hook_sources_are_tracked_with_the_exec_bit():
+    """钩子源要入库、要带执行位（100755）——那是「装了但没 +x」被结构性消掉的前提。
+
+    没跑 `chmod +x` 就 `git add`，这条会因为 mode 是 100644 而红。
+    """
+    out = subprocess.run(["git", "ls-files", "-s", "security/hooks"],
+                         cwd=ROOT, capture_output=True, text=True, check=True).stdout
+    modes = {line.split()[3]: line.split()[0] for line in out.splitlines()}
+    assert set(modes) == {"security/hooks/pre-commit", "security/hooks/commit-msg"}, \
+        "两份钩子源都要入库：%r" % modes
+    assert set(modes.values()) == {"100755"}, "执行位必须随提交入库：%r" % modes
+
+
+def test_hook_sources_point_at_the_scanner_and_are_executable():
+    """内容即扫描器的两个模式；工作区里也要可执行（git 跑之前只看 mode，不看内容）。"""
+    for name, flag in (("pre-commit", "--staged"), ("commit-msg", "--text")):
+        path = HOOKS_SRC / name
+        text = path.read_text(encoding="utf-8")
+        assert "security/scan.py" in text and flag in text, name + " 要调扫描器的 " + flag
+        assert os.access(path, os.X_OK), name + " 工作区里要可执行"

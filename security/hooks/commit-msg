@@ -1,0 +1,12 @@
+#!/bin/sh
+# 标识外流拦截：扫提交信息。**2026-09-27 那次真标识就躺在提交信息里。**
+set -u
+root=$(git rev-parse --show-toplevel) || exit 1
+for py in "$root/.venv/bin/python3" /usr/bin/python3; do
+    if [ -x "$py" ]; then
+        "$py" "$root/security/scan.py" --text "$1" || exit $?
+        exit 0
+    fi
+done
+echo "scan: 找不到可用的 Python 解释器（试过 .venv/bin/python3 与 /usr/bin/python3）" >&2
+exit 2
