@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import os
 import re
 import shutil
 import subprocess
@@ -107,6 +108,119 @@ def path_exempt(rel: str, shape: str) -> bool:
     47 个未登记。这条判据的测试也按那个教训写——两处任一漏掉都会红。
     """
     return shape == "path" and rel in PATH_EXEMPT_FILES
+
+
+HOOKS_PATH_VALUE = "security/hooks"
+HOOK_NAMES = ("pre-commit", "commit-msg")
+
+
+def _hooks_src() -> Path:
+    """仓库侧的钩子源目录。**每次现算**，不用模块级常量——测试会 monkeypatch `REPO_ROOT`，
+    模块级常量在建模块时就绑死了，跟不上。"""
+    return REPO_ROOT / "security" / "hooks"
+
+
+def _git_rc(*args: str) -> tuple[int, str]:
+    """跑 git 并**返回退出码**。
+
+    `_git()` 逢非 0 就抛，而 `core.hooksPath` 的「未设置」正是靠非 0 表达——那条判据要的
+    就是退出码本身，所以它必须走这个薄封装（spec §4.3）。
+    """
+    exe = shutil.which("git")
+    if exe is None:
+        raise ScannerError("PATH 上找不到 git；本扫描器需要 git 来读仓库状态")
+    try:
+        r = subprocess.run([exe] + list(args), cwd=str(REPO_ROOT),
+                           capture_output=True, text=True, timeout=120)
+    except subprocess.SubprocessError as exc:
+        raise ScannerError("git %s 跑不起来：%s" % (args[0], exc))
+    return r.returncode, r.stdout
+
+
+def _common_hooks_dir() -> Path:
+    """共享 hooks 目录。
+
+    `--git-common-dir` 在主树返回**相对串**（`.git`）、在 linked worktree 返回**绝对路径**；
+    `Path` 对绝对右操作数是「右边的赢」，所以这一条写法同时覆盖两种形态（spec §4.3）。
+    """
+    rc, out = _git_rc("rev-parse", "--git-common-dir")
+    if rc != 0:
+        raise ScannerError("git rev-parse --git-common-dir 失败（退出码 %d）" % rc)
+    return (REPO_ROOT / out.strip()).resolve() / "hooks"
+
+
+def _hooks_path_config() -> str | None:
+    """`core.hooksPath` 的值。**未设置返回 None**——与「显式空串」是两态（spec §4.3）。"""
+    rc, out = _git_rc("config", "--get", "core.hooksPath")
+    if rc != 0:
+        return None
+    return out.strip()
+
+
+def _same_bytes(a: Path, b: Path) -> bool:
+    """逐字节相同（不比 mtime、不比行数）。读不了就是不同。"""
+    try:
+        return hashlib.sha256(a.read_bytes()).digest() == hashlib.sha256(b.read_bytes()).digest()
+    except OSError:
+        return False
+
+
+def check_hooks() -> int:
+    """spec §4.3：五态 + 一条不改退出码的警告。→ 退出码。
+
+    **按表序自上而下、先中者生效**——配置对而目录不存在时，diff 判据也会成立，先判 diff
+    会把「机制已经静默归零」报成「未提交的本地改动」，把最危险的那态说轻了。
+    """
+    src = _hooks_src()
+    common = _common_hooks_dir()
+    value = _hooks_path_config()
+
+    if value is None:
+        ours = [n for n in HOOK_NAMES
+                if (common / n).exists() and _same_bytes(common / n, src / n)]
+        if len(ours) == len(HOOK_NAMES):
+            print("旧机制在岗：钩子在共享 hooks 目录里（core.hooksPath 未设置），机制是活的")
+            print("切到新机制：git config core.hooksPath %s，然后删掉那两个旧副本" % HOOKS_PATH_VALUE)
+            return EXIT_HITS
+        foreign = [n for n in HOOK_NAMES
+                   if (common / n).exists() and not _same_bytes(common / n, src / n)]
+        print("钩子未装：core.hooksPath 未设置，共享 hooks 目录里没有本项目钩子的完整副本")
+        if ours:
+            print("（共享 hooks 目录里有本项目的一份但不全：%s）" % "、".join(ours))
+        if foreign:
+            print("（%s 是同名但内容不同的文件——那是**别人的**钩子，别删）" % "、".join(foreign))
+        print("装：git config core.hooksPath %s" % HOOKS_PATH_VALUE)
+        return EXIT_HITS
+
+    if value != HOOKS_PATH_VALUE:
+        print("配置指错：core.hooksPath = %r（应为 %s）" % (value, HOOKS_PATH_VALUE))
+        if value == "":
+            print("（空串在 git 里是**显式停用钩子**，而且不会回落到共享 hooks 目录）")
+        return EXIT_HITS
+
+    if not src.is_dir():
+        print("配置指错：core.hooksPath = %s，但目录不存在（%s）——**机制此刻是停的**"
+              % (value, src))
+        return EXIT_HITS
+
+    problems = []
+    for name in HOOK_NAMES:
+        if not os.access(src / name, os.X_OK):
+            problems.append("执行位丢了：security/hooks/" + name)
+    rc, _ = _git_rc("diff", "--quiet", "HEAD", "--", "security/hooks")
+    if rc != 0:
+        problems.append("工作区与 HEAD 不一致（未提交的本地改动，或少了文件）")
+    if problems:
+        for line in problems:
+            print(line)
+        return EXIT_HITS
+
+    print("钩子正常：core.hooksPath = %s" % value)
+    stale = [n for n in HOOK_NAMES if (common / n).exists()]
+    if stale:
+        print("⚠️ 共享 hooks 目录里还有同名文件（已被旁路，改它没用）：%s"
+              % "、".join(stale), file=sys.stderr)
+    return EXIT_CLEAN
 
 
 def allowlistable(shape: str) -> bool:
@@ -389,6 +503,8 @@ def _build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--allow", metavar="指纹", help="按指纹把该值写进豁免清单（不打印值）")
     ap.add_argument("--verify-allowlist", action="store_true",
                     help="检查豁免清单里的死条目（spec §4.3 不变式 1）")
+    ap.add_argument("--check-hooks", action="store_true",
+                    help="检查提交拦截的安装状态（源入库 + core.hooksPath；spec §4.3 五态）")
     ap.add_argument("--staged", action="store_true", help="只扫暂存区的新增行（pre-commit 用）")
     ap.add_argument("--text", metavar="文件", help="扫一个给定文件（commit-msg 用）")
     return ap
@@ -407,6 +523,9 @@ def _run(args: argparse.Namespace) -> int:
                     print("死条目 #%s——它在仓库里一次都没命中，请从豁免清单删掉" % key)
                 return EXIT_HITS
             return EXIT_CLEAN
+
+        if args.check_hooks:
+            return check_hooks()
 
         if args.allow:
             allow_value(args.allow)

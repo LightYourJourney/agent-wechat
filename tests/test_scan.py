@@ -861,3 +861,77 @@ def test_hook_sources_point_at_the_scanner_and_are_executable():
         text = path.read_text(encoding="utf-8")
         assert "security/scan.py" in text and flag in text, name + " 要调扫描器的 " + flag
         assert os.access(path, os.X_OK), name + " 工作区里要可执行"
+
+
+# ---------- --check-hooks：安装状态自检（spec 2026-10-12 hook-install-design §4.3） ----------
+
+def _fake_git(scan, monkeypatch, *, config, common=".git", diff_rc=0):
+    """桩在**进程边界**（git 调用）上——判据逻辑一行都不桩。config=None 表示未设置。"""
+    def fake(*args):
+        kind = args[0]
+        if kind == "config":
+            return (1, "") if config is None else (0, config + "\n")
+        if kind == "rev-parse":
+            return 0, common + "\n"
+        if kind == "diff":
+            return diff_rc, ""
+        raise AssertionError("意外的 git 调用：%r" % (args,))
+    monkeypatch.setattr(scan, "_git_rc", fake)
+
+
+def _lay_out_hooks(scan, tmp_path, monkeypatch, *, config, copies=False,
+                   copy_from_src=True, exec_bit=True, diff_rc=0, drop=None):
+    """造一套 tmp 结构：仓库侧 security/hooks/ 两份 + 共享 hooks 目录（可选放副本）。"""
+    src = tmp_path / "security" / "hooks"
+    src.mkdir(parents=True)
+    for name in ("pre-commit", "commit-msg"):
+        p = src / name
+        p.write_text("# hook " + name + "\n", encoding="utf-8")
+        p.chmod(0o755 if exec_bit else 0o644)
+    if drop:
+        (src / drop).unlink()
+    common = tmp_path / ".git" / "hooks"
+    common.mkdir(parents=True)
+    for name in ("pre-commit", "commit-msg"):
+        if copies:
+            body = (src / name).read_bytes() if copy_from_src else b"# foreign hook\n"
+            (common / name).write_bytes(body)
+    monkeypatch.setattr(scan, "REPO_ROOT", tmp_path)
+    _fake_git(scan, monkeypatch, config=config, diff_rc=diff_rc)
+    return src, common
+
+
+def test_check_hooks_reports_not_installed(scan, tmp_path, monkeypatch, capsys):
+    _lay_out_hooks(scan, tmp_path, monkeypatch, config=None)
+    rc = scan.main(["--check-hooks"])
+    out = capsys.readouterr()
+    assert rc == scan.EXIT_HITS
+    assert "git config core.hooksPath security/hooks" in out.out, "未装时要给出那条安装命令"
+
+
+def test_check_hooks_recognises_the_legacy_mechanism(scan, tmp_path, monkeypatch, capsys):
+    """config 未设、但共享目录里有**与仓库源逐字节相同**的副本 = 旧机制在岗（本机迁移前正是这态）。"""
+    _lay_out_hooks(scan, tmp_path, monkeypatch, config=None, copies=True)
+    rc = scan.main(["--check-hooks"])
+    out = capsys.readouterr()
+    assert rc == scan.EXIT_HITS
+    assert "旧机制" in out.out and "git config core.hooksPath" in out.out
+
+
+def test_check_hooks_ok_shows_the_mechanism_value(scan, tmp_path, monkeypatch, capsys):
+    """正常态要**印出当前机制的值**——只断言退出码的话，「什么都没印」也能通过。"""
+    _lay_out_hooks(scan, tmp_path, monkeypatch, config="security/hooks")
+    rc = scan.main(["--check-hooks"])
+    out = capsys.readouterr()
+    assert rc == scan.EXIT_CLEAN
+    assert "security/hooks" in out.out
+
+
+def test_check_hooks_warns_about_bypassed_copies_without_changing_the_code(
+        scan, tmp_path, monkeypatch, capsys):
+    """配置对、共享目录里还留着同名文件 → **退 0** + stderr 一句警告（沿用 --staged 对二进制的做法）。"""
+    _lay_out_hooks(scan, tmp_path, monkeypatch, config="security/hooks", copies=True)
+    rc = scan.main(["--check-hooks"])
+    out = capsys.readouterr()
+    assert rc == scan.EXIT_CLEAN, "警告不许改退出码"
+    assert "旁路" in out.err or "已被旁路" in out.err
