@@ -81,19 +81,40 @@ def test_media_refs_by_chat_filters_kind_and_spans_batches(con, monkeypatch):
     from agent_wechat import messages
 
     md5a = messages.md5_of("wxid_abc123def456")
+    md5b = messages.md5_of("wxid_testacct01_ab12")
     rows = [(f"acct|{md5a}|message_0.db|{i}", "sticker", "ab" * 16, None) for i in range(1, 6)]
     rows.append((f"acct|{md5a}|message_0.db|9", "image", "aa" * 16, None))
+    rows += [(f"acct|{md5b}|message_0.db|{i}", "sticker", "cd" * 16, None) for i in range(1, 4)]
+    md5c = messages.md5_of("wxid_x01")            # 第三个会话：3 会话 × 批大小 2 = **真跨批**
+    rows += [(f"acct|{md5c}|message_0.db|1", "sticker", "ef" * 16, None)]
     # refs 的读取 join `messages` 取 ts/local_id 排序——没有消息行就一条都取不到
     store.upsert_batch(con, [messages.make_row(
         account="acct", chat_md5=md5a, chat_id="wxid_abc123def456", shard="message_0.db",
         local_id=i, ts=1700000000 + i, msg_type=49, sender_id="wxid_abc123def456",
         sender_name=None, is_self=0, content=f"[sticker] {i}", media_hint=None)
-        for i in list(range(1, 6)) + [9]])
+        for i in list(range(1, 6)) + [9]]
+        + [messages.make_row(
+            account="acct", chat_md5=md5b, chat_id="wxid_testacct01_ab12",
+            shard="message_0.db", local_id=i, ts=1700001000 + i, msg_type=49,
+            sender_id="wxid_testacct01_ab12", sender_name=None, is_self=0,
+            content=f"[sticker] b{i}", media_hint=None) for i in range(1, 4)]
+        + [messages.make_row(
+            account="acct", chat_md5=md5c, chat_id="wxid_x01", shard="message_0.db",
+            local_id=1, ts=1700002000, msg_type=49, sender_id="wxid_x01",
+            sender_name=None, is_self=0, content="[sticker] c1", media_hint=None)])
     store.upsert_media_refs(con, rows)
     monkeypatch.setattr(store, "KEYS_BATCH", 2)
     assert store.KEYS_BATCH == 2          # 前提自检：patch 真的生效
-    got = store.media_refs_by_chat(con, "acct", ["wxid_abc123def456"], kind="sticker")
-    got_rows = got["wxid_abc123def456"]
-    assert len(got_rows) == 5, "跨批累积丢了行"
-    assert all(k.count(
-        "|") == 3 for k, _ts, _fk in got_rows)
+    # F4：**必须传多个会话**——分批是按 chat_id 数切的（KEYS_BATCH=500），只传一个时
+    # `range(0, 1, 2)` 只迭代一次，「跨批累积」形同虚设（复审 M16：把 out 移进循环仍然全绿）。
+    got = store.media_refs_by_chat(con, "acct",
+                                   ["wxid_abc123def456", "wxid_testacct01_ab12", "wxid_x01"],
+                                   kind="sticker")
+    rows_a = got["wxid_abc123def456"]
+    rows_b = got["wxid_testacct01_ab12"]
+    rows_c = got["wxid_x01"]
+    # 3 会话 × 批大小 2 → `range(0,3,2)` 两次迭代——**这才真的跨批**（2 会话配 2 仍是一次，
+    # 复审 F4 的 M16 就是在这个缝里全绿的）
+    assert len(rows_a) == 5 and len(rows_b) == 3 and len(rows_c) == 1, "跨批累积丢了行"
+    assert all(k.count("|") == 3 for k, _ts, _fk in rows_a + rows_b + rows_c)
+    assert [ts for _k, ts, _fk in rows_a] == sorted(ts for _k, ts, _fk in rows_a), "会话内按 ts 升序"

@@ -571,25 +571,46 @@ def test_chat_export_renders_media_blocks_without_stubs(env, tmp_path):
         con.commit()
 
     out = tmp_path / "out"
-    res = usecases.chat_export(chat_id, out_dir=str(out), account=ACCT)
+    usecases.chat_export(chat_id, out_dir=str(out), account=ACCT)
     html = (out / chat_md5 / "chat" / "index.html").read_text(encoding="utf-8")
-    assert "media" in html and ("<img" in html or "ph" in html), html[:400]
-    assert res.counts.get("image", 0) >= 1, res.counts
+    # F1：断言必须**落在媒体块本身**——`"media" in html`/`"ph" in html` 会命中静态 CSS
+    # （chat_html.py 的 `.media img{…}` / `.ph{…}` 无条件输出），整段调用删掉也照样绿。
+    # 媒体块的可判别形态：`<div class="ph">[图片 · <理由>]</div>`（四态里的某一句）。
+    assert 'class="ph">[图片 · ' in html, html[:600]
+    # 反向自证：把产物里的媒体块按「桩回退」形态渲染（states 空）则必然没有这段，
+    # 也就是上面这条断言不是恒真——M7（删调用）/M7b（换回桩）两种改坏都会让它红。
 
 
-def test_iter_all_respects_the_batch_size(env, monkeypatch):
+def test_iter_all_respects_the_batch_size(env, tmp_path, monkeypatch):
     """EA-111：批次切分（`store.BATCH` 压到 2）：每批 ≤ 批大小、无空批、各批合起来不重不漏。
 
     批是**按分片（及其表）**刷的，不是全局计数——所以「批数 = ⌈n/批大小⌉」不成立
     （首稿这么写，实测 5 ≠ 4 被本用例自己否掉）；钉住的是可证伪的那三条。
     删掉批次刷新那段的 `rows = []` 初始化，本用例必红。
     """
+    # 定制树：**一张表出两批**（4 行、批大小 2），中间夹两行图片——
+    # 这样「flush 处的 `refs = []`」漏重置才会表现为「第二批的 refs 重复」
+    # （`rows`/`refs` 是按表初始化的；一张表只 flush 一次时删掉那行不可观测，复审 F5）。
+    root = tmp_path / "batchwx"
+    shutil.copytree(env.wx, root)
+    build_shard(root, ACCT, "message_0.db", {FRIEND: [
+        (1, 3, 1, T0, zstandard.compress(IMG_XML.encode()), 4, b"E" * 32),
+        (2, 1, 1, T0 + 1, "文本一", 0),
+        (3, 3, 1, T0 + 2, zstandard.compress(IMG_XML.encode()), 4, b"F" * 32),
+        (4, 1, 1, T0 + 3, "文本二", 0),
+    ]}, [FRIEND, SELF])
+    monkeypatch.setattr(paths, "XWECHAT_FILES", root)
     monkeypatch.setattr(store, "BATCH", 2)
     batches = list(reader.MessageReader(ACCT).iter_all())
     rows = [r for b, _refs in batches for r in b]
     assert rows, "夹具必须有行"
     assert len(rows) == len({r["msg_key"] for r in rows}), "批次边界上丢行或重复"
     assert all(0 < len(b) <= 2 for b, _ in batches), [len(b) for b, _ in batches]
+    # F5：refs 半边此前无护栏（旧夹具没有媒体行，删掉 flush 处的 `refs = []` 全量仍绿）。
+    # 现在同一张表出两批：各批 refs 拼起来必须恰好 2 条、不重复（漏重置 → 第二批重复）。
+    refs = [ref for _b, rf in batches for ref in rf]
+    assert len(refs) == 2, f"两张图片各一条 ref：{refs}"
+    assert len(refs) == len({r[0] for r in refs}), "refs 在各批间重复（`refs = []` 未重置）"
 
 
 def test_incremental_export_covers_non_latest_shard(tmp_path, monkeypatch):

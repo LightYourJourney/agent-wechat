@@ -2241,3 +2241,34 @@ def test_status_success_path_covers_both_entries(tmp_path, monkeypatch, capsys):
     res = mcp_server.get_account_status()
     assert res["wechat_running"] is True and res["current_account"] == "wxid_testacct01_ab12"
     assert res["accounts"] == ["wxid_testacct01_ab12"] and res["key_ready"] is True
+    # F2：负向样本——只钉正向时 `key_ready` 可被写成常量 `True` 而无人知（复审 M8 实测绿）。
+    monkeypatch.setattr(keys_mod, "load_cached_hex", lambda bare: None)
+    assert mcp_server.get_account_status()["key_ready"] is False
+    # F2 续：五字段里的 `index` 此前零断言（M10b：改成 {-1,-1,None} 依然全绿）
+    idx = res["index"]
+    assert set(idx) == {"messages", "chats", "last_ts"}, idx     # store.counts 的三键
+    assert isinstance(idx["messages"], int) and isinstance(idx["chats"], int)
+    assert idx["last_ts"] is None or isinstance(idx["last_ts"], int)
+
+
+def test_status_verify_keys_renders_the_hmac_line(tmp_path, monkeypatch, capsys):
+    """F3（EA-038②）：`status --verify-keys` 的 HMAC 渲染此前零覆盖——把它改成
+    `"  HMAC 999/999"` 全仓 1070 条不红。桩 `verify_passphrase` 钉住 `HMAC 1/2`。
+    """
+    from types import SimpleNamespace
+
+    from agent_wechat import keys as keys_mod
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(paths, "HOME_DIR", home)
+    monkeypatch.setattr(keys_mod, "CACHE_FILE", home / "passphrase.json")
+    monkeypatch.setattr(account, "status", lambda: SimpleNamespace(
+        running=True, pid=999, current="wxid_testacct01_ab12",
+        accounts=["wxid_testacct01_ab12"]))
+    keys_mod.save_cached_hex("wxid_testacct01", "aa" * 32)
+    monkeypatch.setattr(keys_mod, "verify_passphrase",
+                        lambda acc, raw: [("session/session.db", True), ("contact/contact.db", False)])
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["status", "--verify-keys"])
+    assert ei.value.code == 0
+    assert "HMAC 1/2" in capsys.readouterr().out
