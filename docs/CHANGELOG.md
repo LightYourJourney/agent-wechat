@@ -23,6 +23,29 @@
 - **MCP `export_chat_media` / `export_moments` 补上 `out_dir` 参数**：描述里一直承诺、
   签名里一直没有（SDK 静默丢弃未知实参，「照描述传」会静默落到默认根——与 `export_chat`
   的自定义根组合即全死链）
+- **密钥与解密链**（批 B4）：
+  - 引导的**诊断分叉**：`bootstrap` 在「一个库都没能读到」时改说权限问题（给「完全磁盘
+    访问权限」指引），不再把它混进「捕获值未通过 HMAC 校验，请重试」——此前用户会一遍遍
+    重跑 sudo 引导，而真问题是读不到库
+  - `status --verify-keys` 的 `HMAC N/N` 后补「（另有 N 个库读不到）」；`status` 新增
+    `备份排除: ✓/✗` 一行（✗ 时给出手动 `tmutil addexclusion` 命令）——这条安全控制
+    此前失败后完全不可观测
+  - 引导结束时的**非致命警告**（sudo 下属主未归还等）改为 `⚠️` 一行，不再把整次引导判负
+  - `AGENT_WECHAT_HOME` 为空时回落默认目录（`Path("")` == `.` 会让密钥缓存落进当前工作
+    目录）；相对路径直接拒绝并给 hint
+  - 微信目录**不可搜索**（无完全磁盘访问权限）与「目录不存在」分开报错——此前一律报
+    「没找到账号」
+  - **图片密钥验证门修好一半**：样本优先取 V2 dat（V0/V1 样本的解密输出与 aesKey 无关，
+    会让验证门空转、放行错钥）；kvcomm code 排序，去掉「哪把钥匙先被试」的文件系统依赖；
+    一个 V2 样本都没有时回落现行为，但把 aesKey 标为**未验证**并在 `degraded` 里说明
+  - `sqlcipher` 命令改走 stdin：派生密钥不再出现在进程命令行（`ps` 可见），错误文案相应
+    从「Parse error in 3rd command line argument」变为「Parse error near line N」；
+    解密失败的 stderr 不再预先截断（脱敏需要完整 64 位密钥形态才认得出）
+  - 密钥缓存的**形状**损坏（合法 JSON 但根/条目不是对象）与 hex 长度不符一律按「缓存损坏」
+    处理并指向重新 bootstrap——此前在前者上裸抛 `AttributeError`
+  - `pgrep` 补超时（卡顿时不再挂住）；lldb 捕获的读循环不再被**半行**输出钉住；收尾只向
+    本次捕获的进程组发信号，不再按名字 `pkill -9 -x lldb`（那会连坐用户自己的 lldb 会话）
+
 - **`semantic_search` 不再因缺少密钥缓存整条失败**：展示名富化读不到名册时回落裸
   `chat_id`（与 `search_history` 同一条降级），此前 `purge --keys` 之后该工具 100% 报
   `KeyNotFound` 并把用户引向需要 sudo 的 bootstrap

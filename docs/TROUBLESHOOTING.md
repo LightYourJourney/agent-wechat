@@ -33,6 +33,12 @@
 `agent-wechat inspect <库>` 确认库本身可解（对照 [schema-4.1.13.md](schema-4.1.13.md)），
 并到 `spike/probe_keyinfo.py` 复核验证公式。
 
+### 1.3b `一个库都没能读到（N 个不可读）`
+
+捕获本身成功了，但**一个库文件都没读到**——这与 1.3 是两回事（1.3 是读到了库、值不对）。
+通常是权限：给终端「完全磁盘访问权限」（[INSTALL.md](INSTALL.md) §3.3）后重试，不要反复
+重跑引导。若权限正常仍报此错，看权限位：`ls -l` 微信容器下的 `db_storage/*/*.db`。
+
 ### 1.4 `PermissionError: ~/.agent-wechat/passphrase.json`
 
 bootstrap 以 sudo 运行导致缓存文件属主为 root（旧版本代码的问题，新代码会自动归还
