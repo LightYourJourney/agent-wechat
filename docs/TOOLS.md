@@ -17,10 +17,11 @@
   捕获并翻译内部异常，**不会有任何异常逃到传输层**。`hint` 仅在存在可执行修复动作时
   出现，文案已含指引则不重复。未预期的内部错误返回
   `{"error": "内部错误: <异常类型>: <说明>"}`。
-  `SystemExit` 不在这条承诺的覆盖里，靠的是**另一条不变量**：core 任何模块都不
-  `raise SystemExit`（源码级护栏 `tests/test_errors.py::test_core_never_raises_systemexit`
-  钉住，全仓唯一一处 `raise SystemExit` 在 CLI 的退出漏斗）；`_guard` 也刻意不捕
-  `BaseException`——那会把 Ctrl-C 的退出语义一起吞成一条工具结果（EA-027）。
+  `SystemExit` 不在这条承诺的覆盖里，靠的是**另一条不变量**：core 任何模块都不抛它
+  （AST 护栏 `tests/test_errors.py::test_core_never_raises_systemexit` 按语法节点核对
+  `raise SystemExit` 与 `sys.exit(...)` 两种形态，`src/agent_wechat` 里唯一一处抛出点在
+  CLI 的退出漏斗）；`_guard` 也刻意不捕 `BaseException`——那会把 Ctrl-C 的退出语义
+  一起吞成一条工具结果（EA-027）。
 
 ---
 

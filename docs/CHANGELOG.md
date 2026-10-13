@@ -37,6 +37,9 @@
 - 错误路径不再杀死 MCP server：`SystemExit` 曾逃出工具处理器（微信未运行时调 5 个工具中的
   任意一个必现），现统一返回 `{"error"[, "hint"]}` 信封；`docs/TOOLS.md` 那句
   「工具不抛异常到传输层」由此由假变真
+  （订正，EA-027：那次修复覆盖的是 `Exception` 面；`SystemExit` 由**另一条不变量**兜住
+  ——core 任何模块都不抛它，`tests/test_errors.py::test_core_never_raises_systemexit`
+  按 AST 钉住。TOOLS 的表述已同步收窄）
 - **模型不一致**的错误现在带「：请改用 rebuild=True 重建」后缀与 hint——受影响的是
   MCP 的 `semantic_search` / `build_vector_index` 与 CLI 的 `semantic` / `vector-build`
   （原 `semantic_search` 的文案止于「不一致」，无后缀、无 hint）
