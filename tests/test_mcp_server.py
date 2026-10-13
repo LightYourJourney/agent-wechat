@@ -178,6 +178,17 @@ def test_unknown_task_id_envelope_unchanged(monkeypatch, tmp_path):
     assert _call(mcp_server.get_task_status, task_id="nope") == {"error": "未知任务 nope"}
 
 
+def test_semantic_search_empty_index_hint_names_the_mcp_tool(monkeypatch):
+    """EA-096：core 中立文案 + _guard 追加 MCP 专属工具名（与 ContactNotFound 同约定）。"""
+    def boom(*a, **k):
+        raise errors.VectorIndexEmpty("向量索引为空", hint="请先构建向量语义索引")
+
+    monkeypatch.setattr(usecases, "semantic_search", boom)
+    res = mcp_server.semantic_search(query="x")
+    assert res["error"].startswith("向量索引为空")
+    assert res["hint"].endswith("（MCP：`build_vector_index`）")
+
+
 def test_export_full_history_registers_task_with_same_envelope(monkeypatch):
     """删掉 export.start_task 转发后，登记参数与返回信封都不变。"""
     seen = {}
