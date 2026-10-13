@@ -69,7 +69,7 @@ def test_count_media_refs_scopes_by_chat_ids_and_kind(con):
     assert store.count_media_refs(con, "acct", chat_ids=["wxid_abc123def456"]) == 2
     assert store.count_media_refs(con, "acct", chat_ids=["wxid_abc123def456"],
                                   kind="video") == 1
-    assert store.count_media_refs(con, "acct", chat_ids=["wxid_testacct01_ab12"]) == 0
+    assert store.count_media_refs(con, "acct", chat_ids=["wxid_x01"]) == 0   # 未种入的会话
 
 
 def test_media_refs_by_chat_filters_kind_and_spans_batches(con, monkeypatch):
