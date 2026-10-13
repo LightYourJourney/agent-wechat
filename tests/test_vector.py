@@ -380,9 +380,10 @@ def test_a_non_missing_exception_is_raised_as_is(monkeypatch):
 
 
 def test_offline_load_missing_entry_still_falls_back_to_download(monkeypatch):
-    """EA-060 的反向守卫（防收窄过头）：huggingface_hub 的 `LocalEntryNotFoundError`
-    （无缓存/快照不完整）**确实**等同缓存缺失，必须仍走回退下载——它是 `FileNotFoundError`
-    与 `ValueError` 的子类。把收窄做成「只认 ValueError」本测试必红。
+    """EA-060 的反向守卫（防收窄过头）：`FileNotFoundError` 一类（含 huggingface_hub 的
+    `LocalEntryNotFoundError`，其 MRO 是 `(FileNotFoundError, EntryNotFoundError)`——**不含**
+    `ValueError`，初版这里写错过）**确实**等同缓存缺失，必须仍走回退下载。
+    把收窄做成「只认 ValueError」本测试必红。
     """
     calls = []
 
