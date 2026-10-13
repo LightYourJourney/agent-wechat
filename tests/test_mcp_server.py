@@ -174,7 +174,6 @@ def test_export_full_history_need_confirm_survives_call_tool(monkeypatch):
 def test_unknown_task_id_envelope_unchanged(monkeypatch, tmp_path):
     """未知 id 从返回 dict 改成抛 TaskNotFound 后，对外形状仍逐字节相同。"""
     monkeypatch.setattr(tasks, "TASKS_FILE", tmp_path / "tasks.json")
-    monkeypatch.setattr(tasks, "_loaded_path", None)
     assert _call(mcp_server.get_task_status, task_id="nope") == {"error": "未知任务 nope"}
 
 
@@ -190,7 +189,12 @@ def test_semantic_search_empty_index_hint_names_the_mcp_tool(monkeypatch):
 
 
 def test_export_full_history_registers_task_with_same_envelope(monkeypatch):
-    """删掉 export.start_task 转发后，登记参数与返回信封都不变。"""
+    """删掉 export.start_task 转发后，登记参数与返回信封都不变。
+
+    `full` 也是登记字段（F1，T7 复审）：它是**准入键**的一部分——缺了它，「增量在跑时
+    要求全量」会被静默吸收、全量根本没跑。把 `full=plan.full` 从 start 调用里删掉，
+    本条断言必红。
+    """
     seen = {}
     monkeypatch.setattr(usecases, "export_plan",
                         lambda **kw: usecases.ExportPlan("acct", "chat1", True))
@@ -200,13 +204,13 @@ def test_export_full_history_registers_task_with_same_envelope(monkeypatch):
 
     assert _call(mcp_server.export_full_history, contact="张三",
                  full=True) == {"task_id": "tid123", "status": "running"}
-    assert seen == {"kind": "export", "fields": {"account": "acct", "chat_id": "chat1"}}
+    assert seen == {"kind": "export",
+                    "fields": {"account": "acct", "chat_id": "chat1", "full": True}}
 
 
 def test_export_task_is_visible_through_get_task_status(monkeypatch, tmp_path):
     """用例层登记 → tasks 持久化 → MCP 查询：删掉转发后的全链路仍通。"""
     monkeypatch.setattr(tasks, "TASKS_FILE", tmp_path / "tasks.json")
-    monkeypatch.setattr(tasks, "_loaded_path", None)
     monkeypatch.setattr(account, "resolve_account", lambda a: "acct")
     # 形参表必须跟着 export.run_export 走：runner 多传 progress（EA-082）与 on_skipped，
     # 桩不接就成 `TypeError`→任务 failed，而本测试问的是**登记/持久化/查询**这条链。
@@ -230,7 +234,6 @@ def test_export_progress_is_wired_to_rows(monkeypatch, tmp_path):
     保留进度值——第二条断言钉的就是这条接线，删掉 `progress=` 必红（桩拿不到回调）。
     """
     monkeypatch.setattr(tasks, "TASKS_FILE", tmp_path / "tasks.json")
-    monkeypatch.setattr(tasks, "_loaded_path", None)
     monkeypatch.setattr(account, "resolve_account", lambda a: "acct")
 
     def fake_export(acct, chat_id=None, full=False, on_skipped=None, progress=None):

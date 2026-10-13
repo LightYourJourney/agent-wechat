@@ -713,8 +713,8 @@ def _render_chat_plan(plan: purge.ChatPlan, query: str) -> None:
     # 执行期间正在跑的导出任务会因写锁而失败」）。它说的是**本命令对别人做了什么**：
     # 读任何东西之前就 `BEGIN IMMEDIATE` 取写锁（SQLite 同时只允许一个写者），于是正在跑的
     # export 的下一批写入会等满 Python sqlite3 的默认 timeout=5 秒，然后抛 `database is locked`。
-    # 提前拦截做不到——purge 是独立进程，`tasks._ensure_loaded()` 一读磁盘就把 running 改判
-    # 成 failed（spec §5.3 末段），所以唯一诚实的做法就是把它印在用户据以说 --yes 的那张表上。
+    # 不查 tasks 注册表做提前拦截：它只覆盖本工具登记过的任务，而这里防的是**文件被持有**
+    # 本身（非本工具进程也算）。唯一诚实的做法就是把它印在用户据以说 --yes 的那张表上。
     print("⚠️ 执行期间正在跑的导出任务会因写锁而失败——本命令先取写锁再读，"
           "同一时刻只有一个写者；\n   等导出跑完再执行，或让它下一轮重试。")
     print("删的是本工具的副本，不是微信里的记录（微信容器恒只读）。")

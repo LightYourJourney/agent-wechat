@@ -2269,6 +2269,57 @@ def test_status_does_not_create_the_index_db(tmp_path, monkeypatch):
     assert not store.DB_PATH.exists(), "只读诊断不许建库"
 
 
+def test_status_does_not_create_exclusions_db_either(tmp_path, monkeypatch):
+    """F9（T7 复审）：`store.open()` 的建文件副作用有**两处**（connect 建 index.db、
+    ATTACH 建 exclusions.db）——闸必须覆盖两个文件。「index 在、排除清单缺」的手工态下，
+    只读诊断仍会补建一个空排除清单（与 `--all` 的「墓碑一并删除」语义冲突）。
+
+    排除清单的位置用 `path_for(DB_PATH)` 取——那正是 `store.connect` ATTACH 的目标
+    （生产上等于 `exclusions.path()`，测试里两者分叉）。把闸退回只看 index.db，
+    第二条断言必红。
+    """
+    from types import SimpleNamespace
+
+    from agent_wechat import exclusions, usecases
+    monkeypatch.setattr(account, "status", lambda: SimpleNamespace(
+        running=True, pid=999, current=None, accounts=[]))
+    store.DB_PATH.write_bytes(b"")                     # 「索引在、排除清单缺」的手工态
+    ex_path = exclusions.path_for(store.DB_PATH)
+    assert not ex_path.exists(), "前提：排除清单确实缺"
+
+    res = usecases.account_status()
+    assert res["index"] == {"messages": 0, "chats": 0, "last_ts": None}, res
+    assert not ex_path.exists(), \
+        "只读诊断不许补建排除清单（store.open 的第二处建文件副作用）"
+
+
+def test_status_says_when_the_index_cannot_be_read(tmp_path, monkeypatch):
+    """F10（T7 复审）：读不出来的索引库不许被折叠成「空索引」——把「库坏了」说成
+    「还没导出过」正是本仓到处在消灭的形态（`message_media` 等处同立场）。
+    计数仍按零呈现（形状不变），但 `schema_notes` 必须带上说明；健康库不许误报。
+    把 except 分支改回 `pass`，第二条断言必红。
+    """
+    from types import SimpleNamespace
+
+    from agent_wechat import exclusions, usecases
+    monkeypatch.setattr(account, "status", lambda: SimpleNamespace(
+        running=True, pid=999, current=None, accounts=[]))
+    ex_path = exclusions.path_for(store.DB_PATH)
+    store.DB_PATH.write_bytes("这不是数据库".encode())
+    ex_path.write_bytes(b"")                    # 两个文件都在 → 闸放行 → 打开时才失败
+
+    res = usecases.account_status()
+    assert res["index"] == {"messages": 0, "chats": 0, "last_ts": None}, res
+    assert res["schema_notes"] and "读不出来" in res["schema_notes"][0], res
+
+    # 反例：健康库不许带这条说明
+    store.DB_PATH.unlink()
+    ex_path.unlink()
+    with store.open():
+        pass                                    # 建一个健康库（含 schema 与排除清单）
+    assert usecases.account_status()["schema_notes"] == [], "健康库不许误报"
+
+
 def test_status_verify_keys_renders_the_hmac_line(tmp_path, monkeypatch, capsys):
     """F3（EA-038②）：`status --verify-keys` 的 HMAC 渲染此前零覆盖——把它改成
     `"  HMAC 999/999"` 全仓 1070 条不红。桩 `verify_passphrase` 钉住 `HMAC 1/2`。

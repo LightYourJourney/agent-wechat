@@ -298,7 +298,6 @@ def test_export_task_carries_skipped_rows_beside_rows(tmp_path, monkeypatch):
     """
     from agent_wechat import exclusions
     monkeypatch.setattr(tasks, "TASKS_FILE", tmp_path / "tasks.json")
-    monkeypatch.setattr(tasks, "_loaded_path", None)
     monkeypatch.setattr(account, "resolve_account", lambda a: "acct")
 
     def _row(md5, chat_id, local_id):

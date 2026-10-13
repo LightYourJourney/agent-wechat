@@ -357,9 +357,9 @@ def test_execute_all_reports_what_it_removed(tmp_path):
 
 
 def test_execute_refuses_when_index_is_held(tmp_path, monkeypatch):
-    """有进程持有 index.db 时拒绝执行。**不要用 tasks 注册表判断**：tasks._ensure_loaded()
-    载入时就把 running 收割成 failed（tasks.py:62-64，test_tasks.py:115-129 固化），
-    独立进程永远看不到 running——那条路是死的（spec §5.1 第 1 步）。"""
+    """有进程持有 index.db 时拒绝执行。**不要用 tasks 注册表判断**：它只覆盖本工具登记过
+    的任务，而这里要防的是「文件仍被打开」本身（非本工具进程也算）——句柄检测跨进程且
+    直接对应 unlink 的后果（spec §5.1 第 1 步）。"""
     home = tmp_path / "home"; home.mkdir(parents=True)
     (home / "index.db").write_bytes(b"x" * 100)
     monkeypatch.setattr(purge, "_holders", lambda p: [4242] if p.name == "index.db" else [])

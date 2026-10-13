@@ -250,17 +250,26 @@ def account_status(account: str | None = None) -> dict:
     ready = bool(acct and keys.load_cached_hex(paths.bare_wxid(acct)))
     index = {"messages": 0, "chats": 0, "last_ts": None}
     schema_notes: list[str] = []
-    if store.DB_PATH.exists():
-        # EA-025：**只读诊断不许建库**。`store.open()` 会 executescript(SCHEMA)——HOME 空的
-        # 机器上跑一次 `status` 就凭空建出 index.db 与 exclusions.db（实测）。与
-        # `purge_chat_targets` 用同一配方：库不在 ≡ 零计数。
+    # EA-025：**只读诊断不许建库**。`store.open()` 会 executescript(SCHEMA)——HOME 空的
+    # 机器上跑一次 `status` 就凭空建出 index.db 与 exclusions.db（实测）。与
+    # `purge_chat_targets` 用同一配方：库不在 ≡ 零计数。F9（T7 复审）：`open()` 的建文件
+    # 副作用有**两处**（connect 建 index.db、ATTACH 建 exclusions.db），闸必须覆盖两个
+    # 文件——只闸 index.db 时，「index 在而排除清单缺」的手工态仍会被补建一个空清单。
+    # 排除清单的位置跟着 `path_for(DB_PATH)` 走：那正是 `store.connect` ATTACH 的目标
+    # （生产上等于 `exclusions.path()`，测试里两者会分叉——闸必须与 connect 用同一个推导）。
+    if (store.DB_PATH.exists()
+            and exclusions.path_for(store.DB_PATH).exists()):
         try:
             with store.open() as con:
                 index = store.counts(con)
                 # EA-077：触发器体是「OLD 库 + 新代码」的静默失配面——自检报出来（不改库）。
                 schema_notes = store.schema_drift_notes(con)
-        except (errors.AgentWeChatError, sqlite3.Error, OSError):
-            pass                             # 读不了就按零计数（形状不变）
+        except (errors.AgentWeChatError, sqlite3.Error, OSError) as exc:
+            # F10（T7 复审）：读不了 ≠ 空索引——把「库坏了」说成「还没导出过」正是本仓
+            # 到处在消灭的形态（message_media / chat_export / message_parts / chat_index
+            # 四处同立场）。计数仍按零呈现（形状不变），但这条说明必须带上。
+            schema_notes = [f"索引库读不出来（{errors.redact(str(exc))}）——"
+                            "index 计数按零呈现；删除 index.db 后重跑一次导出可重建"]
     return {"wechat_running": st.running, "current_account": st.current,
             "accounts": st.accounts, "key_ready": ready, "index": index,
             "schema_notes": schema_notes}
@@ -318,8 +327,11 @@ def export_history(contact: str | None = None, full: bool = False,
                                  progress=lambda n: tasks.update(tid, rows=n),
                                  on_skipped=lambda n: tasks.update(tid, skipped=n))
 
-    # chat_id 一并记进任务元数据（tasks.json 已发布字段），与旧 export.start_task 一致
-    task_id = tasks.start("export", _run, account=plan.account, chat_id=plan.chat_id)
+    # chat_id/full 一并记进任务元数据（tasks.json 已发布字段），与旧 export.start_task 一致；
+    # 两者同时是**准入键**（F1，T7 复审）：缺了 full，「增量在跑时要求全量」会被静默吸收、
+    # 全量根本没跑，而调用方按 done 轮询会得出错误结论。
+    task_id = tasks.start("export", _run, account=plan.account, chat_id=plan.chat_id,
+                          full=plan.full)
     return {"task_id": task_id, "status": "running"}
 
 
