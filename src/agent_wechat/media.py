@@ -161,9 +161,10 @@ def _derive_xor_key(dats, limit: int = 200) -> int | None:
                 tail = f.read(2)
         except OSError:
             continue
-        k = tail[0] ^ 0xFF
-        if len(tail) == 2 and k == tail[1] ^ 0xD9:
-            counts[k] = counts.get(k, 0) + 1
+        if len(tail) == 2:            # F8：先判长度再索引（stat 与读之间的截断竞态）
+            k = tail[0] ^ 0xFF
+            if k == tail[1] ^ 0xD9:
+                counts[k] = counts.get(k, 0) + 1
         scanned += 1
     if not counts:
         return None
@@ -919,7 +920,9 @@ def export_media(account: str, chat_ids: list[str], *, kinds: list[str],
                     # 计数一律走**不 join messages** 的 count_media_refs——`media rebuild-refs`
                     # 只写 refs 不写 messages，join 出来的空会把后两种混成一种，还会把用户
                     # 导向错误的修法。
-                    # 三种成因（EA-089 抽成共用实现，文案逐字不变）：
+                    # 三种成因（EA-089 抽成共用实现）：视频侧与抽取消前逐字一致；
+                    # 贴纸侧情形 1 与其余情形对齐（补了「本次未导出任何贴纸」一句，
+                    # 复审 F7b），语义不变。
                     #   情形 1：该账号一条视频引用都没有（索引建在 media_refs 之前，或建时本机没有视频）；
                     #   情形 3：这些会话**有**引用但 join 不出消息（rebuild-refs 写不出消息）；
                     #   情形 2：引用在别处——这些会话确实没有视频引用（索引本身可用）。

@@ -668,36 +668,39 @@ def test_recent_private_messages_use_display_names(env):
     assert from_friend[0].sender_name == "张三"
 
 
-def test_iter_all_decrypts_each_shard_once_plus_the_two_static_sources(env, monkeypatch):
-    """EA-018：一次 `iter_all` 里每个分片**只解密一次**（名字与消息同一次读走），
-    加上 session + contact 两次静态源 = 分片数 + 2。
 
-    此前名字池先把每个分片解密一遍，扫描时再解一遍（2×分片数 + 2）——把
-    `iter_all` 里的 `chat_map = ...static | set(n2i.values())` 换回 `self.md5_map()`，
-    本用例必红。
-    """
-    from agent_wechat import decrypt as dec_mod
-    from agent_wechat import paths as paths_mod
+def test_iter_all_resolves_a_chat_whose_name_lives_in_another_shard(tmp_path, monkeypatch):
+    """EA-018 的回滚守卫（复审 F1 的构造性反例固化）：某会话的消息在 shard0，而它的用户名
+    **只在 shard1 的 Name2Id**（不在 session / contact）。
 
-    calls = []
-    real = dec_mod.decrypted
+    名字池必须收**全部来源**——把它收窄成「静态源 + 本分片」（629088f 的那版优化），
+    本用例必红（该会话落成 `md5:<hex>`，而它是真实存在的形态：1:1 会话里我发、对方在
+    另一分片才回过消息）。"""
+    wx = tmp_path / "xwechat_files"
+    home = tmp_path / "home"
+    home.mkdir()
+    lone, other = "wxid_x01", FRIEND       # 两个都是本文件既有、已登记的占位符
+    rows0 = {lone: [(1, 1, 1, T0 + 1, "只在分片零的正文", 0)]}
+    rows1 = {other: [(1, 1, 1, T0 + 2, "另一会话", 0)]}
+    build_shard(wx, ACCT, "message_0.db", rows0, [other, SELF])   # users 里**没有** lone
+    build_shard(wx, ACCT, "message_1.db", rows1, [lone, other, SELF])
+    monkeypatch.setattr(paths, "XWECHAT_FILES", wx)
+    monkeypatch.setattr(paths, "HOME_DIR", home)
+    monkeypatch.setattr(keys, "CACHE_FILE", home / "passphrase.json")
+    monkeypatch.setattr(store, "DB_PATH", home / "index.db")
+    keys.save_cached_hex(SELF, PW.encode().hex())
 
-    def spy(db, passphrase):
-        calls.append(str(db))
-        return real(db, passphrase)
-
-    monkeypatch.setattr(dec_mod, "decrypted", spy)
-    n_shards = len(paths_mod.message_shards("wxid_t_a1b2"))
-    rows = [r for batch, _refs in reader.MessageReader("wxid_t_a1b2").iter_all()
-            for r in batch]
-    assert rows, "夹具必须有行，否则这条断言是空转"
-    assert len(calls) == n_shards + 2, f"分片 {n_shards} 个，解密 {len(calls)} 次：{calls}"
+    rows = [r for batch, _refs in reader.MessageReader(ACCT).iter_all() for r in batch]
+    cids = {r["chat_id"] for r in rows}
+    assert lone in cids, f"名字在别的分片里也必须解出：{sorted(cids)}"
+    assert all(not c.startswith("md5:") for c in cids), sorted(cids)
 
 
 def test_iter_all_chat_id_set_is_unchanged(env):
-    """EA-018 的行为侧不变式：分片内名字（＋静态源）足以解出全部 chat_id——
-    退化形态（`md5:<hex>`）一条都不许出现。某个会话的名字只在**别的**分片 Name2Id 里
-    出现时，本用例会红——那说明「同分片名字够用」这个前提在真机形态下不成立。"""
+    """名字池不变式：合成夹具里的会话必须全部解出真名，退化形态（`md5:<hex>`）一条都不许出现。
+
+    （EA-018 的「名字收窄到本分片」优化**已回滚**——它会让「名字只在别的分片 Name2Id 里」
+    的会话退化，见下面那条反例用例。）"""
     rows = [r for batch, _refs in reader.MessageReader("wxid_t_a1b2").iter_all()
             for r in batch]
     assert rows

@@ -172,7 +172,7 @@ def write(view: ChatView, *, formats: Sequence[str] = FORMATS) -> list[pathlib.P
     写错了」在「产物列表短了一截」上长得一模一样（`--format ""` 过滤空项后正是空表，
     放过去就是「零个产物 + exit 0」）。校验在建目录之前——失败的一次调用不留空目录。
     单文件写失败（磁盘满/权限/只读挂载）：那个文件**不进返回列表**（写失败就是没写成，
-    不返回 `None` 也不抛，沿用 `media._save` 的立场：吞掉 `OSError`，裸异常不逃出 core）。
+    不返回 `None` 也不抛，沿用 `media.save_artifact` 的立场：吞掉 `OSError`，裸异常不逃出 core）。
     """
     if not formats or any(fmt not in _RENDERERS for fmt in formats):
         raise errors.SearchInputError(

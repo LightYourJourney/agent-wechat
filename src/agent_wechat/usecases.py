@@ -32,8 +32,6 @@ from . import chat_index as index_html
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
-    # 仅类型检查期：media 顶层拉起 cryptography，运行时在 media_export 内惰性 import
-
 # ---------- 参数归一化 ----------
 
 # limit 一律夹下界 1：非正值会原样进 SQL——`LIMIT -1` 在 SQLite 里表示「不限量」，
@@ -408,9 +406,9 @@ _MEDIA_TYPES = (messages.TYPE_IMAGE, messages.TYPE_VIDEO, messages.TYPE_VOICE,
 def _voice_keys_for(account: str) -> frozenset[tuple[str, int]] | None:
     """语音本体存在集合。**测试接缝**：替换它以免测试真去开 media_*.db。
 
-    写成函数而不是 `_voice_keys_for = media.voice_body_keys`：本模块顶层不 import media
-    （顶层会拉起 cryptography，见文件头部的 TYPE_CHECKING 注释），模块级取属性会在
-    import 期就 NameError。生产路径上就是 `media.voice_body_keys`。
+    写成函数而不是 `_voice_keys_for = media.voice_body_keys`：模块级取属性会把**测试接缝**
+    钉死在 import 期（替换模块属性不再生效）。生产路径上就是 `media.voice_body_keys`
+    （media 已顶层 import，见 EA-090）。
     """
     return media.voice_body_keys(account)
 
@@ -995,7 +993,7 @@ def chat_index(out_dir: str | None = None, account: str | None = None) -> ChatIn
 
 
 def purge_chat_targets(contact: str, account: str | None = None) -> list[dict] | NeedConfirm:
-    """会话名 → 每个**索引里（或排除清单里）有它**的账号各一条 {account, chat_id, chat_md5}。
+    """会话名 → 每个**索引里（或排除清单里）有它**的账号各一条 `{account, chat_id}`（EA-092：无 `chat_md5`）。
 
     **空集也回一条**（`account` 为空串，见下），所以调用方拿到的列表恒非空：会话名解析
     不出会抛 `ContactNotFound`、有歧义会回 `NeedConfirm`，两者都不走这条路。

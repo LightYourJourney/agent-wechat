@@ -190,12 +190,8 @@ class MessageReader:
 
     # ---------- 会话 / 联系人 ----------
 
-    def _static_usernames(self) -> set[str]:
-        """名字池的**静态部分**：session + contact（恰好 2 次解密）——EA-018。
-
-        分片里的 Name2Id 不在这里读：`iter_all` 扫分片时本就要解密它一次，名字**顺带**
-        取走（0 次额外解密）；本方法留给不需要扫描的一次性调用者（`resolve_chat` 等经
-        `username_pool()` 走全量）。
+    def username_pool(self) -> set[str]:
+        """全部已知用户名（session + contact + 各分片 Name2Id），供 md5 反查。
 
         **降级的能力**：源之间彼此独立，缺一个仍有其余（spec §6）——漂移的那一支跳过，
         继续用剩下的。抛在这里等于让「少一个源」变成「什么都查不到」。
@@ -210,15 +206,6 @@ class MessageReader:
                              for (u,) in con.execute(sql) if isinstance(u, bytes)}
             except (DataNotFound, errors.SchemaDrift):
                 continue
-        return pool
-
-    def username_pool(self) -> set[str]:
-        """全部已知用户名（静态部分 + 各分片 Name2Id），供 md5 反查。
-
-        **扫描路径不要用本方法**（EA-018：它会把每个分片解密一遍，`iter_all` 随后再解一遍
-        ——同一分片一次导出解密两次）；`iter_all` 在扫描时顺带取该分片的 Name2Id。
-        """
-        pool = self._static_usernames()
         for shard in paths.message_shards(self.acct):
             rel = f"message/{shard.name}"
             try:
@@ -484,8 +471,7 @@ class MessageReader:
         """
         batch = batch or store.BATCH
         resume = resume or {}
-        static = self._static_usernames()         # EA-018：恰好 2 次解密，循环外一次
-        _md5_cache: dict[str, str] = {}           # 名字 → md5（跨分片复用，别重复哈希）
+        chat_map = self.md5_map()
         sticker_names = self.sticker_captions()   # **循环外取一次**（同 recent）
         want_md5 = messages.md5_of(chat_id) if chat_id else None
         for shard in paths.message_shards(self.acct):
@@ -494,15 +480,6 @@ class MessageReader:
                 if tables:          # 空 = 该分片里没有匹配的表，**不是**漂移（spec §4）
                     self._check("messages", f"message/{shard.name}", con, table=tables[0])
                 n2i = self._name2id(con)
-                # EA-018：本分片的名字与它的消息**同一次解密**里读走（此前名字池先把每个
-                # 分片解密一遍，这里再解一遍）。代价：某会话的名字只在**别的**分片 Name2Id
-                # 里出现时，本分片引用它的行会退回 `md5:<hex>` 退化形态——1:1 会话的名字
-                # 必在它自己发过消息的分片里，群会话走 session（静态部分），
-                # `test_iter_all_chat_id_set_is_unchanged` 钉住这个不变式。
-                names = static | set(n2i.values())
-                for u in names:
-                    _md5_cache.setdefault(u, messages.md5_of(u))
-                chat_map = {_md5_cache[u]: u for u in names}
                 for table in tables:
                     md5hex = table[4:]
                     # EA-112：不再逐表比对 want_md5——`_shard_tables(con, want_md5)` 已早退到

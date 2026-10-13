@@ -744,7 +744,7 @@
 
 | 现象 | 原因 | 处置 |
 |---|---|---|
-| `{"error": "账号 … 无 passphrase 缓存，请先运行 bootstrap"}` | 该账号未 bootstrap | 按 INSTALL.md §5 引导 |
+| `{"error": "账号 … 尚无 passphrase 缓存。请运行一次性引导：…"}` | 该账号未 bootstrap | 按 INSTALL.md §5 引导（文案与 `keys.get_passphrase` 的 `KeyNotFound` 逐字一致） |
 | `{"error": "账号目录不存在: …"}` / `{"error": "微信未运行或无法确定当前登录账号…"}` | `account` 传错或微信未登录 | 用 `get_account_status` 看已知账号，或先登录微信 |
 | `{"error": "内部错误: …"}` | 未预期的第三方异常（fastembed/sqlite3 等） | 多为环境问题；查看服务端日志 |
 | `current_account: null` | 微信未运行或启动中 | 打开微信并登录后重试 |

@@ -498,6 +498,18 @@ def test_sticker_export_degrades_with_the_same_three_way_note(tmp_path, monkeypa
     assert "导出这些会话的历史" in note
     assert "rebuild-refs" not in note
 
+    # 情形 2：引用在**别处**（账号其它会话有贴纸引用 → 索引可用，无需修复）；
+    # 这种连 rebuild-refs 都不该提——那会把人支去跑一个改不了任何事的命令。
+    con3 = store.connect(tmp_path / "elsewhere.db")
+    store.upsert_media_refs(con3, [
+        (messages.row_key(account, messages.md5_of("wxid_b"), "message_0.db", 1),
+         "sticker", "aa" * 16, None)])
+    con3.commit()
+    rep3 = media.export_media(account, ["wxid_a"], kinds=["sticker"], con=con3)
+    note3, = rep3.degraded
+    assert "没有贴纸引用" in note3 and "索引可用" in note3
+    assert "rebuild-refs" not in note3
+
 
 def test_video_export_thumb_keeps_source_stem(tmp_path, monkeypatch):
     """缩略图回退时产物名与账号级枚举那条路逐字一致（`{K}_thumb.jpg`）。

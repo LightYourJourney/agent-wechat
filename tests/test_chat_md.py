@@ -210,6 +210,16 @@ def test_both_templates_take_their_wording_from_chat_text(monkeypatch):
     assert "改过的文案XYZ" in chat_html.render(view), "HTML 读的是导入期的旧值（F53）"
     assert "改过的文案XYZ" in chat_md.render(view), "Markdown 读的是导入期的旧值（F53）"
 
+    # EA-108 的两条新共享措辞也要过这一轮：任一侧写回**硬编码字面量**（而不是引用
+    # chat_text），上面那轮「两个产物都含共享常量值」抓不到（值相同），这一轮能——
+    # 改坏任一侧，产物就不跟着 monkeypatch 的新值变（复审 F6 的判别力缺口）。
+    monkeypatch.setattr(chat_text, "INCONSISTENT_EXPORTED", "改过的导出不一致XYZ")
+    monkeypatch.setattr(chat_text, "unknown_status_note", lambda s: f"改过的未知状态XYZ({s})")
+    html2, md2 = chat_html.render(view), chat_md.render(view)
+    for out in (html2, md2):
+        assert "改过的导出不一致XYZ" in out, "该侧没读 chat_text（EA-108 的硬编码缺口）"
+        assert "改过的未知状态XYZ(weird)" in out, "该侧没读 chat_text（EA-108 的硬编码缺口）"
+
 
 def test_sticker_gone_says_encrypted_copy_exists():
     """贴纸的 `gone` **不许**用那句通用的 GONE——它说的是「本机找不到本体（已被清理，

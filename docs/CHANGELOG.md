@@ -408,7 +408,8 @@
   不假装与 HTML 等价
 - **`chat export` / `chat index` 与 `media export` 必须用同一个 `--out`**：产物在
   `{--out}/{会话md5}/chat/` 下，媒体是 `../image/…` 形式的相对引用、指向**同级**的既有媒体树；
-  用错根会**静默断链**（spec 裁定 13）
+  用错根时媒体块退回 `exportable` / `gone` 占位（不会出现打不开的 `<img>`；`gone` 读作
+  「这个根下没有」，spec 裁定 13）
 - **`get_message_parts` 照实返回转账字段**（金额 / 备注 / 双方用户名 / 交易号）：与
   `search_history` 已在信封返回正文一致，**不为转账单开例外**——这是刻意的裁定，记明于
   SECURITY.md §1
