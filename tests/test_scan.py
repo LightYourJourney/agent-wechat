@@ -970,13 +970,17 @@ def test_check_hooks_reports_missing_dir_as_wrong_config_not_local_edit(
 
 def test_check_hooks_names_the_exec_bit_loss_separately(scan, tmp_path, monkeypatch, capsys):
     """执行位与 diff 是两种成因，要**分别指名**。先 os.access 再 diff——本机 filemode=true 时
-    `chmod -x` 也让 diff 非 0，只靠 diff 会把它说成「未提交的改动」。删掉 os.access 那段，这条红。"""
+    `chmod -x` 也让 diff 非 0，只靠 diff 会把它说成「未提交的改动」。删掉 os.access 那段，这条红；
+    §8 第 4 条还要求两成因**各打一行**——把 problems 挤成一句（`"；".join(...)`）同样要红。"""
     _lay_out_hooks(scan, tmp_path, monkeypatch, config="security/hooks",
                    exec_bit=False, diff_rc=1)
     rc = scan.main(["--check-hooks"])
     out = capsys.readouterr()
     assert rc == scan.EXIT_HITS
     assert "执行位丢了" in out.out
+    assert "工作区与 HEAD 不一致" in out.out, "两种成因都要报，别只报一种"
+    assert not any("执行位丢了" in ln and "工作区与 HEAD 不一致" in ln
+                   for ln in out.out.splitlines()), "两种成因要各打一行，不许混成一句"
 
 
 def test_check_hooks_reports_local_edit_and_a_missing_half(scan, tmp_path, monkeypatch, capsys):
