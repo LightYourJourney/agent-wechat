@@ -51,7 +51,7 @@ def _media_block(m: MediaRefState, prefix: str, out_dir: str) -> str:
     label = chat_text.KIND_LABEL.get(kind, kind)
     if m.status == "exported":
         if not m.path:
-            return "〔已导出，但拿不到产物路径 —— 状态与路径不一致〕"
+            return "〔{}〕".format(_t(chat_text.INCONSISTENT_EXPORTED))
         src = chat_text.media_src(m.path, out_dir, prefix)
         if kind == "image":
             return f"![{_t(label)}]({src})"
@@ -64,7 +64,7 @@ def _media_block(m: MediaRefState, prefix: str, out_dir: str) -> str:
         return "〔{} · {}〕".format(_t(label), _t(why))
     if m.status == "none":
         return ""
-    return f"〔{_t(label)} · 未知媒体状态 {_t(m.status)}〕"
+    return "〔{} · {}〕".format(_t(label), _t(chat_text.unknown_status_note(m.status)))
 
 
 def _transfer_line(t: appmsg.Transfer) -> str:

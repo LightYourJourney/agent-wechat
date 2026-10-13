@@ -40,6 +40,27 @@ def test_does_not_strip_a_leading_colon_line_that_is_not_the_group_prefix():
     assert appmsg.normalize("http://example.com/x:\n<other/>").startswith("http://example.com/x:")
 
 
+def test_normalize_is_a_fixed_point():
+    """EA-106：docstring 曾写「幂等」——对**已规范化形态**成立（生产链的中间态），
+    但有一类输入不成立（声明排在群前缀之前：首轮剥声明后前缀才暴露）。
+
+    两条都钉：不动点用真机三类形态；非幂等形态如实钉住（免得将来有人把它读成缺陷）。
+    """
+    cases = [
+        "<?xml version=\"1.0\"?>\n<msg/>",                       # 声明在文首
+        "<msg><?xml version=\"1.0\"?> <appmsg/></msg>",          # 声明嵌在内部
+        "群名:\n<msg/>",                                          # 群前缀
+    ]
+    for raw in cases:
+        once = appmsg.normalize(raw)
+        assert appmsg.normalize(once) == once, raw
+
+    # 非幂等形态：声明 + 群前缀同时出现且声明在前
+    tricky = '<?xml version="1.0"?>\n补充说明:\n<msg/>'
+    once = appmsg.normalize(tricky)
+    assert appmsg.normalize(once) != once, "该形态**不**幂等——docstring 如实写着"
+
+
 def test_strips_all_xml_declarations():
     """实测 8,980 条无声明、11 条声明位置非法（嵌在 <msg> 内部）—— 全部要剥。"""
     assert appmsg.normalize('<?xml version="1.0"?>\n<msg/>') == "<msg/>"

@@ -14,11 +14,23 @@
 
 **改这里的任何一句话，两个产物同时变** —— 这正是目的；分叉从此不可能悄悄发生。
 """
+
 from __future__ import annotations
+
 
 import datetime
 import os
 from typing import TYPE_CHECKING
+
+# EA-108：这两句此前在 HTML / MD 各留一份副本（实测分叉零红）。措辞归这里，
+# 标记（`[...]` vs `〔…〕`）仍归各模板自己套。
+INCONSISTENT_EXPORTED = "已导出，但拿不到产物路径 —— 状态与路径不一致"
+
+
+def unknown_status_note(status: str) -> str:
+    """四态之外的取值：照实印出来，不猜也不吞（上游将来加枚举值时两个产物同时变）。"""
+    return f"未知媒体状态 {status}"
+
 
 if TYPE_CHECKING:
     from .appmsg import Transfer

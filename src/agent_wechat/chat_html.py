@@ -82,7 +82,7 @@ def _media_block(m: MediaRefState, prefix: str, out_dir: str) -> str:
         if not m.path:
             # 状态说「导出了」却没有路径：这是上游的不一致，**不能静默成空白**
             # （空白看起来与「这条消息没有媒体」一模一样）。
-            return '<div class="ph">[已导出，但拿不到产物路径 —— 状态与路径不一致]</div>'
+            return f'<div class="ph">[{chat_text.INCONSISTENT_EXPORTED}]</div>'
         src = _esc(chat_text.media_src(m.path, out_dir, prefix))
         if kind == "image":
             return f'<div class="media"><img loading="lazy" src="{src}" alt="{_esc(label)}"></div>'
@@ -100,7 +100,7 @@ def _media_block(m: MediaRefState, prefix: str, out_dir: str) -> str:
     if m.status == "none":
         return ""
     # 四态之外的取值（上游将来加枚举值）：照实印出来，不猜也不吞。
-    return f'<div class="ph">[{_esc(label)} · 未知媒体状态 {_esc(m.status)}]</div>'
+    return f'<div class="ph">[{_esc(label)} · {_esc(chat_text.unknown_status_note(m.status))}]</div>'
 
 
 def _quote_block(q: appmsg.Quote, ref_anchor: str | None) -> str:

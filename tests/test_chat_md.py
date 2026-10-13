@@ -185,14 +185,24 @@ def test_both_templates_take_their_wording_from_chat_text(monkeypatch):
     """
     from agent_wechat import chat_html, chat_text
     from agent_wechat.usecases import MediaRefState
+    def _row(k):
+        return {"msg_key": k, "ts": 1, "msg_type": 3, "content": "",
+                "sender_name": "我", "is_self": True}
+
     view = chatview.build(
-        "c", title="t", rows=[{"msg_key": "k1", "ts": 1, "msg_type": 3, "content": "",
-                               "sender_name": "我", "is_self": True}], parts={},
+        "c", title="t", rows=[_row("k1"), _row("k2"), _row("k3")], parts={},
         media={"k1": MediaRefState(msg_key="k1", ts=1, kind="image", status="gone",
+                                   path=None),
+               # EA-108：这两个形态的措辞此前是两个模板各一份副本
+               "k2": MediaRefState(msg_key="k2", ts=1, kind="image", status="exported",
+                                   path=None),
+               "k3": MediaRefState(msg_key="k3", ts=1, kind="image", status="weird",
                                    path=None)},
         out_dir="/tmp", truncated=True, unparsed=2, rejected=1, degraded=())
     html_out, md_out = chat_html.render(view), chat_md.render(view)
-    for shared in (chat_text.GONE, chat_text.TRUNCATED_NOTE[0],
+    for shared in (chat_text.GONE, chat_text.INCONSISTENT_EXPORTED,
+                   chat_text.unknown_status_note('weird'),
+                   chat_text.TRUNCATED_NOTE[0],
                    chat_text.unparsed_note(2)[0], chat_text.rejected_note(1)[0]):
         assert shared in html_out and shared in md_out, f"两个模板的措辞分叉了：{shared}"
 

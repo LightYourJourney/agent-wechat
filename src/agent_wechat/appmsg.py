@@ -46,7 +46,12 @@ def _keep_charref(m: re.Match) -> str:
 
 
 def normalize(raw: str) -> str:
-    """把微信原文规范成可交给 ET 解析的 `<msg>` 片段。幂等。"""
+    """把微信原文规范成可交给 ET 解析的 `<msg>` 片段。
+
+    对真机三类形态（无声明 / 声明在文首 / 声明嵌在 `<msg>` 内部）幂等；**声明排在群前缀
+    之前时不幂等**——首轮剥掉声明后，群前缀才暴露出来，第二轮会再剥一次（EA-106）。
+    生产链（导出 → 解析）不产生该形态；`test_normalize_is_a_fixed_point` 只对已规范化
+    形态断言不动点。"""
     s = _GROUP_PREFIX.sub("", raw.lstrip())
     s = _XML_DECL.sub("", s)
     return _CHARREF.sub(_keep_charref, s).strip()
