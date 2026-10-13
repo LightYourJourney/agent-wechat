@@ -65,8 +65,9 @@ MCP（stdio）均无网络路径，MCP 只在你的 Agent 客户端与本地 Ser
 
 3. **贴纸 CDN 取件**：只有显式指定 `--with-cdn`（CLI `media export`）/ `with_cdn=True`
    （MCP `export_chat_media`）时才把该贴纸的 `filekey` 发往腾讯 CDN——后缀 `*.tc.qq.com`
-   / `*.qpic.cn` / `*.wechat.com`，加精确主机 `wxapp.tc.qq.com`；不上传任何聊天 / 索引
-   内容；同样**端口不受约束**（见 SECURITY.md §1）。
+   / `*.qpic.cn` / `*.wechat.com`（`wxapp.tc.qq.com` 由第一个后缀覆盖，贴纸侧**没有**
+   朋友圈那套「精确主机」机制）；不上传任何聊天 / 索引内容；同样**端口不受约束**
+   （见 SECURITY.md §1）。
 
 第 2、3 两条是本项目零网络红线上**本次新增的**显式例外，详见 SECURITY.md §1「零网络例外」。
 

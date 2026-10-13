@@ -393,8 +393,10 @@ rebuild 与否）各起一条。（F-D，T7 复验：与 §4 同款的合并语�
   只给 `sticker` 不给 `with_cdn` 时：**一次网络请求都不发**，贴纸全部计入
   `counts.sticker.missing`，并在 `degraded` 里说明原因。
 - `counts.sticker` 的口径：`ok` = 落盘成功；`failed` = 联网了但没取到（404、超时、
-  `md5` 校验不过）；`missing` = **没有可用的字节来源**（未开 `with_cdn`，或该消息在
-  `media_refs` 里没有可用引用）；`skipped` 同其余三类。
+  `md5` 校验不过）；`missing` = **没有可用的字节来源，或根本没能去查**（未开 `with_cdn`、
+  该消息在 `media_refs` 里没有可用引用、XML 里查不到 `cdnurl` 凭据、`msg_key` 形状不对而
+  定位不了那一行，或承载它的**消息分片读不出来**）——后两类**一次请求都没发**，与「联网了
+  但没取到」的用户动作完全不同，故不进 `failed`（EA-022）；`skipped` 同其余三类。
 - `get_message_media`（§11）里贴纸**永远不会是 `exportable`**（本机那份拿不出明文），
   只可能是 `gone` 或 `exported`（后者 = 之前用 `with_cdn=true` 导过）。
 - `degraded` 键**恒存在**（与 §3 同一惯例：降级不是错误），但此处每项是**中文字符串**
