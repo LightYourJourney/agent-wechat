@@ -20,6 +20,7 @@ import platform
 import re
 import select
 import shutil
+import signal
 import subprocess
 import tempfile
 import time
@@ -46,11 +47,55 @@ class BootstrapProgress:
     指引；「同序」也要求 account 行先于 ✅ 行。
     """
 
-    kind: str                       # "account" | "attach" | "verified"
+    kind: str                       # "account" | "attach" | "verified" | "warn"
     bare: str | None = None         # kind="account"
     pid: int | None = None          # kind="account"
     ok_libs: int = 0                # kind="verified"
     total_libs: int = 0             # kind="verified"
+    warning: str | None = None      # kind="warn"（EA-005：属主未归还等非致命降级）
+
+
+def _terminate_capture(proc) -> None:
+    """收尾：**只向本次捕获的 lldb 进程组**发信号（EA-004）。
+
+    此前无条件 `pkill -9 -x lldb`——按**名字**杀，会连带杀掉用户自己的 lldb 会话（或以
+    其它身份开的）。现在 Popen 用 `start_new_session=True` 起了独立进程组，`killpg`
+    精确命中本次的 bash→lldb 进程树；`pkill` 降级为「killpg 也不可用」时的最后兜底
+    ——**不删它**：删了就会在异常路径上静默丢失清理。
+    """
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(os.getpgid(proc.pid), sig)
+            proc.wait(timeout=3)
+            return
+        except Exception:                          # noqa: BLE001 — 兜底路径要吞遍所有失败
+            continue
+    subprocess.run(["pkill", "-9", "-x", "lldb"], capture_output=True)
+
+
+def _read_capture(proc, deadline: float) -> str:
+    """读 lldb 的输出直到 deadline 或捕获到 passphrase（EA-052）。
+
+    用 `select` + `os.read` 而不是 `readline`：**半行**输入（lldb 的输出没有换行就停住）
+    会让 `readline` 无限阻塞——deadline 只在两次 readline 之间被检查，整个引导因此可能
+    远超 `timeout`。`os.read` 有多少读多少，循环每次都回到 deadline 判断。
+    （`text=True` 只是给调用方方便；这里绕开 TextIOWrapper 直接读 fd。）
+    """
+    buf = ""
+    while time.time() < deadline:
+        # 超时不许越过 deadline：固定 3.0 会让「300s 的 timeout」实际超到 303s，
+        # 而按秒计的 deadline 承诺在这里就该是准的（EA-052 的测试钉住了这条）。
+        r, _, _ = select.select([proc.stdout], [], [], max(0.0, min(3.0, deadline - time.time())))
+        if r:
+            chunk = os.read(proc.stdout.fileno(), 65536)
+            if not chunk:
+                if proc.poll() is not None:
+                    break
+                continue
+            buf += chunk.decode("utf-8", "replace")
+        if _parse_passphrase(buf):
+            break
+    return buf
 
 
 def _parse_passphrase(out: str) -> str | None:
@@ -91,38 +136,21 @@ def capture_passphrase_lldb(timeout: int = DEFAULT_TIMEOUT) -> str:
 
     # cat 脚本后用 sleep 保活 stdin：lldb continue 是异步的，stdin EOF 会提前退出，
     # 等不到用户重新登录触发断点。
+    # EA-004：起**独立进程组**（start_new_session）——收尾靠 killpg 精确命中本次的
+    # bash→lldb 进程树，而不是按名字杀（见 _terminate_capture）。
     proc = subprocess.Popen(
         ["bash", "-c", f"( cat {sp}; sleep {timeout} ) | TERM=dumb lldb"],
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-    buf = ""
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        start_new_session=True)
     deadline = time.time() + timeout
     try:
-        while time.time() < deadline:
-            r, _, _ = select.select([proc.stdout], [], [], 3.0)
-            if r:
-                line = proc.stdout.readline()
-                if not line:
-                    if proc.poll() is not None:
-                        break
-                    continue
-                buf += line
-            if _parse_passphrase(buf):
-                break
+        buf = _read_capture(proc, deadline)
     finally:
-        try:                      # 先温和终止，超时/失败再强杀
-            proc.terminate()
-            proc.wait(timeout=3)
-        except Exception:
-            try:
-                proc.kill()
-                proc.wait(timeout=3)
-            except Exception:
-                pass
+        _terminate_capture(proc)
         try:
             os.unlink(sp)
         except OSError:
             pass
-        subprocess.run(["pkill", "-9", "-x", "lldb"], capture_output=True)
 
     ph = _parse_passphrase(buf)
     if not ph:
@@ -148,12 +176,22 @@ def bootstrap(timeout: int = DEFAULT_TIMEOUT,
     hexstr = capture_passphrase_lldb(timeout)
 
     passphrase = bytes.fromhex(hexstr)
-    results = keys.verify_passphrase(st.current, passphrase)  # type: ignore[arg-type]
+    results, unreadable = keys.verify_passphrase(st.current, passphrase)  # type: ignore[arg-type]
     ok = [name for name, good in results if good]
     total = len(results)
     if not ok:
+        if total == 0:
+            # EA-051：一个库都没读到 ≠ 捕获值不对——此前两者共用「重试捕获」的文案，
+            # 用户会一遍遍重跑引导，而真问题是读不到库（权限/完全磁盘访问权限）。
+            raise CaptureError(
+                f"一个库都没能读到（{unreadable} 个不可读）——这通常是权限问题："
+                "请给终端「完全磁盘访问权限」（见 INSTALL.md §3.3）后重试。")
         raise CaptureError(f"捕获值未通过任何库的 HMAC 校验（{total} 个库），拒绝落缓存。"
                            "可能捕获了错误时刻的派生值，请重试。")
-    keys.save_cached_hex(bare, hexstr)
+    warn = keys.save_cached_hex(bare, hexstr)
     emit(BootstrapProgress("verified", ok_libs=len(ok), total_libs=total))
+    if warn:
+        # EA-005：属主未归还这类**非致命**降级——缓存已落盘（verified 行照报），
+        # 但要让用户知道 sudo 之外可能读不到，而不是把整次引导判负。
+        emit(BootstrapProgress("warn", warning=warn))
     return bare

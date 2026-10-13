@@ -35,8 +35,15 @@ def _parse_pids(out: str) -> list[int]:
 
 
 def wechat_pid() -> int | None:
-    """微信主进程 PID；未运行返回 None。"""
-    r = _run(["pgrep", "-x", "WeChat"], capture_output=True, text=True)
+    """微信主进程 PID；未运行返回 None。
+
+    EA-052：pgrep 也要有超时——此前它没有 `timeout=`（系统卡顿时会一直挂住），
+    与同文件的 lsof 调用（15s）不成体系。超时与「pgrep 报错」同义：判不出来就是 None。
+    """
+    try:
+        r = _run(["pgrep", "-x", "WeChat"], capture_output=True, text=True, timeout=15)
+    except subprocess.TimeoutExpired:
+        return None
     pids = _parse_pids(r.stdout)
     return pids[0] if pids else None
 

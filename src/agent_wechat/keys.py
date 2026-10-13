@@ -42,7 +42,7 @@ CACHE_FILE = paths.HOME_DIR / "passphrase.json"
 
 def _load_cache() -> dict:
     try:
-        return json.loads(CACHE_FILE.read_text())
+        raw = json.loads(CACHE_FILE.read_text())
     except FileNotFoundError:
         return {"accounts": {}}          # 真的没有：首次使用
     except json.JSONDecodeError:
@@ -53,30 +53,60 @@ def _load_cache() -> dict:
         raise HomeUnavailable(
             f"无法读取密钥缓存：{CACHE_FILE}",
             hint=f"{exc}；请检查 AGENT_WECHAT_HOME 指向的位置是否可用") from exc
+    # EA-049：**形状**归约——「损坏」的完整定义不止「JSON 解不开」：根不是对象、`accounts`
+     # 不是对象、条目不是对象（合法 JSON 全都过得了 json.loads）此前会在下游 `.get()`
+    # 处裸抛 AttributeError（穿透两个适配层）。一律按「损坏 = 空缓存」处理，与既有分支同义。
+    accounts = raw.get("accounts") if isinstance(raw, dict) else None
+    if not isinstance(accounts, dict):
+        return {"accounts": {}}
+    return {"accounts": {k: v for k, v in accounts.items() if isinstance(v, dict)}}
 
 
 def load_cached_hex(bare: str) -> str | None:
-    entry = _load_cache().get("accounts", {}).get(bare)
-    return entry.get("passphrase_hex") if entry else None
+    entry = _load_cache()["accounts"].get(bare)
+    if not isinstance(entry, dict):
+        return None
+    hexstr = entry.get("passphrase_hex")
+    return hexstr if isinstance(hexstr, str) else None
 
 
-def _deprivilege(path: pathlib.Path) -> None:
-    """sudo 环境下把文件/目录属主归还给真实用户，否则缓存普通用户读不了。"""
+def _deprivilege(path: pathlib.Path) -> str | None:
+    """sudo 环境下把文件/目录属主归还给真实用户，否则缓存普通用户读不了。
+
+    EA-005：失败**不抛**——此刻缓存已经以 0600 落盘（跑引导的这个身份读得了），属主未
+    归还只是「sudo 之外读不到」的降级；返回一句给用户看的警告，由引导流程转达。
+    """
     uid, gid = os.environ.get("SUDO_UID"), os.environ.get("SUDO_GID")
-    if uid and gid:
+    if not (uid and gid):
+        return None
+    try:
         os.chown(path, int(uid), int(gid))
+    except OSError as exc:
+        return f"属主未归还（{path}）：{exc}——sudo 之外的用户可能读不到密钥缓存"
+    return None
 
 
-def save_cached_hex(bare: str, passphrase_hex: str) -> None:
+def save_cached_hex(bare: str, passphrase_hex: str) -> str | None:
+    """写入密钥缓存。返回 None = 一切正常；否则是一句**给用户看的警告**（缓存已落盘）。
+
+    EA-005：落盘的三个 IO 步骤此前全裸抛 OSError——core 只抛项目异常（errors.py 开篇
+    那条契约），裸 OSError 会穿透两个适配层（CLI 一整个 traceback、MCP 落
+    generic_payload）。文案沿用 `_load_cache` 同一句。
+    """
     cache = _load_cache()
     cache.setdefault("accounts", {})[bare] = {
         "passphrase_hex": passphrase_hex, "captured_at": int(time.time()),
     }
-    paths.HOME_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
-    CACHE_FILE.write_text(json.dumps(cache, indent=2))
-    os.chmod(CACHE_FILE, 0o600)
-    _deprivilege(CACHE_FILE)
-    _deprivilege(paths.HOME_DIR)
+    try:
+        paths.HOME_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+        CACHE_FILE.write_text(json.dumps(cache, indent=2))
+        os.chmod(CACHE_FILE, 0o600)          # 与 mkdir 的 0700 同属**安全**步骤：失败即不可用
+    except OSError as exc:
+        raise HomeUnavailable(
+            f"无法写入密钥缓存：{CACHE_FILE}",
+            hint=f"{exc}；请检查 AGENT_WECHAT_HOME 指向的位置是否可用") from exc
+    warns = [w for w in (_deprivilege(CACHE_FILE), _deprivilege(paths.HOME_DIR)) if w]
+    return warns[0] if warns else None
 
 
 # ---------- 派生与验证 ----------
@@ -106,17 +136,25 @@ def read_page1(db: pathlib.Path) -> bytes | None:
 
 
 def verify_passphrase(account: str, passphrase: bytes, *,
-                      dbs: list[pathlib.Path] | None = None) -> list[tuple[str, bool]]:
-    """对账号的库逐个校验 passphrase。返回 [(库名, 是否通过)]。"""
+                      dbs: list[pathlib.Path] | None = None
+                      ) -> tuple[list[tuple[str, bool]], int]:
+    """对账号的库逐个校验 passphrase。返回 ([(库名, 是否通过)], **读不到的库数**)。
+
+    EA-051：读不到（`read_page1` → None：权限/完全磁盘访问权限/文件被截断）此前被静默
+    `continue`——与「HMAC 不过」在结果里完全同形，于是引导在「一个库都没读到」时给出
+    **错误诊断**（「重试捕获」而不是「读不到库」）。第二个返回值让调用方分开说。
+    """
     targets = dbs if dbs is not None else paths.all_dbs(account)
-    out = []
+    out: list[tuple[str, bool]] = []
+    unreadable = 0
     for db in targets:
         p1 = read_page1(db)
         if not p1 or len(p1) < PAGE_SZ:
+            unreadable += 1
             continue
         ok = page1_hmac_ok(derive_key(passphrase, p1[:SALT_SZ]), p1)
         out.append((f"{db.parent.name}/{db.name}", ok))
-    return out
+    return out, unreadable
 
 
 def get_passphrase(account: str) -> bytes:
@@ -129,7 +167,21 @@ def get_passphrase(account: str) -> bytes:
             f"  1. killall WeChat && sudo codesign --force --deep --sign - /Applications/WeChat.app\n"
             f"  2. 重启微信并登录 {bare}\n"
             f"  3. sudo uv run agent-wechat bootstrap   （期间在微信内退出登录再重新登录一次）")
-    return bytes.fromhex(hexstr)
+    try:
+        raw = bytes.fromhex(hexstr)
+    except ValueError as exc:
+        # EA-049：非法 hex（手工编辑、旧版本写过、写坏）时 `bytes.fromhex` 会裸抛
+        # ValueError（穿透两个适配层）。与「没有缓存」分开说：重新 bootstrap 能修好它。
+        raise KeyNotFound(
+            f"账号 {bare} 的 passphrase 缓存损坏（不是合法 hex）。"
+            "请重新运行一次性引导（bootstrap）修复") from exc
+    if len(raw) != KEY_SZ:
+        # EA-049：**长度**判据——`bytes.fromhex("ab")` 是合法的（1 字节），只靠 fromhex
+        # 挡不住「短值」；而 passphrase 恒为 32 字节（KEY_SZ）。
+        raise KeyNotFound(
+            f"账号 {bare} 的 passphrase 缓存损坏（长度 {len(raw)} 字节，应为 {KEY_SZ}）。"
+            "请重新运行一次性引导（bootstrap）修复")
+    return raw
 
 
 def get_passphrase_hex(account: str) -> str:

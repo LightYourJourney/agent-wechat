@@ -178,7 +178,7 @@ def test_cmd_bootstrap_output_is_verbatim(monkeypatch, capsys):
     monkeypatch.setattr(bootstrap, "capture_passphrase_lldb", lambda timeout: "ab" * 32)
     monkeypatch.setattr(
         bootstrap.keys, "verify_passphrase",
-        lambda acct, pw: [("m/message_0.db", True)] * 3 + [("m/message_1.db", False)] * 2)
+        lambda acct, pw: ([("m/message_0.db", True)] * 3 + [("m/message_1.db", False)] * 2, 0))
     saved: dict = {}
     monkeypatch.setattr(bootstrap.keys, "save_cached_hex",
                         lambda bare, h: saved.update(bare=bare, h=h))
@@ -2320,6 +2320,28 @@ def test_status_says_when_the_index_cannot_be_read(tmp_path, monkeypatch):
     assert usecases.account_status()["schema_notes"] == [], "健康库不许误报"
 
 
+def test_status_reports_a_failed_backup_exclusion(monkeypatch, capsys):
+    """EA-054：备份排除失败此前全静默。用户要能在 status 里看到失败**与手动补救命令**
+    ——「没看见」不等于「没发生」。把 `if tm is not None:` 那三行删掉本测试必红。
+    """
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(account, "status", lambda: SimpleNamespace(
+        running=True, pid=999, current="wxid_testacct01_ab12",
+        accounts=["wxid_testacct01_ab12"]))
+    monkeypatch.setattr(paths, "_tm_exclusion_ok", False)
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["status"])
+    assert ei.value.code == 0
+    out = capsys.readouterr().out
+    assert "备份排除: ✗" in out and "tmutil addexclusion" in out, out
+
+    monkeypatch.setattr(paths, "_tm_exclusion_ok", True)
+    with pytest.raises(SystemExit):
+        cli.main(["status"])
+    assert "备份排除: ✓" in capsys.readouterr().out
+
+
 def test_status_verify_keys_renders_the_hmac_line(tmp_path, monkeypatch, capsys):
     """F3（EA-038②）：`status --verify-keys` 的 HMAC 渲染此前零覆盖——把它改成
     `"  HMAC 999/999"` 全仓 1070 条不红。桩 `verify_passphrase` 钉住 `HMAC 1/2`。
@@ -2336,8 +2358,34 @@ def test_status_verify_keys_renders_the_hmac_line(tmp_path, monkeypatch, capsys)
         accounts=["wxid_testacct01_ab12"]))
     keys_mod.save_cached_hex("wxid_testacct01", "aa" * 32)
     monkeypatch.setattr(keys_mod, "verify_passphrase",
-                        lambda acc, raw: [("session/session.db", True), ("contact/contact.db", False)])
+                        lambda acc, raw: ([("session/session.db", True), ("contact/contact.db", False)], 0))
     with pytest.raises(SystemExit) as ei:
         cli.main(["status", "--verify-keys"])
     assert ei.value.code == 0
     assert "HMAC 1/2" in capsys.readouterr().out
+
+
+def test_status_verify_keys_names_the_unreadable_dbs(tmp_path, monkeypatch, capsys):
+    """EA-051 的 CLI 半边：读不到的库数非零时 `HMAC a/b` 后面要带一句——否则用户会
+    把「读不到」读成「密钥不对」，跑去重新 bootstrap（那也会失败）。
+
+    把 `if unreadable:` 那两行删掉本测试必红。
+    """
+    from types import SimpleNamespace
+
+    from agent_wechat import keys as keys_mod
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(paths, "HOME_DIR", home)
+    monkeypatch.setattr(keys_mod, "CACHE_FILE", home / "passphrase.json")
+    monkeypatch.setattr(account, "status", lambda: SimpleNamespace(
+        running=True, pid=999, current="wxid_testacct01_ab12",
+        accounts=["wxid_testacct01_ab12"]))
+    keys_mod.save_cached_hex("wxid_testacct01", "aa" * 32)
+    monkeypatch.setattr(keys_mod, "verify_passphrase",
+                        lambda acc, raw: ([("session/session.db", True)], 4))
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["status", "--verify-keys"])
+    assert ei.value.code == 0
+    out = capsys.readouterr().out
+    assert "HMAC 1/1" in out and "4 个库读不到" in out, out

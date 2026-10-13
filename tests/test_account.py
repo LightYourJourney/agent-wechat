@@ -111,6 +111,30 @@ def test_wechat_pid_ignores_abnormal_output(monkeypatch):
     assert account.wechat_pid() is None
 
 
+def test_wechat_pid_passes_a_timeout_and_degrades_to_none(monkeypatch):
+    """EA-052：pgrep 此前没有 `timeout=`（同文件的 lsof 是 15s）——系统卡顿时会一直挂住。
+
+    超时与「pgrep 报错」同义：判不出来的 pid 就是 None。`TimeoutExpired` 不加处理会穿透
+    两个适配层（CLI 一整个 traceback / MCP 落 generic_payload）。删掉 except 那条分支
+    第二条断言必红；删掉 `timeout=` 第一条必红。
+    """
+    seen = {}
+
+    def fake_run(argv, **kwargs):
+        seen.update(kwargs)
+        return _stdout("1234\n")
+
+    monkeypatch.setattr(account, "_run", fake_run)
+    assert account.wechat_pid() == 1234
+    assert seen["timeout"] == 15
+
+    def timed_out(argv, **kwargs):
+        raise subprocess.TimeoutExpired(argv, kwargs.get("timeout"))
+
+    monkeypatch.setattr(account, "_run", timed_out)
+    assert account.wechat_pid() is None
+
+
 # ---------- current_account：注入 _run ----------
 
 def test_current_account_parses_stdout(monkeypatch):

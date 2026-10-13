@@ -45,7 +45,8 @@ def test_detect_ext_magics():
 def test_decrypt_dat_v2_roundtrip():
     head = jpeg_like(1024)
     tail = b"\x11" * 300 + b"\xff\xd9"
-    keys = media.MediaKeys(xor_key=FAKE_XOR, aes_key_ascii=FAKE_KEY, code="test")
+    keys = media.MediaKeys(xor_key=FAKE_XOR, aes_key_ascii=FAKE_KEY, code="test",
+                                     aes_verified=True)
     dat = build_v2_dat(head, tail, FAKE_KEY, FAKE_XOR)
     out = media.decrypt_dat(dat, keys)
     assert out == head + tail                     # 明文逐字节还原
@@ -56,7 +57,8 @@ def test_decrypt_dat_v2_full_block_padding():
     """aesSize 已对齐（1024）时必须多解一个整块 pad 块；恒等式 size=15+aligned+xorSize。"""
     head = jpeg_like(1024)
     tail = b"\x22" * 100
-    keys = media.MediaKeys(xor_key=FAKE_XOR, aes_key_ascii=FAKE_KEY, code="test")
+    keys = media.MediaKeys(xor_key=FAKE_XOR, aes_key_ascii=FAKE_KEY, code="test",
+                                     aes_verified=True)
     dat = build_v2_dat(head, tail, FAKE_KEY, FAKE_XOR)
     assert len(dat) == 15 + 1040 + len(tail)
     assert media.decrypt_dat(dat, keys) == head + tail
@@ -64,14 +66,16 @@ def test_decrypt_dat_v2_full_block_padding():
 
 def test_decrypt_dat_v1_whole_file_xor():
     body = jpeg_like(200)
-    keys = media.MediaKeys(xor_key=FAKE_XOR, aes_key_ascii=FAKE_KEY, code="test")
+    keys = media.MediaKeys(xor_key=FAKE_XOR, aes_key_ascii=FAKE_KEY, code="test",
+                                     aes_verified=True)
     dat = media.V1_SIG + bytes(b ^ FAKE_XOR for b in body)
     assert media.decrypt_dat(dat, keys) == body
 
 
 def test_decrypt_dat_v0_no_sig_whole_file_xor():
     body = jpeg_like(100)
-    keys = media.MediaKeys(xor_key=FAKE_XOR, aes_key_ascii=FAKE_KEY, code="test")
+    keys = media.MediaKeys(xor_key=FAKE_XOR, aes_key_ascii=FAKE_KEY, code="test",
+                                     aes_verified=True)
     assert media.decrypt_dat(bytes(b ^ FAKE_XOR for b in body), keys) == body
 
 
@@ -79,19 +83,22 @@ def test_decrypt_dat_wrong_key_raises_decrypt_error():
     """PKCS#7 严格校验：错钥必须抛 DecryptError，绝不返回乱明文。"""
     head = jpeg_like(1024)
     dat = build_v2_dat(head, b"x" * 10, FAKE_KEY, FAKE_XOR)
-    bad = media.MediaKeys(xor_key=FAKE_XOR, aes_key_ascii=b"ffffffffffffffff", code="test")
+    bad = media.MediaKeys(xor_key=FAKE_XOR, aes_key_ascii=b"ffffffffffffffff", code="test",
+                                          aes_verified=True)
     with pytest.raises(errors.DecryptError):
         media.decrypt_dat(dat, bad)
 
 
 def test_decrypt_dat_truncated_raises():
-    keys = media.MediaKeys(xor_key=FAKE_XOR, aes_key_ascii=FAKE_KEY, code="test")
+    keys = media.MediaKeys(xor_key=FAKE_XOR, aes_key_ascii=FAKE_KEY, code="test",
+                                     aes_verified=True)
     with pytest.raises(errors.DecryptError):
         media.decrypt_dat(media.V2_SIG + b"\x00" * 8, keys)   # 不足 15 字节头
 
 
 def test_media_keys_repr_hides_secrets():
-    keys = media.MediaKeys(xor_key=FAKE_XOR, aes_key_ascii=FAKE_KEY, code="42")
+    keys = media.MediaKeys(xor_key=FAKE_XOR, aes_key_ascii=FAKE_KEY, code="42",
+                              aes_verified=False)
     assert repr(keys) == "MediaKeys(***)"     # 显式遮蔽（repr=False 会落回含内存地址的默认形式，断言碰运气）
 
 
@@ -325,6 +332,11 @@ def test_unreadable_sample_raises_media_key_error(tmp_path, monkeypatch):
     其余 4 个可读」——xorKey 统计照常成立，从而精确打到 derive_keys 里那次
     `sample.read_bytes()`。目录冒充 .dat 是**真** OSError（IsADirectoryError），
     不依赖 chmod 在 root 下的行为。
+
+    EA-020 后这里必须是 **V0** 样本：候选里只要有一个可读的 V2，挑选规则就会绕过读不了的
+    那个（头的 6 字节都读不出来，它自然不算 V2），于是走不到这条分支——本用例会以「码不匹配」
+    那条消息通过，宣称的分支其实没被执行（改前实测如此）。`assert "读不出来"` 就是为它加的
+    判别式：把 `except OSError` 换成 `continue` 本用例必红。
     """
     root, account = make_tree(tmp_path, monkeypatch)
     (paths.CONTAINER / "app_data/net/kvcomm/key_5_x.statistic").write_bytes(b"")
@@ -334,11 +346,109 @@ def test_unreadable_sample_raises_media_key_error(tmp_path, monkeypatch):
     bad.mkdir()
     good = [img / f"g{i}.dat" for i in range(4)]
     for p in good:
-        p.write_bytes(build_v2_dat(jpeg_like(64), b"\x44" * 8 + b"\xff\xd9", FAKE_KEY, FAKE_XOR))
+        p.write_bytes(_v0_dat())                       # V0：无 V2 候选 → 回落 sorted 首个 = bad.dat
     monkeypatch.setattr(media, "_attach_dats", lambda acct: iter([bad, *good]))
     with pytest.raises(errors.MediaKeyError) as ei:
         media.derive_keys(account)
+    assert "读不出来" in str(ei.value), ei.value
     assert ei.value.hint
+
+
+# ---------- EA-020：样本不是 V2 时验证门验不到 aesKey ----------
+
+def _v0_dat(n: int = 64) -> bytes:
+    """V0 dat：全文件单字节 XOR（无 AES 段）——解密输出与 aesKey **无关**。"""
+    return bytes(b ^ FAKE_XOR for b in jpeg_like(n))
+
+
+def _v2_sample_bytes(account: str, code: str) -> bytes:
+    aes = hashlib.md5((code + paths.bare_wxid(account)).encode()).hexdigest()[:16].encode()
+    return build_v2_dat(jpeg_like(64), b"\x33" * 8 + b"\xff\xd9", aes, FAKE_XOR)
+
+
+def test_derive_keys_rejects_a_code_that_cannot_decrypt_the_v2_sample(tmp_path, monkeypatch):
+    """EA-020：验证门验的是「样本能解出已知魔数」——而**样本的格式决定了它验什么**。
+    非 V2 样本走的是纯 XOR 分支，输出与 `aes_key_ascii` 毫无关系，于是循环里第一个 code
+    就过，错钥被放行（后续 V2 图解不开，只体现在 `image.failed` 涨、`degraded` 空）。
+
+    夹具即条目的触发条件：attach 树下 4 个 V0 样本排在前、1 个用**正确** code 加密的 V2
+    样本排在后；两个 code 注入成「错的那把在前」。把样本选择改回 `next(iter(dats))`
+    （不看 V2）本测试必红。
+    """
+    root, account = make_tree(tmp_path, monkeypatch)
+    bare_wxid = paths.bare_wxid(account)
+    right, wrong = "222222", "111111"
+    aes_right = hashlib.md5((right + bare_wxid).encode()).hexdigest()[:16].encode()
+    cm = "a" * 32
+    img = paths.XWECHAT_FILES / account / "msg/attach" / cm / "2026-03" / "Img"
+    img.mkdir(parents=True)
+    v0s = [img / f"a{i}.dat" for i in range(4)]
+    for p in v0s:
+        p.write_bytes(_v0_dat())
+    v2 = img / "zz_v2.dat"
+    v2.write_bytes(_v2_sample_bytes(account, right))
+
+    monkeypatch.setattr(media, "_attach_dats", lambda acct: iter([*v0s, v2]))
+    monkeypatch.setattr(media, "_kvcomm_codes", lambda: [wrong, right])   # 错钥在前
+
+    keys = media.derive_keys(account)
+    assert keys.aes_key_ascii == aes_right, "放行了验不到 aesKey 的那把钥匙"
+    assert keys.aes_verified is True
+    assert media.detect_ext(media.decrypt_dat(v2.read_bytes(), keys)) == "jpg"
+
+
+def test_kvcomm_codes_is_sorted_so_which_key_wins_is_not_a_filesystem_accident(tmp_path, monkeypatch):
+    """EA-020：code 顺序此前由裸 `d.iterdir()` 决定（与 `_attach_dats` 的 sorted 处理不一致）
+    ——「放行哪把钥匙」于是成了文件系统顺序的函数。删掉 `sorted` 本测试必红。"""
+    root, account = make_tree(tmp_path, monkeypatch)
+    kv = paths.CONTAINER / "app_data/net/kvcomm"
+    small, big = kv / "key_3_y.statistic", kv / "key_20_x.statistic"
+    small.write_bytes(b"")
+    big.write_bytes(b"")
+    # 注入「文件系统给出的顺序」：小的在前。不排序时返回 ['3','20']，排序后 ['20','3']。
+    monkeypatch.setattr(pathlib.Path, "iterdir",
+                        lambda self: iter([small, big]) if self == kv else [])
+    assert media._kvcomm_codes() == ["20", "3"]
+
+
+def test_derive_keys_without_a_v2_sample_marks_the_aes_half_unverified(tmp_path, monkeypatch):
+    """EA-020：一个 V2 样本都没有时（3.x 遗留/迁移数据）**不能拒绝**——那会把现在能用
+    的 xor 路径一并废掉；但 aesKey 那一半确实没被验证过，必须标出来。改回「一律
+    aes_verified=True」本测试必红。"""
+    root, account = make_tree(tmp_path, monkeypatch)
+    (paths.CONTAINER / "app_data/net/kvcomm/key_999999_1.statistic").write_bytes(b"")
+    img = paths.XWECHAT_FILES / account / "msg/attach" / ("a" * 32) / "2026-03" / "Img"
+    img.mkdir(parents=True)
+    v0s = [img / f"a{i}.dat" for i in range(4)]
+    for p in v0s:
+        p.write_bytes(_v0_dat())
+    monkeypatch.setattr(media, "_attach_dats", lambda acct: iter(v0s))
+
+    keys = media.derive_keys(account)
+    assert keys.xor_key == FAKE_XOR and keys.aes_verified is False
+
+
+def test_export_media_says_when_the_aes_half_could_not_be_verified(tmp_path, monkeypatch):
+    """EA-020 的用户可见半边：没有 V2 样本时导出照跑，但 degraded 要说清「验证门没验到
+    aesKey」——否则用户只看到失败的张数，线索全无。删掉那条 append 本测试必红。"""
+    root, account = make_tree(tmp_path, monkeypatch)
+    (paths.CONTAINER / "app_data/net/kvcomm/key_999999_1.statistic").write_bytes(b"")
+    img = paths.XWECHAT_FILES / account / "msg/attach" / ("a" * 32) / "2026-03" / "Img"
+    img.mkdir(parents=True)
+    v0s = [img / f"a{i}.dat" for i in range(4)]
+    for p in v0s:
+        p.write_bytes(_v0_dat())
+    monkeypatch.setattr(media, "_attach_dats", lambda acct: iter(v0s))
+
+    cm = hashlib.md5("chatA@chatroom".encode()).hexdigest()
+    idir = paths.XWECHAT_FILES / account / "msg/attach" / cm / "2026-09" / "Img"
+    idir.mkdir(parents=True)
+    (idir / "beef.dat").write_bytes(_v0_dat(1024))
+
+    rep = media.export_media(account, ["chatA@chatroom"], kinds=["image"],
+                             months=["2026-09"], out_dir=root / "home" / "media")
+    assert rep.image.ok == 1, rep
+    assert any("验证" in d for d in rep.degraded), rep.degraded
 
 
 # ---------- Ruling 8：视频是账号级媒体 ----------
@@ -2462,4 +2572,6 @@ def test_derive_xor_key_reads_only_the_tail(tmp_path, monkeypatch):
         raise AssertionError("整文件读：EA-086 要的是尾部两字节")
 
     monkeypatch.setattr(_p.Path, "read_bytes", _boom)
-    assert m._derive_xor_key(dats) == 0x5A
+    xor_key, v2_sample = m._scan_dats(dats)          # EA-020：同一次扫描顺带挑 V2 样本
+    assert xor_key == 0x5A
+    assert v2_sample is None                          # 这批是 V0（无 V2 魔数）

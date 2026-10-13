@@ -25,11 +25,12 @@ _MAX_LEN = 300
 def redact(text: str) -> str:
     """剥掉密钥形态的连续 64 位 hex，再截断长度。
 
-    为什么必须做：`decrypt.py` 把派生密钥拼成 `PRAGMA key = "x'<64位hex>'"` **作为
-    命令行参数**交给 sqlcipher，而 sqlcipher 报语法错时会**回显参数原文并加插入符**
-    （已实测，见 §测试）。C1 之前这段文字被 MCP SDK 吞掉、只留在服务端日志；C1 之后
-    它会进对外信封、到 agent 手上，甚至发往外部 API——直接压在「密钥不进错误信息」
-    这条硬约束上。机制已证实，触发尚未观测到，所以按「可能发生」处理。
+    为什么必须做：`decrypt.py` 把派生密钥拼成 `PRAGMA key = "x'<64位hex>'"` 交给
+    sqlcipher，而 sqlcipher 报错时会**回显出错语句并加插入符**（/tmp 实测：`SELEKT …`
+    形态两形态都回显；**密钥行本身未复现**回显——按「可能发生」处理）。C1 之前这段文字
+    被 MCP SDK 吞掉、只留在服务端日志；C1 之后它会进对外信封、到 agent 手上，甚至发往
+    外部 API——直接压在「密钥不进错误信息」这条硬约束上。
+    （EA-053：命令已改走 stdio 的 stdin，密钥不再出现在 argv；回显机制与脱敏的必要性不变。）
     """
     text = _SECRET_HEX.sub("<已脱敏>", text)
     return text if len(text) <= _MAX_LEN else text[:_MAX_LEN] + "…"

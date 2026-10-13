@@ -2,7 +2,9 @@
 
 算法事实全部来自本机实测（spec §2）与 WeFlow/WeFlowPP 的格式研究（Python 独立实现，
 未复制任何上游代码）。密钥纯磁盘推导：kvcomm 文件名 code + md5(code+裸wxid)[:16]（ASCII）
-+ dat 尾部统计 xorKey；**推导后必须用样本验证，不验证不交付**。
++ dat 尾部统计 xorKey；**推导后必须用样本验证，不验证不交付**——样本**优先取 V2**（EA-020）：
+  只有 V2 样本才验得到 aesKey（V0/V1 的解密输出与它无关，会让验证门空转、「第一个 code 就
+  过」）。一个 V2 样本都没有时回落（xor 那半照验），并把 aesKey 标为**未验证**（→ degraded）。
 
 红线：code/aesKey/xorKey 是推导材料，视同密钥——不进日志、错误消息、repr。
 依赖方向（单向，不得反向）：**media 可以 import store；store 不得 import media**；本模块**不在顶层** import reader（reader 顶层可以 import 本模块）；唯一的反向使用是
@@ -102,6 +104,7 @@ class MediaKeys:
     xor_key: int
     aes_key_ascii: bytes               # md5 hex 前 16 字符的 ASCII 字节（不是 hex 解码！）
     code: str
+    aes_verified: bool                 # EA-020：验证门是否**真的**验过 aesKey（见 _scan_dats）
 
     def __repr__(self) -> str:         # 显式遮蔽：密钥与推导材料不进日志（全局红线）
         return "MediaKeys(***)"
@@ -132,7 +135,9 @@ def _kvcomm_codes() -> list[str]:
                 m = _CODE_RE.match(f.name)
                 if m and m.group(1) not in codes:
                     codes.append(m.group(1))
-    return codes
+    # EA-020：`iterdir` 的顺序是文件系统的函数——不排序的话「哪个 code 先被试」不确定，
+    # 而验证门在样本不是 V2 时**第一个 code 就会过**（错钥因此可能被放行）。
+    return sorted(codes)
 
 
 def _attach_dats(account: str) -> list[pathlib.Path]:
@@ -145,10 +150,19 @@ def _attach_dats(account: str) -> list[pathlib.Path]:
     return _safe_iter(paths.XWECHAT_FILES / account / "msg/attach", "*/*/Img/*.dat")
 
 
-def _derive_xor_key(dats, limit: int = 200) -> int | None:
-    """扫样本 dat **尾部两字节**（EA-086：不整文件读）：b[-2]^0xFF == b[-1]^0xD9（JPEG EOI）
-    取众数；≥4 个一致才认可。`dats` 由调用方物化一次传进来（别再 glob 第二遍）。"""
+def _scan_dats(dats, limit: int = 200) -> tuple[int | None, pathlib.Path | None]:
+    """扫样本 dat 一次，返回 `(xor_key, 首个 V2 样本)`。
+
+    - xor_key：**尾部两字节**（EA-086：不整文件读）b[-2]^0xFF == b[-1]^0xD9（JPEG EOI）
+      取众数；≥4 个一致才认可。
+    - 首个 V2 样本（EA-020）：验证门验的是「样本能解出已知魔数」，而**样本的格式决定了它
+      验什么**——V0/V1 样本走纯 XOR 分支，输出与 `aes_key_ascii` 无关，于是「第一个 code
+      就过」，错钥被放行（后续 V2 图只体现在 `image.failed` 涨）。挑出 V2 样本，验证门才
+      真的验到 aesKey。同一次 open 里顺手读头 6 字节（不新增遍历）。头读不了的样本自然
+      不算 V2 候选。
+    """
     counts: dict[int, int] = {}
+    v2_sample: pathlib.Path | None = None
     scanned = 0
     for p in dats:
         if scanned >= limit:
@@ -157,6 +171,9 @@ def _derive_xor_key(dats, limit: int = 200) -> int | None:
             if p.stat().st_size < 8:
                 continue
             with p.open("rb") as f:
+                head = f.read(len(V2_SIG))
+                if v2_sample is None and head == V2_SIG:
+                    v2_sample = p
                 f.seek(-2, os.SEEK_END)
                 tail = f.read(2)
         except OSError:
@@ -167,17 +184,18 @@ def _derive_xor_key(dats, limit: int = 200) -> int | None:
                 counts[k] = counts.get(k, 0) + 1
         scanned += 1
     if not counts:
-        return None
+        return None, v2_sample
     k, n = max(counts.items(), key=lambda kv: kv[1])
-    return k if n >= 4 else None
+    return (k if n >= 4 else None), v2_sample
 
 
 def derive_keys(account: str) -> MediaKeys:
     """推导并**验证**图片密钥。无 code / 无样本 / 验证不过 → MediaKeyError（能力级降级）。"""
     codes = _kvcomm_codes()
     dats = list(_attach_dats(account))        # EA-086：物化一次，两个消费者共用
-    xor_key = _derive_xor_key(dats)
-    sample = next(iter(dats), None)
+    xor_key, v2_sample = _scan_dats(dats)
+    # 排序只为了让「挑中的是哪一个 V2 样本」也不依赖文件系统顺序（任一个都能同等验到 aesKey）。
+    sample = v2_sample if v2_sample is not None else next(iter(sorted(dats)), None)
     if sample is None:
         raise errors.MediaKeyError("msg/attach 下没有样本 dat，图片密钥无从验证")
     if xor_key is None:
@@ -187,7 +205,8 @@ def derive_keys(account: str) -> MediaKeys:
         keys = MediaKeys(
             xor_key=xor_key,
             aes_key_ascii=hashlib.md5((code + bare).encode()).hexdigest()[:16].encode("ascii"),
-            code=code)
+            code=code,
+            aes_verified=v2_sample is not None)
         try:
             out = decrypt_dat(sample.read_bytes(), keys)
         except OSError as exc:
@@ -862,6 +881,13 @@ def export_media(account: str, chat_ids: list[str], *, kinds: list[str],
             mk = None
             report.degraded.append(f"图片解密不可用：{exc}")
         if mk is not None:
+            if not mk.aes_verified:
+                # EA-020：样本里没有 V2 dat（3.x 遗留/迁移数据）——xor 那半照旧能用，
+                # 但 aes 那半**没被验证过**。不公告的话用户看到的是「失败 N」而毫无线索，
+                # 会去怀疑文件损坏或磁盘。
+                report.degraded.append(
+                    "图片密钥只验了 xorKey（样本里没有 V2 dat，aesKey 未经验证）："
+                    "V2 图片可能解不开，失败会计入 image.failed")
             for chat in chat_ids:
                 cm = messages.md5_of(chat)
                 base = paths.XWECHAT_FILES / account / "msg/attach" / cm

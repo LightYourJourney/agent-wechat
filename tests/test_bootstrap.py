@@ -118,9 +118,174 @@ def test_capture_pid_zero_treated_as_not_running(monkeypatch):
     assert str(ei.value) == "未找到微信进程，请先启动微信"
 
 
+# ---------- EA-004：收尾只向**本进程组**发信号 ----------
+
+class _FakeProc:
+    def __init__(self, pid: int = 4242):
+        self.pid = pid
+
+    def wait(self, timeout=None):
+        return 0
+
+
+def test_terminate_capture_signals_only_its_own_process_group(monkeypatch):
+    """EA-004：收尾此前无条件 `pkill -9 -x lldb`——按**名字**杀，会连坐用户自己的 lldb
+    会话（或以其它身份开的）。现在 Popen 起独立进程组，收尾只向 `getpgid(proc.pid)` 发
+    SIGTERM，且**不许**退到按名 pkill。把首选改回 `pkill` 本测试的首条断言必红。
+    """
+    import signal as _signal
+
+    seen = []
+    monkeypatch.setattr(bootstrap.os, "getpgid", lambda pid: pid + 1)
+    monkeypatch.setattr(bootstrap.os, "killpg", lambda pgid, sig: seen.append((pgid, sig)))
+
+    def _no_pkill(*a, **k):
+        raise AssertionError("不许按名字 pkill——那会连坐用户自己的 lldb 会话")
+    monkeypatch.setattr(bootstrap.subprocess, "run", _no_pkill)
+
+    bootstrap._terminate_capture(_FakeProc(pid=4242))
+    assert seen == [(4243, _signal.SIGTERM)], "只向本进程组发一次 SIGTERM（wait 返回即止）"
+
+
+def test_terminate_capture_escalates_to_sigkill_when_wait_times_out(monkeypatch):
+    """SIGTERM 后收不干净（wait 超时）才升级 SIGKILL——仍不走 pkill。
+
+    `wait` 只超时**一次**：一直不返回的话落到 pkill 才是设计行为（见下一条测试），
+    那测的就不是升级了。
+    """
+    import signal as _signal
+
+    seen = []
+    monkeypatch.setattr(bootstrap.os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(bootstrap.os, "killpg", lambda pgid, sig: seen.append(sig))
+
+    import subprocess as _sub
+
+    class _Stubborn(_FakeProc):
+        calls = 0
+
+        def wait(self, timeout=None):
+            type(self).calls += 1
+            if type(self).calls == 1:
+                raise _sub.TimeoutExpired("lldb", timeout)   # 第一次收不干净
+            return 0                                          # SIGKILL 之后收干净
+    monkeypatch.setattr(bootstrap.subprocess, "run",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("不许 pkill")))
+
+    bootstrap._terminate_capture(_Stubborn(pid=7))
+    assert seen == [_signal.SIGTERM, _signal.SIGKILL], seen
+
+
+def test_terminate_capture_falls_back_to_pkill_only_when_killpg_is_unusable(monkeypatch):
+    """killpg 两轮都不可用（getpgid 抛错）时才退到按名 pkill——**不删它**：删了就会在
+    异常路径上静默丢失清理，留下一个 attach 着微信的 lldb。"""
+    monkeypatch.setattr(bootstrap.os, "getpgid",
+                        lambda pid: (_ for _ in ()).throw(ProcessLookupError(pid)))
+    calls = []
+    monkeypatch.setattr(bootstrap.subprocess, "run", lambda argv, **kw: calls.append(argv))
+
+    bootstrap._terminate_capture(_FakeProc())
+    assert calls == [["pkill", "-9", "-x", "lldb"]], calls
+
+
+def test_capture_starts_its_own_session_so_cleanup_cannot_hit_the_caller(monkeypatch):
+    """EA-004 的另一半：没有 `start_new_session=True`，`killpg(os.getpgid(proc.pid))`
+    命中的就是**调用者自己的进程组**（pytest / MCP server）——收尾会把自己的进程组杀掉。
+    这条与上一条是一对：一条钉「向谁发」，一条钉「组是不是自己的」。
+    """
+    _lldb_which(monkeypatch)
+    monkeypatch.setattr(bootstrap.account, "wechat_pid", lambda: 4242)
+    seen = {}
+
+    import subprocess as _sub
+
+    def fake_popen(argv, **kw):
+        seen.update(kw)
+        seen["argv"] = argv
+        return SimpleNamespace()
+    # autouse fixture 把整个 subprocess 换成了桩，这里换回带常量的桩
+    monkeypatch.setattr(bootstrap, "subprocess", SimpleNamespace(
+        Popen=fake_popen, PIPE=_sub.PIPE, STDOUT=_sub.STDOUT))
+    monkeypatch.setattr(bootstrap, "_read_capture", lambda proc, deadline: _hexdump(HEX))
+    monkeypatch.setattr(bootstrap, "_terminate_capture", lambda proc: None)
+
+    assert bootstrap.capture_passphrase_lldb(timeout=1) == HEX
+    assert seen.get("start_new_session") is True
+    assert "lldb" in seen["argv"][2] and "TERM=dumb" in seen["argv"][2]
+
+
+# ---------- EA-052：读循环的 deadline ----------
+
+def _pipe_reader():
+    import os as _os
+    r, w = _os.pipe()
+    return _os, r, w, _os.fdopen(r, "r")
+
+
+def test_read_capture_returns_at_the_deadline_without_a_newline(monkeypatch):
+    """EA-052：`readline` 只在两次调用**之间**检查 deadline——lldb 输出卡在**半行**
+    （没有换行）时它一直阻塞，`--timeout` 因此形同虚设。`os.read` 有多少读多少。
+
+    管道里先到的是**行内半行**（无换行）：`readline` 只要缓冲区里有半行就会一直阻塞到
+    换行出现（2s 后），而 deadline 只在两次调用之间被检查——`--timeout` 因此形同虚设。
+    `os.read` 有多少读多少，按时返回。
+
+    切点必须落在**行内**：切在行边界上时 select 一响就有整行可读，readline 不会阻塞，
+    这条测试就测不出东西（M-F 变异实测过）。
+    """
+    import threading
+    import time as _time
+
+    _os, _r, w, reader = _pipe_reader()
+    proc = SimpleNamespace(stdout=reader, poll=lambda: None)
+    full = _hexdump(HEX) + "\n"
+    cut = 30                    # 行内切开：首批到的是「半行」
+    gate = threading.Event()    # 断言跑完才放行第二批，测试因此总是 ~deadline 就结束
+
+    def writer():
+        try:
+            _os.write(w, full[:cut].encode())
+            gate.wait(timeout=5)          # 旧实现若卡在 readline，这里超时后照样放行 → 它红
+            _os.write(w, full[cut:].encode())
+        except OSError:
+            pass                          # 读端已关：迟到的写没人在意
+        finally:
+            _os.close(w)
+
+    th = threading.Thread(target=writer, daemon=True)
+    th.start()
+    t0 = _time.monotonic()
+    buf = bootstrap._read_capture(proc, _time.time() + 0.3)
+    elapsed = _time.monotonic() - t0
+    gate.set()
+    th.join(timeout=5)
+    reader.close()
+
+    assert _parse_passphrase(buf) is None, "deadline 之后才到齐的数据不算数"
+    assert elapsed < 1.0, f"半行不许把读循环钉住（readline 会等到 2s 后），实际 {elapsed:.2f}s"
+
+
+def test_read_capture_parses_a_complete_hexdump_promptly():
+    """反例：到齐的输出必须立刻解析出来并返回，不许「一律等到 deadline」。"""
+    import time as _time
+
+    _os, _r, w, reader = _pipe_reader()
+    proc = SimpleNamespace(stdout=reader, poll=lambda: None)
+    _os.write(w, (_hexdump(HEX) + "\n").encode())
+
+    t0 = _time.monotonic()
+    buf = bootstrap._read_capture(proc, _time.time() + 5)
+    elapsed = _time.monotonic() - t0
+    reader.close()
+    _os.close(w)
+
+    assert _parse_passphrase(buf) == HEX
+    assert elapsed < 1.0, f"数据已到齐就该立刻返回，实际 {elapsed:.2f}s"
+
+
 # ---------- bootstrap：进度事件与落缓存 ----------
 
-def _stub_pipeline(monkeypatch, *, verify_result, saved: dict):
+def _stub_pipeline(monkeypatch, *, verify_result, saved: dict, unreadable: int = 0):
     monkeypatch.setattr(bootstrap.account, "status",
                         lambda: SimpleNamespace(logged_in=True, current=ACC, pid=999))
     seen = {}
@@ -133,7 +298,7 @@ def _stub_pipeline(monkeypatch, *, verify_result, saved: dict):
 
     def verify(acct, pw):
         seen["verify"] = (acct, pw)
-        return verify_result
+        return verify_result, unreadable      # EA-051：返回值多了「读不到的库数」
 
     monkeypatch.setattr(bootstrap.keys, "verify_passphrase", verify)
     monkeypatch.setattr(bootstrap.keys, "save_cached_hex",
@@ -161,6 +326,34 @@ def test_bootstrap_without_progress_is_silent_and_works(monkeypatch):
     saved: dict = {}
     _stub_pipeline(monkeypatch, verify_result=[("m/a.db", True)], saved=saved)
     assert bootstrap.bootstrap() == BARE
+
+
+def test_unreadable_dbs_get_a_permission_diagnosis_not_a_retry(monkeypatch):
+    """EA-051：**一个库都没读到**时不许说「捕获值未通过校验，请重试」。
+
+    `verify_passphrase` 此前把「读不到」静默 `continue`，「一个库都读不到」与「读到了但
+    全不过」在返回值里同形——于是真问题（权限/完全磁盘访问权限）被包装成「再试一次捕获」，
+    用户会一遍遍重跑 sudo 引导。第二个返回值让两条诊断分开。
+
+    把 `total == 0` 那条分支删掉（回落到统一文案）本测试必红。
+    """
+    monkeypatch.setattr(bootstrap.account, "status",
+                        lambda: SimpleNamespace(logged_in=True, current=ACC, pid=999))
+    monkeypatch.setattr(bootstrap, "capture_passphrase_lldb", lambda t: HEX)
+    monkeypatch.setattr(bootstrap.keys, "verify_passphrase", lambda a, p: ([], 3))
+    _no_save(monkeypatch)
+
+    with pytest.raises(CaptureError) as ei:
+        bootstrap.bootstrap(timeout=1)
+    msg = str(ei.value)
+    assert "完全磁盘访问权限" in msg and "3 个不可读" in msg, msg
+    assert "HMAC" not in msg, "读不到 ≠ 没过——不许给「重试捕获」的诊断"
+
+
+def _no_save(monkeypatch):
+    def boom(bare, h):
+        raise AssertionError("一个库都没读到，不许落缓存")
+    monkeypatch.setattr(bootstrap.keys, "save_cached_hex", boom)
 
 
 def test_bootstrap_not_logged_in_error_text_unchanged(monkeypatch):
@@ -201,3 +394,22 @@ def test_hmac_failure_error_text_and_chain_never_leak_passphrase(monkeypatch):
         e = e.__cause__ or e.__context__
     for blob in blobs:
         assert all(blob not in t for t in texts), f"泄漏: {blob!r}"
+
+
+def test_a_failed_ownership_handback_is_emitted_as_a_warning(tmp_path, monkeypatch):
+    """EA-005：`save_cached_hex` 返回的警告（属主未归还）必须经 emit 通道到用户面前——
+    verified 行照报（缓存确实落盘了），另加一行 warn；不许把整次引导判负。"""
+    _lldb_which(monkeypatch)
+    monkeypatch.setattr(bootstrap.account, "status", lambda: SimpleNamespace(
+        logged_in=True, current=ACC, pid=999))
+    monkeypatch.setattr(bootstrap, "capture_passphrase_lldb", lambda t: HEX)
+    monkeypatch.setattr(bootstrap.keys, "verify_passphrase", lambda a, p: ([("db", True)], 0))
+    monkeypatch.setattr(bootstrap.keys, "save_cached_hex",
+                        lambda bare, h: "属主未归还（桩）：非 sudo 用户可能读不到密钥缓存")
+
+    events = []
+    assert bootstrap.bootstrap(timeout=1, progress=events.append) == BARE
+    kinds = [e.kind for e in events]
+    assert "verified" in kinds and "warn" in kinds, kinds
+    warn = next(e for e in events if e.kind == "warn")
+    assert "属主未归还" in warn.warning

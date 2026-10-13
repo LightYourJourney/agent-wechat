@@ -18,7 +18,7 @@ import subprocess
 import tempfile
 
 from . import keys, paths
-from .errors import DecryptError
+from .errors import DecryptError, HomeUnavailable
 
 
 def tmp_dir() -> pathlib.Path:
@@ -28,7 +28,13 @@ def tmp_dir() -> pathlib.Path:
 
 def ensure_home_dirs() -> None:
     paths.ensure_home_dirs()
-    tmp_dir().mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        tmp_dir().mkdir(mode=0o700, parents=True, exist_ok=True)
+    except OSError as exc:
+        # EA-005：同路径那处（paths.ensure_home_dirs）的立场——core 只抛项目异常。
+        raise HomeUnavailable(
+            f"解密临时目录不可用：{tmp_dir()}",
+            hint=f"{exc}；请检查 AGENT_WECHAT_HOME 指向的位置是否可用") from exc
 
 
 def snapshot(db: pathlib.Path, td: pathlib.Path) -> pathlib.Path:
@@ -60,9 +66,17 @@ def decrypted(db: pathlib.Path, passphrase: bytes):
             "SELECT sqlcipher_export('plain');",
             "DETACH DATABASE plain;",
         ]
-        r = subprocess.run(["sqlcipher", str(snap), *cmds], capture_output=True, text=True)
+        # EA-053：命令走 **stdin**，密钥不再出现在 argv 里（另一本地用户/进程 `ps` 看得到
+        # 的窗口消失）。/tmp 实测（合成库三态）：stdin 与 argv 的 rc/产物一致；错误文案从
+        # 「Parse error in 3rd command line argument」变成「Parse error near line N」，
+        # 而「回显出错语句 + 插入符」的机制两形态都在——errors.redact 仍是必需的安全网。
+        r = subprocess.run(["sqlcipher", str(snap)], input="\n".join(cmds) + "\n",
+                           capture_output=True, text=True)
         if r.returncode != 0 or not out.exists():
-            raise DecryptError(f"sqlcipher 解密失败: {r.stderr.strip()[:300]}")
+            # EA-047：**不在这里截断**——`[:300]` 曾把跨过截断点的密钥切成「前半段」，
+            # 而 redact 需要完整 64 位才认得出（截断必须发生在脱敏**之后**，由
+            # errors.redact 统一做）。
+            raise DecryptError(f"sqlcipher 解密失败: {r.stderr.strip()}")
         yield out
     finally:
         shutil.rmtree(td, ignore_errors=True)

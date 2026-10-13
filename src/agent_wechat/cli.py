@@ -40,10 +40,16 @@ def cmd_status(args: argparse.Namespace) -> int:
         cached = keys.load_cached_hex(bare)
         line = f"  {acc}: 缓存{'✓' if cached else '✗'}"
         if cached and args.verify_keys:
-            results = keys.verify_passphrase(acc, bytes.fromhex(cached))
+            results, unreadable = keys.verify_passphrase(acc, bytes.fromhex(cached))
             ok = sum(1 for _, good in results if good)
             line += f"  HMAC {ok}/{len(results)}"
+            if unreadable:
+                line += f"（另有 {unreadable} 个库读不到）"   # EA-051：读不到 ≠ 不过
         print(line)
+    tm = paths.time_machine_excluded()
+    if tm is not None:
+        # EA-054：这条安全控制此前完全静默——失败时给一行可执行动作。
+        print(f"备份排除: {'✓' if tm else '✗（请手动 tmutil addexclusion ' + str(paths.HOME_DIR) + '）'}")
     return 0
 
 
@@ -56,6 +62,8 @@ def _render_bootstrap(ev: bootstrap.BootstrapProgress) -> None:
     elif ev.kind == "verified":
         print(f"✅ HMAC 校验通过 {ev.ok_libs}/{ev.total_libs} 个库，"
               f"passphrase 已缓存到 {keys.CACHE_FILE}")
+    elif ev.kind == "warn":
+        print(f"⚠️  {ev.warning}")
 
 
 def cmd_bootstrap(args: argparse.Namespace) -> int:
