@@ -356,6 +356,27 @@ def _no_save(monkeypatch):
     monkeypatch.setattr(bootstrap.keys, "save_cached_hex", boom)
 
 
+def test_an_empty_account_reports_no_databases_not_a_permission_problem(monkeypatch):
+    """F9（T9 复审，P4）：`unreadable == 0` 且 `total == 0` 时新文案自相矛盾——「一个库都没能
+    读到（**0 个不可读**）」。库在盘上而一个 .db 都没有（账号刚登录还没同步、目录刚迁移）
+    不是权限问题；说成权限会把用户送去改系统设置。
+
+    删掉 `total == 0 and unreadable == 0` 那条分支本测试必红。
+    """
+    monkeypatch.setattr(bootstrap.account, "status",
+                        lambda: SimpleNamespace(logged_in=True, current=ACC, pid=999))
+    monkeypatch.setattr(bootstrap, "capture_passphrase_lldb", lambda t: HEX)
+    monkeypatch.setattr(bootstrap.keys, "verify_passphrase", lambda a, p: ([], 0))
+    _no_save(monkeypatch)
+
+    with pytest.raises(CaptureError) as ei:
+        bootstrap.bootstrap(timeout=1)
+    msg = str(ei.value)
+    assert "0 个不可读" not in msg, msg
+    assert "完全磁盘访问权限" not in msg, "「没有库」与「读不到库」是两件事"
+    assert "没有" in msg, msg
+
+
 def test_bootstrap_not_logged_in_error_text_unchanged(monkeypatch):
     monkeypatch.setattr(bootstrap.account, "status",
                         lambda: SimpleNamespace(logged_in=False, current=None, pid=None))

@@ -2553,7 +2553,7 @@ def test_sticker_wxgf_without_transcode_saves_container_and_says_so(tmp_path, mo
     assert rep.sticker.ok == 1                       # 原容器保留了，算导出来了
     assert rep.degraded == ["wxgf 贴纸未转 JPEG（无 ffmpeg 或转码失败），存原容器"]
 
-def test_derive_xor_key_reads_only_the_tail(tmp_path, monkeypatch):
+def test_scan_dats_reads_only_the_tail(tmp_path, monkeypatch):
     """EA-086：样本扫描只读每份 dat 的**末 2 字节**（此前是 `read_bytes()` 整文件读）。
 
     判别法：把 `Path.read_bytes` 换成会抛的桩——回退成整文件读，本用例必红。

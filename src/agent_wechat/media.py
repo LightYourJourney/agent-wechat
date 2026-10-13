@@ -144,7 +144,8 @@ def _attach_dats(account: str) -> list[pathlib.Path]:
     """attach 树里的样本 dat（供 xorKey 统计与密钥验证；Ruling 16）。
 
     glob 是惰性的，**必须**经 `_safe_iter` 立即物化：否则目录读不了时，异常会从
-    `_derive_xor_key` 的 for 或 `derive_keys` 的 `next(iter(...))` 里裸奔出 core 层。
+    `_scan_dats` 的 for 里裸奔出 core 层（F10：原文引的 `_derive_xor_key` 已改名，
+    `derive_keys` 也不再是 `next(iter(...))`）。
     读不了 = 没有样本，落回 derive_keys 既有的「无样本」MediaKeyError。
     """
     return _safe_iter(paths.XWECHAT_FILES / account / "msg/attach", "*/*/Img/*.dat")
@@ -194,8 +195,12 @@ def derive_keys(account: str) -> MediaKeys:
     codes = _kvcomm_codes()
     dats = list(_attach_dats(account))        # EA-086：物化一次，两个消费者共用
     xor_key, v2_sample = _scan_dats(dats)
-    # 排序只为了让「挑中的是哪一个 V2 样本」也不依赖文件系统顺序（任一个都能同等验到 aesKey）。
-    sample = v2_sample if v2_sample is not None else next(iter(sorted(dats)), None)
+    # 样本选择（F10，T9 复审——上一版这段注释不实，说「排序让 V2 样本的选择也不依赖文件
+    # 系统顺序」，而实际只对**回落**那半边排了序）：`dats` 保持 glob 顺序，**不排序**——
+    # 排序在这里不可观测（`derive_keys` 不暴露「用了哪个样本」），只会给「哪个样本被选中」
+    # 引入一份没有测试守护的行为变化。而「挑中哪一个 V2 样本」**不影响正确性**：任一个
+    # V2 样本都能同等验到 aesKey（这正是这一门要验的东西）。回落取首个（glob 顺序）。
+    sample = v2_sample if v2_sample is not None else (dats[0] if dats else None)
     if sample is None:
         raise errors.MediaKeyError("msg/attach 下没有样本 dat，图片密钥无从验证")
     if xor_key is None:

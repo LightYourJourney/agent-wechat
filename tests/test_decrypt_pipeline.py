@@ -94,3 +94,47 @@ def test_the_key_never_reaches_argv_and_a_truncation_cannot_ship_a_fragment(
     payload = errors.to_payload(ei.value)["error"]
     assert "abababab" not in payload, payload       # 密钥的任何 ≥8 位前缀都不许进信封
     assert len(payload) <= 320                      # 而长度上限仍然生效（脱敏后才截）
+
+
+def test_a_wrapped_key_echo_cannot_ship_a_sixty_two_char_fragment(tmp_path, monkeypatch):
+    """F3（T9 复审，P3）：sqlcipher 回显含密钥的语句时按 **~80 列折行**，第二处回显因此
+    留下密钥的**前缀**（实测 62/64 位）——而 `errors.redact` 只认「恰好 64 位连续 hex」，
+    残段一路进对外信封。这是 EA-047/053 那次修复没覆盖到的面（折行与截断无关，是 sqlcipher
+    自己的输出格式化）。
+
+    修法：错误消息只取 stderr 的**首个非空行**。回显块（第二处回显 + caret 行）正是藏
+    残段的地方，而首行已经带够了定位信息（`Parse error near line N: near "…"`）。
+
+    把 `_first_line` 换回 `r.stderr.strip()` 本测试必红。
+    """
+    import re
+
+    from agent_wechat import errors
+
+    db = tmp_path / "message_0.db"
+    db.write_bytes(b"x" * 8192)
+    key_hex = "cd" * 32                                  # 合成密钥（非真实值）
+    wrapped = "  PRAGMA key = \"x'" + key_hex[:62]      # 折行：第 62 位处断开
+
+    class _R:
+        returncode = 1
+        stdout = ""
+        stderr = ("Parse error near line 1: unrecognized token: \"\"x'" + key_hex + ";'\n"
+                  "SELECT 1;\"\n"
+                  f"{wrapped}\n"
+                  "             ^--- error here\n")
+
+    monkeypatch.setattr(decrypt.subprocess, "run", lambda argv, **kw: _R())
+    with pytest.raises(errors.DecryptError) as ei:
+        with decrypt.decrypted(db, b"w" * 32):
+            pass
+
+    msg = str(ei.value)
+    # 判据一：回显块（`PRAGMA key = "x'<62位>` 与 caret 行）整体不进消息——残段住在那里。
+    # 首行不含 "PRAGMA key"（它是 `unrecognized token: ""x'<64位>;'`），故这条判据是准的。
+    assert "PRAGMA key" not in msg, f"回显块进了消息：{msg!r}"
+    assert "^--- error here" not in msg
+    # 判据二（最终目标）：脱敏之后不许留下任何 ≥48 位连续 hex——62 位残段在完整 stderr 里
+    # 会让这条红（带上整个 stderr 的版本实测红）。
+    assert not re.search(r"[0-9a-fA-F]{48,}", errors.redact(msg)), errors.redact(msg)
+    assert "Parse error" in msg, "首行带得动定位信息——不许把诊断一起丢掉"

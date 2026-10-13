@@ -170,6 +170,32 @@ def test_cli_index_unavailable_names_the_cli_rebuild_command(tmp_path, monkeypat
 
 # ---------- C8：bootstrap 的 print 迁到 CLI，四处输出逐字（同序/同流向 stdout） ----------
 
+def test_cmd_bootstrap_renders_the_ownership_warning(monkeypatch, capsys):
+    """F6（T9 复审，P3）：EA-005 的用户可见半边（属主未归还的 `⚠️` 行）在 CLI **渲染层**
+    零覆盖——`tests/test_bootstrap.py` 那条只断言**事件**存在，于是删掉 `_render_bootstrap`
+    的 `warn` 分支，全量 1145 条仍绿。这条把事件钉到 stdout 上。
+
+    判别力（覆盖洞的证明方式）：删掉 cli 里 `elif ev.kind == "warn":` 那两行 → 本测试必红
+    （已按此变异验过）。
+    """
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        bootstrap.account, "status",
+        lambda: SimpleNamespace(logged_in=True, current="wxid_testacct01_ab12", pid=999))
+    monkeypatch.setattr(bootstrap, "capture_passphrase_lldb", lambda timeout: "ab" * 32)
+    monkeypatch.setattr(bootstrap.keys, "verify_passphrase", lambda a, p: ([("m/a.db", True)], 0))
+    monkeypatch.setattr(bootstrap.keys, "save_cached_hex",
+                        lambda bare, h: "属主未归还（桩）：sudo 之外的用户可能读不到密钥缓存")
+
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["bootstrap", "--timeout", "7"])
+    assert ei.value.code == 0
+    out = capsys.readouterr().out
+    assert "✅ HMAC 校验通过" in out, "非致命降级不许把整次引导判负——verified 行照报"
+    assert "⚠️" in out and "属主未归还" in out, out
+
+
 def test_cmd_bootstrap_output_is_verbatim(monkeypatch, capsys):
     """跑真实 bootstrap 编排（仅桩掉账号/捕获/校验/落盘），断言 CLI 的完整 stdout。"""
     monkeypatch.setattr(
@@ -2320,26 +2346,33 @@ def test_status_says_when_the_index_cannot_be_read(tmp_path, monkeypatch):
     assert usecases.account_status()["schema_notes"] == [], "健康库不许误报"
 
 
-def test_status_reports_a_failed_backup_exclusion(monkeypatch, capsys):
-    """EA-054：备份排除失败此前全静默。用户要能在 status 里看到失败**与手动补救命令**
-    ——「没看见」不等于「没发生」。把 `if tm is not None:` 那三行删掉本测试必红。
+def test_status_reports_the_real_backup_exclusion_state(tmp_path, monkeypatch, capsys):
+    """F2（T9 复审，P2）：`status` 印的是**只读查询**到的真实状态（桩在 `paths.subprocess`
+    层的那条测试负责查询本身，这条负责渲染——两层合起来才是端到端）。
+
+    原实现记的是进程内「上次尝试的成败」，在「一次调用一个进程」的 CLI 里恒为 None，
+    那行**永不打印**；原测试直接 `monkeypatch.setattr(paths, "_tm_exclusion_ok", False)`
+    把它测成绿的（假护栏）。另：F12——这条此前没隔离 `keys.CACHE_FILE`，会读**真实**
+    `~/.agent-wechat/passphrase.json`。
     """
     from types import SimpleNamespace
 
+    from agent_wechat import keys as keys_mod
+    monkeypatch.setattr(keys_mod, "CACHE_FILE", tmp_path / "passphrase.json")   # F12：不读真实缓存
     monkeypatch.setattr(account, "status", lambda: SimpleNamespace(
         running=True, pid=999, current="wxid_testacct01_ab12",
         accounts=["wxid_testacct01_ab12"]))
-    monkeypatch.setattr(paths, "_tm_exclusion_ok", False)
+
+    monkeypatch.setattr(paths, "time_machine_excluded", lambda: "[Included]")   # 未排除
     with pytest.raises(SystemExit) as ei:
         cli.main(["status"])
     assert ei.value.code == 0
-    out = capsys.readouterr().out
-    assert "备份排除: ✗" in out and "tmutil addexclusion" in out, out
+    assert "备份排除: [Included]" in capsys.readouterr().out
 
-    monkeypatch.setattr(paths, "_tm_exclusion_ok", True)
+    monkeypatch.setattr(paths, "time_machine_excluded", lambda: None)           # 判不出来
     with pytest.raises(SystemExit):
         cli.main(["status"])
-    assert "备份排除: ✓" in capsys.readouterr().out
+    assert "备份排除" not in capsys.readouterr().out, "判不出来 ≠ 没排除，不许印"
 
 
 def test_status_verify_keys_renders_the_hmac_line(tmp_path, monkeypatch, capsys):
@@ -2363,6 +2396,35 @@ def test_status_verify_keys_renders_the_hmac_line(tmp_path, monkeypatch, capsys)
         cli.main(["status", "--verify-keys"])
     assert ei.value.code == 0
     assert "HMAC 1/2" in capsys.readouterr().out
+
+
+def test_status_verify_keys_survives_a_corrupt_cache(tmp_path, monkeypatch, capsys):
+    """F7（T9 复审，P3）：EA-049 加固的是 `get_passphrase` 那条解码口，而 `status --verify-keys`
+    在 cli 里又 `bytes.fromhex` 解了一次——坏 hex 裸抛 ValueError（CLI 一整个 traceback），
+    长度不足的值还会照印「缓存✓ HMAC 0/0」（把「缓存坏了」说成「密钥不匹配」）。
+
+    解码收口到 `keys.decode_cached_hex`；把 cli 那行换回 `bytes.fromhex(cached)` 本测试必红。
+    """
+    import json as _json
+    from types import SimpleNamespace
+
+    from agent_wechat import keys as keys_mod
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(paths, "HOME_DIR", home)
+    monkeypatch.setattr(keys_mod, "CACHE_FILE", home / "passphrase.json")
+    monkeypatch.setattr(account, "status", lambda: SimpleNamespace(
+        running=True, pid=999, current="wxid_testacct01_ab12",
+        accounts=["wxid_testacct01_ab12"]))
+    (home / "passphrase.json").write_text(_json.dumps(
+        {"accounts": {"wxid_testacct01": {"passphrase_hex": "zz" * 32}}}))
+
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["status", "--verify-keys"])
+    assert ei.value.code == 1
+    out = capsys.readouterr()
+    assert "缓存损坏" in (out.err + out.out), out
+    assert "Traceback" not in (out.err + out.out), out
 
 
 def test_status_verify_keys_names_the_unreadable_dbs(tmp_path, monkeypatch, capsys):

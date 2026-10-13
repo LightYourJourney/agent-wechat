@@ -9,6 +9,7 @@
 import pytest
 
 import json
+import pathlib
 
 from agent_wechat import errors, keys, paths
 
@@ -62,6 +63,23 @@ def test_save_cached_hex_raises_project_error_on_unwritable_home(tmp_path, monke
         home.chmod(0o700)
 
 
+def test_save_cached_hex_refuses_a_relative_home(tmp_path, monkeypatch):
+    """F1（T9 复审，P2）：EA-003 的闸门长在 `paths.ensure_home_dirs` 上，而密钥缓存的唯一
+    写入者 `save_cached_hex` 自建目录、**从不经过它**——`AGENT_WECHAT_HOME=relhome` 时
+    passphrase.json 仍然落进进程的 CWD（文档化的引导命令正是 `sudo uv run agent-wechat
+    bootstrap`，落进去的还有 0700 目录与 sudo 下的 chown）。写入必须先过同一道闸。
+
+    把 `paths.ensure_home_dirs()` 那行换回自己的 `HOME_DIR.mkdir(...)` 本测试必红。
+    """
+    monkeypatch.chdir(tmp_path)          # 相对路径关进 tmp——变异时也不许脏仓库 CWD
+    monkeypatch.setattr(paths, "HOME_DIR", pathlib.Path("relhome"))
+    monkeypatch.setattr(keys, "CACHE_FILE", pathlib.Path("relhome/passphrase.json"))
+    with pytest.raises(errors.HomeUnavailable) as ei:
+        keys.save_cached_hex("wxid_testacct01", "ab" * 32)
+    assert "绝对路径" in str(ei.value)
+    assert not (tmp_path / "relhome").exists(), "判据必须在 mkdir 之前拦住"
+
+
 def test_save_cached_hex_reports_a_failed_chown_as_a_warning(tmp_path, monkeypatch):
     """EA-005：sudo 场景归还属主（chown）失败**不该让整次引导判负**——缓存已经以 0600
     落盘，最坏是 sudo 之外读不到。此前 chown 的 OSError 会让 bootstrap 以 traceback 收场；
@@ -90,6 +108,30 @@ def test_save_cached_hex_is_quiet_on_the_normal_path(tmp_path, monkeypatch):
 
 
 # ---------- EA-049：缓存的「形状」与「值」损坏 ----------
+
+def test_a_failed_chmod_does_not_leave_a_loosely_permissioned_cache(tmp_path, monkeypatch):
+    """F4（T9 复审，P3）：`write_text` 成功、`chmod` 失败时，此前抛「无法写入密钥缓存」而
+    文件**在盘上**（本机默认 0644，同机其它用户可读），下一条命令把它当有效缓存读——
+    文案说「没写入」，事实是「写了、权限没收敛」。
+
+    现在失败就抹掉它：宁可让用户重跑一次引导，也不留一份权限不明的密钥缓存。
+    删掉 `CACHE_FILE.unlink(...)` 那三行本测试必红。
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(paths, "HOME_DIR", home)
+    cache = home / "passphrase.json"
+    monkeypatch.setattr(keys, "CACHE_FILE", cache)
+
+    def _boom(path, mode):
+        raise OSError(1, "Operation not permitted")
+    monkeypatch.setattr(keys.os, "chmod", _boom)
+
+    with pytest.raises(errors.HomeUnavailable) as ei:
+        keys.save_cached_hex("wxid_testacct01", "ab" * 32)
+    assert "无法写入密钥缓存" in str(ei.value)
+    assert not cache.exists(), "权限没收敛的缓存不许留在盘上"
+
 
 def test_load_cache_normalizes_bad_shapes_as_corrupt(tmp_path, monkeypatch):
     """EA-049：合法 JSON 但**形状不对**（根是数组 / `accounts` 是数组 / 条目是字符串）

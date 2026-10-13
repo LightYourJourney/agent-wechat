@@ -25,6 +25,13 @@
 `~/.agent-wechat/tasks.json`（原记录不可找回）。两道一起上：本闸挡住「用例压根没 patch」，
 起线程的用例自己 `_wait_done` 到终态（`status` 与 `_persist` 同锁 → 看见终态即已落盘）。
 
+**第四个闸（T9 复审 F1 连带，2026-10-14 补）**：测试期**不许起真实 `tmutil`**。让写入路径统一
+过 `paths.ensure_home_dirs()`（F1 的修法）之后，一批原本不碰它的用例（`test_keys` 的写缓存、
+`test_paths` 的建目录）会真的对**临时目录**执行 `tmutil addexclusion`——那是改系统状态，且本机
+实测一次调用就是 10s 级。闸的做法是把 `paths.shutil.which` 钉成「找不到 tmutil」，于是
+`ensure_home_dirs` 走便宜路径（连子进程都不起）。要测 tmutil 本身的用例自己桩
+`paths.subprocess.run`（`test_paths.py` 的两条就是），它们在本夹具之后生效、互不冲突。
+
 **刻意不管**另外两个 **import 期绑定**的常量（它们不经过上面三道闸，各有各的理由）：
 `vector.MODEL_CACHE_DIR` 必须指向真实模型缓存（`-m slow` 的向量用例要用）；
 `keys.CACHE_FILE` 的写点全在用例内自带 patch（2026-10-14 grep 复核过）。
@@ -32,6 +39,13 @@
 import pytest
 
 from agent_wechat import exclusions, paths, store, tasks
+
+
+@pytest.fixture(autouse=True)
+def _forbid_real_tmutil(monkeypatch):
+    """见模块 docstring「第四个闸」：测试期不起真实 tmutil。"""
+    from types import SimpleNamespace
+    monkeypatch.setattr(paths, "shutil", SimpleNamespace(which=lambda name: None))
 
 
 @pytest.fixture(autouse=True)

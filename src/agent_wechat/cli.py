@@ -40,7 +40,10 @@ def cmd_status(args: argparse.Namespace) -> int:
         cached = keys.load_cached_hex(bare)
         line = f"  {acc}: 缓存{'✓' if cached else '✗'}"
         if cached and args.verify_keys:
-            results, unreadable = keys.verify_passphrase(acc, bytes.fromhex(cached))
+            # F7：解码收口到 keys.decode_cached_hex（坏 hex/长度不符 → KeyNotFound 单行中文，
+            # 不是裸 ValueError 的 traceback；也不再印「缓存✓ HMAC 0/0」）
+            results, unreadable = keys.verify_passphrase(
+                acc, keys.decode_cached_hex(bare, cached))
             ok = sum(1 for _, good in results if good)
             line += f"  HMAC {ok}/{len(results)}"
             if unreadable:
@@ -48,8 +51,9 @@ def cmd_status(args: argparse.Namespace) -> int:
         print(line)
     tm = paths.time_machine_excluded()
     if tm is not None:
-        # EA-054：这条安全控制此前完全静默——失败时给一行可执行动作。
-        print(f"备份排除: {'✓' if tm else '✗（请手动 tmutil addexclusion ' + str(paths.HOME_DIR) + '）'}")
+        # EA-054（F2 修法）：印**只读查询**到的真实状态（与 purge 的核查同源）。查不出来时
+        # 不印——「判不出来」与「没排除」是两件事，混成一行正是本仓在消灭的那种假象。
+        print(f"备份排除: {tm}")
     return 0
 
 

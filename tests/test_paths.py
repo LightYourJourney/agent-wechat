@@ -74,52 +74,100 @@ def test_shard_and_db_probes_distinguish_unreadable_from_absent(tmp_path, monkey
         message_dir.chmod(0o700)
 
 
-def _fresh_tm_state(monkeypatch, tmp_path):
-    monkeypatch.setattr(paths, "HOME_DIR", tmp_path / "home")
-    monkeypatch.setattr(paths, "_tm_exclusion_checked", False)
-    monkeypatch.setattr(paths, "_tm_exclusion_ok", None)
+def test_time_machine_excluded_queries_the_real_state(tmp_path, monkeypatch):
+    """F2（T9 复审，P2）：EA-054 原修法记的是「上次 `addexclusion` 尝试的成败」——**进程内**
+    状态，而 CLI 一次调用一个进程，唯一消费点 `status` 于是恒拿到 None（那行永不打印）；
+    即便拿到，本机形态也是**假 ✗**（实测 addexclusion 对已存在目录需 ~11s > timeout=10）。
+    改成只读查询 `tmutil isexcluded`：回答的是「**现在**排没排除」，与 purge 的核查同源。
 
-
-def test_tm_exclusion_state_distinguishes_success_from_failure(tmp_path, monkeypatch):
-    """EA-054：备份排除此前「置位在尝试之前 + 静默 except」——成功与失败在进程内完全
-    不可区分，也没有任何命令报它（同为安全控制的「提交拦截」有 `scan.py --check-hooks`
-    自检，这条却是全静默的）。现在留三态状态。
-
-    把 `_tm_exclusion_ok = ...` 的两处赋值删掉（回到「只置 checked」）本测试必红。
+    把函数换回「返回上次尝试的成败」本测试必红（它会返回 None）。
     """
-    _fresh_tm_state(monkeypatch, tmp_path)
-    assert paths.time_machine_excluded() is None        # 还没建过目录 = 没尝试过
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(paths, "HOME_DIR", home)
+    monkeypatch.setattr(paths.shutil, "which", lambda name: "/usr/bin/tmutil")
+    seen = []
+    monkeypatch.setattr(paths.subprocess, "run", lambda argv, **kw: (
+        seen.append(argv), SimpleNamespace(returncode=0, stdout="[Excluded] /tmp/x\n"))[1])
 
+    # 真实形状：tmutil 的原文整段（含路径）——与 purge 的 `tmutil isexcluded` 核查同口径
+    assert paths.time_machine_excluded() == "[Excluded] /tmp/x"
+    assert seen == [["tmutil", "isexcluded", str(home)]], "只读查询，参数是 isexcluded"
+
+    # 三种「判不出来」：非零退出 / 探测抛错 / 没有 tmutil —— 一律 None，不许当成「没排除」
+    monkeypatch.setattr(paths.subprocess, "run",
+                        lambda argv, **kw: SimpleNamespace(returncode=1, stdout=""))
+    assert paths.time_machine_excluded() is None
+    monkeypatch.setattr(paths.subprocess, "run",
+                        lambda argv, **kw: (_ for _ in ()).throw(TimeoutError()))
+    assert paths.time_machine_excluded() is None
+    monkeypatch.setattr(paths.shutil, "which", lambda name: None)
+    assert paths.time_machine_excluded() is None
+
+    # 目录还没建：谈不上排除（不查、不印）
+    monkeypatch.setattr(paths.shutil, "which", lambda name: "/usr/bin/tmutil")
+    monkeypatch.setattr(paths, "HOME_DIR", tmp_path / "nope")
+    assert paths.time_machine_excluded() is None
+
+
+def test_ensure_home_dirs_tries_the_exclusion_but_never_blocks(tmp_path, monkeypatch):
+    """首次建目录仍是**唯一**的排除时机，所以那条 `addexclusion` 保留（尽力而为）；
+    但它的成败不再当状态——失败不许挡住任何命令，也不该被报成「没排除」。"""
+    home = tmp_path / "home"
+    monkeypatch.setattr(paths, "HOME_DIR", home)
+    monkeypatch.setattr(paths, "_tm_exclusion_checked", False)
     monkeypatch.setattr(paths.shutil, "which", lambda name: "/usr/bin/tmutil")
     ran = []
     monkeypatch.setattr(paths.subprocess, "run",
                         lambda argv, **kw: ran.append(argv) or SimpleNamespace(returncode=0))
     paths.ensure_home_dirs()
-    assert paths.time_machine_excluded() is True
-    assert ran == [["tmutil", "addexclusion", str(paths.HOME_DIR)]]
+    assert ran == [["tmutil", "addexclusion", str(home)]]
+    assert home.is_dir()
 
+    # 失败形态（超时）：照常返回，目录照旧可用
+    monkeypatch.setattr(paths, "_tm_exclusion_checked", False)
 
-def test_tm_exclusion_failure_is_recorded_not_swallowed(tmp_path, monkeypatch):
-    """失败（tmutil 不在 / addexclusion 非零退出）记 False——`ensure_home_dirs` 本身
-    照常返回（这条控制不该挡住任何命令），但状态要能被 status 报出来。"""
-    _fresh_tm_state(monkeypatch, tmp_path)
-    monkeypatch.setattr(paths.shutil, "which", lambda name: None)      # 便宜路径：不起子进程
-
-    def _no_subprocess(*a, **k):
-        raise AssertionError("tmutil 都不在，不该起子进程")
-    monkeypatch.setattr(paths.subprocess, "run", _no_subprocess)
+    def _boom(argv, **kw):
+        raise TimeoutError("tmutil 卡住")
+    monkeypatch.setattr(paths.subprocess, "run", _boom)
     paths.ensure_home_dirs()
-    assert paths.time_machine_excluded() is False
+    assert home.is_dir()
 
-    # 另一种失败形态：tmutil 在但 addexclusion 非零退出（check=True → CalledProcessError）
-    _fresh_tm_state(monkeypatch, tmp_path)
-    monkeypatch.setattr(paths.shutil, "which", lambda name: "/usr/bin/tmutil")
-
-    def _fails(argv, **kw):
-        raise paths.subprocess.CalledProcessError(1, argv)
-    monkeypatch.setattr(paths.subprocess, "run", _fails)
+    # 没有 tmutil：便宜路径，连子进程都不起。**探针用「记录」而不是「抛」**——实现的
+    # `except Exception: pass` 会把抛出来的 AssertionError 一起吞掉，那条断言就永远不红
+    # （变异 M5 实测如此）。
+    monkeypatch.setattr(paths, "_tm_exclusion_checked", False)
+    monkeypatch.setattr(paths.shutil, "which", lambda name: None)
+    calls = []
+    monkeypatch.setattr(paths.subprocess, "run", lambda *a, **k: calls.append(a))
     paths.ensure_home_dirs()
-    assert paths.time_machine_excluded() is False
+    assert home.is_dir()
+    assert calls == [], f"tmutil 都不在，不该起子进程：{calls}"
+
+
+def test_all_dbs_does_not_swallow_a_subdirectory_eacces(tmp_path, monkeypatch):
+    """F8（T9 复审，P3）：`all_dbs` 此前用 `root.glob("*/*.db")`——CPython 的 glob 在**某个
+    子目录** scandir 失败时静默跳过它，于是「整个 message/ 读不出来」被报成「这个账号没有
+    message 分片」（少报；并直接喂坏 EA-051 的 unreadable 计数与 `HMAC N/N` 的分母）。
+
+    逐层列举、每层过同一个 helper：读不到仍是项目异常，真没有才是空列表（EA-002 的口径）。
+    把实现换回 `root.glob("*/*.db")` 本测试必红。
+    """
+    db_root = tmp_path / "xwechat_files" / ACC / "db_storage"
+    (db_root / "message").mkdir(parents=True)
+    (db_root / "message" / "message_0.db").write_bytes(b"")
+    (db_root / "contact").mkdir()
+    (db_root / "contact" / "contact.db").write_bytes(b"")
+    monkeypatch.setattr(paths, "XWECHAT_FILES", tmp_path / "xwechat_files")
+    assert len(paths.all_dbs(ACC)) == 2
+
+    (db_root / "message").chmod(0o000)
+    try:
+        with pytest.raises(errors.HomeUnavailable) as ei:
+            paths.all_dbs(ACC)
+        assert "完全磁盘访问权限" in (ei.value.hint or "")
+    finally:
+        (db_root / "message").chmod(0o700)
 
 
 def test_ensure_home_dirs_rejects_a_relative_home(tmp_path, monkeypatch):

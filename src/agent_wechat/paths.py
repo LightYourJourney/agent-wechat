@@ -33,15 +33,11 @@ HOME_DIR = pathlib.Path(
     os.environ.get("AGENT_WECHAT_HOME") or (pathlib.Path.home() / ".agent-wechat"))
 
 _tm_exclusion_checked = False
-# EA-054：备份排除这条控制项的**状态**（None = 尚未尝试 / True 成功 / False 失败）。
-# 此前「置位在尝试之前」+ 静默 except：成功与失败在进程内不可区分，也没有任何命令报它
-# ——同为安全控制的「提交拦截」有 `scan.py --check-hooks` 的自检，这条却是全静默的。
-_tm_exclusion_ok: bool | None = None
 
 
 def ensure_home_dirs() -> None:
     """确保数据目录存在（0700）并排除出 Time Machine（幂等，失败静默）。"""
-    global _tm_exclusion_checked, _tm_exclusion_ok
+    global _tm_exclusion_checked
     if not HOME_DIR.is_absolute():
         # EA-003：相对路径（`.`、`""`、`foo/bar`）在本仓没有合法用例——它会让密钥缓存与
         # 明文索引落到进程的当前工作目录。判据上移到路径的收口处；purge 自带的
@@ -61,18 +57,16 @@ def ensure_home_dirs() -> None:
             hint=f"{exc}；请检查 AGENT_WECHAT_HOME 指向的位置是否可用") from exc
     if not _tm_exclusion_checked:
         _tm_exclusion_checked = True
-        if shutil.which("tmutil") is None:
-            _tm_exclusion_ok = False       # 便宜路径：连二进制都没有，不必起子进程
-        else:
+        if shutil.which("tmutil") is not None:
             try:
+                # **尽力而为**：首次建目录是唯一的排除时机，所以保留这次尝试；但它的成败
+                # **不当状态**——F2（T9 复审）实测本机 addexclusion 对已存在目录需 ~11s >
+                # timeout=10，拿它的成败当状态会报出假 ✗，而状态只在进程内、CLI 一次一进程，
+                # 消费点永远看不到。真实状态由 `time_machine_excluded()` 的只读查询回答。
                 subprocess.run(["tmutil", "addexclusion", str(HOME_DIR)],
-                               capture_output=True, timeout=10, check=True)
-                _tm_exclusion_ok = True
+                               capture_output=True, timeout=10)
             except Exception:                  # noqa: BLE001 — 备份排除失败不该挡住任何命令
-                # 失败**可观测**（`time_machine_excluded()` → status 印一行），但**不重试**：
-                # 本机实测 tmutil 超时就是 10s 级，每次 ensure_home_dirs 重试会把常用命令
-                # 拖成秒级（EA-054 的「失败可重试」按此实测取舍，理由记在 ⑤）。
-                _tm_exclusion_ok = False
+                pass
 
 
 def _listdir_or_project_error(root: pathlib.Path, *, what: str) -> list[pathlib.Path] | None:
@@ -138,14 +132,44 @@ def key_info_db(account: str) -> pathlib.Path:
 
 
 def all_dbs(account: str) -> list[pathlib.Path]:
-    """账号下全部 .db 文件（用于密钥校验覆盖统计）。"""
+    """账号下全部 .db 文件（用于密钥校验覆盖统计）。
+
+    F8（T9 复审）：此前是一句 `root.glob("*/*.db")`——CPython 的 glob 在**某个子目录**
+    scandir 失败时**静默跳过**它，于是「整个 message/ 读不出来」被报成「这个账号没有
+    message 分片」（少报，还喂坏 EA-051 的 unreadable 计数与 `HMAC N/N` 的分母）。逐层列举、
+    每层过同一个 helper：读不到是项目异常，真没有才是空列表（EA-002 的口径）。
+    """
     root = db_storage(account)
-    if _listdir_or_project_error(root, what=f"账号数据目录（{account}）") is None:
+    subs = _listdir_or_project_error(root, what=f"账号数据目录（{account}）")
+    if subs is None:
         return []
-    return sorted(root.glob("*/*.db"))
+    out: list[pathlib.Path] = []
+    for sub in subs:
+        if not sub.is_dir():
+            continue
+        files = _listdir_or_project_error(sub, what=f"库目录（{sub.name}）")
+        if files is None:
+            continue                 # 列举与访问之间消失 = 真没有
+        out += [p for p in files if p.name.endswith(".db")]
+    return sorted(out)
 
 
-def time_machine_excluded() -> bool | None:
-    """备份排除的状态（EA-054）：True 已排除 / False 尝试过但失败（请手动 tmutil
-    addexclusion）/ None 尚未尝试过（进程还没建过 HOME_DIR）。"""
-    return _tm_exclusion_ok
+def time_machine_excluded() -> str | None:
+    """备份排除的**真实状态**（只读查询 `tmutil isexcluded`）：`[Excluded]` / `[Included]`；
+    判不出来（无 tmutil / 超时 / 非零退出 / HOME_DIR 还不存在）→ None。
+
+    F2（T9 复审，P2）：EA-054 的原修法记的是「上次 `addexclusion` 尝试的成败」——**进程内**
+    状态，而 CLI 一次调用一个进程，唯一消费点 `status` 因此恒拿到 None（那行永不打印）；
+    即便拿到，本机形态也是假 ✗。改成查真实状态：回答的是「现在排没排除」，与 purge 的
+    `tmutil isexcluded` 核查同源同口径。**判不出来与没排除是两件事**，前者返回 None。
+    """
+    if not HOME_DIR.is_dir() or shutil.which("tmutil") is None:
+        return None                    # 没建过目录谈不上排除；无 tmutil 就判不出来
+    try:
+        r = subprocess.run(["tmutil", "isexcluded", str(HOME_DIR)],
+                           capture_output=True, text=True, timeout=10)
+    except Exception:                  # noqa: BLE001 — 探测失败只表示「判不出来」
+        return None
+    if r.returncode != 0:
+        return None
+    return (r.stdout or "").strip() or None          # tmutil 原文（含路径），与 purge 同口径

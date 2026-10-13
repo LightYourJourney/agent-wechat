@@ -180,6 +180,12 @@ def bootstrap(timeout: int = DEFAULT_TIMEOUT,
     ok = [name for name, good in results if good]
     total = len(results)
     if not ok:
+        if total == 0 and unreadable == 0:
+            # F9（T9 复审）：库在盘上而一个 .db 都没有（账号刚登录还没同步过 / 目录刚迁移）
+            # ——这不是权限问题，说成「（0 个不可读）」自相矛盾，还会把用户送去改系统设置。
+            raise CaptureError(
+                "账号目录下没有可解密的数据库——微信还没同步过？"
+                "确认已登录并同步后再重试引导。")
         if total == 0:
             # EA-051：一个库都没读到 ≠ 捕获值不对——此前两者共用「重试捕获」的文案，
             # 用户会一遍遍重跑引导，而真问题是读不到库（权限/完全磁盘访问权限）。

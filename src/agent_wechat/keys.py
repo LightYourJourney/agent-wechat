@@ -97,11 +97,22 @@ def save_cached_hex(bare: str, passphrase_hex: str) -> str | None:
     cache.setdefault("accounts", {})[bare] = {
         "passphrase_hex": passphrase_hex, "captured_at": int(time.time()),
     }
+    # F1（T9 复审）：目录的**建与判**都归 `paths.ensure_home_dirs`——这里此前自建目录，
+    # 于是 EA-003 的「必须是绝对路径」那道闸（长在 ensure_home_dirs 上）对**密钥缓存这条
+    # 代价最高的写入路径**完全不起作用：AGENT_WECHAT_HOME 是相对值时 passphrase.json 照样
+    # 落进进程 CWD。ensure_home_dirs 同时负责 mkdir（0700）与备份排除尝试。
+    paths.ensure_home_dirs()
     try:
-        paths.HOME_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
         CACHE_FILE.write_text(json.dumps(cache, indent=2))
         os.chmod(CACHE_FILE, 0o600)          # 与 mkdir 的 0700 同属**安全**步骤：失败即不可用
     except OSError as exc:
+        # F4（T9 复审）：`write_text` 可能已经成功——「写了但 chmod 失败」不许留下文件：
+        # 那时它带着本机默认权限（0644）躺在盘上，下一条命令会把它当有效缓存读，而文案
+        # 说的是「无法写入」。抹掉它，让用户重跑引导（比留一份权限不明的密钥缓存好）。
+        try:
+            CACHE_FILE.unlink(missing_ok=True)
+        except OSError:
+            pass                     # 抹不掉也不掩盖原始错误（下面照抛）
         raise HomeUnavailable(
             f"无法写入密钥缓存：{CACHE_FILE}",
             hint=f"{exc}；请检查 AGENT_WECHAT_HOME 指向的位置是否可用") from exc
@@ -157,6 +168,30 @@ def verify_passphrase(account: str, passphrase: bytes, *,
     return out, unreadable
 
 
+def decode_cached_hex(bare: str, hexstr: str) -> bytes:
+    """把缓存里的 hex 解成 32 字节 passphrase——**唯一解码口**（EA-049 的加固面）。
+
+    F7（T9 复审）：解码点此前有两处（本函数的调用者 `get_passphrase` 与 `cli.cmd_status`），
+    EA-049 只加固了前者——`status --verify-keys` 于是自成一条裸抛路径：坏 hex → ValueError
+    穿透 CLI（一整个 traceback，破「core 只抛项目异常」那条契约），长度不足的值 → 照印
+    「缓存✓ HMAC 0/0」，把「缓存坏了」显示成「密钥不匹配」。收口到一处，两个消费点同语义。
+    """
+    try:
+        raw = bytes.fromhex(hexstr)
+    except ValueError as exc:
+        # 非法 hex（手工编辑、旧版本写过、写坏）。与「没有缓存」分开说：重新 bootstrap 能修好它。
+        raise KeyNotFound(
+            f"账号 {bare} 的 passphrase 缓存损坏（不是合法 hex）。"
+            "请重新运行一次性引导（bootstrap）修复") from exc
+    if len(raw) != KEY_SZ:
+        # **长度**判据——`bytes.fromhex("ab")` 是合法的（1 字节），只靠 fromhex 挡不住「短值」；
+        # 而 passphrase 恒为 32 字节（KEY_SZ）。
+        raise KeyNotFound(
+            f"账号 {bare} 的 passphrase 缓存损坏（长度 {len(raw)} 字节，应为 {KEY_SZ}）。"
+            "请重新运行一次性引导（bootstrap）修复")
+    return raw
+
+
 def get_passphrase(account: str) -> bytes:
     """取账号的 passphrase（裸 wxid 键）。无缓存则抛 KeyNotFound 并给出指引。"""
     bare = paths.bare_wxid(account)
@@ -167,21 +202,7 @@ def get_passphrase(account: str) -> bytes:
             f"  1. killall WeChat && sudo codesign --force --deep --sign - /Applications/WeChat.app\n"
             f"  2. 重启微信并登录 {bare}\n"
             f"  3. sudo uv run agent-wechat bootstrap   （期间在微信内退出登录再重新登录一次）")
-    try:
-        raw = bytes.fromhex(hexstr)
-    except ValueError as exc:
-        # EA-049：非法 hex（手工编辑、旧版本写过、写坏）时 `bytes.fromhex` 会裸抛
-        # ValueError（穿透两个适配层）。与「没有缓存」分开说：重新 bootstrap 能修好它。
-        raise KeyNotFound(
-            f"账号 {bare} 的 passphrase 缓存损坏（不是合法 hex）。"
-            "请重新运行一次性引导（bootstrap）修复") from exc
-    if len(raw) != KEY_SZ:
-        # EA-049：**长度**判据——`bytes.fromhex("ab")` 是合法的（1 字节），只靠 fromhex
-        # 挡不住「短值」；而 passphrase 恒为 32 字节（KEY_SZ）。
-        raise KeyNotFound(
-            f"账号 {bare} 的 passphrase 缓存损坏（长度 {len(raw)} 字节，应为 {KEY_SZ}）。"
-            "请重新运行一次性引导（bootstrap）修复")
-    return raw
+    return decode_cached_hex(bare, hexstr)
 
 
 def get_passphrase_hex(account: str) -> str:

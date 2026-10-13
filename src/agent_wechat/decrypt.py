@@ -21,6 +21,14 @@ from . import keys, paths
 from .errors import DecryptError, HomeUnavailable
 
 
+def _first_line(text: str) -> str:
+    """stderr 的首个非空行（F3：折行回显块里的密钥残段不进消息，见 decrypted 的注释）。"""
+    for line in (text or "").splitlines():
+        if line.strip():
+            return line.strip()
+    return ""
+
+
 def tmp_dir() -> pathlib.Path:
     """解密临时目录（0700）。调用方负责确保存在（见 ensure_home_dirs）。"""
     return paths.HOME_DIR / "tmp"
@@ -76,7 +84,11 @@ def decrypted(db: pathlib.Path, passphrase: bytes):
             # EA-047：**不在这里截断**——`[:300]` 曾把跨过截断点的密钥切成「前半段」，
             # 而 redact 需要完整 64 位才认得出（截断必须发生在脱敏**之后**，由
             # errors.redact 统一做）。
-            raise DecryptError(f"sqlcipher 解密失败: {r.stderr.strip()}")
+            # F3（T9 复审）：只取**首个非空行**。sqlcipher 报错时会回显出错语句并按 ~80 列
+            # **折行**，第二处回显因此留下密钥的前缀（实测 62/64 位）——而 redact 只认「恰好
+            # 64 位连续 hex」，残段会一路进对外信封。回显块正是藏残段的地方；首行
+            # （`Parse error near line N: near "…"`）已带够定位信息。
+            raise DecryptError(f"sqlcipher 解密失败: {_first_line(r.stderr)}")
         yield out
     finally:
         shutil.rmtree(td, ignore_errors=True)
