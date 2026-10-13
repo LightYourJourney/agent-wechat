@@ -408,7 +408,7 @@ def delete_chat(con: sqlite3.Connection, *, account: str, chat_id: str) -> dict[
     # 走 `VECTOR_DROP` 整表重建（`vector_meta` 一起 DROP），所以表里的行恒属于唯一模型，
     # `count(*)` 就是这个定义的直接实现，还顺带自愈历史漂移（例如本次删除前的值就是漂移的）。
     # 代价：一次 O(表行数) 的 count 取代原来的 O(1) 减法，每次 `purge --chat` 一次。
-    # **这条 UPDATE 不能删掉**：`embedded == 0` 是空索引判据（`vector.py:367`）。
+    # **这条 UPDATE 不能删掉**：`embedded == 0` 是空索引判据（`vector.semantic_search` 读 `vector_meta.embedded`）。
     # 守卫要两张表都在——重算的来源是 `vec_messages`（`vector_meta` 存在而它不存在时无从重算，
     # 那种状态只在手工建表的测试夹具里出现）。
     if _has_table(con, "vec_messages") and _has_table(con, "vector_meta"):

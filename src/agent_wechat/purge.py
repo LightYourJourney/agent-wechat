@@ -819,7 +819,7 @@ def execute_chat(plan: ChatPlan) -> tuple[ChatReport, ...]:
 
     **保证的边界（诚实口径）**：本命令保证的是「索引里没有存活行 + 它们的 msg_key 进了排除
     清单」。**不是**「字节层面不存在」：`secure_delete` 只清 SQLite 自己释放的页，而 vec0 的
-    `preview` 列装的是**被删行前一条消息的显示正文**（`vector.py:290`，真内容）——chunk 没整块
+    `preview` 列装的是**被删行前一条消息的显示正文**（`vector._INSERT_VEC` 写入的 `preview` 列，真内容）——chunk 没整块
     清空时它仍留在**活跃页**里（评审实测 1200 行形态下，开了本 pragma 也还能在 `messages` 与
     `vec_messages_auxiliary` 的活跃页里搜到 1–3 次，dbstat 显示它们不在 freelist）。要字节级
     清除只能重建：`purge --index` 后重跑 export。
