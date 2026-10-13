@@ -349,7 +349,7 @@ rebuild 与否）各起一条。（F-D，T7 复验：与 §4 同款的合并语�
 | `months` | string | 否 | null | 逗号分隔的月份（`YYYY-MM`），按消息时间过滤；省略不限 |
 | `limit` | int | 否 | 500 | 本次最多**新增**的文件数（下界 1，无上界；产物已存在的不计） |
 | `force` | bool | 否 | `false` | `true` = 忽略已存在的产物全部重做（默认跳过已存在的） |
-| `with_cdn` | bool | 否 | `false` | `true` = 贴纸从腾讯 CDN 取件（**默认不联网**）。会把该贴纸的 `filekey` 以**明文 HTTP** 发往 `*.tc.qq.com`——这是既知且被显式接受的代价，见 SECURITY.md；返回 `degraded` 里的说明只写「CDN 下载失败」这类不含 URL 的文案 |
+| `with_cdn` | bool | 否 | `false` | `true` = 贴纸从腾讯 CDN 取件（**默认不联网**）。会把该贴纸的 `filekey` 以**明文 HTTP** 发往三个后缀之一（`*.tc.qq.com` / `*.qpic.cn` / `*.wechat.com`，端口不受约束）——这是既知且被显式接受的代价，见 SECURITY.md；返回 `degraded` 里的说明只写「CDN 下载失败」这类不含 URL 的文案 |
 | `out_dir` | string | 否 | null | 产物落这个输出根（默认 `~/.agent-wechat/media`）。**与 `export_chat` 的 `out_dir` 必须同根**，否则产物页里的媒体引用会断链（§12） |
 | `account` | string | 否 | null | 同通用约定 |
 
@@ -412,7 +412,8 @@ rebuild 与否）各起一条。（F-D，T7 复验：与 §4 同款的合并语�
      不写消息**，对这种索引永远修不好）；
   4. 索引库打不开或读不了（如损坏）→ **本次不导视频**，其余类型照常——**不会**退回旧的
      账号级枚举：那会把账号视频树里的**全部**文件写进本次请求的会话目录（错归属比缺归属更坏）。
-- `counts[*].skipped` 是本次因产物已存在而跳过的**文件**数（**按文件**计，不是消息条数）；
+- `counts[*].skipped` 是本次因产物**已存在**、或**本轮内重复**（同一个贴纸 md5 被发多次，
+  只取一次件）而跳过的**文件**数（**按文件**计，不是消息条数）；
   它不吃 `limit` 预算。`counts[*].remaining` 是撞上 `limit` 时还有多少个**未导出**（CLI 印的是
   四类之和）。
 - `truncated=true` 表示触及 `limit` 提前收手，结果不完整——`remaining` 含续跑时**仍会失败**的

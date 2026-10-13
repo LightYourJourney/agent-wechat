@@ -83,8 +83,20 @@
   `--kinds` 的默认值**不含** sticker，`with_cdn` 默认 `false` —— 两个开关都是显式的，
   不加则整次导出一个网络请求都不发。加了 `sticker` 但没加 `--with-cdn` 时，
   贴纸一条都不导、并如实计入 `counts.sticker.missing`。
-- **目标域**：只连腾讯 CDN 的 `*.tc.qq.com`（实测出现 `vweixinf.tc.qq.com` 与
-  `wxapp.tc.qq.com`），**跨重定向也复查**同一个后缀判据（白名单只对第一跳成立等于没有白名单）。
+- **目标域**：代码放行**三个**后缀——`*.tc.qq.com`（实测出现 `vweixinf.tc.qq.com` 与
+  `wxapp.tc.qq.com`）、`*.qpic.cn`（实测 `mmbiz.qpic.cn`，占可得贴纸 **1.0%**）、
+  `*.wechat.com`（实测 `snsvideo.c2c.wechat.com`，占 **0.1%**）；**跨重定向也复查**同一个
+  后缀判据（白名单只对第一跳成立等于没有白名单）。三个后缀都在 `media._CDN_ALLOWED`，
+  与 `tests/test_media.py` 的实测主机参数表逐字对应。
+  **订正（EA-023，2026-10-14 审计修复）**：这一条此前只写 `*.tc.qq.com`，而代码在实测之后
+  就从单后缀扩到了三个（0.1% + 1.0% 两个样本）——文档低估了出站面。按文档评估出站面会漏掉
+  两个后缀，这正是本条要消灭的那种落差。
+  - ⚠️ **端口不受约束**（与上面例外 2 同款，机制是同一处 `urlsplit().hostname` 判据）：
+    带端口的 URL 会通过白名单并真的向该端口发起连接（实测 `http://vweixinf.tc.qq.com:22/x`
+    抵达 opener）。目标主机仍限上面三个后缀，**不构成越权**；但贴纸的 `cdnurl` 由**发送方
+    客户端**写入（`media.py` 自己写明「发送方可影响」），构造的 XML 可把 URL 指到
+    `http://vweixinf.tc.qq.com:<任意端口>/…`，故本机可被借作对这几台腾讯 CDN 主机的端口探测
+    工具——若你对此敏感，可在网络层限制出站端口。
 - **⚠️ 明文传输，凭据明文出网**：实测 `https://vweixinf.tc.qq.com/…` 的证书
   **对主机名无效**（`CERTIFICATE_VERIFY_FAILED: Hostname mismatch`），而消息 XML 里给的
   scheme 本就是 `http`，故当前一律明文 HTTP。**请求 URL 携带该贴纸的 `filekey`——
