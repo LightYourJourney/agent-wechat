@@ -19,13 +19,19 @@
   `media.export_root()`、`moments.export_root()`，以及 `purge` 的整条计划/执行/核查。只闸 DB_PATH 的话，
   一句 `exclusions.path().unlink()` 就能删掉用户真实的排除清单（T2/T3/T7 都会碰它）。
 
-**刻意不管**另外三个 **import 期绑定**的常量（它们不经过上面两道闸，各有各的理由）：
-`vector.MODEL_CACHE_DIR` 必须指向真实模型缓存（`-m slow` 的向量用例要用），
-`keys.CACHE_FILE` / `tasks.TASKS_FILE` 的写入路径不在本闸的故障面内。
+**第三个闸（F3，2026-10-14 补）**：`tasks.TASKS_FILE` 也是 import 期绑定，此前被列在
+「刻意不管」里，直到 T6 复审逮到真实事故——`tasks.start` 的守护线程越过用例 teardown
+（monkeypatch 已还原真实路径）才走到 `_persist()`，把三条合成记录**整表覆写**进用户真实的
+`~/.agent-wechat/tasks.json`（原记录不可找回）。两道一起上：本闸挡住「用例压根没 patch」，
+起线程的用例自己 `_wait_done` 到终态（`status` 与 `_persist` 同锁 → 看见终态即已落盘）。
+
+**刻意不管**另外两个 **import 期绑定**的常量（它们不经过上面三道闸，各有各的理由）：
+`vector.MODEL_CACHE_DIR` 必须指向真实模型缓存（`-m slow` 的向量用例要用）；
+`keys.CACHE_FILE` 的写点全在用例内自带 patch（2026-10-14 grep 复核过）。
 """
 import pytest
 
-from agent_wechat import exclusions, paths, store
+from agent_wechat import exclusions, paths, store, tasks
 
 
 @pytest.fixture(autouse=True)
@@ -33,6 +39,8 @@ def _isolate_index_db(tmp_path, monkeypatch):
     """每条用例一个自己的 HOME_DIR 与 index.db —— 谁也不可能写到用户真实的那个。"""
     monkeypatch.setattr(paths, "HOME_DIR", tmp_path / "home")
     monkeypatch.setattr(store, "DB_PATH", tmp_path / "index.db")
+    monkeypatch.setattr(tasks, "TASKS_FILE", tmp_path / "tasks.json")
     # 断言查的是**结果**，不是「patch 了哪些常量」——漏掉一条的那一刻就要当场红
     assert exclusions.path().is_relative_to(tmp_path), "排除清单会落到真实 ~/.agent-wechat"
     assert store.DB_PATH.is_relative_to(tmp_path), "索引库会落到真实 ~/.agent-wechat"
+    assert tasks.TASKS_FILE.is_relative_to(tmp_path), "任务注册表会落到真实 ~/.agent-wechat"

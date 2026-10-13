@@ -248,14 +248,19 @@ def account_status(account: str | None = None) -> dict:
     st = acc_mod.status()
     acct = account or st.current
     ready = bool(acct and keys.load_cached_hex(paths.bare_wxid(acct)))
-    try:
-        with store.open() as con:
-            index = store.counts(con)
-            # EA-077：触发器体是「OLD 库 + 新代码」的静默失配面——自检报出来（不改库）。
-            schema_notes = store.schema_drift_notes(con)
-    except Exception:
-        index = {"messages": 0, "chats": 0, "last_ts": None}
-        schema_notes = []
+    index = {"messages": 0, "chats": 0, "last_ts": None}
+    schema_notes: list[str] = []
+    if store.DB_PATH.exists():
+        # EA-025：**只读诊断不许建库**。`store.open()` 会 executescript(SCHEMA)——HOME 空的
+        # 机器上跑一次 `status` 就凭空建出 index.db 与 exclusions.db（实测）。与
+        # `purge_chat_targets` 用同一配方：库不在 ≡ 零计数。
+        try:
+            with store.open() as con:
+                index = store.counts(con)
+                # EA-077：触发器体是「OLD 库 + 新代码」的静默失配面——自检报出来（不改库）。
+                schema_notes = store.schema_drift_notes(con)
+        except (errors.AgentWeChatError, sqlite3.Error, OSError):
+            pass                             # 读不了就按零计数（形状不变）
     return {"wechat_running": st.running, "current_account": st.current,
             "accounts": st.accounts, "key_ready": ready, "index": index,
             "schema_notes": schema_notes}
@@ -307,6 +312,10 @@ def export_history(contact: str | None = None, full: bool = False,
         # 原样透出，入口不需要再翻译）。只修 `rows` 那一半的话，agent 见数少了却不知道
         # 少在哪：「导出成功」与实际发生的事不一致，正是 spec §7 要消灭的形态。
         return export.run_export(plan.account, chat_id=plan.chat_id, full=plan.full,
+                                 # EA-082：`rows` 此前恒为 0——progress 没接线（S3-010）。
+                                 # progress 的入参正是**已入库行数**，与终值同口径；
+                                 # 终值由 tasks._run 用返回值覆盖（既有语义保留）。
+                                 progress=lambda n: tasks.update(tid, rows=n),
                                  on_skipped=lambda n: tasks.update(tid, skipped=n))
 
     # chat_id 一并记进任务元数据（tasks.json 已发布字段），与旧 export.start_task 一致

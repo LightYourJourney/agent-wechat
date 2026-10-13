@@ -14,6 +14,7 @@ export 与向量索引共用；任务记录持久化到 ~/.agent-wechat/tasks.js
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import threading
 import time
@@ -32,9 +33,36 @@ _loaded_path: pathlib.Path | None = None
 _lock = threading.Lock()
 
 
+def _pid_alive(pid: object) -> bool:
+    """记录里的 pid 是否还活着（EA-015 的孤儿判据）。缺 pid / 非正整数 → 视为不活。"""
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True                     # 存在但无权限发信号：活着
+    return True
+
+
 def _persist() -> None:
+    """整文件覆写，但**原子**（EA-014）：写临时文件再 `os.replace`。
+
+    此前直接 `write_text`（O_TRUNC 后逐块写）：并发的读者会读到空文件或半截 JSON，
+    解析失败又走「静默降级为空」→ 注册表被读空，随后任一次 `_persist` 把这空快照
+    落盘、**放大**成真丢失（V2 用两进程探针实测：`{'empty': 78, 'partial': 2, …}`）。
+    """
+    if _loaded_path != TASKS_FILE:
+        # F3（T6 复审）：表不是从**当前**路径载入的（载入后 TASKS_FILE 被改指；测试
+        # teardown 会这样还原真实路径）——写回去等于拿一份属于别的文件的快照整表覆写
+        # 别人的注册表。真实事故：~/.agent-wechat/tasks.json 被残留线程的三条合成记录
+        # 替换。不写；等下一次 `_ensure_loaded` 把表与路径重新对齐。
+        return
     paths.HOME_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
-    TASKS_FILE.write_text(json.dumps(_tasks, ensure_ascii=False, indent=1))
+    tmp = TASKS_FILE.with_name(TASKS_FILE.name + ".tmp")
+    tmp.write_text(json.dumps(_tasks, ensure_ascii=False, indent=1))
+    os.replace(tmp, TASKS_FILE)          # 读者要么看到旧全量、要么看到新全量
 
 
 def _ensure_loaded() -> None:
@@ -50,30 +78,52 @@ def _ensure_loaded() -> None:
     with _lock:
         if _loaded_path == TASKS_FILE:
             return
-        _loaded_path = TASKS_FILE
         _tasks = {}
         try:
             raw = json.loads(TASKS_FILE.read_text())
+        except FileNotFoundError:
+            _loaded_path = TASKS_FILE   # 「文件不存在」= 空注册表，这是稳定状态
+            return
         except (OSError, ValueError):
+            # EA-014：读/解析失败**不记 loaded**，下次调用重试。此前在 try 之前就置位
+            # `_loaded_path`——一次半截读会被当成「已载入（空表）」缓存住，后面的 `_persist`
+            # 再把空表写盘，静默清空别人的任务记录。
             return
         if not isinstance(raw, dict):
             return
+        _loaded_path = TASKS_FILE
         for tid, rec in raw.items():
             if not isinstance(rec, dict):
                 continue
-            if rec.get("status") == "running":
+            if rec.get("status") == "running" and not _pid_alive(rec.get("pid")):
+                # EA-015：只收割「进程确实死了」的孤儿。此前无条件把 running 改判 failed
+                # ——另一个进程（MCP server）里正在跑的任务，被这里一读就写死，而
+                # `get_task_status` 会答「失败」，使用者据得出的结论是**错的**。
                 rec = {**rec, "status": "failed", "error": ORPHAN_ERROR}
             _tasks[tid] = rec
 
 
 def start(kind: str, runner: Callable[[str], int | None], **fields) -> str:
-    """登记任务并在后台线程执行 runner(task_id)。runner 的返回值写 rows 终值。"""
+    """登记任务并在后台线程执行 runner(task_id)。runner 的返回值写 rows 终值。
+
+    **准入控制（EA-122）**：同 `kind` 且同 `account`（给定时）的任务仍在跑（记录 running
+    且 pid 活着）→ **返回既有 id**，不再起第二个。定时同步落地后「手动 + 定时」并发触发是
+    常态；两个 export 各自全量重跑会把失败面变成英文裸 `database is locked`。
+    `account` 缺省（向量构建是多账号）时不设限。
+    """
     _ensure_loaded()
+    acct = fields.get("account")
+    with _lock:
+        for tid, rec in _tasks.items():
+            if (rec.get("status") == "running" and rec.get("kind") == kind
+                    and (acct is None or rec.get("account") == acct)
+                    and _pid_alive(rec.get("pid"))):
+                return tid
     task_id = uuid.uuid4().hex[:12]
     with _lock:
         _tasks[task_id] = {"id": task_id, "kind": kind, "status": "running",
                            "rows": 0, "started_at": int(time.time()),
-                           "error": None, **fields}
+                           "error": None, "pid": os.getpid(), **fields}
         _persist()
     threading.Thread(target=_run, args=(task_id, runner), daemon=True).start()
     return task_id

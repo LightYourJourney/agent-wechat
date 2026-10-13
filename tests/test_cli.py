@@ -2251,6 +2251,24 @@ def test_status_success_path_covers_both_entries(tmp_path, monkeypatch, capsys):
     assert idx["last_ts"] is None or isinstance(idx["last_ts"], int)
 
 
+def test_status_does_not_create_the_index_db(tmp_path, monkeypatch):
+    """EA-025（只读诊断不许建库）：HOME 空的机器上跑一次 `status`，`store.open()` 会
+    `executescript(SCHEMA)` 凭空建出 index.db 与 exclusions.db（实测）——诊断命令不该
+    留下副作用；库不在 ≡ 零计数（与 `purge_chat_targets` 同一配方）。
+
+    把 `if store.DB_PATH.exists()` 改成恒真，第二条断言必红。
+    """
+    from types import SimpleNamespace
+
+    from agent_wechat import usecases
+    monkeypatch.setattr(account, "status", lambda: SimpleNamespace(
+        running=True, pid=999, current=None, accounts=[]))
+
+    res = usecases.account_status()
+    assert res["index"] == {"messages": 0, "chats": 0, "last_ts": None}, res
+    assert not store.DB_PATH.exists(), "只读诊断不许建库"
+
+
 def test_status_verify_keys_renders_the_hmac_line(tmp_path, monkeypatch, capsys):
     """F3（EA-038②）：`status --verify-keys` 的 HMAC 渲染此前零覆盖——把它改成
     `"  HMAC 999/999"` 全仓 1070 条不红。桩 `verify_passphrase` 钉住 `HMAC 1/2`。

@@ -208,10 +208,11 @@ def test_export_task_is_visible_through_get_task_status(monkeypatch, tmp_path):
     monkeypatch.setattr(tasks, "TASKS_FILE", tmp_path / "tasks.json")
     monkeypatch.setattr(tasks, "_loaded_path", None)
     monkeypatch.setattr(account, "resolve_account", lambda a: "acct")
-    # 形参表必须跟着 export.run_export 走：runner 现在多传 on_skipped，桩不接就成
-    # `TypeError`→任务 failed，而本测试问的是**登记/持久化/查询**这条链，不是那个接线
+    # 形参表必须跟着 export.run_export 走：runner 多传 progress（EA-082）与 on_skipped，
+    # 桩不接就成 `TypeError`→任务 failed，而本测试问的是**登记/持久化/查询**这条链。
     monkeypatch.setattr(export, "run_export",
-                        lambda acct, chat_id=None, full=False, on_skipped=None: 3)
+                        lambda acct, chat_id=None, full=False, on_skipped=None,
+                        progress=None: 3)
 
     res = _call(mcp_server.export_full_history)
     for _ in range(200):                      # 后台线程，等待完成
@@ -220,6 +221,30 @@ def test_export_task_is_visible_through_get_task_status(monkeypatch, tmp_path):
             break
         time.sleep(0.01)
     assert st["status"] == "done" and st["rows"] == 3 and st["kind"] == "export"
+
+
+def test_export_progress_is_wired_to_rows(monkeypatch, tmp_path):
+    """EA-082：`export_history` 的 runner 曾**不接** `progress`——导出跑了几分钟，
+    `get_task_status` 的 `rows` 恒 0（S3-010），agent 见数少了却不知道少在哪。
+    修后 runner 把 progress 接到 `tasks.update(rows=)`；runner 返回 None（无终值）时
+    保留进度值——第二条断言钉的就是这条接线，删掉 `progress=` 必红（桩拿不到回调）。
+    """
+    monkeypatch.setattr(tasks, "TASKS_FILE", tmp_path / "tasks.json")
+    monkeypatch.setattr(tasks, "_loaded_path", None)
+    monkeypatch.setattr(account, "resolve_account", lambda a: "acct")
+
+    def fake_export(acct, chat_id=None, full=False, on_skipped=None, progress=None):
+        progress(7)                       # 跑动中的进度快照
+        return None                       # 无终值 → 进度值本身即答案
+
+    monkeypatch.setattr(export, "run_export", fake_export)
+    res = _call(mcp_server.export_full_history)
+    for _ in range(200):
+        st = _call(mcp_server.get_task_status, task_id=res["task_id"])
+        if st["status"] != "running":
+            break
+        time.sleep(0.01)
+    assert st["status"] == "done" and st["rows"] == 7, st
 
 
 def test_msg_dict_marks_self_as_me():
