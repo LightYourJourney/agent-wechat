@@ -50,7 +50,7 @@ def url_is_safe(url: str) -> bool:
     **反斜杠或非 ASCII 主机**：Python 的 `urlsplit` 不把反斜杠当分隔符，浏览器按 WHATWG 会
     ——`https://evil.com` 后面接反斜杠再接 `mp.weixin.qq.com/x` 时，页面显示的是后者，
     点下去却落到 `evil.com`。反斜杠**必须查 `netloc` 而不是 `hostname`**（`hostname` 已
-    把 userinfo 丢掉，而 WHATWG 先按 `\` 切一刀）。第三类：WHATWG 会当 IPv4 解析的 host
+    把 userinfo 丢掉，而 WHATWG 先按反斜杠切一刀）。第三类：WHATWG 会当 IPv4 解析的 host
     与含 `%` 的 host（`urlsplit` 不解百分号编码、WHATWG 解）。
 
     **从 `moments_html._link_block` 搬来（EA-034）**：那里一直有这套守卫，而 `chat_html`
