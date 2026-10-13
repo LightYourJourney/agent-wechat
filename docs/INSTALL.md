@@ -160,7 +160,8 @@ uv run agent-wechat status --verify-keys
 
 - [ ] `微信运行: True`，`当前登录` 显示账号目录名
 - [ ] 每个已引导账号显示 `缓存✓ HMAC N/N`（有库读不到时会追加「（另有 N 个库读不到）」）
-- [ ] `备份排除: ✓`（✗ 时按提示手动 `tmutil addexclusion ~/.agent-wechat`）
+- [ ] `备份排除: [Excluded] …`（`[Included]` 时手动 `tmutil addexclusion ~/.agent-wechat`；
+      该行由只读查询得出，查不出来时不会出现）
 - [ ] `uv run agent-wechat recent filehelper -n 3` 返回真实消息
 - [ ] MCP 接入后在 Claude Code 里调用 `get_account_status` 返回 JSON
 
