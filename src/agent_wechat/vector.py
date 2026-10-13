@@ -144,7 +144,14 @@ class FastEmbedEmbedder:
                     # 运行期不得发起任何网络请求）。只有首次（缓存缺失）才允许下载。
                     self._model = TextEmbedding(local_files_only=True, **kwargs)
                     return self._model
-                except Exception:
+                except (ValueError, FileNotFoundError):
+                    # EA-060：**只把「缓存缺失」当作回退条件**。`ValueError` 是本机实测的形态
+                    # （fastembed 缓存缺失抛 ValueError，不是 FileNotFoundError）；
+                    # `FileNotFoundError` 覆盖 huggingface_hub 的 `LocalEntryNotFoundError`
+                    # （无缓存/快照不完整，它同时是 ValueError 与 FileNotFoundError 的子类）。
+                    # 其余异常（`PermissionError`、只读卷、坏文件…）**不是「缺失」**——原样抛出，
+                    # 别在同一个不可读目录上再走一遍下载、把真原因换成一个更晦涩的错误
+                    # （SECURITY.md 承诺的触发条件就是「缓存缺失」）。
                     pass
             # 显式 local_files_only=True 的调用方要求「失败即报错」，不做下载回退
             self._model = TextEmbedding(local_files_only=self._local_only, **kwargs)
@@ -263,6 +270,14 @@ def _build_account(con: sqlite3.Connection, acct: str, embedder: FastEmbedEmbedd
         # 单事务内行序无影响。
         order = sorted(range(len(buf_texts)), key=lambda i: len(buf_texts[i]))
         vecs = embedder.embed([buf_texts[i] for i in order])
+        if len(vecs) != len(order):
+            # EA-059：`zip(order, vecs)` 会**静默截断**——少返的向量对应的行不进索引，而下面
+            # `embedded += len(buf_rows)` 照记（账目漂移 + 那些消息永远搜不到）。真实
+            # fastembed 恒等长，这条防的是嵌入层被换/出错的形态。抛出即整轮终止（水位线停在上
+            # 一次 commit 处，重跑可续）。
+            raise VectorError(
+                f"嵌入返回的向量数不足（{len(vecs)} != {len(order)}）：索引可能不完整，"
+                "请用 rebuild=True 重建")
         con.executemany(_INSERT_VEC,
                         [(buf_rows[i][0], sqlite_vec.serialize_float32(v), buf_rows[i][1],
                           acct, buf_rows[i][2], buf_rows[i][3])
@@ -318,6 +333,9 @@ def build_index(accounts: Sequence[str] | None = None, rebuild: bool = False,
     列表则只索引列表内的账号（[] = 不索引任何账号，而非「全部」）。
 
     batch / commit_rows 默认取模块常量，仅供测试经接口注入（生产调用不传）。
+
+    `rebuild=True` 会清空索引**并重置本模型的水位线**（EA-043：重置是显式的一步，
+    不靠 `VECTOR_DROP` 顺手做）——中断后重跑同一条 rebuild 命令要从头；续跑走不带 rebuild 的那条。
     """
     embedder = embedder or default_embedder()
     con = connect()
@@ -325,6 +343,9 @@ def build_index(accounts: Sequence[str] | None = None, rebuild: bool = False,
         if rebuild:
             con.executescript(store.VECTOR_DROP)
             con.executescript(store.VECTOR_SCHEMA)
+            # EA-043：进度指针由本行**显式**重置（`VECTOR_DROP` 不再顺手删它——见那里的注释）。
+            # 只重置**本模型**的：水位线按 `(model_id, account)` 查，别的模型的留着无害。
+            con.execute("DELETE FROM vector_watermark WHERE model_id=?", (MODEL_ID,))
             con.commit()
         # 换模型必须重建。不重建的两种真实失败形态（实测）：
         #   1) 模型常量变了 → 新模型的水位线从 0 起 → 重嵌 → 撞 vec_messages 主键（裸 OperationalError）

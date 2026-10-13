@@ -188,8 +188,10 @@ def build_vector_index(rebuild: bool = False, account: str | None = None) -> dic
 
     嵌入跑在本机 CPU（fastembed + bge-small-zh-v1.5），聊天内容不外发；
     首次调用会下载约 95MB 模型文件到 ~/.agent-wechat/models，之后完全离线。
-    实测全量构建约 2.5–3 小时（68 万向量，含多次中断续跑），中断后重跑自动续传。
-    立即返回 task_id，用 get_task_status 查进度；rebuild=True 会先清空索引重新嵌入。
+    实测全量构建约 2.5–3 小时（68 万向量，含多次中断续跑），中断后重跑自动续传
+    ——**这条对不带 rebuild 的续跑成立**：rebuild=True 会先清空索引**并重置进度**，
+    被中断后重跑同一条命令要从头。
+    立即返回 task_id，用 get_task_status 查进度。
     注意 account 语义与其它工具相反：省略 account 表示索引**全部**账号，而不是当前账号。
     """
     return usecases.build_vector_index(account, rebuild)

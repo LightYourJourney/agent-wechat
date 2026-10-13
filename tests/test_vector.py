@@ -246,6 +246,100 @@ def test_build_index_rebuild_drops_and_reembeds(env):
     assert env.execute("SELECT count(*) FROM vec_messages").fetchone()[0] == 1   # 未翻倍
 
 
+def test_vector_drop_keeps_the_watermark_table(env):
+    """EA-043：`VECTOR_DROP` 此前把**进度指针**（`vector_watermark`）与两张数据表一起 DROP
+    ——「清表」与「重置进度」是两件事：水位线记录「已嵌入到哪」，与表里有没有行无关。
+    混在一个常量里意味着任何整表重建路径都会顺手抹掉续跑能力（`store` 里那条注释提过
+    purge 的重建也读同一个常量）。现在 DROP 只清数据表，rebuild **显式**重置本模型水位线。
+
+    把 `DROP TABLE IF EXISTS vector_watermark;` 加回常量本测试必红。
+    """
+    env.execute("INSERT INTO vector_watermark(model_id, account, last_rowid, updated_at) "
+                "VALUES ('m', 'acct', 7, 0)")
+    env.commit()
+    env.executescript(store.VECTOR_DROP)
+    env.commit()
+    names = {r[0] for r in env.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert "vector_watermark" in names, "DROP 不该顺手删进度指针"
+    assert "vec_messages" not in names and "vector_meta" not in names
+
+
+def test_rebuild_resets_the_watermark_explicitly(env):
+    """EA-043 的另一半：rebuild 仍**必须**重置水位线——否则重建会从旧水位线之后开始，
+    留下一批没重嵌的旧向量（换模型时那就是**上一个模型**的向量）。
+
+    删掉 `build_index` 里那条 `DELETE FROM vector_watermark WHERE model_id=?` 本测试必红。
+    """
+    store.upsert_batch(env, [mk_row("acct", "chatA", 1, "第一条消息"),
+                             mk_row("acct", "chatA", 2, "第二条消息")])
+    vector.build_index(embedder=FakeEmbedder())
+    assert env.execute("SELECT last_rowid FROM vector_watermark").fetchone()[0] == 2
+
+    res = vector.build_index(rebuild=True, embedder=FakeEmbedder())
+    assert res["embedded_this_run"] == 2, "水位线没重置 → 重建只补了尾巴"
+    assert env.execute("SELECT count(*) FROM vec_messages").fetchone()[0] == 2   # 未翻倍
+
+
+def test_flush_rejects_a_short_vector_batch(env):
+    """EA-059：`flush` 用 `zip(order, vecs)` 配对——嵌入少返向量时**静默截断**：少的那几行
+    不进索引，而 `embedded += len(buf_rows)` 照记（账目漂移 + 那些消息永远搜不到）。
+    真实 fastembed 恒等长，这条防的是嵌入层被换/出错的形态。
+
+    删掉那条长度校验本测试必红。
+    """
+    store.upsert_batch(env, [mk_row("acct", "chatA", i, f"第{i}条消息") for i in (1, 2, 3)])
+
+    class _Short(FakeEmbedder):
+        def embed(self, texts):
+            return super().embed(texts)[:-1]          # 少返一个
+    with pytest.raises(vector.VectorError) as ei:
+        vector.build_index(embedder=_Short())
+    assert "向量" in str(ei.value), ei.value
+
+
+def test_offline_load_permission_error_does_not_fall_back_to_download(monkeypatch):
+    """EA-060：`_ensure` 的离线加载此前宽接 `except Exception: pass`——缓存**损坏**
+    （权限/坏文件）也会静默回退下载，而 SECURITY.md 承诺的触发条件是「缓存缺失」；更糟的是
+    原错误被吞，用户看不到真正原因（下载会在同一个不可读目录上以另一个更晦涩的错误失败）。
+
+    把 except 放回宽版本测试必红。
+    """
+    calls = []
+
+    class FakeTE:
+        def __init__(self, **kwargs):
+            calls.append(kwargs)
+            if kwargs.get("local_files_only"):
+                raise PermissionError(13, "Operation not permitted")
+            raise AssertionError("权限错不是「缓存缺失」，不该回退下载")
+    monkeypatch.setattr("fastembed.TextEmbedding", FakeTE)
+
+    with pytest.raises(PermissionError):
+        vector.FastEmbedEmbedder().embed(["x"])
+    assert len(calls) == 1
+
+
+def test_offline_load_missing_entry_still_falls_back_to_download(monkeypatch):
+    """EA-060 的反向守卫（防收窄过头）：huggingface_hub 的 `LocalEntryNotFoundError`
+    （无缓存/快照不完整）**确实**等同缓存缺失，必须仍走回退下载——它是 `FileNotFoundError`
+    与 `ValueError` 的子类。把收窄做成「只认 ValueError」本测试必红。
+    """
+    calls = []
+
+    class FakeTE:
+        def __init__(self, **kwargs):
+            calls.append(kwargs)
+            if kwargs.get("local_files_only"):
+                raise FileNotFoundError("no local entry")
+
+        def embed(self, texts, batch_size=None):
+            return [[0.0] * vector.DIM for _ in texts]
+    monkeypatch.setattr("fastembed.TextEmbedding", FakeTE)
+
+    vector.FastEmbedEmbedder().embed(["x"])
+    assert [c["local_files_only"] for c in calls] == [True, False]
+
+
 def test_build_index_account_scoped(env):
     store.upsert_batch(env, [mk_row("acct1", "chatA", 1, "账号一的消息"),
                              mk_row("acct2", "chatA", 2, "账号二的消息")])
