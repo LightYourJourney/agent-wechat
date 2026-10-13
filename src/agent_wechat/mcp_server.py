@@ -37,6 +37,14 @@ def _guard(fn: Callable[..., Any]) -> Callable[..., Any]:
     def wrapper(*args: Any, **kwargs: Any) -> Any:
         try:
             return fn(*args, **kwargs)
+        except errors.IndexUnavailable as exc:
+            payload = errors.to_payload(exc)
+            payload["hint"] = f"{payload.get('hint', '')}（MCP：`export_full_history`）"
+            return payload
+        except errors.VectorIndexEmpty as exc:
+            payload = errors.to_payload(exc)
+            payload["hint"] = f"{payload.get('hint', '')}（MCP：`build_vector_index`）"
+            return payload
         except errors.ContactNotFound as exc:
             # 未命中的下一步指引是**入口专属**的：MCP 侧该提示 list_contacts、
             # CLI 侧该提示 contacts。core 只给中立文案，后缀在各自适配层追加

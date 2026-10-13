@@ -173,6 +173,7 @@ class Degradation:
     table: str
     missing_columns: tuple[str, ...]
     effect: str
+    drift: bool = True      # EA-095：False = 非漂移成因（未回填 / 覆盖不足），CLI 不加「结构不符」后缀
 
 
 def collect_degradations(rdr: reader.MessageReader) -> tuple[Degradation, ...]:
@@ -590,7 +591,7 @@ def message_media(contact: str, *, keys: Sequence[str] | None = None,
             # 的翻译路径给出单行中文（CLI）/ 错误信封（MCP），而不是一整个 traceback。
             raise errors.IndexUnavailable(
                 f"本地检索库不可用：{errors.redact(str(exc))}",
-                hint="索引库可能损坏；删除 index.db 后重跑 export_full_history 可重建"
+                hint="索引库可能损坏；删除 index.db 后重跑一次导出即可重建"
             ) from exc
 
     # 语音本体集合**按需**取：这个会话一条语音都没有时，不值得去开 media_*.db
@@ -746,7 +747,7 @@ def chat_export(contact: str, *, months: list[str] | None = None, limit: int = 5
         # 索引读不了就是什么都答不了：一个空产物只会把「库坏了」谎报成「这个会话没有消息」。
         raise errors.IndexUnavailable(
             f"本地检索库不可用：{errors.redact(str(exc))}",
-            hint="索引库可能损坏；删除 index.db 后重跑 export_full_history 可重建"
+            hint="索引库可能损坏；删除 index.db 后重跑一次导出即可重建"
         ) from exc
 
     # 媒体：直接复用丙的 message_media，`states` 就是 `MediaRefState`。`_ctx=ctx` 复用刚解析
@@ -790,7 +791,8 @@ def chat_export(contact: str, *, months: list[str] | None = None, limit: int = 5
         degraded.append(Degradation(
             capability="msg_parts", db="index.db", table="msg_parts", missing_columns=(),
             effect="msg_parts 未回填，appmsg 会显示成 `[appmsg: 标题]`；"
-                   "运行 `agent-wechat appmsg rebuild` 补齐"))
+                   "运行 `agent-wechat appmsg rebuild` 补齐",
+            drift=False))
     if len(states) < len(keys):
         # 判据是**答回的条数**，不是 `mm.truncated`：keys 路径下 message_media 是「一个 key
         # 一行」（非媒体消息也在里面、状态为 `none`），于是 `truncated`（= `len(rows) >= lim`）
@@ -799,6 +801,7 @@ def chat_export(contact: str, *, months: list[str] | None = None, limit: int = 5
         # 而「答回得比 keys 少」正是产物里会**静默少一块**的那个条件。
         degraded.append(Degradation(
             capability="msg_media", db="index.db", table="messages", missing_columns=(),
+            drift=False,
             effect=f"媒体状态只覆盖了 {len(states)}/{len(keys)} 条消息"
                    "（message_media 的 limit 上限 500）：没覆盖到的消息在产物里不会出现"
                    "媒体块"))
@@ -896,7 +899,7 @@ def message_parts(contact: str, *, keys: Sequence[str],
     except (sqlite3.Error, OSError) as exc:
         raise errors.IndexUnavailable(
             f"本地检索库不可用：{errors.redact(str(exc))}",
-            hint="索引库可能损坏；删除 index.db 后重跑 export_full_history 可重建"
+            hint="索引库可能损坏；删除 index.db 后重跑一次导出即可重建"
         ) from exc
     out: list[MessagePart] = []
     unparsed = rejected = dropped_blobs = 0
@@ -971,7 +974,7 @@ def chat_index(out_dir: str | None = None, account: str | None = None) -> ChatIn
         # 退回「没有已导出的会话」是**谎报**——产物明明在，用户会以为导出白做了。
         raise errors.IndexUnavailable(
             f"本地检索库不可用：{errors.redact(str(exc))}",
-            hint="索引库可能损坏；删除 index.db 后重跑 export_full_history 可重建"
+            hint="索引库可能损坏；删除 index.db 后重跑一次导出即可重建"
         ) from exc
     indexed = {r["chat_md5"]: r for r in rows}
     entries = []

@@ -137,15 +137,34 @@ def test_semantic_core_error_reaches_stderr_with_hint(env, monkeypatch, capsys):
     monkeypatch.setattr(account, "resolve_account", lambda a: "acct")
 
     def boom(*a, **k):
-        raise vector.VectorError("向量索引为空", hint="请先运行 build_vector_index")
+        # EA-096：core 现在给中立文案，入口专属命令名由 CLI 按异常类型追加
+        raise errors.VectorIndexEmpty("向量索引为空", hint="请先构建向量语义索引")
 
     monkeypatch.setattr(vector, "semantic_search", boom)
     with pytest.raises(SystemExit) as ei:
         cli.main(["semantic", "爬山"])
     assert ei.value.code == 1
     err = capsys.readouterr().err
-    assert "向量索引为空（请先运行 build_vector_index）" in err
+    assert "向量索引为空（请先构建向量语义索引）" in err
+    assert "agent-wechat vector-build" in err, "印出来的必须是本入口可执行的命令"
+    assert "build_vector_index" not in err, "MCP 工具名不得出现在 CLI 输出里"
     assert "Traceback" not in err
+
+def test_cli_index_unavailable_names_the_cli_rebuild_command(tmp_path, monkeypatch, capsys):
+    """EA-096：`media locate` 撞损坏索引 → 只点名 CLI 可执行的 `agent-wechat export`。"""
+    monkeypatch.setattr(account, "resolve_account", lambda a: "acct")
+
+    def boom(*a, **k):
+        raise errors.IndexUnavailable("本地检索库不可用：database disk image is malformed",
+                                      hint="索引库可能损坏；删除 index.db 后重跑一次导出即可重建")
+
+    monkeypatch.setattr(usecases, "message_media", boom)
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["media", "locate", "--chat", "wxid_abc123def456"])
+    assert ei.value.code == 1
+    err = capsys.readouterr().err
+    assert "agent-wechat export" in err
+    assert "export_full_history" not in err
 
 
 # ---------- C8：bootstrap 的 print 迁到 CLI，四处输出逐字（同序/同流向 stdout） ----------
@@ -2071,3 +2090,22 @@ def test_decrypt_out_absolute_path_is_written_there_and_chmods_0600(tmp_path, mo
     assert target.read_bytes() == b"SECRET", "绝对路径按原样写入"
     assert (target.stat().st_mode & 0o777) == 0o600, "整库明文必须 0600"
     assert str(target) in capsys.readouterr().out
+
+def test_render_degradations_marks_only_real_drift(capsys):
+    """EA-095：`结构不符` 只属于真漂移；非漂移成因（未回填 / 覆盖不足）不加后缀。
+
+    反面同测：真漂移那条**仍**带后缀——免得将来有人把整句删掉也算「修好」。
+    """
+    from agent_wechat.usecases import Degradation
+
+    cli._render_degradations([
+        Degradation(capability="msg_parts", db="index.db", table="msg_parts",
+                    missing_columns=(), effect="msg_parts 未回填，appmsg 会显示成占位",
+                    drift=False),
+        Degradation(capability="roster", db="contact.db", table="contact",
+                    missing_columns=("nick_name",), effect="名册表缺列"),
+    ])
+    err = capsys.readouterr().err
+    assert "msg_parts 未回填" in err
+    assert err.count("结构不符") == 1, "只有真漂移那条带后缀"
+    assert "（contact.db 的 contact 结构不符）" in err

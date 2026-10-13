@@ -53,6 +53,14 @@ class VectorError(AgentWeChatError):
     """向量层不可用（sqlite-vec 缺失 / 模型不一致 / 索引为空）。"""
 
 
+class VectorIndexEmpty(VectorError):
+    """向量索引为空（尚未构建，或 rebuild 进行中）。
+
+    EA-096：与其它 VectorError 分开，好让两个适配层按**类型**追加入口专属的
+    重建命令名（core 的 hint 只给中立动作，不点名任何入口的命令）。
+    """
+
+
 class CaptureError(AgentWeChatError):
     """lldb 捕获 passphrase 失败。"""
 

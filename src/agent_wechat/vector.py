@@ -13,7 +13,7 @@ from typing import Callable, Sequence
 import sqlite_vec
 
 from . import messages, paths, store
-from .errors import SearchInputError, VectorError
+from .errors import SearchInputError, VectorError, VectorIndexEmpty
 
 MODEL_NAME = "BAAI/bge-small-zh-v1.5"
 DIM = store.VECTOR_DIM                      # 单一真值在 store；本模块只做短别名
@@ -385,7 +385,7 @@ def semantic_search(query: str, chat_id: str | None = None, limit: int = 10,
         _ensure_model_ok(con)
         meta = _meta(con)
         if meta is None or meta["embedded"] == 0:
-            raise VectorError("向量索引为空", hint="请先运行 build_vector_index")
+            raise VectorIndexEmpty("向量索引为空", hint="请先构建向量语义索引")
         k = min(limit * 3, K_MAX)          # 多取候选，过滤后再截断（limit ≥ 1 时 limit*3 ≥ limit）
         qvec = sqlite_vec.serialize_float32(
             list((embedder or default_embedder()).embed_query(query_text(query))))

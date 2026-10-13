@@ -446,7 +446,7 @@ def test_semantic_search_errors(env):
         vector.semantic_search("x", account="")
     with pytest.raises(vector.VectorError, match="向量索引为空") as e:
         vector.semantic_search("x", account="acct", embedder=fake)
-    assert e.value.hint == "请先运行 build_vector_index"
+    assert e.value.hint == "请先构建向量语义索引"      # EA-096：core 只给中立动作
     # 模型不匹配：手工塞一条别的 model_id 的 meta 行
     vector.build_index(embedder=fake)
     env.execute("UPDATE vector_meta SET model_id='fastembed:other:512'")

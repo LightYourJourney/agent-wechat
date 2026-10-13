@@ -654,7 +654,8 @@ def _render_degradations(degraded) -> None:
         elif isinstance(d, str):
             print(f"⚠️  {d}", file=sys.stderr)
         else:
-            print(f"⚠️  {d.effect}（{d.db} 的 {d.table} 结构不符）", file=sys.stderr)
+            suffix = f"（{d.db} 的 {d.table} 结构不符）" if getattr(d, "drift", True) else ""
+            print(f"⚠️  {d.effect}{suffix}", file=sys.stderr)
 
 
 # ---------- `purge --chat` / `--undo` / `--excluded` ----------
@@ -1044,6 +1045,13 @@ def main(argv: list[str] | None = None) -> None:
     except errors.AgentWeChatError as exc:
         # 项目错误 → 单行中文（含 hint）打到 stderr，退出码 1。argparse 自己的
         # SystemExit(2) 在 parse_args 处先抛出，不经过这里，故参数错仍是 2。
-        print(errors.to_text(exc), file=sys.stderr)
+        # EA-096：core 的 hint 只给中立动作；入口专属的命令名在此按**异常类型**追加
+        # （与 ContactNotFound 的后缀同一处约定），保证印出来的命令在本入口可直接执行。
+        text = errors.to_text(exc)
+        if isinstance(exc, errors.IndexUnavailable):
+            text += "（CLI：`agent-wechat export`）"
+        elif isinstance(exc, errors.VectorIndexEmpty):
+            text += "（CLI：`agent-wechat vector-build`）"
+        print(text, file=sys.stderr)
         code = 1
     raise SystemExit(code)
