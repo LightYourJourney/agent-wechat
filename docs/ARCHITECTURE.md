@@ -38,7 +38,7 @@ src/agent_wechat/
 ├── chat_text.py    两个会话模板共享的措辞与纯函数（时间格式化 / 相对路径 / 媒体状态与降级文案）
 ├── chatview.py     会话时间线：`ChatView` 组装 + `write`（唯一决定产物布局的地方）
 ├── chat_html.py    会话时间线的 HTML 模板（纯函数，单文件自包含，不写文件、不联网）
-├── chat_md.py      会话时间线的 Markdown 模板（纯函数；四处固有损失见 USAGE.md §7）
+├── chat_md.py      会话时间线的 Markdown 模板（纯函数；固有损失与**已收口的转义**见 USAGE.md §7）
 ├── chat_index.py   会话索引页的 HTML 模板（纯函数；枚举产物与查库在用例层）
 ├── export.py       导出管道：流式批处理 + 水位线续跑（任务登记归 usecases 层）
 ├── store.py        本地检索库：DDL、幂等 upsert、水位线、FTS 触发器
@@ -216,7 +216,7 @@ moments.iter_posts(account, report=…)       # 复用 passphrase 解密 sns/sns
 | 更大规模（千万级） | 单文件 SQLite（百万级实测流畅） | 分库（按账号/年份）或迁移 PostgreSQL + pgvector |
 | 媒体导出 | 已实现：`media.py`（图片 dat 解密 / 语音 SILK→WAV / 视频定位）+ `media_refs` 映射 | 按会话导出与存量回填已就绪；按相册批量导出未做 |
 | 媒体与消息关联 | 已实现：CLI `media locate` / MCP `get_message_media` 按 `msg_key` 回答四态（`none` / `exported` / `exportable` / `gone`），信封另给 `counts` 与 `by_kind` 拆分（`image` / `video` / `voice` / `sticker` 四项） | 不写微信目录、不写 `out_dir`、不联网；判定做 `pathlib` 探测与索引只读查询，语音的本体判定要解密 `media_*.db`（明文只在 `tmp/` 短暂存在，见 SECURITY.md）。`exportable` 在本机实质上是语音专属——图片/视频本体只为**近期（尚未导出）**的消息保留；**贴纸是第四类，只可能 `gone` 或 `exported`（永不 `exportable`）**，那个 `gone` 的语义是「取不出来」：微信把它存成加密格式、方案未破（且本机那份是缩略档），与「本机有没有」无关。**贴纸的字节来源是 CDN 取件**（`media export --kinds …sticker --with-cdn`），默认关，见 TOOLS.md §9 / §11 与 SECURITY.md §1「零网络例外」第 3 条 |
-| 会话时间线导出（appmsg 富文本） | 已实现：`appmsg.py`（三步规范化 + 解析）+ `msg_parts` 原始载荷表 + `chatview.py`（`ChatView` 组装与落盘）+ `chat_html.py` / `chat_md.py`（两个纯模板，措辞共享在 `chat_text.py`）+ `chat_index.py`（索引页）；CLI `chat export` / `chat index` / `appmsg rebuild`，MCP `export_chat` / `get_message_parts` | appmsg（引用 / 链接 / 文件 / 转账）渲染成结构化块，媒体以相对路径引用**同级**的既有媒体树（`chat export` 的 `--out` 必须与 `media export` 同根）；`appmsg rebuild` 是显式的一次性动作（幂等）；Markdown 有四处固有损失，**不假装与 HTML 等价**（见 USAGE.md §7） |
+| 会话时间线导出（appmsg 富文本） | 已实现：`appmsg.py`（三步规范化 + 解析）+ `msg_parts` 原始载荷表 + `chatview.py`（`ChatView` 组装与落盘）+ `chat_html.py` / `chat_md.py`（两个纯模板，措辞共享在 `chat_text.py`）+ `chat_index.py`（索引页）；CLI `chat export` / `chat index` / `appmsg rebuild`，MCP `export_chat` / `get_message_parts` | appmsg（引用 / 链接 / 文件 / 转账）渲染成结构化块，媒体以相对路径引用**同级**的既有媒体树（`chat export` 的 `--out` 必须与 `media export` 同根）；`appmsg rebuild` 是显式的一次性动作（幂等）；Markdown 有三处固有损失（第四处「语法不转义」已在 EA-037 收口），**不假装与 HTML 等价**（见 USAGE.md §7） |
 | 朋友圈读取与导出 | 已实现：`moments.py`（离线解析 `sns.db`）+ `moments_html.py`（单文件 HTML）+ `sns_media.py`（远程媒体，默认关） | 远程媒体需联网——`--with-media` / `with_media=True` 显式开启，只连微信 CDN——后缀 `*.qpic.cn` / `*.video.qq.com`，加精确主机 `wxapp.tc.qq.com`（**不含子域**）；默认全程零网络；本地缓存图不参与（文件名与动态对不上）；发布 / 删除等写操作不做 |
 | 群成员显示名 | 已实现：索引库存 `display_names` 名册，查询时 join；实时路径 `recent` 用内存名册 | 群昵称在 `contact.db` 的 `chat_room.ext_buffer`（protobuf，字段 f2，可选），回落 `contact.remark` / `nick_name` |
 | 增量自动同步 | 手动重跑 export（秒级） | export 管道与水位线已就绪，加定时触发即可 |
