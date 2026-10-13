@@ -475,6 +475,30 @@ def test_video_export_points_at_history_export_when_messages_are_missing(tmp_pat
     assert "rebuild-refs" not in note         # 它只写引用，永远修不好这一种
 
 
+def test_sticker_export_degrades_with_the_same_three_way_note(tmp_path, monkeypatch):
+    """EA-089：贴纸侧的「三种空」此前**零测试**。与视频共用 `_refs_absence_note` 之后，
+    两种可区分的成因必须逐条成立——尤其「refs 在、消息不在」那一种不许提 `rebuild-refs`
+    （它只写 refs，永远修不好这一种）。把 `_refs_absence_note` 换回硬编码文案或删掉
+    贴纸侧的调用，本用例必红。
+    """
+    root, account = make_tree(tmp_path, monkeypatch)
+
+    con = store.connect(tmp_path / "empty.db")
+    rep = media.export_media(account, ["wxid_a"], kinds=["sticker"], con=con)
+    assert any("一条贴纸引用都没有" in d and "rebuild-refs" in d for d in rep.degraded), rep.degraded
+
+    fk = "ff" * 16
+    con2 = store.connect(tmp_path / "refs-only.db")
+    store.upsert_media_refs(con2, [
+        (messages.row_key(account, messages.md5_of("wxid_a"), "message_0.db", 1),
+         "sticker", fk, None)])
+    con2.commit()
+    rep2 = media.export_media(account, ["wxid_a"], kinds=["sticker"], con=con2)
+    note, = rep2.degraded                     # 恰好一条：不是「一条引用都没有」那条
+    assert "导出这些会话的历史" in note
+    assert "rebuild-refs" not in note
+
+
 def test_video_export_thumb_keeps_source_stem(tmp_path, monkeypatch):
     """缩略图回退时产物名与账号级枚举那条路逐字一致（`{K}_thumb.jpg`）。
 
@@ -1883,7 +1907,7 @@ def _one_sticker_index(ts, md5, chat_id="wxid_x", account="wxid_testacct01_ab12"
 def test_sticker_export_sends_no_request_without_the_flag(tmp_path, monkeypatch):
     """**默认零网络**：不加 `with_cdn`，导出流程一次 CDN 取件都不调，且如实计 missing。
 
-    与下面那条正向用例是**一对**。**打桩的是 `fetch_sticker_from_cdn` 而不是
+    与下面那条正向用例是**一对**。**打桩的是取件那一步（`_fetch_one` → `_fetch_cdn_bytes`）而不是
     `_cdn_opener`**：要钉的是「导出流程会不会走到联网那一步」。打更底层只能证明
     「这次没发请求」，证明不了「没走那条分支」——分支被误接通时它照样绿。
     """
@@ -1971,9 +1995,24 @@ def test_fetch_sticker_sends_no_request_without_cdnurl(tmp_path, monkeypatch):
     monkeypatch.setattr(reader_mod, "_decode_content",
                         lambda *a: f'<msg><emoji md5="{md5_}" aeskey="{"b" * 32}"/></msg>')
     monkeypatch.setattr(media, "_cdn_opener", lambda: _Boom())
-    assert media.fetch_sticker_from_cdn("wxid_testacct01_ab12", "c" * 32,
-                                        "message_0.db", 1) is None
+    assert _fetch_one("wxid_testacct01_ab12", "c" * 32, "message_0.db", 1) is None
     assert opened == []
+
+
+def _fetch_one(account, cm, shard, lid):
+    """EA-088：原 `fetch_sticker_from_cdn`（已删的零生产调用包装）的**等价两步**。
+
+    断言面与实现面都不变：URL 构造（白名单 / 两种写法 / 空白容忍）在 `sticker_cdn_urls`，
+    取件与异常吞并在 `_fetch_cdn_bytes`——包装删掉后直接打这两处。
+    """
+    from agent_wechat import media as m
+
+    loc = (cm, shard, lid)
+    urls = m.sticker_cdn_urls(account, [loc])
+    if loc not in urls:
+        return None
+    url, expect_md5 = urls[loc]
+    return m._fetch_cdn_bytes(url, expect_md5)
 
 
 def test_fetch_sticker_swallows_any_opener_exception(tmp_path, monkeypatch):
@@ -2011,8 +2050,7 @@ def test_fetch_sticker_swallows_any_opener_exception(tmp_path, monkeypatch):
                         lambda *a: f'<msg><emoji md5="{md5_}" '
                                   f'cdnurl="http://wxapp.tc.qq.com/x?filekey=deadbeef"/></msg>')
     monkeypatch.setattr(media, "_cdn_opener", lambda: _Boom())
-    assert media.fetch_sticker_from_cdn("wxid_testacct01_ab12", "c" * 32,
-                                        "message_0.db", 1) is None
+    assert _fetch_one("wxid_testacct01_ab12", "c" * 32, "message_0.db", 1) is None
 
 
 def test_fetch_sticker_refuses_host_outside_allowlist(tmp_path, monkeypatch):
@@ -2047,8 +2085,7 @@ def test_fetch_sticker_refuses_host_outside_allowlist(tmp_path, monkeypatch):
                         lambda *a: f'<msg><emoji md5="{md5_}" '
                                   f'cdnurl="http://evil.example.com/x?filekey=deadbeef"/></msg>')
     monkeypatch.setattr(media, "_cdn_opener", lambda: _Rec())
-    assert media.fetch_sticker_from_cdn("wxid_testacct01_ab12", "c" * 32,
-                                        "message_0.db", 1) is None
+    assert _fetch_one("wxid_testacct01_ab12", "c" * 32, "message_0.db", 1) is None
     assert opened == []
 
 
@@ -2077,7 +2114,7 @@ def test_fetch_sticker_reads_cdnurl_in_both_spellings(tmp_path, monkeypatch, sty
     """CDN 取件必须读得出**两种书写形态**的 `cdnurl`——否则近半数贴纸静默取不到件。
 
     与上面那条是同一件事的两个入口：解析（`extract_sticker_ref`）与取件
-    （`fetch_sticker_from_cdn`）。**两处必须共用 `_emoji_attr_re`**，各写一份就是两个真相源。
+    （`sticker_cdn_urls`）。**两处必须共用 `_emoji_attr_re`**，各写一份就是两个真相源。
     """
     from agent_wechat import reader as reader_mod
 
@@ -2124,7 +2161,7 @@ def test_fetch_sticker_reads_cdnurl_in_both_spellings(tmp_path, monkeypatch, sty
     monkeypatch.setattr(reader_mod, "MessageReader", _FakeReader)
     monkeypatch.setattr(reader_mod, "_decode_content", lambda *a: xml)
     monkeypatch.setattr(media, "_cdn_opener", lambda: _Rec())
-    media.fetch_sticker_from_cdn("wxid_testacct01_ab12", "c" * 32, "message_0.db", 1)
+    _fetch_one("wxid_testacct01_ab12", "c" * 32, "message_0.db", 1)
     assert seen == ["http://wxapp.tc.qq.com/x?filekey=deadbeef"], \
         f"{style} 形态的 cdnurl 没被读出来"
 

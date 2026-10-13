@@ -758,6 +758,35 @@ def exported_path(out_root: pathlib.Path, *, chat_md5: str, kind: str, ts: int,
     return None
 
 
+_REFS_NOTE_NAME = {"video": "视频", "sticker": "贴纸"}
+
+
+def _refs_absence_note(kind: str, con, account: str, chat_ids, *,
+                       empty_hint: str = "", history_clause: str = "") -> str | None:
+    """「一条都没导出」的三种成因 + 「索引读不了」的降级文案（EA-089：视频/贴纸共用）。
+
+    计数一律走**不 join messages** 的 `count_media_refs`——`media rebuild-refs` 只写 refs
+    不写 messages，join 出来的空会把「refs 在但消息没进索引」混成「一条都没有」，把用户
+    导向错误的修法（spec §4.7）。各 kind 的差异（额外可能性说明、历史导出指引里的命令名）
+    **显式参数化**，不静默丢信息。
+    """
+    name = _REFS_NOTE_NAME[kind]
+    try:
+        if store.count_media_refs(con, account, kind=kind) == 0:
+            return (f"{name}导出按 media_refs 索引归属：索引里这个账号一条{name}引用都没有"
+                    f"（索引建立在 media_refs 之前{empty_hint}），本次未导出任何{name}。"
+                    "请先运行 `media rebuild-refs` 补齐引用。")
+        if store.count_media_refs(con, account, chat_ids=chat_ids, kind=kind):
+            return (f"{name}导出按 media_refs 索引归属：本次请求的会话有{name}引用，"
+                    f"但它们的消息不在索引里，本次未导出任何{name}。"
+                    f"请先导出这些会话的历史{history_clause}")
+        return (f"{name}导出按 media_refs 索引归属：本次请求的会话在索引里没有{name}引用，"
+                f"本次未导出任何{name}（该账号其它会话有引用，说明索引可用）。")
+    except (sqlite3.Error, OSError) as exc:
+        return (f"{name}索引读不了（{errors.redact(str(exc))}），本次未导出任何{name}"
+                f"（{name}按 media_refs 索引归属）")
+
+
 def export_media(account: str, chat_ids: list[str], *, kinds: list[str],
                  months: list[str] | None = None, out_dir: pathlib.Path | None = None,
                  max_files: int = 2000, progress=None, force: bool = False,
@@ -890,23 +919,15 @@ def export_media(account: str, chat_ids: list[str], *, kinds: list[str],
                     # 计数一律走**不 join messages** 的 count_media_refs——`media rebuild-refs`
                     # 只写 refs 不写 messages，join 出来的空会把后两种混成一种，还会把用户
                     # 导向错误的修法。
-                    if store.count_media_refs(con, account, kind="video") == 0:
-                        # 情形 1：该账号一条视频引用都没有（索引建在 media_refs 之前，或建时本机没有视频）
-                        note = ("视频导出按 media_refs 索引归属：索引里这个账号一条视频引用都没有"
-                                "（索引建立在 media_refs 之前，或建索引时本机没有视频消息），"
-                                "本次未导出任何视频。请先运行 `media rebuild-refs` 补齐引用。")
-                    elif store.count_media_refs(con, account, chat_ids=chat_ids, kind="video"):
-                        # 情形 3：这些会话**有**引用，但 join 不出消息——它们的消息没进索引。
-                        #    rebuild-refs 写不出消息，唯一有效的动作是导出这些会话的历史
-                        #    （导出管道同时写 messages 与 refs）。
-                        note = ("视频导出按 media_refs 索引归属：本次请求的会话有视频引用，"
-                                "但它们的消息不在索引里，本次未导出任何视频。"
-                                "请先导出这些会话的历史（`export_full_history` / CLI `export`）"
-                                "——它同时写入消息与媒体引用。")
-                    else:
-                        # 情形 2：引用在别处——这些会话确实没有视频引用（索引本身可用，无需修复）
-                        note = ("视频导出按 media_refs 索引归属：本次请求的会话在索引里没有视频引用，"
-                                "本次未导出任何视频（该账号其它会话有引用，说明索引可用）。")
+                    # 三种成因（EA-089 抽成共用实现，文案逐字不变）：
+                    #   情形 1：该账号一条视频引用都没有（索引建在 media_refs 之前，或建时本机没有视频）；
+                    #   情形 3：这些会话**有**引用但 join 不出消息（rebuild-refs 写不出消息）；
+                    #   情形 2：引用在别处——这些会话确实没有视频引用（索引本身可用）。
+                    note = _refs_absence_note(
+                        "video", con, account, chat_ids,
+                        empty_hint="，或建索引时本机没有视频消息",
+                        history_clause="（`export_full_history` / CLI `export`）"
+                                       "——它同时写入消息与媒体引用。")
             except (sqlite3.Error, OSError) as exc:
                 # 索引读不了 = 归属无从谈起：**如实降级**产出 0 条。裸 sqlite3.Error 逃出 core
                 # 层会击穿错误契约，而静默返回 0 会把「索引坏了」说成「本机没有视频」。
@@ -1172,7 +1193,7 @@ def sticker_cdn_urls(account: str, items: Sequence[tuple[str, str, int]]
                         f"SELECT message_content, WCDB_CT_message_content FROM 'Msg_{chat_md5}' "
                         f"WHERE local_id = ?", (local_id,)).fetchone()
                     rows[(chat_md5, local_id)] = _decode_content(*row) if row else None
-        except Exception:                    # noqa: BLE001 —— 见 fetch_sticker_from_cdn 的说明
+        except Exception:                    # noqa: BLE001 —— 见 `_fetch_cdn_bytes` 的说明（core 层只抛项目异常）
             continue                         # 该分片整体取不到：这些键不出现在返回值里
         for (chat_md5, local_id), xml in rows.items():
             if not xml:
@@ -1215,35 +1236,6 @@ def _fetch_cdn_bytes(url: str, expect_md5: str, *, timeout: float = 15.0) -> byt
     return body if hashlib.md5(body).hexdigest() == expect_md5 else None
 
 
-def fetch_sticker_from_cdn(account: str, chat_md5: str, shard: str, local_id: int,
-                           *, timeout: float = 15.0) -> bytes | None:
-    """从 CDN 取**一张**贴纸的明文图片字节。取不到返回 None，**不抛**。
-
-    **唯一会联网的贴纸路径，只在调用方显式 opt-in 时被调用。**
-
-    **为什么回源而不是读索引**：贴纸 XML 不落库是凭据问题的结构性根治（spec §7.1）。
-    所以 `cdnurl`（`filekey` 就在它的查询串里）只能在**用的这一刻**从微信库里现取，
-    凭据随本函数的栈帧消失——不落盘、不进日志、不进信封。**不要改成从索引读。**
-
-    **走 `cdnurl`，不走 `encrypturl`**：实测 `cdnurl` 返回**明文**图片（spec 附录 E.1），
-    故本函数**不碰 `aeskey`**——凭据面因此只有 URL 里那一个 `filekey`。
-    （`encrypturl` 是 AES-128-CBC、`key = IV = aeskey` 的那一份，本设计不用它。）
-
-    **当前只能明文 http**（spec R10）：实测 `vweixinf.tc.qq.com` 的证书对主机名无效。
-    外发的是 `filekey`——**这是既知且被显式接受的代价，不许在文档或日志里说成加密传输**。
-    （**只测过那一个主机名**，别写成「贴纸域一律不支持 https」。）
-
-    **批量场景请用 `sticker_cdn_urls` + `_fetch_cdn_bytes`**：本函数是单条便捷包装，
-    每条都会重新解密一次分片（见 `sticker_cdn_urls` 的性能注记）。
-    """
-    loc = (chat_md5, shard, local_id)
-    urls = sticker_cdn_urls(account, [loc])
-    if loc not in urls:
-        return None
-    url, expect_md5 = urls[loc]
-    return _fetch_cdn_bytes(url, expect_md5, timeout=timeout)
-
-
 def _export_stickers(account: str, chat_ids: list[str], out_root: pathlib.Path,
                      report: MediaReport, want: set[str] | None, is_full, bump,
                      progress, already, con: sqlite3.Connection | None,
@@ -1273,16 +1265,9 @@ def _export_stickers(account: str, chat_ids: list[str], out_root: pathlib.Path,
         if not refs:
             # 与视频同款三分解（spec §4.7）：计数值走**不 join messages** 的 count_media_refs，
             # 否则「refs 在但消息没进索引」会被混成「一条都没有」，把用户导向错误的修法。
-            if store.count_media_refs(con, account, kind="sticker") == 0:
-                note = ("贴纸导出按 media_refs 索引归属：索引里这个账号一条贴纸引用都没有"
-                        "（索引建立在 media_refs 之前）。请先运行 `media rebuild-refs` 补齐引用。")
-            elif store.count_media_refs(con, account, chat_ids=chat_ids, kind="sticker"):
-                note = ("贴纸导出按 media_refs 索引归属：本次请求的会话有贴纸引用，"
-                        "但它们的消息不在索引里，本次未导出任何贴纸。"
-                        "请先导出这些会话的历史（它同时写入消息与媒体引用）。")
-            else:
-                note = ("贴纸导出按 media_refs 索引归属：本次请求的会话在索引里没有贴纸引用，"
-                        "本次未导出任何贴纸（该账号其它会话有引用，说明索引可用）。")
+            note = _refs_absence_note(
+                "sticker", con, account, chat_ids,
+                history_clause="（它同时写入消息与媒体引用）。")
     except (sqlite3.Error, OSError) as exc:
         note = (f"贴纸索引读不了（{errors.redact(str(exc))}），本次未导出任何贴纸"
                 "（贴纸按 media_refs 索引归属）")
