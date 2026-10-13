@@ -84,13 +84,14 @@ def test_like_fallback_uses_display_name(db):
 
 
 def test_recent_from_store_uses_display_name(db):
-    """这条函数当前无调用者（死代码），但改它是为了不留一个行为不一致的入口。"""
+    """`_SENDER_JOIN` 的显示名接线（EA-072：原函数零生产调用且无 account 隔离，已删除；
+    断言改打等价入口 `messages_in_range`——它带 account 且走同一个 join）。"""
     with store.open() as con:
         _seed(con, mk_row("acct", "888@chatroom", 1, "开会啦",
                           sender_id="wxid_a", sender_name="wxid_a"))
         store.replace_roster(con, "acct", [("888@chatroom", "wxid_a", "张三")])
-    got = search.recent_from_store("888@chatroom")
-    assert got[0]["sender_name"] == "张三", f"recent_from_store 没走 join：{got[0]}"
+    got, _truncated = search.messages_in_range("888@chatroom", account="acct", limit=10)
+    assert got[0]["sender_name"] == "张三", f"没走 join：{got[0]}"
 
 
 def test_semantic_recall_uses_display_name(db):

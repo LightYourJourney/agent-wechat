@@ -581,6 +581,14 @@ def test_chat_export_renders_media_blocks_without_stubs(env, tmp_path):
     # 也就是上面这条断言不是恒真——M7（删调用）/M7b（换回桩）两种改坏都会让它红。
 
 
+def test_recent_limit_zero_is_empty_not_everything(env):
+    """EA-080：`recent(…, limit=0)` 曾因 `[-0:]`（= 全量切片）返回**全部**消息；
+    而 SQL 侧的 `if limit:` 把 0 当「不拼 LIMIT」——两处口径相反。0 必须返回空列表。
+    """
+    got = reader.MessageReader(ACCT).recent(FRIEND, limit=0)
+    assert got == []
+
+
 def test_iter_all_respects_the_batch_size(env, tmp_path, monkeypatch):
     """EA-111：批次切分（`store.BATCH` 压到 2）：每批 ≤ 批大小、无空批、各批合起来不重不漏。
 

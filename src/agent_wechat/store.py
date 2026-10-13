@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import contextlib
 import pathlib
+import re
 import sqlite3
 import time
 from collections.abc import Iterator, Sequence
@@ -60,6 +61,8 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 CREATE INDEX IF NOT EXISTS idx_msg_chat_ts ON messages(account, chat_id, ts);
 CREATE INDEX IF NOT EXISTS idx_msg_ts      ON messages(account, ts);
+-- EA-076：**预留、零消费者**（照 `server_id` 的先例标注）。删除它需要动既有库（IF NOT EXISTS
+-- 只挡创建）；在「按发送者筛」真被实现前先留着，别让一处 DDL 与一处注释各说各话。
 CREATE INDEX IF NOT EXISTS idx_msg_sender  ON messages(account, sender_id);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
@@ -74,7 +77,7 @@ CREATE TRIGGER IF NOT EXISTS msg_fts_ad AFTER DELETE ON messages BEGIN
     INSERT INTO messages_fts(messages_fts, rowid, content, chat_id)
         VALUES ('delete', old.id, old.content, old.chat_id);
 END;
-CREATE TRIGGER IF NOT EXISTS msg_fts_au AFTER UPDATE OF content ON messages BEGIN
+CREATE TRIGGER IF NOT EXISTS msg_fts_au AFTER UPDATE OF content, chat_id ON messages BEGIN
     INSERT INTO messages_fts(messages_fts, rowid, content, chat_id)
         VALUES ('delete', old.id, old.content, old.chat_id);
     INSERT INTO messages_fts(rowid, content, chat_id) VALUES (new.id, new.content, new.chat_id);
@@ -179,14 +182,25 @@ def connect(db_path: pathlib.Path | None = None) -> sqlite3.Connection:
     """
     paths.ensure_home_dirs()
     db = db_path or DB_PATH
-    con = sqlite3.connect(db)
-    con.row_factory = sqlite3.Row
-    ex_path = exclusions.path_for(pathlib.Path(db))
-    ex_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    con.execute("ATTACH DATABASE ? AS exclusions", (str(ex_path),))
-    con.executescript(SCHEMA)
-    con.executescript(exclusions.SCHEMA)
-    con.execute("PRAGMA synchronous=NORMAL")
+    try:
+        con = sqlite3.connect(db)
+        con.row_factory = sqlite3.Row
+        ex_path = exclusions.path_for(pathlib.Path(db))
+        ex_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        con.execute("ATTACH DATABASE ? AS exclusions", (str(ex_path),))
+        con.executescript(SCHEMA)
+        con.executescript(exclusions.SCHEMA)
+        con.execute("PRAGMA synchronous=NORMAL")
+    except sqlite3.Error as exc:
+        # EA-074：core 层只抛项目异常——建立段此前裸抛 sqlite3（实测：损坏的 index.db 会在
+        # ATTACH 处冒 `DatabaseError: file is not a database`，CLI 直接 traceback）。
+        msg = str(exc)
+        hint = ("索引库可能损坏或正被另一个进程写锁住；"
+                "确认没有其它导出在跑，仍失败则可删除 index.db 后重跑一次导出")
+        if isinstance(exc, sqlite3.OperationalError) and "locked" in msg:
+            hint = "数据库被锁住——稍后重试，或确认没有其它导出 / 向量构建在跑"
+        raise errors.IndexUnavailable(
+            f"本地检索库不可用：{errors.redact(msg)}", hint=hint) from exc
     return con
 
 
@@ -219,8 +233,35 @@ _INSERT_SQL = (
     f"VALUES ({', '.join(':' + c for c in _INSERT_COLUMNS)}) "
     "ON CONFLICT(msg_key) DO UPDATE SET "
     "content=excluded.content, msg_type=excluded.msg_type, "
-    "sender_name=excluded.sender_name, exported_at=excluded.exported_at "
-    "WHERE messages.content IS NOT excluded.content")
+    "sender_name=excluded.sender_name, chat_id=excluded.chat_id, "
+    "exported_at=excluded.exported_at "
+    # EA-012：守卫扩成「content **或 chat_id** 不同」。`chat_id` 是 `chat_md5` 的派生展示
+    # 属性（退化形态 `md5:<hex>` 是真名的降级），名字解析回来后必须能自愈；只认 content
+    # 时同一条消息会永远停在首次写入的 chat_id 上，同一 chat_md5 的行分裂成两种 id。
+    "WHERE messages.content IS NOT excluded.content "
+    "   OR messages.chat_id IS NOT excluded.chat_id")
+
+
+def schema_drift_notes(con: sqlite3.Connection) -> list[str]:
+    """库里已存在的**触发器体**与代码里 SCHEMA 文本不一致时的说明（EA-077）。
+
+    `CREATE TRIGGER IF NOT EXISTS` 只挡创建、不挡演进：老库里留着旧触发器体，代码改了 DDL
+    也**不会**生效——而 FTS 镜像与 EA-012 的修正集全靠它。这里只**报告**（挂进 status 自检），
+    不改库：重建触发器要评估多进程争用，留给显式的维护动作。
+    """
+    expected: dict[str, str] = {}
+    for m in re.finditer(r"CREATE TRIGGER IF NOT EXISTS (\w+)(.*?\bEND);", SCHEMA, re.S):
+        expected[m.group(1)] = " ".join(("CREATE TRIGGER " + m.group(1) + m.group(2)).split())
+    notes: list[str] = []
+    for name, want in sorted(expected.items()):
+        row = con.execute("SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?",
+                          (name,)).fetchone()
+        if row is None:
+            notes.append(f"触发器 {name} 不存在（索引库不完整）")
+        elif " ".join((row[0] or "").split()) != want:
+            notes.append(f"触发器 {name} 的库内文本与代码不一致"
+                         "（改过 DDL 的老库不会自动升级；重建索引可消除）")
+    return notes
 
 
 def _filter_excluded(con: sqlite3.Connection, keys: Sequence[str]) -> set[str]:
@@ -541,7 +582,9 @@ def count_media_refs(con: sqlite3.Connection, account: str, *,
     acct_prefix = f"{account}|"
     args += [len(acct_prefix), acct_prefix]
     if chat_ids is not None:
-        pats = [f"{account}|{messages.md5_of(c)}|" for c in dict.fromkeys(chat_ids)]
+        # EA-011：用 `chat_md5()` 而不是 `md5_of()`——后者对退化形态（`md5:<hex>`）会
+        # **再哈希一次**，与 `msg_key` 第二段（本就是 chat_md5）分家，计数恒为 0。
+        pats = [f"{account}|{messages.chat_md5(c)}|" for c in dict.fromkeys(chat_ids)]
         if not pats:                            # 空集：一条都不算（IN () / OR 空集是语法错）
             return 0
         where.append("(" + " OR ".join("substr(msg_key, 1, ?) = ?" for _ in pats) + ")")

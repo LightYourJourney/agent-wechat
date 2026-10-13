@@ -475,6 +475,19 @@ def test_video_export_points_at_history_export_when_messages_are_missing(tmp_pat
     assert "rebuild-refs" not in note         # 它只写引用，永远修不好这一种
 
 
+def test_loc_of_msg_key_rejects_a_non_numeric_local_id():
+    """EA-085：`msg_key` 的 `local_id` 段不是数字时，解析必须返回 None（调用方按 `failed`
+    归口），不许 `int()` 裸抛 `ValueError` 让整批导出崩。把校验去掉本用例必红。
+    """
+    from agent_wechat import media as m
+
+    assert m._loc_of_msg_key("acct|md5v|message_0.db|7") == ("md5v", "message_0.db", 7)
+    assert m._loc_of_msg_key("acct|md5v|message_0.db|notanumber") is None
+    assert m._loc_of_msg_key("acct|md5v|message_0.db") is None
+    assert m._loc_of_msg_key("acct|md5v|message_0.db|7|extra") is None
+
+
+
 def test_sticker_export_degrades_with_the_same_three_way_note(tmp_path, monkeypatch):
     """EA-089：贴纸侧的「三种空」此前**零测试**。与视频共用 `_refs_absence_note` 之后，
     两种可区分的成因必须逐条成立——尤其「refs 在、消息不在」那一种不许提 `rebuild-refs`

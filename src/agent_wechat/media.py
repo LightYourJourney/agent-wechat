@@ -389,6 +389,18 @@ _PROTO_ZHCN = re.compile(rb"zh_cn\x12(.)", re.S)
 _CJK = re.compile(r"[一-鿿]+")
 
 
+def _loc_of_msg_key(msg_key: str) -> tuple[str, str, int] | None:
+    """`account|chat_md5|shard|local_id` → `(chat_md5, shard, local_id)`；形状不合法 → None。
+
+    EA-085：此前 `_locs` 只查「四段」，末段不是数字时 `int()` 裸抛 `ValueError`（core 层
+    只抛项目异常）——坏索引会让整批贴纸导出崩。判据收在这里，坏键由调用方按 `failed` 归口。
+    """
+    parts = msg_key.split("|")
+    if len(parts) != 4 or not parts[3].isdigit():
+        return None
+    return parts[1], parts[2], int(parts[3])
+
+
 def _sticker_name(raw_b64: str | None) -> str | None:
     """`desc` / `emojiattr` 的 Base64 protobuf → 中文名。
 
@@ -1325,8 +1337,11 @@ def _export_stickers(account: str, chat_ids: list[str], out_root: pathlib.Path,
     def _locs(keys: list[str]) -> list[tuple[str, str, int]]:
         out = []
         for k in keys:
-            _a, c, sh, l = k.split("|")
-            out.append((c, sh, int(l)))
+            loc = _loc_of_msg_key(k)             # EA-085：形状校验收在一个可测的纯函数里
+            if loc is None:
+                report.sticker.failed += 1       # 与上面那条「msg_key 形状不对」同支归口
+                continue
+            out.append(loc)
         return out
 
     # 去重：候选跨月后同一个 msg_key 会出现在多个月份键里，重复的行查询是白费。

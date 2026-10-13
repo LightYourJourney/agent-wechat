@@ -600,6 +600,18 @@ def verify(plan: PurgePlan) -> ResidueReport:
 
 # ---------- 会话级销毁（`purge --chat`）：计划 → 执行 → 核查 ----------
 
+def _root_cause(exc: BaseException) -> BaseException:
+    """EA-074：`store.connect()` 已把建立段的 sqlite 错误翻成 `IndexUnavailable`——
+    这里把**最深那层病因**取回来，让外层 `raise ... from` 的 `__cause__` 仍指向原始
+    `sqlite3.Error` / `OSError`（调用方与测试都按那条契约看病因）。
+    """
+    cur, seen = exc, 0
+    while isinstance(cur, errors.IndexUnavailable) and cur.__cause__ is not None and seen < 4:
+        cur = cur.__cause__
+        seen += 1
+    return cur
+
+
 @contextlib.contextmanager
 def _open_index() -> Iterator[sqlite3.Connection]:
     """purge 的库连接：`store.open()` 的连接 + **尽力加载 sqlite-vec**。
@@ -742,18 +754,20 @@ def plan_chat(resolved: list[dict]) -> ChatPlan:
             entries.append(ChatEntry(
                 item["account"], item["chat_id"], md5, counts, counts["messages"],
                 d, exists, _tree_size(d) if exists and not d.is_symlink() else 0))
-    except (sqlite3.Error, OSError) as exc:
+    except (sqlite3.Error, OSError, errors.IndexUnavailable) as exc:
         # 索引打不开/读不了（损坏、权限、被别的进程占着）时，裸 `sqlite3.DatabaseError` /
         # `sqlite3.OperationalError` 会一路逃到 CLI 的 `except AgentWeChatError` 之外——
         # 用户看到的是一整个 traceback 而不是一行拒绝。core 层只抛项目异常（errors.py 开篇
         # 契约），所以在模块边界翻，并点名**哪一步**失败。
+        # EA-074 之后 `store.connect()` 会把建立段的 sqlite 错误先翻成 `IndexUnavailable`
+        # ——那也是「读不了」，在同一处一并翻（`__cause__` 保持最深那层病因）。
         # `exists()` / `_tree_size()` 也在 try 里：`media/` 父目录不可搜索时 pathlib 抛 EACCES
         # （EACCES 不在它忽略的 errno 里），同样不许裸穿。
         raise errors.PurgeRefused(
             f"读取索引失败，未生成销毁计划：{exc}",
             hint="确认 index.db 可读、且没有别的进程正在写它（导出任务 / MCP server）；"
                  "库损坏（file is not a database 等）时先 purge --index 删掉再重跑 export"
-        ) from exc
+        ) from _root_cause(exc)
     return ChatPlan(tuple(entries))
 
 
@@ -843,7 +857,7 @@ def execute_chat(plan: ChatPlan) -> tuple[ChatReport, ...]:
     try:
         with _open_index() as con:
             exclusions.count(con)
-    except (sqlite3.Error, OSError) as exc:
+    except (sqlite3.Error, OSError, errors.IndexUnavailable) as exc:   # EA-074：connect 段已翻过一次
         # 这条闸门开的是**整条连接**（`store.connect()` 会 ATTACH 排除清单并跑 SCHEMA），
         # 所以异常有两个来源、修法完全不同，文案必须两个都点到。实测：**新库**形态下
         # `CREATE TABLE` 就要写锁，异常是从 connect 里抛的——跟排除清单一点关系都没有，
@@ -853,7 +867,7 @@ def execute_chat(plan: ChatPlan) -> tuple[ChatReport, ...]:
             hint="看括号里的真因：`database is locked` → 有别的进程正在写索引"
                  "（导出任务 / MCP server），等它结束后重试；"
                  f"否则检查 {exclusions.path()} 是否可读——它没了，被删内容下次导出就会回来"
-        ) from exc
+        ) from _root_cause(exc)
     for e in plan.entries:
         try:
             with _open_index() as con:
@@ -879,7 +893,7 @@ def execute_chat(plan: ChatPlan) -> tuple[ChatReport, ...]:
                 # ——那种情况只能等它自己 checkpoint，所以忽略失败，不因此让命令报错。
                 with contextlib.suppress(sqlite3.Error):
                     con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-        except (sqlite3.Error, OSError) as exc:
+        except (sqlite3.Error, OSError, errors.IndexUnavailable) as exc:   # EA-074：connect 段已翻过一次
             # **这一层必须包住 `_open_index()` 本身**，不能只包 `BEGIN IMMEDIATE`——
             # `store.connect()` 每次都跑 `executescript(SCHEMA)`，而那是 DDL、要写锁。
             # 实测（本机 SQLite 3.50 / WAL，另一条连接持 `BEGIN IMMEDIATE` + 一次写）：
@@ -972,14 +986,14 @@ def verify_chat(plan: ChatPlan) -> ChatResidue:
         # errno 里），那也要翻成 PurgeRefused，不许裸穿、更不许被吞成「不在」。
         surviving = tuple(dict.fromkeys(
             e.export_dir for e in plan.entries if name_there(e.export_dir)))
-    except (sqlite3.Error, OSError) as exc:
+    except (sqlite3.Error, OSError, errors.IndexUnavailable) as exc:   # EA-074：connect 段已翻过一次
         # 同 plan_chat：读不了库时不许裸 sqlite3.Error 逃到 CLI。而且**「核查不了」必须与
         # 「核查通过」区分开**——静默返回一个空 leftover 就是对着未知状态报 ✅。
         raise errors.PurgeRefused(
             f"核查失败，本次结果不可信：{exc}",
             hint="确认 index.db / exclusions.db 可读且没有别的进程正在写索引"
                  "（导出任务 / MCP server）；库损坏时先 purge --index 删掉再重跑 export"
-        ) from exc
+        ) from _root_cause(exc)
     return ChatResidue(tuple(leftover), written, sum(e.tombstone for e in plan.entries),
                        surviving)
 
@@ -1024,10 +1038,10 @@ def undo_chat(targets: list[dict], *, apply: bool = False) -> tuple[UndoEntry, .
                 for e in per:
                     exclusions.remove_chat(con, e.account, e.chat_md5)
                 con.commit()      # remove_chat 不 commit（它的契约）：由调用方收口
-    except (sqlite3.Error, OSError) as exc:
+    except (sqlite3.Error, OSError, errors.IndexUnavailable) as exc:   # EA-074：connect 段已翻过一次
         # 读不出来就一行拒绝，不许裸异常穿到 CLI 的漏斗之外（core 层只抛项目异常）。
         raise errors.PurgeRefused(
             f"撤销未执行：{exc}",
             hint=f"检查 {exclusions.path()} 是否可读、是否损坏"
-        ) from exc
+        ) from _root_cause(exc)
     return tuple(per)

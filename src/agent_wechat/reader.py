@@ -448,7 +448,10 @@ class MessageReader:
                 tables = self._shard_tables(con, md5hex)
                 if tables:          # 空 = 该会话在这分片里没有消息，**不是**漂移（spec §4）
                     self._check("messages", f"message/{shard.name}", con, table=tables[0])
-                n2i = self._name2id(con)
+                    # EA-017：Name2Id 只在这张表的行解码里用——挪进 `if`。无条件读它时，
+                    # 「目标会话不在本分片」的分片（`tables` 为空）照样会去碰 Name2Id，
+                    # 缺那张表的分片就抛裸 sqlite 错误（守卫白设）。
+                    n2i = self._name2id(con)
                 for table in tables:
                     pieces += self._read_rows(con, table, shard.name, md5hex, chat_map,
                                               n2i, order_desc=True, limit=limit,
@@ -456,6 +459,10 @@ class MessageReader:
             if len(pieces) >= limit:
                 break
         pieces.sort(key=lambda m: m.ts)
+        # EA-080：`[-0:]` 是**全量**切片（`-0 == 0`）——`limit=0` 必须返回空列表，
+        # 与 `if limit:` 的「0 = 不拼 LIMIT」在 SQL 侧的口径分开写清楚。
+        if limit <= 0:
+            return []
         return self._apply_roster(chat_id, pieces)[-limit:]
 
     def iter_all(self, chat_id: str | None = None, resume: dict[str, int] | None = None,
@@ -479,7 +486,7 @@ class MessageReader:
                 tables = self._shard_tables(con, want_md5)
                 if tables:          # 空 = 该分片里没有匹配的表，**不是**漂移（spec §4）
                     self._check("messages", f"message/{shard.name}", con, table=tables[0])
-                n2i = self._name2id(con)
+                    n2i = self._name2id(con)      # EA-017：只在有表可读时才碰它
                 for table in tables:
                     md5hex = table[4:]
                     # EA-112：不再逐表比对 want_md5——`_shard_tables(con, want_md5)` 已早退到

@@ -251,10 +251,14 @@ def account_status(account: str | None = None) -> dict:
     try:
         with store.open() as con:
             index = store.counts(con)
+            # EA-077：触发器体是「OLD 库 + 新代码」的静默失配面——自检报出来（不改库）。
+            schema_notes = store.schema_drift_notes(con)
     except Exception:
         index = {"messages": 0, "chats": 0, "last_ts": None}
+        schema_notes = []
     return {"wechat_running": st.running, "current_account": st.current,
-            "accounts": st.accounts, "key_ready": ready, "index": index}
+            "accounts": st.accounts, "key_ready": ready, "index": index,
+            "schema_notes": schema_notes}
 
 
 def contacts(query: str = "", limit: int = 200,
@@ -1036,14 +1040,16 @@ def purge_chat_targets(contact: str, account: str | None = None) -> list[dict] |
                 rows = con.execute(
                     "SELECT account FROM exclusions.excluded WHERE chat_md5=? "
                     "ORDER BY account", (md5,)).fetchall()
-    except (sqlite3.Error, OSError) as exc:
+    except (sqlite3.Error, OSError, errors.IndexUnavailable) as exc:
         # 与 plan_chat 同一口径：读不了索引/清单时裸 sqlite3.Error 会一路逃到 CLI 的
         # `except AgentWeChatError` 之外，用户看到的是一整个 traceback 而不是一行拒绝。
+        # EA-074 之后 `store.connect()` 会先翻一次（IndexUnavailable）——同样是「读不了」，
+        # 在这里统一翻成销毁路径自己的 PurgeRefused，`__cause__` 取最深那层病因。
         raise errors.PurgeRefused(
             f"读不出会话「{contact}」的销毁目标：{exc}",
             hint="确认 index.db 可读、且没有别的进程正在写它（导出任务 / MCP server）；"
                  "库损坏（file is not a database 等）时先 purge --index 删掉再重跑 export"
-        ) from exc
+        ) from (exc.__cause__ or exc)
     if not rows:
         # 空集**不是「无事可做」**，恰好相反：索引里没有活行，不代表 `media/<md5>/` 不在盘上
         # ——`purge --index` 之后逐会话重建的那个窗口里，解密出的图片/语音/HTML 还摊在盘上，
@@ -1211,7 +1217,7 @@ def search_history(query: str, contact: str | None = None, limit: int = 20,
     _refresh_roster(ctx)
     res = search.search(query, chat_id=chat_id, limit=clamp_limit(limit),
                         account=ctx.account)
-    res["degraded"] = ctx.degradations()
+    res["degraded"] = [*res.get("degraded", []), *ctx.degradations()]   # EA-013：合并 FTS 降级说明
     return res
 
 

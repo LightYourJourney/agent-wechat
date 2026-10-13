@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import sqlite3
 
-from . import messages, store
+from . import errors, messages, store
 from .errors import SearchInputError
 
 # 命中行的列清单（fts / like 两条路径共用；两处 SQL 曾各抄一份）
@@ -30,12 +30,17 @@ def search(query: str, chat_id: str | None = None, limit: int = 20,
     """
     if not account:
         raise SearchInputError("search 需要显式 account（多账号索引隔离）")
+    if not query.strip():
+        # EA-073：空/全空白 query 曾退化成 LIKE '%%'（全表匹配）——在入口直接拒绝，
+        # 别让一次手滑变成全表扫。
+        raise SearchInputError("检索串不能为空（或全空白）")
     where, args = ["m.account = ?"], [account]
     if chat_id:
         where.append("m.chat_id = ?")
         args.append(chat_id)
     w = " AND ".join(where)
 
+    notes: list[dict] = []
     with store.open() as con:
         mode = "fts"
         try:
@@ -46,32 +51,35 @@ def search(query: str, chat_id: str | None = None, limit: int = 20,
                    f"WHERE messages_fts MATCH ? AND {w} "
                    f"ORDER BY m.ts DESC LIMIT ?")
             rows = con.execute(sql, [_fts_safe(query), *args, limit]).fetchall()
-        except sqlite3.OperationalError:
-            rows = []
+        except sqlite3.OperationalError as exc:
+            # EA-013：只吞「**确认可降级**」的那一种，且把降级说出来（mode 不再是 fts）。
+            # 此前吞掉**全部** OperationalError：索引损坏与将来的 SQL 拼装错误都静默成
+            # 「0 命中，mode=fts」——真故障看起来和「没搜到」一模一样。
+            msg = str(exc)
+            if "no such table" in msg or "no such column" in msg:
+                rows = []
+                mode = "like"            # 降级要说出来：不再假报 mode=fts
+                notes.append({"capability": "search_fts",
+                              "effect": f"索引库结构不完整（{msg}）——已退回 LIKE 兜底；"
+                                        "删除 index.db 后重跑一次导出即可重建"})
+            else:
+                raise errors.SearchInputError(   # 编程/输入错误的原样重抛（响亮）
+                    f"检索失败：{errors.redact(msg)}") from exc
 
         if not rows and len(query.strip()) <= 2:
             # trigram 无法匹配 <3 字符 → LIKE 兜底（有 chat 过滤则快，无过滤为全表扫）
             mode = "like"
-            like = f"%{query.strip()}%"
+            q = query.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            like = f"%{q}%"
             sql = (f"SELECT {_HIT_COLUMNS}, "
                    f"NULL AS snip FROM messages m {store._SENDER_JOIN} "
-                   f"WHERE m.content LIKE ? AND {w} "
+                   f"WHERE m.content LIKE ? ESCAPE '\\' AND {w} "
                    f"ORDER BY m.ts DESC LIMIT ?")
             args2 = [like, *args, limit]
             rows = con.execute(sql, args2).fetchall()
 
     hits = [dict(r) for r in rows]
-    return {"hits": hits, "mode": mode, "total": len(hits)}
-
-
-def recent_from_store(chat_id: str, limit: int = 50) -> list[dict]:
-    """本地库读取近期消息（毫秒级；需先导出）。"""
-    with store.open() as con:
-        rows = con.execute(
-            f"SELECT {_RECENT_COLUMNS} FROM messages m {store._SENDER_JOIN} "
-            "WHERE m.chat_id=? ORDER BY m.ts DESC, m.local_id DESC LIMIT ?",
-            (chat_id, limit)).fetchall()
-    return [dict(r) for r in reversed(rows)]  # 时间正序
+    return {"hits": hits, "mode": mode, "total": len(hits), "degraded": notes}
 
 
 def messages_in_range(chat_id: str, *, account: str,

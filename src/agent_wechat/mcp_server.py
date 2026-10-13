@@ -110,8 +110,9 @@ def get_recent_messages(contact: str, limit: int = 50,
         return _need_confirm(res)
     return {"chat_id": res.chat_id, "display": res.display,
             "messages": [_msg_dict(m) for m in res.messages],
-            "degraded": [{"capability": d.capability, "effect": d.effect}
-                         for d in res.degraded]}
+            "degraded": [d if isinstance(d, dict)
+                         else {"capability": d.capability, "effect": d.effect}
+                         for d in res.degraded]}   # EA-013：两种形态都收
 
 
 @server.tool()

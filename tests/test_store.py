@@ -118,3 +118,199 @@ def test_media_refs_by_chat_filters_kind_and_spans_batches(con, monkeypatch):
     assert len(rows_a) == 5 and len(rows_b) == 3 and len(rows_c) == 1, "跨批累积丢了行"
     assert all(k.count("|") == 3 for k, _ts, _fk in rows_a + rows_b + rows_c)
     assert [ts for _k, ts, _fk in rows_a] == sorted(ts for _k, ts, _fk in rows_a), "会话内按 ts 升序"
+
+
+def test_count_media_refs_takes_a_degraded_chat_id(con):
+    """EA-011：`count_media_refs(chat_ids=…)` 必须走 `messages.chat_md5()`——
+    退化形态（`md5:<hex>`）经 `md5_of()` 会被**再哈希一次**，与 msg_key 第二段分家、
+    计数恒为 0（而 `messages` 侧同族的另三处判据都用 `chat_md5()`）。
+    """
+    from agent_wechat import messages
+
+    real = "wxid_abc123def456"
+    md5v = messages.chat_md5(real)
+    deg = messages.degraded_chat_id(md5v)          # "md5:<hex>"
+    assert messages.md5_of(deg) != md5v, "前提：md5_of 对退化形态会再哈希一次"
+    store.upsert_media_refs(con, [(f"acct|{md5v}|message_0.db|1", "image", "aa" * 16, None)])
+    assert store.count_media_refs(con, "acct", chat_ids=[deg]) == 1
+    assert store.count_media_refs(con, "acct", chat_ids=[deg], kind="image") == 1
+    assert store.count_media_refs(con, "acct", chat_ids=[deg], kind="video") == 0
+
+
+def test_upsert_corrects_a_degraded_chat_id_in_place(con):
+    """EA-012 ①：同 key 重扫、`chat_id` 由退化形态变真名 → **就地修正**。
+
+    修前 `chat_id` 不在 DO UPDATE 集里，行永远停在首次写入的退化 id 上
+    （`WHERE messages.content IS NOT excluded.content` 也不会被触发）。
+    """
+    from agent_wechat import messages
+
+    real = "wxid_abc123def456"
+    md5v = messages.chat_md5(real)
+    deg = messages.degraded_chat_id(md5v)
+    key = f"acct|{md5v}|message_0.db|1"
+    row = messages.make_row(account="acct", chat_md5=md5v, chat_id=deg, shard="message_0.db",
+                            local_id=1, ts=1700000000, msg_type=1, sender_id=None,
+                            sender_name=None, is_self=0, content="同一句正文", media_hint=None)
+    store.upsert_batch(con, [row])
+    assert con.execute("SELECT chat_id FROM messages WHERE msg_key=?", (key,)).fetchone()[0] == deg
+
+    store.upsert_batch(con, [{**row, "chat_id": real}])
+    assert con.execute("SELECT chat_id FROM messages WHERE msg_key=?", (key,)).fetchone()[0] == real
+
+
+def test_upsert_touches_a_row_whose_chat_id_changed_even_if_content_did_not(con):
+    """EA-012 ②：content 不变、只有 `chat_id` 变 → 也必须更新（守卫生效的判别面）。
+
+    把守卫改回「只认 content」，本用例必红。
+    """
+    import time
+
+    from agent_wechat import messages
+
+    md5v = messages.chat_md5("wxid_abc123def456")
+    key = f"acct|{md5v}|message_0.db|1"
+    base = dict(account="acct", chat_md5=md5v, shard="message_0.db", local_id=1,
+                ts=1700000000, msg_type=1, sender_id=None, sender_name=None, is_self=0,
+                content="同一句正文", media_hint=None)
+    store.upsert_batch(con, [messages.make_row(chat_id="wxid_abc123def456", **base)])
+    before = con.execute("SELECT exported_at FROM messages WHERE msg_key=?", (key,)).fetchone()[0]
+    time.sleep(1.1)      # exported_at 是秒级：跨 1 秒才能判别「真的写过」
+    store.upsert_batch(con, [messages.make_row(chat_id="wxid_testacct01_ab12", **base)])
+    after = con.execute("SELECT exported_at, chat_id FROM messages WHERE msg_key=?",
+                        (key,)).fetchone()
+    assert after[1] == "wxid_testacct01_ab12"
+    assert after[0] > before, "守卫没放行这次更新（exported_at 未推进）"
+
+
+def test_upsert_keeps_chat_row_counts_consistent_after_the_fix(con):
+    """EA-012 ③：分裂场景消失后，同一 chat_md5 的 messages 与 parts/refs 计数同数
+    （前缀按 md5 数——修复前 `chat_row_counts` 报 messages:1 而 parts/refs:2 的「各说各话」）。"""
+    from agent_wechat import messages
+
+    md5v = messages.chat_md5("wxid_abc123def456")
+    deg = messages.degraded_chat_id(md5v)
+    store.upsert_batch(con, [
+        messages.make_row(account="acct", chat_md5=md5v, chat_id=deg, shard="message_0.db",
+                          local_id=1, ts=1700000000, msg_type=49, sender_id=None,
+                          sender_name=None, is_self=0, content="<x/>", media_hint=None),
+        messages.make_row(account="acct", chat_md5=md5v, chat_id="wxid_abc123def456",
+                          shard="message_0.db", local_id=2, ts=1700000001, msg_type=49,
+                          sender_id=None, sender_name=None, is_self=0, content="<y/>",
+                          media_hint=None)])
+    store.upsert_msg_parts(con, [
+        (messages.row_key("acct", md5v, "message_0.db", i), 5, None, None, b"<x/>")
+        for i in (1, 2)])
+    con.commit()
+
+    # 名字解析回来后重扫（同 key、同 content）——EA-012 之前，退化那条会**留在原地**
+    # （守卫只认 content），于是同一 chat_md5 上 messages 只有 1 条而 parts/refs 有 2 条。
+    store.upsert_batch(con, [
+        messages.make_row(account="acct", chat_md5=md5v, chat_id="wxid_abc123def456",
+                          shard="message_0.db", local_id=i, ts=1700000000 + i, msg_type=49,
+                          sender_id=None, sender_name=None, is_self=0, content=c,
+                          media_hint=None)
+        for i, c in ((1, "<x/>"), (2, "<y/>"))])
+    counts = store.chat_row_counts(con, "acct", "wxid_abc123def456")
+    assert counts["messages"] == counts["parts"] == 2, counts
+
+
+def test_schema_drift_notes_detect_a_stale_trigger_body(tmp_path, monkeypatch):
+    """EA-077：`CREATE TRIGGER IF NOT EXISTS` 只挡创建、不挡演进——老库留着旧触发器体，
+    代码改了 DDL 也不会生效（FTS 镜像与 EA-012 的修正集全靠它）。自检必须**报出来**。
+
+    新库 → 无 note；把触发器体改掉重建 → 恰好报那一条。
+    """
+    monkeypatch.setattr(paths, "HOME_DIR", tmp_path / "home")
+    con = store.connect(tmp_path / "i.db")
+    try:
+        assert store.schema_drift_notes(con) == [], "新库不该报漂移"
+        con.execute("DROP TRIGGER msg_fts_au")
+        con.execute("CREATE TRIGGER msg_fts_au AFTER UPDATE OF content ON messages "
+                    "BEGIN SELECT 1; END")
+        con.commit()
+        notes = store.schema_drift_notes(con)
+        assert len(notes) == 1 and "msg_fts_au" in notes[0], notes
+    finally:
+        con.close()
+
+
+def test_search_reports_a_damaged_index_instead_of_silently_zero(con, monkeypatch):
+    """EA-013（= EA-078③ 的 FTS 失败路径）：`messages_fts` 被删后，`search()` 不许再
+    静默答「0 命中，mode=fts」——降级为 like 并随 `degraded` 说明「索引不完整 + 重建路径」；
+    而**非**索引类的 OperationalError（编程错误）要响亮地抛。
+
+    把 except 收窄回 `except sqlite3.OperationalError: rows = []`，本用例必红。
+    """
+    import sqlite3
+
+    from agent_wechat import messages, search
+
+    con.execute("DROP TABLE messages_fts")
+    con.commit()
+    # 注入这条连接：`store.open()` 会按 SCHEMA 把删掉的 FTS 表**重建**回来（IF NOT EXISTS），
+    # 直接调它测不到损坏形态。
+    monkeypatch.setattr(store, "open", lambda: _Ctx(con))
+    res = search.search("爬山", account="acct")
+    assert res["mode"] == "like", res
+    assert res["degraded"] and "索引库结构不完整" in res["degraded"][0]["effect"], res
+
+    # 编程错误（列名拼错 → no such column）也走「索引损坏」一支是刻意的：
+    # 两者都无法降级、都必须让人看见；这里钉住的是「不再静默成 0 命中」这一点。
+    assert res["total"] == 0
+
+
+def test_search_raises_on_an_unclassified_sqlite_error(con, monkeypatch):
+    """EA-013：不认识的 OperationalError 一律原样重抛成项目异常（响亮），不吞。"""
+    import sqlite3
+
+    from agent_wechat import errors, search
+
+    class _Boom:
+        def execute(self, *a, **k):
+            raise sqlite3.OperationalError("out of memory")
+
+    monkeypatch.setattr(store, "open", lambda: _Ctx(_Boom()))
+    import pytest as _pytest
+    with _pytest.raises(errors.SearchInputError):
+        search.search("爬山", account="acct")
+
+
+class _Ctx:
+    def __init__(self, con):
+        self._con = con
+
+    def __enter__(self):
+        return self._con
+
+    def __exit__(self, *a):
+        return False
+
+
+def test_search_rejects_blank_query_and_escapes_like_wildcards(con, monkeypatch):
+    """EA-073：① 空/全空白 query 在入口拒绝（此前退化成 `LIKE '%%'` 全表匹配）；
+    ② LIKE 支路把 `%` / `_` 当**字面量**（FTS 支路是短语匹配，不受影响——只在 LIKE 支路转义）。
+
+    去掉转义（或 `ESCAPE`），第二条断言必红：`a%` 会以通配符命中「abc」。
+    """
+    import pytest as _pytest
+
+    from agent_wechat import errors, messages, search
+
+    with _pytest.raises(errors.SearchInputError):
+        search.search("   ", account="acct")
+
+    store.upsert_batch(con, [
+        messages.make_row(account="acct", chat_md5="a" * 32, chat_id="wxid_abc123def456",
+                          shard="message_0.db", local_id=1, ts=1700000001, msg_type=1,
+                          sender_id=None, sender_name=None, is_self=0, content="abc",
+                          media_hint=None),
+        messages.make_row(account="acct", chat_md5="a" * 32, chat_id="wxid_abc123def456",
+                          shard="message_0.db", local_id=2, ts=1700000002, msg_type=1,
+                          sender_id=None, sender_name=None, is_self=0, content="a%b",
+                          media_hint=None)])
+    con.commit()
+    monkeypatch.setattr(store, "open", lambda: _Ctx(con))
+    res = search.search("a%", account="acct")
+    assert res["mode"] == "like", res
+    assert [h["content"] for h in res["hits"]] == ["a%b"], res
