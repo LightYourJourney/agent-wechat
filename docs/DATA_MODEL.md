@@ -61,7 +61,7 @@ CREATE TABLE messages (
 ```sql
 CREATE INDEX idx_msg_chat_ts ON messages(account, chat_id, ts);  -- 会话内时间序（最常用）
 CREATE INDEX idx_msg_ts      ON messages(account, ts);           -- 全局时间线
-CREATE INDEX idx_msg_sender  ON messages(account, sender_id);    -- 按发送者
+CREATE INDEX idx_msg_sender  ON messages(account, sender_id);    -- 预留、零消费者（照 server_id 先例）
 ```
 
 **全文检索**（外部内容模式，不重复存正文）：
