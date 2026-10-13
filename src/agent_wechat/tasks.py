@@ -167,6 +167,12 @@ def start(kind: str, runner: Callable[[str], int | None], **fields) -> str:
     裸 `database is locked`。**不同目标绝不吸收**（F1）。判据、插入与落盘在**同一把锁内**
     完成（F7）：check-then-act 分两次取锁会让并发 start 各起一条。
     """
+    # F1 的同族入口（review-T9 复验条件 3）：`TASKS_FILE` 的唯一写入入口也要过 HOME 那道闸。
+    # 放在**拿锁之前**：失败发生在任何状态改动之前（`_persist_locked` 的 `except OSError`
+    # 回滚接不住 `HomeUnavailable`，在锁内抛会留一条 runner 永不执行的幽灵记录）。
+    # 注：这仍是**逐点补闸**——收口（把绝对路径判据搬进 HOME_DIR 的取值处 + 源码护栏防新增
+    # 写入者）归 T15 的门禁批，清单与理由记在 ⑤。
+    paths.ensure_home_dirs()
     with _lock, _file_lock():
         _load_locked()
         for tid, rec in _tasks.items():

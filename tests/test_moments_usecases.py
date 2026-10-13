@@ -87,6 +87,21 @@ def test_export_offline_writes_html_without_any_network(env, monkeypatch):
     assert res.report.posts == 1
 
 
+def test_export_refuses_a_relative_home(env, tmp_path, monkeypatch):
+    """F1 的同族入口（review-T9 复验条件 3）：`moments export` 的默认产物根是
+    `HOME_DIR/moments`，而 usecases 入口此前不经过任何闸——相对 `AGENT_WECHAT_HOME` 下
+    它会经 `media.ensure_tree` 在 CWD 里建出整棵树（EA-003 的原始后果换了个入口）。
+
+    删掉 `paths.ensure_home_dirs()` 那行本测试必红。
+    """
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(paths, "HOME_DIR", pathlib.Path("relhome"))
+
+    with pytest.raises(errors.HomeUnavailable):
+        usecases.moments_export(account=ACCT)
+    assert not (tmp_path / "relhome").exists(), "判据必须在 mkdir 之前拦住"
+
+
 def test_export_creates_locked_down_tree(env):
     res = usecases.moments_export(account=ACCT)
     p = pathlib.Path(res.out_dir)

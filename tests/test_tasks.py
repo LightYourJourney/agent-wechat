@@ -1,12 +1,13 @@
 """通用长任务注册表：登记/进度/持久化/孤儿收割/跨进程新鲜度/失败不崩进程。"""
 import json
 import os
+import pathlib
 import threading
 import time
 
 import pytest
 
-from agent_wechat import errors, tasks
+from agent_wechat import errors, paths, tasks
 
 
 def _simulate_restart():
@@ -27,6 +28,26 @@ def _wait_done(tid, timeout=2.0):
             return st
         time.sleep(0.01)
     raise AssertionError(f"任务 {tid} 未在 {timeout}s 内结束")
+
+
+def test_start_refuses_a_relative_home(tmp_path, monkeypatch):
+    """F1 的同族入口（review-T9 复验条件 3）：`tasks.start` 是 `TASKS_FILE` 的唯一写入入口，
+    而它此前只自建目录、不过 `paths.ensure_home_dirs` 那道闸——相对 `AGENT_WECHAT_HOME` 下
+    `tasks.json` 会落进进程 CWD（MCP 的 export_full_history / build_vector_index 都走这里，
+    且 `tasks.start` 在 `store.open` **之前**）。
+
+    闸放在入口（拿锁之前）：失败发生在任何状态改动之前，内存里不留一条 runner 永不执行的
+    幽灵记录。删掉 `paths.ensure_home_dirs()` 那行本测试必红。
+    """
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(paths, "HOME_DIR", pathlib.Path("relhome"))
+    monkeypatch.setattr(tasks, "TASKS_FILE", pathlib.Path("relhome/tasks.json"))
+
+    before = set(tasks._tasks)          # `_tasks` 是模块级状态、跨用例不重置（全量跑时
+    with pytest.raises(errors.HomeUnavailable):   # 前面用例会留下记录）——比快照，不比空
+        tasks.start("export", lambda tid: None)
+    assert not (tmp_path / "relhome").exists(), "判据必须在 mkdir 之前拦住"
+    assert set(tasks._tasks) == before, "闸在入口：失败不留幽灵记录"
 
 
 def test_start_runs_runner_and_records_rows(tmp_path, monkeypatch):

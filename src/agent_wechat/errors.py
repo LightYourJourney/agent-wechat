@@ -26,11 +26,14 @@ def redact(text: str) -> str:
     """剥掉密钥形态的连续 64 位 hex，再截断长度。
 
     为什么必须做：`decrypt.py` 把派生密钥拼成 `PRAGMA key = "x'<64位hex>'"` 交给
-    sqlcipher，而 sqlcipher 报错时会**回显出错语句并加插入符**（/tmp 实测：`SELEKT …`
-    形态两形态都回显；**密钥行本身未复现**回显——按「可能发生」处理）。C1 之前这段文字
-    被 MCP SDK 吞掉、只留在服务端日志；C1 之后它会进对外信封、到 agent 手上，甚至发往
-    外部 API——直接压在「密钥不进错误信息」这条硬约束上。
-    （EA-053：命令已改走 stdio 的 stdin，密钥不再出现在 argv；回显机制与脱敏的必要性不变。）
+    sqlcipher，而 sqlcipher 报错时会**回显出错语句并加插入符**。两轮复审都在 /tmp 用真
+    sqlcipher 实测到：**密钥行自身出错时必回显**（stdin 与 argv 两形态一样），且回显块按
+    ~80 列**折行**——折行处会把密钥切成**前缀**（实测 62/64 位），而本函数的判据只认
+    「恰好 64 位连续 hex」，对残段无效。所以 `decrypt` 侧只把 stderr 的**首个非空行**交出来
+    （见 `decrypt._first_line`：残段住在回显块里），首行里的完整密钥由本函数换成 `<已脱敏>`。
+    C1 之前这段文字被 MCP SDK 吞掉、只留在服务端日志；C1 之后它会进对外信封、到 agent
+    手上，甚至发往外部 API——直接压在「密钥不进错误信息」这条硬约束上。
+    （EA-053：命令已改走 stdin，密钥不再出现在 argv；回显机制与脱敏的必要性不变。）
     """
     text = _SECRET_HEX.sub("<已脱敏>", text)
     return text if len(text) <= _MAX_LEN else text[:_MAX_LEN] + "…"

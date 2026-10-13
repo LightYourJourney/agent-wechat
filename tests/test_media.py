@@ -1261,8 +1261,9 @@ def test_export_media_unverifiable_out_root_mode_degrades_once(tmp_path, monkeyp
 def test_unreadable_attach_tree_raises_media_key_error(tmp_path, monkeypatch):
     """Ruling 16：attach 树读不了 → 既有的「没有样本」MediaKeyError，不是裸 OSError。
 
-    `glob` 是惰性生成器：不物化的话异常从 `_derive_xor_key` 的 for 或 `next(iter(...))`
-    里裸奔出 core 层。走 `_safe_iter` 后空样本集落到 derive_keys 既有的能力级降级上。
+    `glob` 是惰性生成器：不物化的话异常从 `_scan_dats` 的 for 里裸奔出 core 层
+    （F10：原文引的 `_derive_xor_key` 已改名，`derive_keys` 也不再是 `next(iter(...))`）。
+    走 `_safe_iter` 后空样本集落到 derive_keys 既有的能力级降级上。
     """
     root, account = make_tree(tmp_path, monkeypatch)
     (paths.CONTAINER / "app_data/net/kvcomm/key_5_x.statistic").write_bytes(b"")

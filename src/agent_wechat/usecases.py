@@ -1342,6 +1342,10 @@ def moments_export(contact: str | None = None, *, months: list[str] | None = Non
     `with_media=False`（默认）时**全程零网络**——这是零网络红线上本次新增的例外开关，
     默认必须关闭。`fetch` 仅作测试注入，生产调用方不传。
     """
+    # F1 的同族入口（review-T9 复验条件 3）：默认产物根在 HOME 下（`HOME_DIR/moments`），
+    # 而本入口此前不过任何闸——相对 AGENT_WECHAT_HOME 下会经 `media.ensure_tree` 在 CWD 里
+    # 建出整棵树（EA-003 的后果换了个入口）。同 `store.connect` / `keys.save_cached_hex` 的立场。
+    paths.ensure_home_dirs()
     from . import moments, moments_html, sns_media          # 惰性：moments_html 只在导出时用（media 已顶层）
     ctx = ChatContext(account)
     author = ctx.resolve_optional(contact)
