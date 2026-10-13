@@ -13,7 +13,7 @@
 | 解密后的媒体明文（图片/语音 WAV/视频）与**会话时间线产物**（HTML / Markdown 明文，含引用 / 链接 / 转账内容） | `~/.agent-wechat/media/`（持久） | 极高 |
 | 朋友圈正文 / 评论 / 点赞 / 媒体明文（`moments export` 产物） | `~/.agent-wechat/moments/`（持久；目录 0700、文件 0600） | 极高 |
 | **例外**：`moments export --out DIR` 会把同一份朋友圈明文（含已下载的媒体）写到**任意指定目录** | `DIR`（代码尽力 chmod 0700，但不在 `~/.agent-wechat/` 之下） | 极高（用后必须手动删除；不受 Time Machine 排除与 `purge` 覆盖） |
-| **例外**：`decrypt <db> --out` 调试命令会**持久**写出整库明文 | `~/.agent-wechat/<out>`（相对路径）或**绝对路径按原样写入的任意位置**；文件 0600 | 极高（用后必须手动删除；绝对路径产物不在 `~/.agent-wechat/` 之下，不受 `purge` 覆盖） |
+| **例外**：`decrypt <db> --out` 调试命令会**持久**写出整库明文 | 相对路径（不含 `..`）落 `~/.agent-wechat/<out>`；**绝对路径与含 `..` 的相对路径写到其解析结果处**；文件恒 0600 | 极高（用后必须手动删除；上述两类产物不在 `~/.agent-wechat/` 之下，不受 `purge` 与 TM 排除覆盖） |
 | **例外**：`media export --out DIR` 会把同一份媒体明文写到**任意指定目录** | `DIR`（代码尽力 chmod 0700，但不在 `~/.agent-wechat/` 之下） | 极高（用后必须手动删除；不受 Time Machine 排除与 `purge` 覆盖） |
 | **例外**：`chat export --out DIR` 会把同一份**会话正文明文**（HTML / Markdown，含引用原文与转账字段）写到**任意指定目录** | `DIR`（代码逐级 chmod 0700、文件 0600，但不在 `~/.agent-wechat/` 之下） | 极高（用后必须手动删除；不受 Time Machine 排除与 `purge` 覆盖。`chat index --out` 只写一页索引，同理） |
 

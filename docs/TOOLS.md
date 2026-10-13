@@ -300,7 +300,7 @@
   `gh_*` / `filehelper`；reader 对无法反查的会话给出的 `md5:<hex>` 退化形式也特判支持）
   能命中。一个能解析、但**没有任何已入索引消息**的会话（该会话从未导出，或消息全被跳过）
   返回 `{"total": 0, "hits": []}` 且**不带 hint**——与「确实没有命中」不可区分。
-- 索引未构建返回 `{"error": ..., "hint": "请先运行 build_vector_index"}`；
+- 索引未构建返回 `{"error": ..., "hint": "请先构建向量语义索引（MCP：`build_vector_index`）"}`；
   索引由其他模型构建时返回错误并提示重建（`vector-build --rebuild` 或
   `build_vector_index(rebuild=True)`），不会混用不同模型的向量。
 - 检索延迟（2026-09-11 真机实测，68 万向量）：单会话 ~76ms；全局热查询 ~0.6s，
@@ -732,7 +732,7 @@
   `agent-wechat appmsg rebuild`」。空答案必须自证是哪一种空（与 §11 的「本地索引为空」
   同一约定）。
 - 索引库打不开 / 读不了（损坏、半拷贝的 WAL、权限）→ `{"error": "本地检索库不可用：…",
-  "hint": "索引库可能损坏；删除 index.db 后重跑 export_full_history 可重建"}`，**不是**一个空
+  "hint": "索引库可能损坏；删除 index.db 后重跑一次导出即可重建（MCP：`export_full_history`）"}`，**不是**一个空
   `parts`——空答案会把「库坏了」谎报成「没有可读内容」。
 - **不联网、不写微信目录、不写任何产物**：只读本地检索库；`contact` 的解析要读一次
   `contact.db`（只读，同其它 contact 类工具）。
