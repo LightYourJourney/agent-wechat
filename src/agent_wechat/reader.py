@@ -482,8 +482,8 @@ class MessageReader:
                 n2i = self._name2id(con)
                 for table in tables:
                     md5hex = table[4:]
-                    if want_md5 and md5hex != want_md5:
-                        continue
+                    # EA-112：不再逐表比对 want_md5——`_shard_tables(con, want_md5)` 已早退到
+                    # 唯一那张表，这里再判一次是恒真分支（同一判据两处维护）。
                     start = resume.get((shard.name, md5hex), 0)
                     cur = con.execute(
                         f"SELECT local_id, local_type, real_sender_id, create_time, "

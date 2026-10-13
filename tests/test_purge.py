@@ -591,7 +591,7 @@ def test_execute_refuses_when_home_is_root(monkeypatch):
     execute 之间 paths.HOME_DIR 可能已被改指（或首次 plan 走的不是这条路径），到那时就只剩
     「已经开始删」了。测试文件里那道 autouse 红线保护不了这条——它保护的是测试自己。"""
     monkeypatch.setattr(paths, "HOME_DIR", pathlib.Path("/"))
-    p = purge.PurgePlan(scopes=frozenset({"keys"}), all_=False, items=(), loose=())
+    p = purge.PurgePlan(all_=False, items=(), loose=())
     with pytest.raises(errors.PurgeRefused) as ei:
         purge.execute(p)
     assert "文件系统根" in str(ei.value)

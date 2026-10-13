@@ -466,7 +466,7 @@ def test_the_unrebuildable_line_goes_by_the_flag_not_by_the_path(capsys):
     # 这条断言护的是**本测试自己的判别力**：假产物的路径一旦与真产物重合，两种判据都会印，
     # 这条就退化成「怎么改都绿」的假护栏。
     assert fake.path != exclusions.path()
-    plan = purge.PurgePlan(frozenset(), True, (purge.PlanItem(fake, False, 0, False),), ())
+    plan = purge.PurgePlan(True, (purge.PlanItem(fake, False, 0, False),), ())
     cli._render_plan(plan, 7, None)
     out = capsys.readouterr().out
     assert "不可重建：7 条排除随之失效" in out, f"判据必须是 unrebuildable 标志：{out!r}"

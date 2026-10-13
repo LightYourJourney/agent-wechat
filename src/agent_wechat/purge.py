@@ -138,7 +138,6 @@ class LooseEntry:
 
 @dataclass(frozen=True)
 class PurgePlan:
-    scopes: frozenset[str]
     all_: bool
     items: tuple[PlanItem, ...]        # 具名产物（--all 时亦为「已知产物」部分）
     loose: tuple[LooseEntry, ...]      # 仅 --all：HOME_DIR 顶层不属于任何具名产物的条目
@@ -311,7 +310,7 @@ def plan(scopes: frozenset[str], all_: bool = False,
             # 不是 T3 那两个（它们走 all_=False，根本不进这个分支）。
             top = []
         loose = tuple(_loose_entry(p) for p in top if p not in known)
-    return PurgePlan(scopes=scopes, all_=all_, items=items, loose=loose)
+    return PurgePlan(all_=all_, items=items, loose=loose)
 
 
 @dataclass(frozen=True)

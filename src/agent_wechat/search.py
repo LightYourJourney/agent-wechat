@@ -23,7 +23,6 @@ def _fts_safe(q: str) -> str:
 
 
 def search(query: str, chat_id: str | None = None, limit: int = 20,
-           after_ts: int | None = None, before_ts: int | None = None,
            account: str | None = None) -> dict:
     """返回 {"hits": [...], "mode": "fts"|"like", "total": n}。
 
@@ -35,12 +34,6 @@ def search(query: str, chat_id: str | None = None, limit: int = 20,
     if chat_id:
         where.append("m.chat_id = ?")
         args.append(chat_id)
-    if after_ts:
-        where.append("m.ts >= ?")
-        args.append(after_ts)
-    if before_ts:
-        where.append("m.ts < ?")
-        args.append(before_ts)
     w = " AND ".join(where)
 
     with store.open() as con:

@@ -249,7 +249,7 @@ def account_status(account: str | None = None) -> dict:
     """账号/密钥/索引规模快照。account 省略即当前登录账号（不校验目录是否存在）。"""
     st = acc_mod.status()
     acct = account or st.current
-    ready = bool(acct and keys.load_cached_hex(acc_mod.paths.bare_wxid(acct)))
+    ready = bool(acct and keys.load_cached_hex(paths.bare_wxid(acct)))
     try:
         with store.open() as con:
             index = store.counts(con)

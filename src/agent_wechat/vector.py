@@ -88,8 +88,8 @@ def should_embed(row: sqlite3.Row | messages.MessageRow) -> bool:
 
 
 def display_text(row: sqlite3.Row | messages.MessageRow) -> str:
-    """一行消息的展示文本：正文优先，媒体消息退回 media_hint。"""
-    return (row["content"] or row["media_hint"] or "").strip()
+    """一行消息的展示文本（正文；`should_embed` 已保证入选行 content 非空）。"""
+    return (row["content"] or "").strip()
 
 
 def _who(row: sqlite3.Row | messages.MessageRow) -> str:

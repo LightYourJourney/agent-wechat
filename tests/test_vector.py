@@ -600,3 +600,11 @@ def test_semantic_search_hits_carry_msg_key(env):
         # 形态校验：account|chat_md5|shard|local_id
         parts = h["msg_key"].split("|")
         assert len(parts) == 4, f"msg_key 形态不对：{h['msg_key']!r}"
+
+def test_display_text_takes_content_only():
+    """EA-058：`media_hint` 回退分支已删——它在唯一调用点上不可达（`should_embed` 保证
+    content 非空），留着会让 docstring 与代码互相矛盾。把回退加回来，本用例必红。"""
+    from agent_wechat import vector
+
+    assert vector.display_text({"content": "  正文  ", "media_hint": "[图片]"}) == "正文"
+    assert vector.display_text({"content": "", "media_hint": "[图片]"}) == ""
