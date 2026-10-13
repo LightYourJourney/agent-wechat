@@ -20,6 +20,12 @@
   只报不改库）
 - **只读诊断不再建库**：`get_account_status` / CLI `status` 在索引库或其排除清单缺失时
   不再凭空创建它们（此前跑一次 status 就会把 `purge --index` 删掉的索引建回来）
+- **MCP `export_chat_media` / `export_moments` 补上 `out_dir` 参数**：描述里一直承诺、
+  签名里一直没有（SDK 静默丢弃未知实参，「照描述传」会静默落到默认根——与 `export_chat`
+  的自定义根组合即全死链）
+- **`semantic_search` 不再因缺少密钥缓存整条失败**：展示名富化读不到名册时回落裸
+  `chat_id`（与 `search_history` 同一条降级），此前 `purge --keys` 之后该工具 100% 报
+  `KeyNotFound` 并把用户引向需要 sudo 的 bootstrap
 
 ### 架构深化重构（C1–C8 + 3 个缺陷修复）
 

@@ -14,9 +14,13 @@
   （源 XML 里没有合法 md5 时回落成 `[sticker]`），而 `media_hint` **仍是 `[sticker]`**
   ——两列语义不同，这是设计而不是不一致（见 §3、§6 与 DATA_MODEL.md §5）。
 - 错误一律以 `{"error": "中文说明"[, "hint": "可执行修复动作"]}` 信封返回；工具层统一
-  捕获并翻译内部异常，**不会有任何异常逃到传输层**（包括会杀死常驻 stdio server 的
-  `SystemExit`）。`hint` 仅在存在可执行修复动作时出现，文案已含指引则不重复。
-  未预期的内部错误返回 `{"error": "内部错误: <异常类型>: <说明>"}`。
+  捕获并翻译内部异常，**不会有任何异常逃到传输层**。`hint` 仅在存在可执行修复动作时
+  出现，文案已含指引则不重复。未预期的内部错误返回
+  `{"error": "内部错误: <异常类型>: <说明>"}`。
+  `SystemExit` 不在这条承诺的覆盖里，靠的是**另一条不变量**：core 任何模块都不
+  `raise SystemExit`（源码级护栏 `tests/test_errors.py::test_core_never_raises_systemexit`
+  钉住，全仓唯一一处 `raise SystemExit` 在 CLI 的退出漏斗）；`_guard` 也刻意不捕
+  `BaseException`——那会把 Ctrl-C 的退出语义一起吞成一条工具结果（EA-027）。
 
 ---
 
@@ -345,6 +349,7 @@ rebuild 与否）各起一条。（F-D，T7 复验：与 §4 同款的合并语�
 | `limit` | int | 否 | 500 | 本次最多**新增**的文件数（下界 1，无上界；产物已存在的不计） |
 | `force` | bool | 否 | `false` | `true` = 忽略已存在的产物全部重做（默认跳过已存在的） |
 | `with_cdn` | bool | 否 | `false` | `true` = 贴纸从腾讯 CDN 取件（**默认不联网**）。会把该贴纸的 `filekey` 以**明文 HTTP** 发往 `*.tc.qq.com`——这是既知且被显式接受的代价，见 SECURITY.md；返回 `degraded` 里的说明只写「CDN 下载失败」这类不含 URL 的文案 |
+| `out_dir` | string | 否 | null | 产物落这个输出根（默认 `~/.agent-wechat/media`）。**与 `export_chat` 的 `out_dir` 必须同根**，否则产物页里的媒体引用会断链（§12） |
 | `account` | string | 否 | null | 同通用约定 |
 
 **成功返回**：
@@ -433,6 +438,7 @@ rebuild 与否）各起一条。（F-D，T7 复验：与 §4 同款的合并语�
 | `months` | string | 否 | null | 逗号分隔的月份（`YYYY-MM`），按动态时间过滤；省略不限 |
 | `with_media` | bool | 否 | `false` | **是否联网下载并解密媒体本体**。`false`（默认）= 零网络；`true` = 向微信 CDN 发起请求（见下方「联网边界」）。**本机媒体总量约 1.5 GiB，其中本期新增约 0.62 GiB**（小视频 / 视频号 / 视频封面这批内容此前是 0） |
 | `limit` | int | 否 | 500 | 动态条数上限（下界 1，无上界）。截断留下的是**最新**的那些动态 |
+| `out_dir` | string | 否 | null | 产物落这个输出根（默认 `~/.agent-wechat/moments`） |
 | `account` | string | 否 | null | 同通用约定 |
 
 **成功返回**：
