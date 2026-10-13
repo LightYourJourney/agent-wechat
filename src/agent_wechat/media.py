@@ -5,8 +5,9 @@
 + dat 尾部统计 xorKey；**推导后必须用样本验证，不验证不交付**。
 
 红线：code/aesKey/xorKey 是推导材料，视同密钥——不进日志、错误消息、repr。
-依赖方向（单向，不得反向）：**media 可以 import store；store 不得 import media**；本模块不
-import reader（reader 可以 import 本模块）。唯一的 store 调用点是视频导出的 refs 驱动归属
+依赖方向（单向，不得反向）：**media 可以 import store；store 不得 import media**；本模块**不在顶层** import reader（reader 顶层可以 import 本模块）；唯一的反向使用是
+贴纸回源里**函数内惰性** import `reader.MessageReader` 现取原始 XML（文档化的例外，
+理由见 `sticker_cdn_urls`）。唯一的 store 调用点是视频导出的 refs 驱动归属
 （`store.media_refs_by_chat` / `count_media_refs`）——视频树是账号级的，没有索引就无从知道
 某条视频属于哪个会话（spec §4.7）。
 """
