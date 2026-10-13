@@ -113,8 +113,10 @@ def _never_touch_real_home(monkeypatch, tmp_path):
     # 遍历 known_artifacts() 而不是 artifacts()：后者只含有 CLI 开关的那几个，scope=None
     # 的（models/、tasks.json）同样会被删，也必须逐个确认路径被重定向过。
     arts = purge.known_artifacts()
-    assert len(arts) == 10, \
-        f"红线：清单条目数由 10 变为 {len(arts)}，必有产物未被保护，须先核对再改这个数"
+    # 10 → 11：F-A（T7 复验）给 tasks 加了跨进程锁文件，已按本用例的红线要求逐条核对
+    # （它是 tasks.lock_file()，跟随被 patch 的 TASKS_FILE，落点仍在 tmp 内）。
+    assert len(arts) == 11, \
+        f"红线：清单条目数由 11 变为 {len(arts)}，必有产物未被保护，须先核对再改这个数"
     for a in arts:
         assert a.path != REAL_HOME and REAL_HOME not in a.path.parents, \
             f"红线：{a.path} 指向真实数据目录"

@@ -107,6 +107,10 @@ def known_artifacts() -> tuple[Artifact, ...]:
         Artifact("tmp", decrypt.tmp_dir(), "dir", True, "无"),
         Artifact(None, vector.MODEL_CACHE_DIR, "dir", False, "重新下载"),
         Artifact(None, tasks.TASKS_FILE, "file", False, "无"),
+        # F-A（T7 复验）新增的跨进程锁文件：0 字节、无可重建代价，但同样是 tasks 的产物
+        # ——不列进来 `--all` 会把它当 loose 行渲染（本模块开篇那条「产物清单归 owner
+        # 模块、这里必须跟着演进」的约定就是这么要求 media/moments 的）。
+        Artifact(None, tasks.lock_file(), "file", False, "无"),
         # 唯一一个删了就不可重建的产物：它没了，被删的内容下次导出就全回来了（spec §4.1③）
         Artifact(None, exclusions.path(), "file", True,
                  "不可重建：它没了，被删内容下次导出会回来", unrebuildable=True),

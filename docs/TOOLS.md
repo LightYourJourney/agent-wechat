@@ -174,14 +174,17 @@
 ```json
 { "id": "a1b2c3d4e5f6", "kind": "export", "account": "wxid_xxx_ab12",
   "chat_id": null, "full": false, "status": "done", "rows": 841584,
-  "pid": 68996, "started_at": 1789044000, "finished_at": 1789044110, "error": null }
+  "pid": 68996, "started_at": 1789044000, "updated_at": 1789044109,
+  "finished_at": 1789044110, "error": null }
 ```
 
 `pid` 是登记该任务的进程号，也是 `running` 记录的收割判据：进程退出/被杀后记录仍留在
 文件里，直到**下一次任意进程读到它**时改判 `failed`（`error` = 「进程中断，任务未完成」）
-——判据是 `pid` 是否还活着，外加 **24 小时**的时间兜底（pid 可能被无关进程复用）。
+——判据是 `pid` 是否还活着，外加**心跳**兜底：`updated_at`（最后一次进度更新的时刻）
+超过 **24 小时**没有前进也判 failed（覆盖 pid 被无关进程复用的情形；进度上报很密，
+活任务的心跳恒新鲜；万一真·长任务被误判，它自己下一次上报进度会改回 `running`）。
 两个 MCP server 共享同一个 `AGENT_WECHAT_HOME` 时，两边看到的任务列表一致：注册表
-每次操作都重读磁盘，写入按记录合并（不会把对方刚写的记录抹掉）。
+每次操作都重读磁盘，写入按记录合并并加跨进程文件锁（不会把对方刚写的记录抹掉）。
 
 `status`: `running` / `done` / `failed`；失败时 `error` 含中文原因。`rows` 与 `skipped`
 **按 kind 各有各的口径，别混用**：
@@ -247,7 +250,9 @@
 ## 7. build_vector_index
 
 **用途**：构建本地向量语义索引（`semantic_search` 的数据源）。**长任务**：立即返回 `task_id`，
-用 `get_task_status` 查进度。
+用 `get_task_status` 查进度。**同一次工作的重复请求会复用既有任务**：`account` 与
+`rebuild` 都相同的请求仍在跑时返回**既有** `task_id`；目标不同（单账号 vs 全部账号、
+rebuild 与否）各起一条。（F-D，T7 复验：与 §4 同款的合并语义。）
 
 | 参数 | 类型 | 必填 | 默认 | 说明 |
 |---|---|---|---|---|

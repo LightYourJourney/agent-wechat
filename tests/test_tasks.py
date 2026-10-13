@@ -490,6 +490,80 @@ def test_start_rolls_back_when_the_registry_cannot_be_written(tmp_path, monkeypa
     assert _wait_done(tid)["status"] == "done", "新任务必须真的跑（不许被幽灵吸收）"
 
 
+def test_the_read_modify_write_takes_the_cross_process_lock(tmp_path, monkeypatch):
+    """F-A（T7 复验）：两个进程在同一瞬间 start 时，「读盘 → 合并 → `os.replace`」会交错，
+    后写者把先写者刚落的记录吞掉（重放实测 5 轮里 4 轮，受害者此后对自己的任务答
+    「未知任务」）。修法是跨进程互斥：写操作必须先拿到 `<tasks.json>.lock` 的 flock。
+
+    判别法：测试自己扣住那把 flock，另一个线程的 `update` 必须**阻塞**到放锁为止。
+    把 `_file_lock` 从写操作上摘掉，第一条断言必红（它会立刻返回）。
+    """
+    import fcntl
+
+    target = tmp_path / "tasks.json"
+    monkeypatch.setattr(tasks, "TASKS_FILE", target)
+    tid = tasks.start("export", lambda _t: 1, account="acct")
+    _wait_done(tid)
+
+    lock_path = target.with_name(target.name + ".lock")
+    done = threading.Event()
+    with open(lock_path, "a") as holder:
+        fcntl.flock(holder, fcntl.LOCK_EX)
+        w = threading.Thread(target=lambda: (tasks.update(tid, rows=5), done.set()))
+        w.start()
+        assert not done.wait(0.3), "写操作必须等 flock（否则跨进程读改写会交错）"
+        fcntl.flock(holder, fcntl.LOCK_UN)
+    assert done.wait(2), "放锁后写操作应当完成"
+    w.join(5)
+    assert json.loads(target.read_text())[tid]["rows"] == 5
+
+
+def test_a_long_task_heals_its_own_orphan_marking_on_the_next_progress(tmp_path, monkeypatch):
+    """F-B（T7 复验）：时间兜底的两条边界——① 判据必须是**心跳**（`updated_at`）而不是
+    `started_at`：真·长任务（>24h）会因「开始得早」被自家判死；② 兜底误判之后，本进程的
+    下一次**进度上报**必须把它改回 running（记录里的 pid 是本进程 = 它没死）。
+
+    改回 `started_at`（或删掉 `update` 的自愈分支），两条断言各红一条。
+    """
+    monkeypatch.setattr(tasks, "TASKS_FILE", tmp_path / "tasks.json")
+    tid = tasks.start("export", lambda _t: 1, account="acct")
+    _wait_done(tid)
+    disk = json.loads((tmp_path / "tasks.json").read_text())
+    disk[tid].update(status="running", error=None, finished_at=None,
+                     started_at=int(time.time()) - 25 * 3600,      # 一条 25 小时前开始…
+                     updated_at=int(time.time()) - 25 * 3600)      # …且 25 小时没有进度的记录
+    (tmp_path / "tasks.json").write_text(json.dumps(disk))
+    assert tasks.status(tid)["status"] == "failed", "心跳过期 = 兜底收割"
+
+    tasks.update(tid, rows=6)
+    assert tasks.status(tid)["status"] == "running", \
+        "本进程还在报进度 = 它没死，必须自愈（否则 agent 会去重跑一条还在跑的任务）"
+
+
+def test_a_failing_finish_does_not_kill_the_runner_thread(tmp_path, monkeypatch):
+    """F-C（T7 复验）：收尾期注册表不可写时，失败记账的 `_finish` 不许再抛出——否则
+    runner 线程带 traceback 死亡（批前同形）。这里直接驱动 `_run`（它就是线程体）：
+    不吞异常时它会从测试线程抛出，本用例必红。
+    """
+    target = tmp_path / "tasks.json"
+    monkeypatch.setattr(tasks, "TASKS_FILE", target)
+    tid = tasks.start("export", lambda _t: 1, account="acct")
+    _wait_done(tid)
+    real_replace = os.replace
+
+    def boom(src, dst):
+        raise OSError("EACCES: 注册表不可写")
+
+    monkeypatch.setattr(tasks.os, "replace", boom)
+
+    def failing_runner(_t):
+        raise RuntimeError("任务失败")
+
+    tasks._run(tid, failing_runner)                       # 不许抛
+    assert tasks._tasks[tid]["status"] == "failed", "内存里的终态要保留"
+    monkeypatch.setattr(tasks.os, "replace", real_replace)
+
+
 def test_the_temp_file_name_carries_the_pid(tmp_path, monkeypatch):
     """F5：tmp 名带 pid——固定名会让两个进程共用同一个临时文件，一方的 `os.replace`
     撞上另一方刚搬走它的 ENOENT 窗口（落盘的进程反而抛错、留下幽灵）。"""

@@ -17,12 +17,15 @@ MCP server 指向同一个 HOME 是文档推荐的部署，长驻进程必须看
 """
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
 import os
+import pathlib
 import threading
 import time
 import uuid
-from typing import Callable
+from typing import Callable, Iterator
 
 from . import errors, paths
 
@@ -31,8 +34,10 @@ from . import errors, paths
 ORPHAN_ERROR = "进程中断，任务未完成"
 # F6（T7 复审）：pid 复用的时间兜底。`os.kill(pid, 0)` 分不清「原任务」与「复用了该 pid 的
 # 无关进程」，而错误的「还活着」会把该账号的新导出全部吸收进一条永不执行的幽灵任务。
-# 24h 远大于真实长任务（68 万行向量构建实测 ~3h），且误判可自愈：那条任务下次
-# update/收尾会把状态改回来。
+# 判据是「**最后一次进度更新**（updated_at，老记录回落 started_at）距今超过 24 小时」——
+# 不能只看 started_at：真·长任务（>24h）会因此被自家判死（F-B，T7 复验）。进度上报很密
+# （export 每 2 万行、向量每批一次），所以活任务的 updated_at 恒新鲜；误判也有自愈：
+# 本进程的下一次 update 会把 failed 改回 running。
 STALE_RUNNING_SECONDS = 24 * 3600
 # 准入键（F1，T7 复审）：同 kind、且这些区分「目标」的字段全部相同才算同一次工作。
 # 此前只看 (kind, account)——要 chatB 的调用会拿到 chatA 的 task_id、`full=True` 被增量
@@ -43,6 +48,12 @@ _IDENTITY_KEYS = ("account", "chat_id", "full", "rebuild")
 TASKS_FILE = paths.HOME_DIR / "tasks.json"
 _tasks: dict[str, dict] = {}       # 本操作开头从磁盘重读的视图（见 _load_locked）
 _lock = threading.Lock()
+
+
+def lock_file() -> pathlib.Path:
+    """跨进程互斥的锁文件（F-A）。**调用时求值**（本仓约定：路径的唯一来源是拥有它的
+    模块，且测试要能把 TASKS_FILE 重定向后跟着走）。`purge --all` 会在锁文件上看到它。"""
+    return TASKS_FILE.with_name(TASKS_FILE.name + ".lock")
 
 
 def _pid_alive(pid: object) -> bool:
@@ -67,8 +78,8 @@ def _harvest(rec: dict, now: int) -> dict:
     """
     if rec.get("status") != "running":
         return rec
-    started = rec.get("started_at")
-    stale = isinstance(started, int) and now - started > STALE_RUNNING_SECONDS
+    seen = rec.get("updated_at") or rec.get("started_at")   # 老记录没有心跳 → 回落开始时刻
+    stale = isinstance(seen, int) and now - seen > STALE_RUNNING_SECONDS
     if stale or not _pid_alive(rec.get("pid")):
         return {**rec, "status": "failed", "error": ORPHAN_ERROR}
     return rec
@@ -86,6 +97,29 @@ def _read() -> dict[str, dict] | None:
         return None
     now = int(time.time())
     return {tid: _harvest(rec, now) for tid, rec in raw.items() if isinstance(rec, dict)}
+
+
+@contextlib.contextmanager
+def _file_lock() -> Iterator[None]:
+    """跨进程的「读—改—写」互斥（F-A，T7 复验）。
+
+    进程内的 `_lock` 管不住另一个进程：两个进程在**同一瞬间** start 时，两边的
+    「读盘 → 合并 → `os.replace`」会交错，后写者把先写者刚落的记录吞掉（重放实测
+    5 轮里 4 轮），而「id 不在重读结果里就跳过」的守卫会把这个**瞬时**丢失变成
+    **永久**丢失（受害进程再也认领不回自己的记录，连自己起的任务都答「未知任务」）。
+
+    锁打在**独立锁文件**上而不是 TASKS_FILE 本身：`os.replace` 每次都换 inode，
+    打在旧 inode 上的 flock 保护不了新文件。读路径（status）不取它：`os.replace`
+    的读者要么看到旧全量、要么看到新全量，加锁只会让查询等在写者后面。
+    """
+    lock = lock_file()
+    lock.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with open(lock, "a") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
 
 
 def _load_locked() -> None:
@@ -133,7 +167,7 @@ def start(kind: str, runner: Callable[[str], int | None], **fields) -> str:
     裸 `database is locked`。**不同目标绝不吸收**（F1）。判据、插入与落盘在**同一把锁内**
     完成（F7）：check-then-act 分两次取锁会让并发 start 各起一条。
     """
-    with _lock:
+    with _lock, _file_lock():
         _load_locked()
         for tid, rec in _tasks.items():
             if (rec.get("status") == "running" and rec.get("kind") == kind
@@ -141,8 +175,9 @@ def start(kind: str, runner: Callable[[str], int | None], **fields) -> str:
                     and _pid_alive(rec.get("pid"))):
                 return tid
         task_id = uuid.uuid4().hex[:12]
+        now = int(time.time())
         rec = {"id": task_id, "kind": kind, "status": "running",
-               "rows": 0, "started_at": int(time.time()),
+               "rows": 0, "started_at": now, "updated_at": now,   # updated_at = 心跳
                "error": None, "pid": os.getpid(), **fields}
         _tasks[task_id] = rec
         try:
@@ -178,12 +213,12 @@ def _finish(task_id: str, *, status: str, rows: int | None = None,
     造出来的记录会被写进**别人的**文件（F4），下标取值还会让 KeyError 逃出
     `except Exception`（同一发现的另一半）。
     """
-    with _lock:
+    with _lock, _file_lock():
         _load_locked()
         rec = _tasks.get(task_id)
         if rec is None:
             return
-        rec.update(status=status, finished_at=int(time.time()))
+        rec.update(status=status, finished_at=int(time.time()), updated_at=int(time.time()))
         if rows is not None:             # 终值覆盖进度值
             rec["rows"] = rows
         if error is not None:
@@ -196,7 +231,13 @@ def _run(task_id: str, runner: Callable[[str], int | None]) -> None:
         rows = runner(task_id)
         _finish(task_id, status="done", rows=rows)
     except Exception as e:  # 任务失败不能崩掉 MCP 进程
-        _finish(task_id, status="failed", error=_error_text(e))
+        try:
+            _finish(task_id, status="failed", error=_error_text(e))
+        except Exception:
+            # F-C（T7 复验）：收尾期注册表写不动（磁盘满/权限）时，失败的**记账**不该再让
+            # runner 线程带 traceback 死亡——任务本身已经结束；内存视图里的终态保留着，
+            # 磁盘要等环境恢复后的下一次写（或进程退出后的收割）。
+            pass
 
 
 def update(task_id: str, **fields) -> None:
@@ -204,12 +245,17 @@ def update(task_id: str, **fields) -> None:
 
     未知 id 静默忽略：runner 可能在任务被清理后仍在跑（或记录属于别的注册表文件）。
     """
-    with _lock:
+    with _lock, _file_lock():
         _load_locked()
         rec = _tasks.get(task_id)
         if rec is None:
             return
-        rec.update(fields)
+        if (rec.get("status") == "failed" and rec.get("error") == ORPHAN_ERROR
+                and rec.get("pid") == os.getpid()):
+            # F-B（T7 复验）：兜底误伤（真·长任务/心跳过期后又续跑）时——**本进程还在报
+            # 进度**就是「它没死」的直接证据，把它改回 running。
+            rec.update(status="running", error=None)
+        rec.update(fields, updated_at=int(time.time()))
         _persist_locked({task_id: rec})
 
 
