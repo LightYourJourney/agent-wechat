@@ -263,12 +263,16 @@ def _git(*args: str) -> str:
     exe = shutil.which("git")
     if exe is None:
         raise ScannerError("PATH 上找不到 git；本扫描器需要 git 来枚举文件与读取 diff")
+    # EA-008 的残留洞（T5 复审 F1，P2）：`text=True` 会做**通用换行翻译**——diff 内容里的
+    # 孤立 `\r` 在 `split("\n")` **之前**就变成了 `\n`，于是「内容里的 `\r` + `diff --git `」
+    # 依旧能伪造头、静默漏扫（fail-open）。这里取字节、只按 UTF-8 解码，**不做换行翻译**。
     r = subprocess.run([exe] + list(args), cwd=str(REPO_ROOT),
-                       capture_output=True, text=True, timeout=120)
+                       capture_output=True, timeout=120)
     if r.returncode != 0:
         raise ScannerError("git %s 退出码 %d：%s"
-                           % (args[0], r.returncode, (r.stderr or "").strip()[:200]))
-    return r.stdout
+                           % (args[0], r.returncode,
+                              (r.stderr or b"").decode("utf-8", "replace").strip()[:200]))
+    return (r.stdout or b"").decode("utf-8", "replace")
 
 
 def _tracked_files() -> list[str]:

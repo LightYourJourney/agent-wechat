@@ -653,6 +653,42 @@ index 1111111..2222222 100644
 """
 
 
+def test_git_output_keeps_lone_carriage_returns(scan, monkeypatch):
+    """T5 复审 F1（P2）：`_git` 曾用 `text=True`——**通用换行翻译**会把 diff 内容里的
+    孤立 `\r` 变成 `\n`，发生在 `split("\n")` **之前**：`\r` 那一格因此仍然 fail-open。
+    这条钉住读取边界本身（直接喂字符串的用例绕不过它）。"""
+    class _R:
+        returncode = 0
+        stdout = b"a\rb"
+        stderr = b""
+
+    monkeypatch.setattr(scan.subprocess, "run", lambda *a, **k: _R())
+    assert scan._git("diff") == "a\rb", "孤立 \\r 不许被翻译成 \\n"
+
+
+def test_staged_forged_header_with_a_real_cr_survives_the_git_boundary(scan, tmp_path, monkeypatch):
+    """T5 复审 F1 的端到端面：真 temp git 仓、真 `git add`、真 `_git` 读取——
+    文件内容里放「`\r` + `diff --git …`」，其后的伪造值必须仍被报出。
+
+    红过：`_git` 用 `text=True` 时，`\r` 被翻译成 `\n`，同一条断言在**生产路径**上静默失效
+    （本用例修正前正是「喂字符串」的版本，绿而生产红——假护栏）。
+    """
+    import subprocess as sp
+    repo = tmp_path / "r"
+    repo.mkdir()
+    sp.run(["git", "init", "-q"], cwd=repo, check=True)
+    sp.run(["git", "config", "user.email", "a@b.c"], cwd=repo, check=True)
+    sp.run(["git", "config", "user.name", "p"], cwd=repo, check=True)
+    fake = "wx" + "id_" + "e2eprobe9x7q2m"
+    (repo / "f.py").write_bytes(
+        ("ok\n" + "\r" + "diff --git a/x b/y\n" + fake + "\n").encode("utf-8"))
+    sp.run(["git", "add", "-A"], cwd=repo, check=True)
+    monkeypatch.setattr(scan, "REPO_ROOT", repo)
+
+    hits = scan.staged_added_lines()          # 不喂字符串：走真 _git
+    assert any(fake in text for _rel, _n, text in hits), hits
+
+
 def test_staged_special_newlines_cannot_forge_a_diff_header(scan, tmp_path, monkeypatch):
     """EA-008：`str.splitlines()` 认 **10** 个换行字符，而 git 的 diff 只以 `\n` 分行。
 
