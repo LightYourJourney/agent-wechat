@@ -307,6 +307,26 @@ def test_rebuild_wipes_tables_and_pointer_in_one_transaction(env, monkeypatch):
         con2.close()
 
 
+def test_a_wrong_dimension_is_rejected_before_the_first_batch(env):
+    """EA-123：换模型时维度不一致的失败面此前是**循环中途**的裸 `sqlite3.OperationalError`
+    （vec0 表按 512 维建，插 768 维的行由 sqlite-vec 报错），发生在已经嵌了几批之后、
+    异常还不是项目异常。起手自检一条常量字符串：不符就在**首批之前**抛 `VectorError`。
+
+    删掉起手自检本测试必红（会变成中途的 OperationalError 或静默写入失败）。
+    """
+    store.upsert_batch(env, [mk_row("acct", "chatA", 1, "第一条消息")])
+
+    class _WrongDim(FakeEmbedder):
+        def embed(self, texts):
+            return [[0.0] * 384 for _ in texts]
+
+    with pytest.raises(vector.VectorError) as ei:
+        vector.build_index(embedder=_WrongDim())
+    assert ei.value.hint, "hint 要给两个修法（换回原模型 / 用 --rebuild）"
+    assert "维度" in str(ei.value) or "dim" in str(ei.value).lower(), ei.value
+    assert env.execute("SELECT count(*) FROM vec_messages").fetchone()[0] == 0
+
+
 def test_flush_rejects_a_short_vector_batch(env):
     """EA-059：`flush` 用 `zip(order, vecs)` 配对——嵌入少返向量时**静默截断**：少的那几行
     不进索引，而 `embedded += len(buf_rows)` 照记（账目漂移 + 那些消息永远搜不到）。

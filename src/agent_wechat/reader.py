@@ -474,7 +474,10 @@ class MessageReader:
                                               sticker_names=names)
             if len(pieces) >= limit:
                 break
-        pieces.sort(key=lambda m: m.ts)
+        # EA-016：排序键此前只有 `m.ts`——扫描是 `ORDER BY local_id DESC`（`order_desc=True`），
+        # 稳定排序会让同秒的两条保持**降序**到达序（「后发的在前」），与「时间正序」的契约、
+        # 与索引侧（`ORDER BY ts`）都不一致。加 `local_id` 作次键：先发的在前，且确定。
+        pieces.sort(key=lambda m: (m.ts, m.local_id))
         # EA-080：`[-0:]` 是**全量**切片（`-0 == 0`）——`limit=0` 必须返回空列表，
         # 与 `if limit:` 的「0 = 不拼 LIMIT」在 SQL 侧的口径分开写清楚。
         if limit <= 0:

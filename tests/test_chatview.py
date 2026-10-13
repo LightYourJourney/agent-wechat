@@ -122,3 +122,30 @@ def test_counts_count_messages_by_kind():
                        parts={}, media={}, out_dir="/tmp", truncated=False,
                        unparsed=0, rejected=0, degraded=())
     assert v.counts == {"text": 2, "image": 1}
+
+
+def _minimal_view(out_dir):
+    return chatview.ChatView(chat_id="wxid_x", title="X", generated_at=0,
+                             out_dir=str(out_dir), msgs=(), counts={}, unparsed=0,
+                             rejected=0, degraded=(), truncated=False)
+
+
+def test_a_failed_chmod_does_not_hide_a_written_artifact(tmp_path, monkeypatch):
+    """EA-109：`chmod` 与 `write_text` 在**同一个** `except OSError` 里（且 chmod 在后）
+    ——chmod 失败时文件**已在盘上 0644**，函数却把它当「没写成」（不进返回列表），调用方
+    会以为产物不存在（而它就在那儿、权限没收紧）。口径向同仓另两处对齐：**写失败 = 没写成；
+    权限没收敛 = 写成了但降级**。
+
+    把 `chmod` 挪回第一个 `try` 本测试必红。
+    """
+    import pathlib as _pl
+
+    view = _minimal_view(tmp_path)
+
+    def _boom(self, mode):
+        raise OSError(1, "Operation not permitted")
+    monkeypatch.setattr(_pl.Path, "chmod", _boom)
+
+    out = chatview.write(view, formats=["md"])
+    assert [p.name for p in out] == ["index.md"], "写成了就该进返回列表（权限没收敛是降级）"
+    assert (tmp_path / "chat" / "index.md").exists()

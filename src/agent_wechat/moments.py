@@ -177,7 +177,13 @@ def _ts(v: str | None) -> int:
     """
     if not v or not v.isdecimal():
         return 0
-    n = int(v)
+    try:
+        n = int(v)
+    except ValueError:
+        # EA-033：`isdecimal()` 为真**不代表 `int()` 能转**——CPython 3.11+ 对十进制串有
+        # 转换位数上限（默认 4300 位），超了抛 ValueError。`createTime` 是好友可控字段，
+        # 一条动态就能让整批 `iter_posts` 中止（异常会穿透 core 层）。
+        return 0
     return n if 0 < n <= _MAX_TS else 0
 
 
@@ -293,37 +299,43 @@ def _comments_of(root: ET.Element) -> tuple[SnsComment, ...]:
 
 
 def parse_post(tid: str, xml_text: str) -> SnsPost | None:
-    """单条动态。XML 畸形或非朋友圈结构 → None（调用方计 failed，不中断整批）。"""
+    """单条动态。XML 畸形或非朋友圈结构 → None（调用方计 failed，不中断整批）。
+
+    **整个解析体都在兜底之内**（EA-104）：`ET.ParseError` 之外，字段转换还会抛
+    `ValueError`（`_ts` 的 `int()` / `_duration` 的 `float()` / `_media_of`…），
+    从这道边界漏出去就会一路崩到整次导出（本文件多处 docstring 写过这句）。
+    与 `appmsg.parse` 同形——那边也是把会抛的步骤（`normalize`）放进同一个 try。
+    """
     if not xml_text or not xml_text.strip():
         return None
     try:
         root = ET.fromstring(xml_text.strip())
-    except ET.ParseError:
+        tlo = root.find("TimelineObject")
+        if tlo is None or tlo.findtext("id") is None:
+            return None
+        ctype = _text(tlo, "ContentObject/type")
+        feed = tlo.find("ContentObject/finderFeed")
+        media = tuple(_media_of(m) for m in tlo.findall("ContentObject/mediaList/media"))
+        if feed is not None:
+            # 视频号的媒体在 finderFeed 下——真机 27/29 的 ContentObject/mediaList 是空的，
+            # 旧解析对它完全不可见（不是「读到了没渲染」，是根本没读）。
+            media += _finder_media(feed)
+        cu = _text(tlo, "ContentObject/contentUrl")
+        return SnsPost(
+            tid=tid,
+            post_id=(tlo.findtext("id") or "").strip(),
+            username=(tlo.findtext("username") or "").strip(),
+            nickname=_text(root, "LocalExtraInfo/nickname") or "",
+            create_time=_ts(_text(tlo, "createTime")),
+            text=_text(tlo, "contentDesc"),
+            is_video_post=(ctype == str(TYPE_VIDEO_POST)),
+            media=media,
+            comments=_comments_of(root),  # 整个 SnsDataItem：互动在 LocalExtraInfo 下，不在 tlo 内
+            link=SnsLink(cu, _text(tlo, "ContentObject/title")) if _is_external(cu) else None,
+            finder=_finder_of(feed) if feed is not None else None,
+        )
+    except (ET.ParseError, ValueError):
         return None
-    tlo = root.find("TimelineObject")
-    if tlo is None or tlo.findtext("id") is None:
-        return None
-    ctype = _text(tlo, "ContentObject/type")
-    feed = tlo.find("ContentObject/finderFeed")
-    media = tuple(_media_of(m) for m in tlo.findall("ContentObject/mediaList/media"))
-    if feed is not None:
-        # 视频号的媒体在 finderFeed 下——真机 27/29 的 ContentObject/mediaList 是空的，
-        # 旧解析对它完全不可见（不是「读到了没渲染」，是根本没读）。
-        media += _finder_media(feed)
-    cu = _text(tlo, "ContentObject/contentUrl")
-    return SnsPost(
-        tid=tid,
-        post_id=(tlo.findtext("id") or "").strip(),
-        username=(tlo.findtext("username") or "").strip(),
-        nickname=_text(root, "LocalExtraInfo/nickname") or "",
-        create_time=_ts(_text(tlo, "createTime")),
-        text=_text(tlo, "contentDesc"),
-        is_video_post=(ctype == str(TYPE_VIDEO_POST)),
-        media=media,
-        comments=_comments_of(root),      # 整个 SnsDataItem：互动在 LocalExtraInfo 下，不在 tlo 内
-        link=SnsLink(cu, _text(tlo, "ContentObject/title")) if _is_external(cu) else None,
-        finder=_finder_of(feed) if feed is not None else None,
-    )
 
 
 def iter_posts(account: str, *, chat_filter: str | None = None,
@@ -352,10 +364,12 @@ def iter_posts(account: str, *, chat_filter: str | None = None,
         try:
             try:
                 rows = con.execute("SELECT tid, content FROM SnsTimeLine")
-            except sqlite3.OperationalError as exc:
-                # 旧版微信的 sns.db 没有这张表（或列被改名）。裸 sqlite3 异常会一路穿透到
-                # 适配层：CLI 印 traceback、MCP 退化成通用内部错误。「core 只抛
-                # AgentWeChatError 子类」这条契约在此收口（spec §5 的原话就是 SchemaDrift）。
+            except sqlite3.Error as exc:
+                # 旧版微信的 sns.db 没有这张表（或列被改名）；**损坏的库**抛的是
+                # `DatabaseError`（`file is not a database`），不是 `OperationalError`
+                # ——EA-105：按 `sqlite3.Error` 宽口径收口，别让裸 sqlite3 异常穿透到适配层
+                # （CLI 印 traceback、MCP 退化成通用内部错误）。「core 只抛 AgentWeChatError
+                # 子类」这条契约在此收口（spec §5 的原话就是 SchemaDrift）。
                 raise errors.SchemaDrift("朋友圈", str(db), "SnsTimeLine") from exc
             out = []
             for tid, content in rows:

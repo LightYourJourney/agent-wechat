@@ -185,8 +185,14 @@ def write(view: ChatView, *, formats: Sequence[str] = FORMATS) -> list[pathlib.P
         p = root / f"index.{fmt}"
         try:
             p.write_text(_RENDERERS[fmt](view), encoding="utf-8")
-            p.chmod(0o600)                 # 产物是聊天原文：除了属主谁也读不到
         except OSError:
             continue
+        # EA-109：`chmod` **不在**上面那个 try 里——它排在写入之后，同一个 try 会让「chmod
+        # 失败」被当成「没写成」：文件已在盘上（0644），而函数不把它进返回列表，调用方以为
+        # 产物不存在。口径向同仓另两处对齐：写失败 = 没写成；**权限没收敛 = 写成了但降级**。
+        try:
+            p.chmod(0o600)                 # 产物是聊天原文：除了属主谁也读不到
+        except OSError:
+            pass
         out.append(p)
     return out

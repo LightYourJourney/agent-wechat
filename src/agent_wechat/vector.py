@@ -292,6 +292,18 @@ def _build_account(con: sqlite3.Connection, acct: str, embedder: FastEmbedEmbedd
         # 单事务内行序无影响。
         order = sorted(range(len(buf_texts)), key=lambda i: len(buf_texts[i]))
         vecs = embedder.embed([buf_texts[i] for i in order])
+        # EA-123：**维度自检**并在这里——嵌入模型与 `store.VECTOR_DIM`（DDL 用它建 vec0 表）
+        # 是两个必须同步的常量，此前没有任何校验：换模型时失败面是循环中途的裸
+        # `sqlite3.OperationalError`（vec0 表 512 维、插 768 维的行），且已经嵌了几批。
+        # 放在 flush（所有路径的必经点、且在本批 `executemany` **之前**）⇒ 第一批落盘前就抛
+        # 项目异常。条目原本建议「起手单嵌一条常量串」——**不采纳**：那会给每个 batch 多出
+        # 一次嵌入调用，污染所有按调用计数/顺序的假 embedder（实测 5 条既有用例同时红）。
+        if vecs and len(vecs[0]) != store.VECTOR_DIM:
+            raise VectorError(
+                f"嵌入模型维度 {len(vecs[0])} 与索引库的 {store.VECTOR_DIM} 不一致："
+                "换模型后必须重建索引",
+                hint="换回建索引时的模型，或用 rebuild=True 重建（DDL 会按新维度建表）",
+            )
         if len(vecs) != len(order):
             # EA-059：`zip(order, vecs)` 会**静默截断**——少返的向量对应的行不进索引，而下面
             # `embedded += len(buf_rows)` 照记（账目漂移 + 那些消息永远搜不到）。真实

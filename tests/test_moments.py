@@ -5,7 +5,7 @@ import sqlite3
 
 import pytest
 
-from agent_wechat import keys, media, moments, moments_html, paths, sns_media
+from agent_wechat import errors, keys, media, moments, moments_html, paths, sns_media
 from moments_fixtures import ACCT, _passthrough, env  # noqa: F401  (EA-117 共享夹具)
 
 
@@ -86,6 +86,60 @@ def test_repr_hides_credentials():
     m = moments.parse_post("T1", POST_XML).media[0]
     r = repr(m)
     assert "TOK_URL" not in r and "12345678901234567890" not in r
+
+
+def test_ts_rejects_a_decimal_string_too_long_for_int():
+    """EA-033：`isdecimal()` 为真**不代表 `int()` 能转**——CPython 3.11+ 对十进制串有转换
+    位数上限（默认 4300 位），超了抛 `ValueError`。`createTime` 是好友可控的 XML 字段，
+    一条动态就能让整批 `iter_posts` 中止（异常还会穿透 core 层）。
+
+    把 `try/except ValueError` 去掉（回到裸 `int(v)`）本测试必红。
+    """
+    assert moments._ts("1" * 5000) == 0
+    assert moments._ts("9" * 4301) == 0
+    assert moments._ts("1735689600") == 1735689600          # 正常值不受影响
+
+
+def test_iter_posts_survives_a_too_long_create_time(sns):
+    """EA-033 的整批面：一条超长 `createTime` 不许把 `iter_posts` 整批中止。"""
+    _add(sns, 1, POST_XML.replace("1735689600", "1" * 5000))
+    posts = list(moments.iter_posts(ACCT))
+    assert len(posts) == 1 and posts[0].create_time == 0     # 时间归 0，动态本身还在
+
+
+def test_parse_post_never_lets_a_value_error_out_of_the_boundary(monkeypatch):
+    """EA-104：`parse_post` 只 catch `ET.ParseError`——而边界内还有字段转换（`_ts`/`_duration`/
+    `_media_of`），`ValueError` 家族从它们里逃出来会一路崩到整次导出（本文件自己的 docstring
+    写过这句）。这里注入一个逃逸的 `ValueError`（**修 EA-033 之前的真实形态**：`_ts` 的
+    `int()` 对超长十进制串抛的就是它），断言边界把它变成 None。
+
+    把 `except` 收回 `ET.ParseError` 本测试必红。
+    """
+    def _boom(v):
+        raise ValueError("boom")
+    monkeypatch.setattr(moments, "_ts", _boom)
+    assert moments.parse_post("T1", POST_XML) is None
+
+
+def test_iter_posts_wraps_a_corrupt_db_as_schema_drift(tmp_path, monkeypatch):
+    """EA-105：`iter_posts` 只 catch `sqlite3.OperationalError`——损坏的库抛的是
+    `DatabaseError`（`file is not a database`），裸 sqlite3 异常会穿透适配层（CLI 印
+    traceback、MCP 退化成通用内部错误）。照 `message_parts` 的宽口径收口成 `SchemaDrift`。
+
+    把 `except` 收回 `sqlite3.OperationalError` 本测试必红。
+    """
+    wx = tmp_path / "wx"
+    d = wx / ACCT / "db_storage" / "sns"
+    d.mkdir(parents=True)
+    monkeypatch.setattr(paths, "XWECHAT_FILES", wx)
+    fake = d / "sns.db"
+    fake.write_bytes(b"this is not a database" * 64)       # `iter_posts` 先探存在再解密
+    monkeypatch.setattr(moments.decrypt, "decrypted",
+                        lambda *a, **k: contextlib.nullcontext(fake))
+    monkeypatch.setattr(moments.keys, "get_passphrase", lambda a: b"x" * 32)
+
+    with pytest.raises(errors.SchemaDrift):
+        list(moments.iter_posts(ACCT))
 
 
 def test_malformed_xml_returns_none():

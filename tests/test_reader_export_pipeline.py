@@ -341,6 +341,28 @@ def test_resolve_one(env):
     assert chat_id is None and cands == []
 
 
+def test_recent_orders_same_second_messages_by_local_id(wechat, env):
+    """EA-016：`recent` 的排序键此前只有 `m.ts`——**同一秒**的消息顺序于是取决于扫描顺序，
+    而扫描是 `ORDER BY local_id DESC`（:439 的 `order_desc=True`）+ 稳定排序 ⇒ 同秒的两条
+    保持**降序**到达序，「时间正序」这条契约在同秒上不成立（与索引侧 `ORDER BY ts` 的顺序
+    也不一致）。键加上 `local_id` 后确定：**先发的在前**。
+
+    把 `key=lambda m: (m.ts, m.local_id)` 换回 `key=lambda m: m.ts` 本测试必红。
+    """
+    t = T0 + 100                       # 比既有行都新，稳稳落进 limit 窗口
+    shard = wechat.wx / ACCT / "db_storage" / "message" / "message_2.db"
+    build_shard(wechat.wx, ACCT, "message_2.db",
+                {FRIEND: [(1, 1, 1, t, "先发的", 0), (2, 1, 1, t, "后发的", 0)]}, [FRIEND, SELF])
+    try:
+        msgs = reader.MessageReader(ACCT).recent(FRIEND, limit=2)
+        assert [m.content for m in msgs] == ["先发的", "后发的"]
+    finally:
+        # `wechat` 是 **module 级**共享夹具：新加的分片必须清掉，否则同模块后跑的用例
+        # （`test_recent_cross_shard_decode` 断言 7 条）会看到它——实测踩过。
+        for p in shard.parent.glob("message_2.db*"):
+            p.unlink()
+
+
 def test_recent_cross_shard_decode(env):
     r = reader.MessageReader(ACCT)
     msgs = r.recent(FRIEND, limit=50)

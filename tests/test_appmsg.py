@@ -40,6 +40,27 @@ def test_does_not_strip_a_leading_colon_line_that_is_not_the_group_prefix():
     assert appmsg.normalize("http://example.com/x:\n<other/>").startswith("http://example.com/x:")
 
 
+def test_xml_decl_quantifier_is_capped_so_a_long_run_cannot_go_quadratic():
+    """EA-001：`<?xml` 后跟长 run（**没有 `>`**）时，`[^>]*` 会在每个起点一路扫到串尾
+    ——`normalize` 对「长度 × `<?xml` 出现次数」平方增长。实测（本仓，2026-10-14）：
+
+        40 KB → 0.25 s ｜ 160 KB → 3.89 s ｜ 320 KB → 15.64 s
+
+    对手可控的输入（任何人发一条 appmsg 即可）能把这变成一次拒绝服务。封顶量词后
+    `normalize` 与长度线性：同一份 320 KB 实测 **毫秒级**。
+
+    判别法：**时限断言**——把 `{0,4096}` 去掉（回到 `[^>]*`）本测试必红（~15 s，断言 2 s）。
+    改后实测 0.38 s ⇒ 阈值留 5 倍余量，机器慢也不会误红。
+    """
+    import time
+
+    payload = "<?xml" * 65536                     # 320 KB，最坏形态：一个 `>` 都没有
+    t0 = time.monotonic()
+    appmsg.normalize(payload)
+    elapsed = time.monotonic() - t0
+    assert elapsed < 2.0, f"二次回溯回来了：320 KB 用了 {elapsed:.1f}s（封顶后实测 0.38s）"
+
+
 def test_normalize_is_a_fixed_point():
     """EA-106：docstring 曾写「幂等」——对**已规范化形态**成立（生产链的中间态），
     但有一类输入不成立（声明排在群前缀之前：首轮剥声明后前缀才暴露）。
