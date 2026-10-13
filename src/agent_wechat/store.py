@@ -155,8 +155,9 @@ CREATE TABLE IF NOT EXISTS vector_watermark (
 # rebuild 用 DROP 而非 DELETE：vec0 的删除只在整块清空时回收空间，且 DELETE 路径有已知 bug
 # EA-043：**不含 `vector_watermark`**。「清表」与「重置进度指针」是两件事——水位线记录
 # 「已嵌入到哪」，与表里有没有行无关；把它绑在这个常量上，意味着任何整表重建路径都会顺手
-# 抹掉续跑能力（本文件下游的 purge 重建也读这个常量）。重建进度由调用方**显式**重置
-# （`vector.build_index` 的 rebuild 分支）。
+# 抹掉续跑能力。重建进度由调用方**显式**重置（`vector.build_index` 的 rebuild 分支）。
+# （F4 订正：初版这句写「purge 重建也读这个常量」——不成立，`VECTOR_DROP` 的生产消费者
+#  只有 `vector.py` 一处；`purge --index` 删的是 `index.db` 整文件。）
 VECTOR_DROP = """
 DROP TABLE IF EXISTS vec_messages;
 DROP TABLE IF EXISTS vector_meta;

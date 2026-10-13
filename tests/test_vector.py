@@ -249,8 +249,8 @@ def test_build_index_rebuild_drops_and_reembeds(env):
 def test_vector_drop_keeps_the_watermark_table(env):
     """EA-043：`VECTOR_DROP` 此前把**进度指针**（`vector_watermark`）与两张数据表一起 DROP
     ——「清表」与「重置进度」是两件事：水位线记录「已嵌入到哪」，与表里有没有行无关。
-    混在一个常量里意味着任何整表重建路径都会顺手抹掉续跑能力（`store` 里那条注释提过
-    purge 的重建也读同一个常量）。现在 DROP 只清数据表，rebuild **显式**重置本模型水位线。
+    混在一个常量里意味着任何整表重建路径都会顺手抹掉续跑能力。现在 DROP 只清数据表，
+    rebuild **显式**重置本模型水位线（且与清表同**一笔事务**，见下一条用例）。
 
     把 `DROP TABLE IF EXISTS vector_watermark;` 加回常量本测试必红。
     """
@@ -280,6 +280,33 @@ def test_rebuild_resets_the_watermark_explicitly(env):
     assert env.execute("SELECT count(*) FROM vec_messages").fetchone()[0] == 2   # 未翻倍
 
 
+def test_rebuild_wipes_tables_and_pointer_in_one_transaction(env, monkeypatch):
+    """F2（复审，P3）：清表与水位线重置必须**同一笔事务**。实测（本机 sqlite3）：
+    `executescript` 逐条提交、**不原子**——脚本中段出错时前面的 DROP 已经落库，所以
+    「放进同一个脚本」并不能消灭那个窗口，只有显式 `BEGIN; … COMMIT;` 才是一笔。
+
+    判别法：让脚本里 DELETE 那步语法错（`MODEL_ID` 换成含引号的值），然后**另开连接**看
+    **已持久化**的状态——原子时 DROP 整体回滚（表还在）。把显式事务去掉（回到裸
+    `executescript`）本测试必红。
+    """
+    store.upsert_batch(env, [mk_row("acct", "chatA", 1, "第一条消息")])
+    vector.build_index(embedder=FakeEmbedder())
+    monkeypatch.setattr(vector, "MODEL_ID", "fastembed:bad'id:512")
+
+    with pytest.raises(sqlite3.OperationalError):
+        vector.build_index(rebuild=True, embedder=FakeEmbedder())
+
+    con2 = sqlite3.connect(store.DB_PATH)          # 新连接：只看已提交的状态
+    try:
+        names = {r[0] for r in con2.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        assert "vec_messages" in names, "DROP 与重置不在同一笔：表已清空而指针还在"
+        # 旧数据仍在的判据用**普通表**（`vec_messages` 是 vec0 虚表，裸连接查它要扩展）
+        assert con2.execute("SELECT count(*) FROM vector_meta").fetchone()[0] == 1
+    finally:
+        con2.close()
+
+
 def test_flush_rejects_a_short_vector_batch(env):
     """EA-059：`flush` 用 `zip(order, vecs)` 配对——嵌入少返向量时**静默截断**：少的那几行
     不进索引，而 `embedded += len(buf_rows)` 照记（账目漂移 + 那些消息永远搜不到）。
@@ -294,16 +321,49 @@ def test_flush_rejects_a_short_vector_batch(env):
             return super().embed(texts)[:-1]          # 少返一个
     with pytest.raises(vector.VectorError) as ei:
         vector.build_index(embedder=_Short())
-    assert "向量" in str(ei.value), ei.value
+    msg = str(ei.value)
+    assert "向量" in msg, msg
+    # 复审 F3：文案必须指向**重跑**（水位线还没推进 ⇒ 不带 rebuild 就能续），
+    # 「请用 rebuild 重建」会把已经嵌好的 2.5–3 小时全部作废。
+    assert "重跑" in msg and "rebuild" in msg, msg
 
 
-def test_offline_load_permission_error_does_not_fall_back_to_download(monkeypatch):
-    """EA-060：`_ensure` 的离线加载此前宽接 `except Exception: pass`——缓存**损坏**
-    （权限/坏文件）也会静默回退下载，而 SECURITY.md 承诺的触发条件是「缓存缺失」；更糟的是
-    原错误被吞，用户看不到真正原因（下载会在同一个不可读目录上以另一个更晦涩的错误失败）。
+def test_a_cache_dir_that_cannot_be_read_does_not_fall_back_to_download(tmp_path, monkeypatch):
+    """EA-060（复审 F1 定稿）：**夹具照生产形态**——真 fastembed 把「缺缓存 / 权限错 /
+    半份快照 / 坏文件」在 `download_model` 里两级 `except Exception` 之后**统一压成同一个
+    `ValueError`**（实测五类里四类如此），所以「按异常类型收窄」在生产路径上等价于原来的
+    宽接，而**异常类型里根本没有可分辨的信息**。判据因此换成「自己看缓存目录」：
+    目录存在但读不了 ⇒ 不回退下载。
 
-    把 except 放回宽版本测试必红。
+    上一版的夹具让假 `TextEmbedding` 抛 `PermissionError`——恰好把「真组件会把权限错改写成
+    ValueError」这一层桩掉了，于是守卫在测试里成立、在生产路径上不成立（复审实测：那版代码
+    在权限错下**照样**发起下载）。把 `cache_dir_blocks_loading` 那条分支删掉本测试必红。
     """
+    cache = tmp_path / "models"
+    cache.mkdir()
+    cache.chmod(0o000)
+    monkeypatch.setattr(vector, "MODEL_CACHE_DIR", cache)
+    calls = []
+
+    class FakeTE:
+        def __init__(self, **kwargs):
+            calls.append(kwargs)
+            raise ValueError("Could not load model from any source.")   # 生产形态
+    monkeypatch.setattr("fastembed.TextEmbedding", FakeTE)
+
+    try:
+        with pytest.raises(vector.VectorError) as ei:
+            vector.FastEmbedEmbedder().embed(["x"])
+        assert len(calls) == 1, "读不了的缓存不是「缺失」，不许回退下载"
+        assert "缓存" in str(ei.value) and ei.value.hint
+    finally:
+        cache.chmod(0o700)          # 让 pytest 的清理能删掉它
+
+
+def test_a_non_missing_exception_is_raised_as_is(monkeypatch):
+    """另一支：**不在**「缓存缺失」两类里的异常（如 `PermissionError`）原样抛出。
+    这一条桩的是 `TextEmbedding` 的**抛错面**，不是缓存形态——真组件不会这么抛（见上一条），
+    所以它守的是「别把 except 放得太宽」这一半，不能替代上一条。"""
     calls = []
 
     class FakeTE:
@@ -311,7 +371,7 @@ def test_offline_load_permission_error_does_not_fall_back_to_download(monkeypatc
             calls.append(kwargs)
             if kwargs.get("local_files_only"):
                 raise PermissionError(13, "Operation not permitted")
-            raise AssertionError("权限错不是「缓存缺失」，不该回退下载")
+            raise AssertionError("原样抛出的异常不该走到下载")
     monkeypatch.setattr("fastembed.TextEmbedding", FakeTE)
 
     with pytest.raises(PermissionError):

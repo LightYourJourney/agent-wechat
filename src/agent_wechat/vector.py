@@ -5,6 +5,7 @@ pre-v1，存在已知崩溃/内存泄漏 bug），便于回归测试与将来整
 """
 from __future__ import annotations
 
+import os
 import sqlite3
 import threading
 import time
@@ -122,6 +123,23 @@ def query_text(q: str) -> str:
     return QUERY_INSTRUCTION + q.strip()
 
 
+def cache_dir_blocks_loading() -> bool:
+    """模型缓存目录**存在但读不了**（权限 / 只读卷 / 坏挂载）——这种态不该回退下载。
+
+    为什么需要它（EA-060，复审 F1 实测）：真 fastembed 把「缺缓存」与「缓存坏了」在内部压成
+    同一个 `ValueError`，异常类型里没有可分辨的信息；唯一还看得到的是**目录本身**。
+
+    目录不存在 → `False`（真缺失，回退下载是对的）；存在但列举失败 → `True`。
+    """
+    try:
+        os.listdir(MODEL_CACHE_DIR)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    return False
+
+
 class FastEmbedEmbedder:
     """fastembed 懒加载封装：模型只在首次使用时载入（首次会下载 ~95MB 公共资产）。
 
@@ -144,15 +162,19 @@ class FastEmbedEmbedder:
                     # 运行期不得发起任何网络请求）。只有首次（缓存缺失）才允许下载。
                     self._model = TextEmbedding(local_files_only=True, **kwargs)
                     return self._model
-                except (ValueError, FileNotFoundError):
-                    # EA-060：**只把「缓存缺失」当作回退条件**。`ValueError` 是本机实测的形态
-                    # （fastembed 缓存缺失抛 ValueError，不是 FileNotFoundError）；
-                    # `FileNotFoundError` 覆盖 huggingface_hub 的 `LocalEntryNotFoundError`
-                    # （无缓存/快照不完整，它同时是 ValueError 与 FileNotFoundError 的子类）。
-                    # 其余异常（`PermissionError`、只读卷、坏文件…）**不是「缺失」**——原样抛出，
-                    # 别在同一个不可读目录上再走一遍下载、把真原因换成一个更晦涩的错误
-                    # （SECURITY.md 承诺的触发条件就是「缓存缺失」）。
-                    pass
+                except (ValueError, FileNotFoundError) as exc:
+                    # EA-060（复审 F1 定稿）：**异常类型分辨不出「缺失」与「损坏」**——
+                    # 真 fastembed 在 `model_management.download_model` 里两级
+                    # `except Exception` 把「缺缓存 / 权限错 / 半份快照 / 坏文件」**统一压成
+                    # 同一个 `ValueError`**（实测五类形态里四类如此），所以「按异常类型收窄」
+                    # 在生产路径上等价于原来的宽接。判据换成**自己看缓存目录**：
+                    if cache_dir_blocks_loading():
+                        raise VectorError(
+                            f"模型缓存目录读不了：{MODEL_CACHE_DIR}",
+                            hint="这不是「缓存缺失」——先修权限/挂载，再重跑；"
+                                 "回退下载会在同一个不可读目录上以更晦涩的错误失败",
+                        ) from exc
+                    pass                       # 目录不存在或读得了 → 按「缓存缺失」回退下载
             # 显式 local_files_only=True 的调用方要求「失败即报错」，不做下载回退
             self._model = TextEmbedding(local_files_only=self._local_only, **kwargs)
         return self._model
@@ -275,9 +297,11 @@ def _build_account(con: sqlite3.Connection, acct: str, embedder: FastEmbedEmbedd
             # `embedded += len(buf_rows)` 照记（账目漂移 + 那些消息永远搜不到）。真实
             # fastembed 恒等长，这条防的是嵌入层被换/出错的形态。抛出即整轮终止（水位线停在上
             # 一次 commit 处，重跑可续）。
+            # 文案（复审 F3）：**重跑**才是对的修法——抛在这里时水位线还没推进，不带 rebuild
+            # 重跑会从上次提交处续跑；rebuild 会把已经嵌好的部分全部作废（2.5–3 小时）。
             raise VectorError(
-                f"嵌入返回的向量数不足（{len(vecs)} != {len(order)}）：索引可能不完整，"
-                "请用 rebuild=True 重建")
+                f"嵌入返回的向量数不足（{len(vecs)} != {len(order)}）：索引不完整。"
+                "重跑一次即可从上次提交处续跑（不带 rebuild）；反复出现再用 rebuild 重建")
         con.executemany(_INSERT_VEC,
                         [(buf_rows[i][0], sqlite_vec.serialize_float32(v), buf_rows[i][1],
                           acct, buf_rows[i][2], buf_rows[i][3])
@@ -341,11 +365,20 @@ def build_index(accounts: Sequence[str] | None = None, rebuild: bool = False,
     con = connect()
     try:
         if rebuild:
-            con.executescript(store.VECTOR_DROP)
+            # EA-043：进度指针由这里**显式**重置（`VECTOR_DROP` 不再顺手删它，见那里的注释）；
+            # 只重置**本模型**的（水位线按 `(model_id, account)` 查，别的模型的留着无害）。
+            # 复审 F2：清表与重置进度**必须同一笔事务**——否则「数据表已空、指针还停在旧
+            # 进度」这一态可被 SIGKILL 命中并持久化，用户按新文档「不带 rebuild 重跑」会得到
+            # 永远 0 进展的空索引。**实测**（本机 sqlite3）：`executescript` 逐条提交、
+            # **不原子**（脚本中段出错时前面的 DROP 已落库；「放进同一个脚本」并不能解决），
+            # 只有显式 `BEGIN; … COMMIT;` 才是一笔。`MODEL_ID` 是模块常量
+            # （`fastembed:<模型>:<维度>`，无引号）⇒ 拼进脚本无注入面。
+            con.executescript(
+                "BEGIN;\n"
+                + store.VECTOR_DROP
+                + f"\nDELETE FROM vector_watermark WHERE model_id='{MODEL_ID}';\n"
+                + "COMMIT;")
             con.executescript(store.VECTOR_SCHEMA)
-            # EA-043：进度指针由本行**显式**重置（`VECTOR_DROP` 不再顺手删它——见那里的注释）。
-            # 只重置**本模型**的：水位线按 `(model_id, account)` 查，别的模型的留着无害。
-            con.execute("DELETE FROM vector_watermark WHERE model_id=?", (MODEL_ID,))
             con.commit()
         # 换模型必须重建。不重建的两种真实失败形态（实测）：
         #   1) 模型常量变了 → 新模型的水位线从 0 起 → 重嵌 → 撞 vec_messages 主键（裸 OperationalError）
