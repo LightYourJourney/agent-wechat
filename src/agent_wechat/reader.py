@@ -102,6 +102,10 @@ class MessageReader:
         self._probed: set[tuple[str, str, str]] = set()   # (rel, capability, only or table)
         self._drifted: dict[tuple[str, str, str], errors.SchemaDrift] = {}
         self._drift: list[errors.SchemaDrift] = []        # 本次实例见过的漂移（T5 读）
+        # 非漂移成因的源级降级（F2，T8 复审）：`_drift` 只装 SchemaDrift，而「文件在、
+        # 解不开」是 DecryptError——不记的话会话名静默落 `md5:<hex>`，用户只知道名字丢了
+        # 一些，不知道去修哪个库。`collect_degradations` 把两者合并成 degraded 条目。
+        self._source_notes: list[tuple[str, str]] = []
 
     def _contacts_all_cached(self) -> list[dict]:
         """**全量**联系人（不带 `LIMIT`）。同一 reader 生命周期内只解密一次 contact.db
@@ -176,6 +180,11 @@ class MessageReader:
                 raise drift
         self._probed.add(key)
 
+    def _record_source_degrade(self, capability: str, rel: str) -> None:
+        """记一条**非漂移**的源级降级（F2，T8 复审）。同一 `(capability, rel)` 只记一条。"""
+        if (capability, rel) not in self._source_notes:
+            self._source_notes.append((capability, rel))
+
     def _record_drift(self, drift: errors.SchemaDrift) -> None:
         """把漂移记进 `self._drift`（T5 读），**同一 `(capability, table)` 只记一条**。
 
@@ -204,11 +213,14 @@ class MessageReader:
                     self._check("username_pool", rel, con)
                     pool |= {u.decode("utf-8", "replace")
                              for (u,) in con.execute(sql) if isinstance(u, bytes)}
-            except (DataNotFound, errors.SchemaDrift, errors.DecryptError):
-                # EA-079：「文件在、**解不开**」（换钥/半截文件/损坏）与「缺文件/结构漂移」
-                # 对**纯名字源**是同一种处置——跳过（池子仍有其余源，解析不出的会话走既有
-                # 的 `md5:<hex>` 回落，usecases 会把降级呈现给用户）。下面**分片源不加**
-                # 这一条：跳过会让时间线静默出现空洞。
+            except (DataNotFound, errors.SchemaDrift):
+                continue
+            except errors.DecryptError:
+                # EA-079 + F2（T8 复审）：纯名字源「文件在、**解不开**」（换钥/半截文件/
+                # 损坏）→ 跳过（池子仍有其余源，解析不出的会话走既有的 `md5:<hex>` 回落），
+                # 但**留一条降级记录**（非漂移成因）——否则这次降级对用户完全不可见。
+                # 下面**分片源不加**这一条：跳过会让时间线静默出现空洞。
+                self._record_source_degrade("username_pool", rel)
                 continue
         for shard in paths.message_shards(self.acct):
             rel = f"message/{shard.name}"

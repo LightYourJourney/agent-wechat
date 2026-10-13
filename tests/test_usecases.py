@@ -105,10 +105,14 @@ def test_chat_context_reader_is_lazy_and_reused(stub):
     assert stub["readers"] == ["acct"]
 
 
-def test_the_usecase_limit_defaults_match_the_documented_value():
+def test_the_usecase_limit_defaults_are_pinned_to_500():
     """EA-094：媒体/朋友圈两个用例层的 `limit` 默认曾是 2000——与 TOOLS.md §9/§10 的默认列
     （500）和两个入口（MCP 500）都不一致，且两个入口**都恒传** limit，用例层那份只在测试
-    里可达。默认值应当只存在于入口；这两处对齐成文档值。把它改回 2000，断言必红。
+    里可达。默认值应当只存在于入口；这两处对齐成 500。
+
+    **这条是硬编码的 pin**（F5，T8 复审：原用例名自称「match the documented value」，实际
+    不读文档）：MCP 侧参数表 ↔ 签名的真正对账在 `tests/test_tools_doc.py`；用例层的默认
+    没有文档行可读，就只能钉值。把它改回 2000，断言必红。
     """
     import inspect
 
@@ -132,12 +136,16 @@ def test_semantic_search_survives_without_a_passphrase_cache(env, monkeypatch):
 
     res = usecases.semantic_search("爬山", account=ACCT)
     assert res["hits"][0]["display"] == FRIEND, res       # 读不到名册 → 回落裸 chat_id
+    # F1（T8 复审）：回落必须**自证**——no-key 时 reader 根本没构造出来，`_drift` 里
+    # 不会有 roster 那条（TOOLS §8 承诺「显示名降级 ⇒ degraded 非空」）。
+    assert [d["capability"] for d in res["degraded"]] == ["roster"], res["degraded"]
     assert "hits" in usecases.search_history("你好", account=ACCT), "兄弟工具同一时刻照常"
 
-    # 反例：缓存正常时 display 仍是展示名（回落不许变成常态）
+    # 反例：缓存正常时 display 仍是展示名、且不许误报降级（回落不许变成常态）
     monkeypatch.setattr(keys, "CACHE_FILE", env.home / "passphrase.json")
     res2 = usecases.semantic_search("爬山", account=ACCT)
     assert res2["hits"][0]["display"] == "张三", res2
+    assert res2["degraded"] == [], res2["degraded"]
 
 
 def test_result_shapes(stub, monkeypatch):

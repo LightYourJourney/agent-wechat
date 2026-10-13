@@ -1,8 +1,9 @@
 """MCP 适配层错误契约：任何工具都不得把异常抛到传输层。
 
-关键护栏：core 若抛 SystemExit（非 Exception 子类），SDK 的 `except Exception` 兜底
-接不住，会杀死常驻 stdio server——所以这里逐个工具**直接调用函数**并断言
-「返回含 error 的 dict 且不抛任何 BaseException」。
+这里逐个工具**直接调用函数**并断言「返回含 error 的 dict 且不抛任何 BaseException」
+——`_call` 的 `except BaseException` 是通用防逃逸网。**`SystemExit` 不在注入面里**：
+它靠 core 侧的不变量（core 不抛 SystemExit）＋ `tests/test_errors.py` 的 AST 护栏兜住
+（F4，T8 复审：模块 docstring 此前把这件事说成被本文件的用例覆盖）。
 """
 import asyncio
 import inspect

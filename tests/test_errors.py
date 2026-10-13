@@ -68,10 +68,33 @@ def test_to_payload_and_to_text_shapes():
 
 
 def test_core_never_raises_systemexit():
-    """源码级护栏：core 任何模块都不得 raise SystemExit；唯一一处是 cli 的退出漏斗。"""
-    offenders = {p.name: p.read_text().count("raise SystemExit")
-                 for p in sorted(SRC.glob("*.py"))
-                 if "raise SystemExit" in p.read_text()}
+    """源码级护栏（F3，T8 复审：改 AST 面）：core 任何模块都不许让 `SystemExit` 逃出。
+
+    旧版是**文本扫描**（数 `raise SystemExit` 字面量），两个洞：`sys.exit(3)` 逃逸
+    ——运行时同样是 `SystemExit`，正是 EA-027 触发条件点名的形态；反向，注释/docstring
+    里写这个字面量反而误红（批内自测当场踩过）。AST 只认真实语法节点。
+
+    唯一允许的抛出点是 `cli.py` 的退出漏斗。（`exit()`/`quit()` 这对内建不在判据里：
+    全仓零使用，且它们是 site 注入的、静态分析不可靠。）
+    """
+    import ast
+
+    offenders: dict[str, int] = {}
+    for p in sorted(SRC.glob("*.py")):
+        hits = 0
+        for node in ast.walk(ast.parse(p.read_text())):
+            if isinstance(node, ast.Raise):
+                exc = node.exc
+                target = exc.func if isinstance(exc, ast.Call) else exc
+                if isinstance(target, ast.Name) and target.id == "SystemExit":
+                    hits += 1
+            elif isinstance(node, ast.Call):
+                f = node.func
+                if (isinstance(f, ast.Attribute) and f.attr == "exit"
+                        and isinstance(f.value, ast.Name) and f.value.id == "sys"):
+                    hits += 1
+        if hits:
+            offenders[p.name] = hits
     assert offenders == {"cli.py": 1}, f"SystemExit 只允许出现在 cli.main: {offenders}"
 
 

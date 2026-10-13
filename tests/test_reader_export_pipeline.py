@@ -828,8 +828,13 @@ def test_username_pool_degrades_when_a_name_only_source_is_undecryptable(env, tm
     monkeypatch.setattr(paths, "XWECHAT_FILES", root)
     (root / ACCT / "db_storage" / "session" / "session.db").write_bytes(b"\x00" * 8192)
 
-    pool = reader.MessageReader(ACCT).username_pool()      # 不许抛
+    r = reader.MessageReader(ACCT)
+    pool = r.username_pool()                               # 不许抛
     assert FRIEND in pool, "一个名字源解不开 ≠ 什么都查不到（其余源照常供名字）"
+    # F2（T8 复审）：跳过一个坏源必须留一条**非漂移**降级记录——否则会话名静默落
+    # `md5:<hex>`，用户只知道名字丢了一些、不知道去修哪个库，CLI 连一行 ⚠️ 都没有。
+    dets = usecases.collect_degradations(r)
+    assert [(d.capability, d.drift) for d in dets] == [("username_pool", False)], dets
 
     (root / ACCT / "db_storage" / "message" / "message_0.db").write_bytes(b"\x00" * 8192)
     with pytest.raises(errors.DecryptError):

@@ -189,6 +189,15 @@ def collect_degradations(rdr: reader.MessageReader) -> tuple[Degradation, ...]:
                 capability=d.capability, db=d.db, table=d.table,
                 missing_columns=d.missing_columns,
                 effect=DEGRADE_EFFECT.get(d.capability, "部分功能降级"))
+    # F2（T8 复审）：非漂移成因的源级降级（reader._source_notes）——`drift=False` 让
+    # CLI 不加「结构不符」后缀（成因是「读不出来」而不是「结构对不上」）。用 getattr
+    # 取：测试里的 reader 桩只建模各自路径用到的那部分状态（真实 reader 在 __init__ 恒有）。
+    for capability, db in getattr(rdr, "_source_notes", ()):
+        key = (capability, db)
+        if key not in seen:
+            seen[key] = Degradation(
+                capability=capability, db=db, table="", missing_columns=(),
+                effect=DEGRADE_EFFECT.get(capability, "部分功能降级"), drift=False)
     return tuple(seen.values())
 
 
@@ -1253,6 +1262,7 @@ def semantic_search(query: str, contact: str | None = None, limit: int = 10,
     res = vector.semantic_search(query, chat_id=chat_id,
                                  limit=clamp_limit(limit, LIMIT_SEMANTIC),
                                  account=ctx.account)
+    fell_back = False
     for h in res.get("hits", []):
         try:
             h["display"] = _display_or_id(ctx, h["chat_id"])   # 缓存命中，只解密一次
@@ -1262,9 +1272,14 @@ def semantic_search(query: str, contact: str | None = None, limit: int = 10,
             # 索引的机器上，`_display_or_id` 只接 SchemaDrift 会让整个工具 100% 失败
             # （错误文案还把用户引向唯一需要 sudo 的 bootstrap），而兄弟工具
             # `search_history` 同一时刻照常出结果。读不到就不富化：`display` 回落裸
-            # chat_id——§3 已文档化的降级形态（degraded 里 roster 那条说的就是这件事）。
+            # chat_id——回落要**自证**（F1，T8 复审）：no-key 时 reader 根本没构造出来，
+            # `ctx.degradations()` 里不会有 roster 那条（条目原注释此处被复验证伪）。
             h["display"] = h["chat_id"]
+            fell_back = True
     res["degraded"] = ctx.degradations()
+    if fell_back and not any(d["capability"] == "roster" for d in res["degraded"]):
+        res["degraded"].append(
+            {"capability": "roster", "effect": DEGRADE_EFFECT["roster"]})
     return res
 
 
