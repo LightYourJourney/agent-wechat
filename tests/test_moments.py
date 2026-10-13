@@ -6,8 +6,8 @@ import sqlite3
 import pytest
 
 from agent_wechat import keys, media, moments, moments_html, paths, sns_media
+from moments_fixtures import ACCT, _passthrough, env  # noqa: F401  (EA-117 共享夹具)
 
-ACCT = "wxid_testacct01_ab12"
 
 POST_XML = """<SnsDataItem>
   <TimelineObject>
@@ -201,11 +201,6 @@ def test_unresolvable_reply_target_is_none_not_a_wxid():
 
 
 # ---------- iter_posts：合成 sns.db + 假解密 ----------
-
-@contextlib.contextmanager
-def _passthrough(db_path, passphrase, tmpdir=None):
-    yield db_path
-
 
 @pytest.fixture()
 def sns(tmp_path, monkeypatch):

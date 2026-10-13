@@ -8,8 +8,8 @@ import sqlite3
 import pytest
 
 from agent_wechat import errors, keys, media, moments, paths, sns_media, usecases
+from moments_fixtures import ACCT, _passthrough, env  # noqa: F401  (EA-117 共享夹具)
 
-ACCT = "wxid_testacct01_ab12"
 
 XML = """<SnsDataItem><TimelineObject>
  <id>P1</id><username>wxid_friend</username><createTime>1735689600</createTime>
@@ -47,37 +47,6 @@ def _md5_xml(bad_md5: str) -> str:
    <url type="1" md5="{bad_md5}" key="3" enc_idx="1" token="TK">http://shmmsns.qpic.cn/sns/u/9</url>
  </media></mediaList></ContentObject>
 </TimelineObject><LocalExtraInfo><nickname>老王</nickname></LocalExtraInfo></SnsDataItem>"""
-
-
-@contextlib.contextmanager
-def _passthrough(db_path, passphrase, tmpdir=None):
-    yield db_path
-
-
-@pytest.fixture()
-def env(tmp_path, monkeypatch):
-    from agent_wechat import decrypt as dec_mod
-    wx, home = tmp_path / "wx", tmp_path / "home"
-    d = wx / ACCT / "db_storage" / "sns"
-    d.mkdir(parents=True)
-    home.mkdir()
-    # `iter_posts` 经 `keys.get_passphrase` 取钥；不隔离就会读到**真实机器的**
-    # passphrase.json（与 test_moments.py 同一口径）。
-    (home / "passphrase.json").write_text(json.dumps(
-        {"accounts": {"wxid_testacct01": {"passphrase_hex": "aa" * 32, "captured_at": 0}}}))
-    monkeypatch.setattr(paths, "XWECHAT_FILES", wx)
-    monkeypatch.setattr(paths, "HOME_DIR", home)
-    monkeypatch.setattr(keys, "CACHE_FILE", home / "passphrase.json")
-    monkeypatch.setattr(dec_mod, "decrypted", _passthrough)
-    for mod in ("agent_wechat.moments", "agent_wechat.usecases"):
-        monkeypatch.setattr(f"{mod}.decrypt", dec_mod, raising=False)
-    con = sqlite3.connect(d / "sns.db")
-    con.execute("CREATE TABLE SnsTimeLine(tid INTEGER PRIMARY KEY DESC, user_name TEXT,"
-                " content TEXT, pack_info_buf TEXT)")
-    con.execute("INSERT INTO SnsTimeLine(tid, user_name, content) VALUES (1,'u',?)", (XML,))
-    con.commit()
-    con.close()
-    return home
 
 
 def _add_post(xml: str, tid: int = 2) -> None:

@@ -1435,3 +1435,21 @@ def test_undo_chat_derives_the_md5_instead_of_trusting_the_target():
     with exclusions.standalone() as con:
         assert exclusions.count(con) == 0, \
             "入参 md5 写错也要撤销得了——判据按 chat_id 派生，不押在调用方身上"
+
+def test_write_tombstone_goes_through_the_owning_module(monkeypatch):
+    """EA-075：墓碑的生产写入端必须在**拥有排除清单的模块**里（`exclusions.add_from_messages`）；
+    `_write_tombstone` 只是它在 purge 事务里的调用点。把 SQL 抄回 purge，本用例必红。"""
+    from agent_wechat import exclusions, purge
+
+    calls = []
+
+    def spy(con, account, chat_id):
+        calls.append((account, chat_id))
+        return 3
+
+    monkeypatch.setattr(exclusions, "add_from_messages", spy)
+    monkeypatch.setattr(exclusions, "add",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            AssertionError("测试播种接口不该被生产路径调用")))
+    assert purge._write_tombstone(object(), "acct", "wxid_x") == 3
+    assert calls == [("acct", "wxid_x")]

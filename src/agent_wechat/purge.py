@@ -769,15 +769,12 @@ def _write_tombstone(con: sqlite3.Connection, account: str, chat_id: str) -> int
     ——所以两次 `rowcount` 之和恰是**本次新增**的条数，重复的既不计入也不会真的写第二遍。
 
     单独成函数是为了**可注入**：`tests/test_purge.py` 的「墓碑没写成 → 核查必须报
-    不可逆性未建立」那条测试要把它换成不写库的桩。桩打在 `exclusions.add` 上没用——
-    本函数走的是裸 SQL。
+    不可逆性未建立」那条测试要把它换成不写库的桩。
+
+    EA-075：SQL 已归位到 `exclusions.add_from_messages`（生产写入端属于拥有排除清单的模块），
+    本函数只是它在 purge 事务里的调用点。
     """
-    cur = con.execute(
-        "INSERT OR IGNORE INTO exclusions.excluded "
-        "(msg_key, account, chat_md5, excluded_at) "
-        "SELECT msg_key, account, chat_md5, ? FROM messages "
-        "WHERE account=? AND chat_id=?", (int(time.time()), account, chat_id))
-    return cur.rowcount
+    return exclusions.add_from_messages(con, account, chat_id)
 
 
 def _escaping_links(plan: ChatPlan, home: pathlib.Path) -> list[pathlib.Path]:

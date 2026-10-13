@@ -74,8 +74,26 @@ def standalone() -> Iterator[sqlite3.Connection]:
         con.close()
 
 
+def add_from_messages(con: sqlite3.Connection, account: str, chat_id: str) -> int:
+    """把该会话当前**全部**消息写进排除清单（`INSERT … SELECT`，返回新写入条数）。
+
+    **这是生产写路径**（EA-075：从 `purge._write_tombstone` 原样搬来，SQL 一字不改）——
+    墓碑的生产写入端属于拥有排除清单的模块。**必须从同一个谓词派生**，不许「先读一个
+    msg_key 集合、再照着写」：后者在「读集合」与「写墓碑」之间留一个窗口，那期间写进来的
+    新消息不在墓碑里、却会被随后的谓词 DELETE 一并删掉——**删了但没挡**，下次 `--full`
+    复活（spec §5.1）。`INSERT OR IGNORE` 让重复调用幂等。
+    """
+    cur = con.execute(
+        "INSERT OR IGNORE INTO exclusions.excluded "
+        "(msg_key, account, chat_md5, excluded_at) "
+        "SELECT msg_key, account, chat_md5, ? FROM messages "
+        "WHERE account=? AND chat_id=?", (int(time.time()), account, chat_id))
+    return cur.rowcount
+
+
 def add(con: sqlite3.Connection, rows: list[tuple[str, str, str]]) -> int:
-    """批量写墓碑。幂等（`INSERT OR IGNORE`）。不 commit：由调用方收口。
+    """批量写墓碑（**仅供测试播种/夹具**——生产写入端是 `add_from_messages`）。幂等
+    （`INSERT OR IGNORE`）。不 commit：由调用方收口。
 
     **返回本次真正新写进去的条数**（与 `purge._write_tombstone` 同口径）：重复的既不计入、
     也不会真的写第二遍，所以同一个会话重跑返回 0。此前返回 `len(rows)`——重跑报 2 条而实际
