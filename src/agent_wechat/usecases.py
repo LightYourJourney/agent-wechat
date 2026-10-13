@@ -192,12 +192,15 @@ def collect_degradations(rdr: reader.MessageReader) -> tuple[Degradation, ...]:
     # F2（T8 复审）：非漂移成因的源级降级（reader._source_notes）——`drift=False` 让
     # CLI 不加「结构不符」后缀（成因是「读不出来」而不是「结构对不上」）。用 getattr
     # 取：测试里的 reader 桩只建模各自路径用到的那部分状态（真实 reader 在 __init__ 恒有）。
+    # F7（T8 复验）：把**哪个库**烘进 effect——信封只带 {capability, effect}，不写进
+    # effect 的话两个名字源都坏时 CLI/MCP 各看到两条逐字相同的说明，谁都不知道去修哪个。
     for capability, db in getattr(rdr, "_source_notes", ()):
         key = (capability, db)
         if key not in seen:
+            effect = DEGRADE_EFFECT.get(capability, "部分功能降级")
             seen[key] = Degradation(
                 capability=capability, db=db, table="", missing_columns=(),
-                effect=DEGRADE_EFFECT.get(capability, "部分功能降级"), drift=False)
+                effect=f"{effect}（{db} 读不出来）" if db else effect, drift=False)
     return tuple(seen.values())
 
 

@@ -835,6 +835,9 @@ def test_username_pool_degrades_when_a_name_only_source_is_undecryptable(env, tm
     # `md5:<hex>`，用户只知道名字丢了一些、不知道去修哪个库，CLI 连一行 ⚠️ 都没有。
     dets = usecases.collect_degradations(r)
     assert [(d.capability, d.drift) for d in dets] == [("username_pool", False)], dets
+    # F7（T8 复验）：坏的是**哪个库**要看得见（信封只带 {capability, effect}，不写进
+    # effect 的话两个名字源都坏时只有两条逐字相同的说明）。
+    assert "session/session.db" in dets[0].effect, dets[0].effect
 
     (root / ACCT / "db_storage" / "message" / "message_0.db").write_bytes(b"\x00" * 8192)
     with pytest.raises(errors.DecryptError):

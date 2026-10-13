@@ -86,4 +86,9 @@ def test_every_tool_parameter_and_default_matches_TOOLS_md():
             if want is not param.default and want != param.default:
                 problems.append(
                     f"{name}.{pname}: 文档默认 {want!r} ≠ 签名默认 {param.default!r}")
+        # F8（T8 复验）：反向也要查——表里有、签名没有的行同样是契约裂缝（文档承诺了
+        # 一个不存在的参数，SDK 会静默丢弃它）。单向门禁时「凭空加一行 zzz_bogus」全绿。
+        extra = set(rows) - set(inspect.signature(fn).parameters)
+        if extra:
+            problems.append(f"{name}: 参数表里有签名没有的行 {sorted(extra)}")
     assert problems == [], problems
