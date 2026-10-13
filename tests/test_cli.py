@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent_wechat import (account, bootstrap, cli, errors, keys, media, paths, reader,
+from agent_wechat import (account, bootstrap, cli, decrypt, errors, keys, media, paths, reader,
                           search, store, usecases, vector)
 # 合成微信目录（真实 sqlcipher 解密链路；路径全部指向 tmp_path，绝不碰真实数据）。
 # 跨模块复用夹具与 test_usecases 同法：`env` 依赖它**自己模块**里的 module 级 `wechat`。
@@ -2040,3 +2040,34 @@ def test_appmsg_rebuild_wires_the_skipped_note_to_stderr(monkeypatch, capsys):
     assert ei.value.code == 0
     out, err = capsys.readouterr()
     assert "跳过 11 行（已排除）" in err and "跳过" not in out
+
+def test_decrypt_out_absolute_path_is_written_there_and_chmods_0600(tmp_path, monkeypatch, capsys):
+    """EA-050：`--out` 给绝对路径时**按原样写到该处**（帮助文本与 SECURITY 已照此改），
+    且产物必须是 0600——它是整库明文。
+
+    红过（修前）：无 chmod，文件是 umask 默认的 0644。
+    """
+    db = tmp_path / "message" / "message_0.db"
+    db.parent.mkdir(parents=True)
+    db.write_bytes(b"x")
+    plain = tmp_path / "plain.db"
+    plain.write_bytes(b"SECRET")
+    monkeypatch.setattr(account, "resolve_account", lambda a: "wxid_testacct01_ab12")
+    monkeypatch.setattr(paths, "db_storage", lambda acc: db.parent)
+    monkeypatch.setattr(keys, "get_passphrase", lambda acc: b"p" * 32)
+
+    class _Ctx:
+        def __enter__(self):
+            return plain
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(decrypt, "decrypted", lambda d, pp: _Ctx())
+    target = tmp_path / "elsewhere" / "m0.db"
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["decrypt", "message_0.db", "--out", str(target)])
+    assert ei.value.code == 0
+    assert target.read_bytes() == b"SECRET", "绝对路径按原样写入"
+    assert (target.stat().st_mode & 0o777) == 0o600, "整库明文必须 0600"
+    assert str(target) in capsys.readouterr().out

@@ -76,6 +76,7 @@ def cmd_decrypt(args: argparse.Namespace) -> int:
             out = paths.HOME_DIR / args.out
             out.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
             out.write_bytes(plain.read_bytes())
+            out.chmod(0o600)      # EA-050：整库明文，权限与目录侧承诺对齐
             print(f"已导出明文: {out}")
         else:
             con = sqlite3.connect(f"file:{plain}?mode=ro", uri=True)
@@ -869,7 +870,7 @@ def main(argv: list[str] | None = None) -> None:
 
     sp = sub.add_parser("decrypt", help="解密指定库（调试用）")
     sp.add_argument("db", help="相对 db_storage 的路径，如 session/session.db")
-    sp.add_argument("--out", help="输出文件名（存于 ~/.agent-wechat/ 下）；省略则做 quick_check")
+    sp.add_argument("--out", help="输出路径（相对路径存于 ~/.agent-wechat/ 下；绝对路径按原样写入）；文件权限 0600；省略则做 quick_check")
     sp.add_argument("--account", help="目标账号目录名；省略用当前登录账号")
     sp.set_defaults(fn=cmd_decrypt)
 
