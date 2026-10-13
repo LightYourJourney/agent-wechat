@@ -33,8 +33,10 @@
 `paths.subprocess.run`（`test_paths.py` 的两条就是），它们在本夹具之后生效、互不冲突。
 
 **刻意不管**另外两个 **import 期绑定**的常量（它们不经过上面三道闸，各有各的理由）：
-`vector.MODEL_CACHE_DIR` 必须指向真实模型缓存（`-m slow` 的向量用例要用）；
-`keys.CACHE_FILE` 的写点全在用例内自带 patch（2026-10-14 grep 复核过）。
+`keys.CACHE_FILE` 的写点全在用例内自带 patch（2026-10-14 grep 复核过）；
+`vector.MODEL_CACHE_DIR` 归**文件级**闸——`tests/test_vector.py` 有自己的 autouse fixture
+（EA-064：那两条走 `_embedder._ensure()` 的用例此前会对**真实** `~/.agent-wechat/models`
+执行 mkdir）；真模型用例在 `test_vector_real.py`（`-m slow`），那才是需要真实缓存的。
 """
 import pytest
 

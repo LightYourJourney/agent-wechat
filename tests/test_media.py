@@ -2056,7 +2056,7 @@ def test_sticker_export_sends_no_request_without_the_flag(tmp_path, monkeypatch)
     md5 = "d0f46ed3" + "0" * 24
     called = []
     monkeypatch.setattr(media, "sticker_cdn_urls",
-                        lambda *a, **k: called.append("urls") or {})
+                        lambda *a, **k: called.append("urls") or ({}, None))
     monkeypatch.setattr(media, "_fetch_cdn_bytes",
                         lambda *a, **k: called.append("bytes") or None)
     con = _one_sticker_index(ts, md5)
@@ -2083,7 +2083,7 @@ def test_sticker_export_calls_cdn_only_with_the_flag(tmp_path, monkeypatch):
     monkeypatch.setattr(media, "sticker_cdn_urls",
                         lambda acct, items, **k: (asked.append((acct, list(items)))
                                                   or {(cm_, "message_0.db", 7):
-                                                      ("http://wxapp.tc.qq.com/x", md5)}))
+                                                      ("http://wxapp.tc.qq.com/x", md5)}, None))
     monkeypatch.setattr(media, "_fetch_cdn_bytes",
                         lambda url, expect, **k: fetched.append((url, expect)) or None)
     con = _one_sticker_index(ts, md5)
@@ -2148,7 +2148,7 @@ def _fetch_one(account, cm, shard, lid):
     from agent_wechat import media as m
 
     loc = (cm, shard, lid)
-    urls = m.sticker_cdn_urls(account, [loc])
+    urls, _note = m.sticker_cdn_urls(account, [loc])       # EA-021：多了「分片失败原因」出参
     if loc not in urls:
         return None
     url, expect_md5 = urls[loc]
@@ -2331,8 +2331,9 @@ def test_sticker_export_fetches_a_repeated_sticker_only_once(tmp_path, monkeypat
     con.commit()
 
     fetched = []
-    monkeypatch.setattr(media, "sticker_cdn_urls", lambda acct, items, **k: {
-        (cm, "message_0.db", 7 + i): ("http://wxapp.tc.qq.com/x", md5) for i in range(3)})
+    monkeypatch.setattr(media, "sticker_cdn_urls",
+                        lambda acct, items, **k: ({
+        (cm, "message_0.db", 7 + i): ("http://wxapp.tc.qq.com/x", md5) for i in range(3)}, None))
     monkeypatch.setattr(media, "_fetch_cdn_bytes",
                         lambda url, expect, **k: fetched.append(url) or None)
     try:
@@ -2342,6 +2343,86 @@ def test_sticker_export_fetches_a_repeated_sticker_only_once(tmp_path, monkeypat
         con.close()
     assert len(fetched) == 1, f"同一条贴纸取了 {len(fetched)} 次件——去重没生效"
     assert rep.sticker.skipped == 2         # 另两条走 skipped，不吃 limit 预算
+
+
+def test_sticker_cdn_urls_reports_an_unreadable_shard(tmp_path, monkeypatch):
+    """EA-021：`sticker_cdn_urls` 此前把「整个分片打不开」静默压成空字典——调用方只能把它
+    与「这一行不在分片里」一起计数，`degraded` 一条都不加（对照：语音侧同类失败**有**护栏
+    且有用例）。现在把首个打不开分片的原因带出来，且文案必须与「本机没有凭据」区分开
+    ——后者用户重试无用，前者说明库/密钥有问题。
+
+    把 except 分支改回不带 note 本测试必红。
+    """
+    _, account = make_tree(tmp_path, monkeypatch)          # message/ 下没有任何分片
+    urls, note = media.sticker_cdn_urls(account, [("a" * 32, "message_0.db", 1)])
+    assert urls == {}
+    assert note, "分片打不开必须带出原因，不许静默返回空字典"
+    assert "分片" in note and "凭据" in note, note          # 与「本机没有凭据」区分开
+
+
+def test_sticker_shard_failure_reaches_the_degraded_channel(tmp_path, monkeypatch):
+    """EA-021 的**消费点**：`sticker_cdn_urls` 带出来的原因必须真的进 `report.degraded`
+    ——只测「函数返回了 note」不够（上一批的教训：事件有了、渲染没了）。删掉
+    `_export_stickers` 里那条 `report.degraded.append(shard_note)` 本测试必红。
+    """
+    _, account = make_tree(tmp_path, monkeypatch)
+    ts_ = int(datetime.datetime(2026, 9, 15, 12, 0).timestamp())
+    md5 = "d0f46ed3" + "0" * 24
+    con = store.connect()
+    cm = messages.md5_of("wxid_x")
+    row = messages.make_row(
+        account=account, chat_md5=cm, chat_id="wxid_x", shard="message_0.db",
+        local_id=7, ts=ts_, msg_type=messages.TYPE_STICKER,
+        sender_id="wxid_x", sender_name=None, is_self=0,
+        content=messages.sticker_display(md5, None), media_hint="[sticker]")
+    store.upsert_batch(con, [row])
+    store.upsert_media_refs(con, [(row["msg_key"], "sticker", md5, None)])
+    con.commit()
+
+    note = "2 个消息分片读不出来（首个：message_0.db），其中 3 条贴纸查不到凭据"
+    monkeypatch.setattr(media, "sticker_cdn_urls", lambda acct, items, **k: ({}, note))
+    try:
+        rep = media.export_media(account, ["wxid_x"], kinds=["sticker"],
+                                 out_dir=tmp_path / "media", con=con, with_cdn=True)
+    finally:
+        con.close()
+    assert note in rep.degraded, rep.degraded
+
+
+def test_sticker_without_any_credential_counts_missing_not_failed(tmp_path, monkeypatch):
+    """EA-022：`counts.sticker.failed` 此前把「一次请求都没发」也算成失败——`got is None`
+    的两种成因（行不在分片里 / XML 无凭据）都进 failed，而文档口径写的是「联网了但没取到」。
+    两类用户动作完全不同（前者重试无用、要查数据形态），故并入 `missing`；`failed` 只留
+    真正联网失败的（`_fetch_cdn_bytes` 返回 None）。
+
+    把 `got is None` 那条改回 `failed += 1` 本测试必红。
+    """
+    _, account = make_tree(tmp_path, monkeypatch)
+    ts_ = int(datetime.datetime(2026, 9, 15, 12, 0).timestamp())
+    md5 = "d0f46ed3" + "0" * 24
+    con = store.connect()
+    cm = messages.md5_of("wxid_x")
+    row = messages.make_row(
+        account=account, chat_md5=cm, chat_id="wxid_x", shard="message_0.db",
+        local_id=7, ts=ts_, msg_type=messages.TYPE_STICKER,
+        sender_id="wxid_x", sender_name=None, is_self=0,
+        content=messages.sticker_display(md5, None), media_hint="[sticker]")
+    store.upsert_batch(con, [row])
+    store.upsert_media_refs(con, [(row["msg_key"], "sticker", md5, None)])
+    con.commit()
+
+    # 一次请求都没发：回源整批拿不到凭据（空字典）——既不是「联网失败」也不是「落盘失败」
+    monkeypatch.setattr(media, "sticker_cdn_urls", lambda acct, items, **k: ({}, None))
+
+    def _no_fetch(*a, **k):
+        raise AssertionError("没有凭据时一个请求都不该发")
+    monkeypatch.setattr(media, "_fetch_cdn_bytes", _no_fetch)
+    try:
+        rep = media.export_media(account, ["wxid_x"], kinds=["sticker"],
+                                 out_dir=tmp_path / "media", con=con, with_cdn=True)
+    finally:
+        con.close()
+    assert rep.sticker.missing == 1 and rep.sticker.failed == 0, rep.sticker
 
 
 def test_sticker_export_tries_other_messages_of_the_same_sticker(tmp_path, monkeypatch):
@@ -2369,8 +2450,9 @@ def test_sticker_export_tries_other_messages_of_the_same_sticker(tmp_path, monke
 
     fetched = []
     # **只有第二条候选**（local_id=8）拿得到凭据——模拟首条是商店引用形态
-    monkeypatch.setattr(media, "sticker_cdn_urls", lambda acct, items, **k: {
-        (cm, "message_0.db", 8): ("http://wxapp.tc.qq.com/x", md5)})
+    monkeypatch.setattr(media, "sticker_cdn_urls",
+                        lambda acct, items, **k: ({
+        (cm, "message_0.db", 8): ("http://wxapp.tc.qq.com/x", md5)}, None))
     monkeypatch.setattr(media, "_fetch_cdn_bytes",
                         lambda url, expect, **k: fetched.append(url) or None)
     try:
@@ -2422,7 +2504,7 @@ def test_sticker_export_sources_credentials_from_another_month(tmp_path, monkeyp
     def _fake_urls(acct, items, **k):
         seen_locs.extend(items)
         # **只有 8 月那条**（local_id=8）拿得到凭据
-        return {(cm, "message_0.db", 8): ("http://wxapp.tc.qq.com/x", md5)}
+        return {(cm, "message_0.db", 8): ("http://wxapp.tc.qq.com/x", md5)}, None
 
     monkeypatch.setattr(media, "sticker_cdn_urls", _fake_urls)
     monkeypatch.setattr(media, "_fetch_cdn_bytes",
@@ -2504,8 +2586,8 @@ def test_sticker_wxgf_transcodes_to_jpeg(tmp_path, monkeypatch):
     md5 = "d0f46ed3" + "0" * 24
     con, cm = _one_wxgf_sticker_index(ts, md5)
     monkeypatch.setattr(media, "sticker_cdn_urls",
-                        lambda acct, items, **k: {(cm, "message_0.db", 7):
-                                                  ("http://wxapp.tc.qq.com/x", md5)})
+                        lambda acct, items, **k: ({(cm, "message_0.db", 7):
+                                                   ("http://wxapp.tc.qq.com/x", md5)}, None))
     monkeypatch.setattr(media, "_fetch_cdn_bytes",
                         lambda url, expect, **k: WXGF_BLOB)
 
@@ -2538,8 +2620,8 @@ def test_sticker_wxgf_without_transcode_saves_container_and_says_so(tmp_path, mo
     md5 = "d0f46ed3" + "0" * 24
     con, cm = _one_wxgf_sticker_index(ts, md5)
     monkeypatch.setattr(media, "sticker_cdn_urls",
-                        lambda acct, items, **k: {(cm, "message_0.db", 7):
-                                                  ("http://wxapp.tc.qq.com/x", md5)})
+                        lambda acct, items, **k: ({(cm, "message_0.db", 7):
+                                                   ("http://wxapp.tc.qq.com/x", md5)}, None))
     monkeypatch.setattr(media, "_fetch_cdn_bytes",
                         lambda url, expect, **k: WXGF_BLOB)
     monkeypatch.setattr(media, "_wxgf_to_jpeg", lambda data, dest: False)   # 无 ffmpeg / 转码失败

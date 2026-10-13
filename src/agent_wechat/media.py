@@ -492,7 +492,7 @@ class Counts:
     missing: int = 0
     raw_only: int = 0      # voice 专属：pilk 缺失时导出原始 .slk 的数量
     thumb: int = 0         # video 专属：回退缩略图数量
-    skipped: int = 0       # 本次因产物已存在而跳过的**文件**数（有本体的视频，其缩略图不再另写，故不另计）；不吃 --limit 预算
+    skipped: int = 0       # 本次因产物**已存在**或**本轮内重复**（EA-084：同一个贴纸 md5 只取一次件）而跳过的**文件**数（有本体的视频，其缩略图不再另写，故不另计）；不吃 --limit 预算
     remaining: int = 0     # 撞上 --limit 后本会导出的条数（只计数，不落盘）
 
 
@@ -1214,8 +1214,13 @@ def _cdn_opener() -> urllib.request.OpenerDirector:
 
 
 def sticker_cdn_urls(account: str, items: Sequence[tuple[str, str, int]]
-                     ) -> dict[tuple[str, str, int], tuple[str, str]]:
-    """批量回源：`{(chat_md5, shard, local_id): (url, expect_md5)}`，取不到的键不出现。
+                     ) -> tuple[dict[tuple[str, str, int], tuple[str, str]], str | None]:
+    """批量回源：`({(chat_md5, shard, local_id): (url, expect_md5)}, note)`，取不到的键不出现。
+
+    **note**（EA-021）：一次调用内**首个打不开的分片**的原因，全成功时为 `None`。此前那条
+    `except Exception: continue` 把「整个分片读不出来」静默压成空字典——与「这一行不在分片
+    里」在下游完全同形，而前者是能力级失败（分片损坏 / 密钥失效 / 结构漂移），本应公告
+    （对照：语音侧同类失败**有**护栏且有用例）。文案与「本机没有凭据」区分开。
 
     **为什么必须批量**：回源要解密分片，而 `reader._open` 走的是 `decrypt.decrypted`
     ——那是一次**完整分片**的 sqlcipher_export。本机 `message_4.db` 有 **235 MB**，
@@ -1227,6 +1232,7 @@ def sticker_cdn_urls(account: str, items: Sequence[tuple[str, str, int]]
     """
     from .reader import MessageReader, _decode_content      # 惰性：避开 reader↔media 的环
     out: dict[tuple[str, str, int], tuple[str, str]] = {}
+    failed_shards: list[tuple[str, int]] = []
     # 按分片分组：同一个 (shard) 只开一次
     by_shard: dict[str, list[tuple[str, int]]] = {}
     for chat_md5, shard, local_id in items:
@@ -1242,6 +1248,7 @@ def sticker_cdn_urls(account: str, items: Sequence[tuple[str, str, int]]
                         f"WHERE local_id = ?", (local_id,)).fetchone()
                     rows[(chat_md5, local_id)] = _decode_content(*row) if row else None
         except Exception:                    # noqa: BLE001 —— 见 `_fetch_cdn_bytes` 的说明（core 层只抛项目异常）
+            failed_shards.append((shard, len(wanted)))
             continue                         # 该分片整体取不到：这些键不出现在返回值里
         for (chat_md5, local_id), xml in rows.items():
             if not xml:
@@ -1253,7 +1260,13 @@ def sticker_cdn_urls(account: str, items: Sequence[tuple[str, str, int]]
                 continue                     # 没凭据 → 这个键不出现 → **一次请求都不发**
             out[(chat_md5, shard, local_id)] = (m.group(1).replace("&amp;", "&"),
                                                 h.group(1).lower())
-    return out
+    note = None
+    if failed_shards:
+        n_keys = sum(n for _, n in failed_shards)
+        note = (f"{len(failed_shards)} 个消息分片读不出来（首个：{failed_shards[0][0]}），"
+                f"其中 {n_keys} 条贴纸查不到凭据——**这与「本机没有凭据」不是一回事**"
+                "（分片损坏 / 密钥失效 / 结构漂移），请先查库与密钥")
+    return out, note
 
 
 def _fetch_cdn_bytes(url: str, expect_md5: str, *, timeout: float = 15.0) -> bytes | None:
@@ -1356,7 +1369,7 @@ def _export_stickers(account: str, chat_ids: list[str], out_root: pathlib.Path,
                 report.sticker.skipped += 1
                 continue
             if msg_key.count("|") != 3:
-                report.sticker.failed += 1   # msg_key 形状不对：定位不了那一行
+                report.sticker.missing += 1  # EA-022：形状不对 = 定位不了那一行（一次请求都不会发）
                 continue
             key = (cm, mon, file_key)
             if key in cands:
@@ -1372,7 +1385,7 @@ def _export_stickers(account: str, chat_ids: list[str], out_root: pathlib.Path,
         for k in keys:
             loc = _loc_of_msg_key(k)             # EA-085：形状校验收在一个可测的纯函数里
             if loc is None:
-                report.sticker.failed += 1       # 与上面那条「msg_key 形状不对」同支归口
+                report.sticker.missing += 1      # EA-022：与上面那条「msg_key 形状不对」同支归口
                 continue
             out.append(loc)
         return out
@@ -1394,7 +1407,10 @@ def _export_stickers(account: str, chat_ids: list[str], out_root: pathlib.Path,
         return
 
     # ── 第二趟：按分片**一次性**回源（候选消息一并交出去） ──
-    urls = sticker_cdn_urls(account, all_locs)
+    urls, shard_note = sticker_cdn_urls(account, all_locs)
+    if shard_note:
+        report.degraded.append(shard_note)       # EA-021：分片级失败必须公告（一次导出一条）
+
 
     # ── 第三趟：每个不同贴纸取一次件 + 落盘 ──
     wxgf_warned = False          # once-flag：一次导出只说一次（与图片分支同款）
@@ -1405,7 +1421,10 @@ def _export_stickers(account: str, chat_ids: list[str], out_root: pathlib.Path,
             continue
         got = next((urls[loc] for loc in _locs(cands[(cm, mon, md5)]) if loc in urls), None)
         if got is None:
-            report.sticker.failed += 1       # 全部候选都拿不到（行不在分片里 / XML 无凭据）
+            # EA-022：并进 `missing` 而不是 `failed`——**一次请求都没发**。两种成因（行不在
+            # 分片里 / XML 无凭据）与「联网了但没取到」的用户动作完全不同，后者重试可能有用，
+            # 前者重试无用、要查数据形态。文档口径（TOOLS §9）已同批改为与本行一致。
+            report.sticker.missing += 1
             continue
         data = _fetch_cdn_bytes(got[0], got[1])
         if data is None:

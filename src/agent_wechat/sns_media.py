@@ -229,6 +229,11 @@ def fetch(m: moments.SnsMedia, *, timeout: float = 20.0, attempts: int = 3,
 
     异常消息**只含类型名**，绝不回显 URL / token / key。
 
+    **已知边界（EA-056，2026-10-14 审计）**：「只解前 128KB」的判据是 `kind`（`video=`），
+    而**视频封面复用 `kind=video`**——封面大于 128KB 且整份加密时会被静默截断成坏图。修法
+    （给封面那条调用传 `video=False`）**需要一行真机证据**（封面 >128KB 且整份加密）才该动，
+    否则是无根据的猜测；本批按条目的「先别改」处置，边界留在这里。
+
     注意 `x-enc: 1` 只说明「响应体是加密的」，**不代表解出来的是有效媒体**：
     密钥错误或越界时 `decrypt_stream` 会静默产出乱码而非抛错，调用方须自行嗅探校验。
 
@@ -269,16 +274,36 @@ def fetch(m: moments.SnsMedia, *, timeout: float = 20.0, attempts: int = 3,
             with op.open(req, timeout=timeout) as resp:
                 raw = resp.read()
                 enc = str(resp.headers.get("x-enc") or "").strip()
-            # 两个信号都不完备，**取或才完备**（真机 5087 个 media 零例外）：
+        except urllib.error.HTTPError as exc:
+            # EA-007：4xx 是**确定性失败**——重试既白等，又把根因改写成「下载失败（重试 N 次）」，
+            # 用户会去查网络而不是理解「服务端已清理这条媒体」。`HTTPError` 是 `URLError`
+            # 的子类，故本子句必须排在宽 `except` 之前。文案只带状态码（**不带 URL**——
+            # 「消息只含类型名」那条硬约束的同一立场，`test_fetch_error_never_echoes_token` 钉住）。
+            # 取舍（条目明记）：确实存在「CDN 边缘暂时 404」的形态，代价是丢掉一次可恢复的下载。
+            if 400 <= exc.code < 500:
+                raise SnsMediaError(
+                    f"服务端已清理（HTTP {exc.code}），不再重试：该媒体已不可取") from None
+            last = exc
+        except Exception as exc:                       # 网络异常种类多，统一重试
+            last = exc
+        else:
+            # 解密放在重试面**之外**（EA-007）：它只依赖响应体与 XML、与网络无关。此前它在
+            # `try` 内，任何解密失败（如 `key` 不是数字）都被宽 `except` 吞掉重试三次，最后
+            # 只剩「下载失败（重试 3 次）」——真正的原因反而丢了（同 `:251` 那条早退的理由）。
+            # 两个加密信号都不完备，**取或才完备**（真机 5087 个 media 零例外）：
             #   · 响应头 `x-enc: 1` —— type=1/54/3（4775 条）靠它
             #   · XML `<enc>` 文本 '1' —— type=15（180 条）**没有** `x-enc` 头，靠它
             # 只信头会静默存下密文；只信 XML 会漏掉老路径。
-            if m.key and (enc == "1" or m.encrypted):
+            if enc == "1" or m.encrypted:
+                if not m.key:
+                    # EA-055：头说加密而 XML 没给密钥——此前靠 `if m.key and (...)` 短路成
+                    # 「返回密文」，落盘是坏图、归因指向「解密后不是已知格式」，与请求**前**
+                    # 那条同族早退（`m.encrypted and not m.key`）不对称：同一族信号只有一半出声。
+                    raise SnsMediaError(
+                        "媒体已加密（x-enc=1）但 XML 未给出密钥（enc@key 缺失）")
                 return decrypt_stream(raw, m.key,
                                       video=(m.kind == moments.KIND_VIDEO))
             return raw
-        except Exception as exc:                       # 网络异常种类多，统一重试
-            last = exc
-            if i < attempts - 1:
-                time.sleep(sleep)
+        if i < attempts - 1:
+            time.sleep(sleep)
     raise SnsMediaError(f"下载失败（重试 {attempts} 次）：{type(last).__name__}")

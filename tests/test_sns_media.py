@@ -197,6 +197,78 @@ def test_fetch_error_never_echoes_token():
     assert "SECRETTOKEN" not in str(ei.value)
 
 
+def test_http_404_is_not_retried_and_names_the_real_cause():
+    """EA-007：4xx 是**确定性失败**——重试三次既白等，又把根因改写成「下载失败（重试 3 次）」，
+    用户会去查网络而不是去理解「这条媒体已经被服务端清理了」。条目：4xx（尤其 404/410）
+    直接抛，文案与「网络失败」分开；硬约束「消息只含类型名」仍在（URL/token 不出现）。
+
+    把 4xx 分支删掉（回到宽 except）本测试的前两条断言必红。
+    """
+    err = urllib.error.HTTPError("http://shmmsns.qpic.cn/x", 404, "Not Found", None, None)
+    op = _Opener([err, err, err])
+    with pytest.raises(sns_media.SnsMediaError) as ei:
+        sns_media.fetch(_m(token="SECRETTOKEN"), opener=op)
+    assert len(op.calls) == 1, "4xx 不许重试"
+    msg = str(ei.value)
+    assert "404" in msg and "清理" in msg, msg
+    assert "下载失败" not in msg, "确定性失败不许被说成网络失败"
+    assert "SECRETTOKEN" not in msg
+
+
+def test_a_decrypt_failure_is_not_retried_or_rewritten():
+    """EA-007 的另一半：`decrypt_stream` 此前在重试的 `try` 内——解密失败（如 `key` 不是
+    数字）被宽 `except` 吞掉重试 3 次，最后只剩「下载失败（重试 3 次）」，真正的原因
+    （密钥形态）反而丢了。解密只依赖响应体与 XML，与网络无关，移出重试面。
+
+    把 `decrypt_stream` 挪回 `try` 内本测试必红（请求数 3 + 文案变成「下载失败」）。
+    """
+    plain = b"\xff\xd8\xff" + bytes(200)
+    op = _Opener([_enc(plain, "3")] * 3)
+    with pytest.raises(sns_media.SnsMediaError) as ei:
+        sns_media.fetch(_m(key="not-a-number"), opener=op)
+    assert len(op.calls) == 1, "解密失败与网络无关，不许重试"
+    msg = str(ei.value)
+    assert "不是数字" in msg, msg
+    assert "下载失败" not in msg, "根因不许被改写成网络失败"
+
+
+def test_x_enc_header_without_any_key_is_not_silently_plaintext():
+    """EA-055：响应头说「加密」（`x-enc: 1`）而 XML 既无 `key` 也无 `<enc>` 时，`fetch`
+    经 `if m.key and (...)` 短路**把密文当明文返回**——与 `:251`「XML 说加密而无密钥」
+    那条早退（请求**前**）不对称：同一族信号只有一半出声。
+
+    把 `enc == "1" and not m.key` 那条分支删掉本测试必红（会静默返回密文）。
+    """
+    op = _Opener([(b"\x00" * 64, {"x-enc": "1"})])
+    with pytest.raises(sns_media.SnsMediaError) as ei:
+        sns_media.fetch(_m(key=None, encrypted=False), opener=op)
+    # 钉**具体文案**：只断言「含『密钥』」不够——把分支短路后 `decrypt_stream(raw, None)`
+    # 也会抛一条含「密钥」的消息（「媒体密钥不是数字」），断言就假绿了（变异 S3 实测）。
+    assert "未给出密钥" in str(ei.value) and "enc@key" in str(ei.value), ei.value
+    assert len(op.calls) == 1
+
+
+def test_fetch_wires_video_so_only_the_head_is_decrypted():
+    """EA-062：`fetch` 的 `video=` 接线零覆盖——没有任何用例让 `fetch` 拿到 KIND_VIDEO 且
+    响应体 > 128KB，于是 `video=(m.kind == KIND_VIDEO)` 这个实参改错（或不改）都测不出来。
+
+    夹具是「只有前 128KB 是密文、其后本就是明文」的真实视频形态（`decrypt_stream` 的
+    docstring 写的就是这个）：`kind=KIND_VIDEO` → 只解头段 → 返回**原文**；同一响应体按
+    `kind=KIND_IMAGE` 走（video=False，全份都当密文解）→ 尾部被 XOR 成乱码 → 不等于原文。
+    两个方向都可分辨，`video=` 的任一取值错都必红。
+    """
+    head = sns_media.VIDEO_HEAD
+    plain = _jpeg_plain() + bytes((i * 7 + 3) % 256 for i in range(300_000 - len(_jpeg_plain())))
+    body = _enc(plain[:head], "7") + plain[head:]        # 只有头段加密
+
+    op_video = _Opener([(body, {"x-enc": "1"})])
+    assert sns_media.fetch(_m(kind=moments.KIND_VIDEO, key="7"), opener=op_video) == plain
+
+    op_image = _Opener([(body, {"x-enc": "1"})])
+    out = sns_media.fetch(_m(kind=moments.KIND_IMAGE, key="7"), opener=op_image)
+    assert out != plain and out[:head] == plain[:head], "非视频形态全份都当密文解（尾部必然不同）"
+
+
 def test_fetch_rejects_foreign_host_before_any_request():
     """恶意 XML 可能把 URL 指向任意主机——白名单必须在发请求之前拦住。
 
@@ -472,6 +544,13 @@ def test_allowlist_exact_host_not_subtree():
     # 既有后缀仍然覆盖子域
     assert sns_media.host_allowed("https://finder.video.qq.com/a") is True
     assert sns_media.host_allowed("https://a.b.qpic.cn/a") is True
+    # EA-061：后缀判据的反例面——「后缀」必须落在**标签边界**上。三条都是
+    # 「白名单域名 + 攻击者后缀」的经典绕过形态，任何把 endswith 放宽成 `in`、
+    # 或把后缀写成裸拼接的改法都会在这里红（改 `endswith` 为 `in` 已实测红）。
+    assert sns_media.host_allowed("https://x.qpic.cn.evil.com/a") is False
+    assert sns_media.host_allowed("https://evil.qpic.cn.attacker.net/a") is False
+    assert sns_media.host_allowed("https://x.video.qq.com.attacker.net/a") is False
+    assert sns_media.host_allowed("https://qpic.cn/a") is False          # 裸域不是子域
 
 
 def _jpeg_plain() -> bytes:

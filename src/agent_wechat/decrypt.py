@@ -11,7 +11,9 @@
 from __future__ import annotations
 
 import contextlib
+import os
 import pathlib
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -29,12 +31,56 @@ def _first_line(text: str) -> str:
     return ""
 
 
+_AWDEC_RE = re.compile(r"^awdec-(\d+)-")
+
+
 def tmp_dir() -> pathlib.Path:
     """解密临时目录（0700）。调用方负责确保存在（见 ensure_home_dirs）。"""
     return paths.HOME_DIR / "tmp"
 
 
+_swept_stale = False          # 每进程只扫一次（EA-019）
+
+
+def _pid_alive(pid: int) -> bool:
+    """`os.kill(pid, 0)` 判活。`PermissionError` = 别人的进程 = **活着**（保守不删）。"""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
+def sweep_stale_tempdirs() -> int:
+    """清扫 `tmp/` 下**没有活进程持有**的 `awdec-<pid>-*`，返回清掉的目录数（EA-019）。
+
+    「用后即焚」此前只覆盖 `finally` 那条优雅路径：SIGKILL/崩溃时它不执行，MCP server 被
+    客户端关闭时长任务在 **daemon 线程**里被解释器丢弃、`finally` 同样不保证执行——于是
+    **分片明文**留在 `tmp/`（审计复现实测 8192 字节的 `plain.db`），而全仓没有任何清扫路径。
+
+    **绝不无条件 `rmtree`**：多进程下会误删正在跑的任务的明文（`purge.py` 那句注释点过
+    同款坑）。判据是 `os.kill(pid, 0)`：只有「确定已死」才清；判不出来（`PermissionError`
+    等）一律留着。非 `awdec-` 形态的目录一律不碰。
+    """
+    swept = 0
+    try:
+        entries = list(tmp_dir().iterdir())
+    except OSError:
+        return 0                       # tmp 读不了：清扫是尽力而为，绝不因此挡住解密
+    for d in entries:
+        m = _AWDEC_RE.match(d.name)
+        if not m or _pid_alive(int(m.group(1))):
+            continue
+        shutil.rmtree(d, ignore_errors=True)
+        if not d.exists():
+            swept += 1
+    return swept
+
+
 def ensure_home_dirs() -> None:
+    global _swept_stale
     paths.ensure_home_dirs()
     try:
         tmp_dir().mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -43,6 +89,11 @@ def ensure_home_dirs() -> None:
         raise HomeUnavailable(
             f"解密临时目录不可用：{tmp_dir()}",
             hint=f"{exc}；请检查 AGENT_WECHAT_HOME 指向的位置是否可用") from exc
+    if not _swept_stale:
+        # 挂在「第一次解密之前」这条路径上（`decrypted()` 每次都先调本函数）：
+        # 清扫必须发生在**新建**明文之前，否则刚建的目录会被自己扫掉。
+        _swept_stale = True
+        sweep_stale_tempdirs()
 
 
 def snapshot(db: pathlib.Path, td: pathlib.Path) -> pathlib.Path:
@@ -59,7 +110,8 @@ def snapshot(db: pathlib.Path, td: pathlib.Path) -> pathlib.Path:
 def decrypted(db: pathlib.Path, passphrase: bytes):
     """上下文管理器：yield 解密后的明文库路径，退出时自动清理临时文件。"""
     ensure_home_dirs()
-    td = pathlib.Path(tempfile.mkdtemp(prefix="awdec-", dir=tmp_dir()))
+    # 目录名带 **pid**（EA-019）：崩溃后的残留靠它判活（`sweep_stale_tempdirs`）。
+    td = pathlib.Path(tempfile.mkdtemp(prefix=f"awdec-{os.getpid()}-", dir=tmp_dir()))
     try:
         snap = snapshot(db, td)
         page1 = snap.read_bytes()[:keys.PAGE_SZ]

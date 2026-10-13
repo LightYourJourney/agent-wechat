@@ -6,6 +6,19 @@ import pytest
 
 from agent_wechat import paths, store, vector
 
+
+@pytest.fixture(autouse=True)
+def _isolate_model_cache(tmp_path, monkeypatch):
+    """EA-064：`vector.MODEL_CACHE_DIR` 是 **import 期绑定**（`paths.HOME_DIR / "models"`），
+    conftest 那三道闸管不到它——本文件里任何走到 `FastEmbedEmbedder._ensure()` 的用例都会对
+    **真实** `~/.agent-wechat/models` 执行 `mkdir`。
+
+    指向用例自己的 `tmp_path`。**用文件级 autouse 而不是逐条 patch**：逐条补只修这一次，
+    新加的用例照样会漏（同 conftest 开篇那段理由）。真模型用例在 `test_vector_real.py`
+    （`-m slow`），不受影响。
+    """
+    monkeypatch.setattr(vector, "MODEL_CACHE_DIR", tmp_path / "models")
+
 from helpers import mk_row
 
 

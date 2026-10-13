@@ -3,12 +3,14 @@
 用 passphrase 文本形式加密（与微信场景一致：sqlcipher 默认参数 = SQLCipher 4），
 验证 decrypt.decrypted() 对"微信式"库的完整处理。
 """
+import os
+import pathlib
 import sqlite3
 import subprocess
 
 import pytest
 
-from agent_wechat import decrypt, keys
+from agent_wechat import decrypt, keys, paths
 
 
 @pytest.fixture()
@@ -138,3 +140,100 @@ def test_a_wrapped_key_echo_cannot_ship_a_sixty_two_char_fragment(tmp_path, monk
     # 会让这条红（带上整个 stderr 的版本实测红）。
     assert not re.search(r"[0-9a-fA-F]{48,}", errors.redact(msg)), errors.redact(msg)
     assert "Parse error" in msg, "首行带得动定位信息——不许把诊断一起丢掉"
+
+
+# ---------- EA-019：崩溃后留在 tmp/ 的分片明文 ----------
+
+def _mk_awdec(tmp_home: pathlib.Path, pid: int, name: str = "x") -> pathlib.Path:
+    d = tmp_home / "tmp" / f"awdec-{pid}-{name}"
+    d.mkdir(parents=True)
+    (d / "plain.db").write_bytes(b"\x00" * 4096)      # 假装是明文产物
+    return d
+
+
+def test_stale_awdec_dirs_of_dead_processes_are_swept(tmp_path, monkeypatch):
+    """EA-019：「用后即焚」此前只覆盖 `finally` 那条优雅路径——SIGKILL/崩溃/daemon 线程被
+    解释器丢弃时，分片**明文**会留在 `tmp/`（实测 8192 字节的 `plain.db`），且全仓没有
+    任何清扫路径。
+
+    判活用 `os.kill(pid, 0)`：已死进程的目录清掉；**活进程的目录一律不动**（多进程下
+    无条件 rmtree 会误删正在跑的任务的明文——`purge.py` 那句注释点过同款坑）。
+    """
+    from agent_wechat import decrypt
+    home = tmp_path / "home"
+    (home / "tmp").mkdir(parents=True)
+    monkeypatch.setattr(paths, "HOME_DIR", home)
+    monkeypatch.setattr(decrypt, "_swept_stale", False)
+
+    import subprocess as _sub, sys as _sys
+    dead = _sub.Popen([_sys.executable, "-c", "pass"])
+    dead.wait()                                       # 拿一个**确定已退出**的 pid
+    stale = _mk_awdec(home, dead.pid)
+    mine = _mk_awdec(home, os.getpid(), "mine")
+    foreign = home / "tmp" / "someone-elses-dir"      # 非本工具形态：不许动
+    foreign.mkdir()
+
+    swept = decrypt.sweep_stale_tempdirs()
+    assert swept == 1 and not stale.exists(), "已死进程的明文目录必须清掉"
+    assert mine.exists(), "本进程的目录不许动（可能正在用）"
+    assert foreign.exists(), "非 awdec 形态的目录一律不碰"
+
+
+def test_the_sweep_runs_before_the_first_decryption(tmp_path, monkeypatch):
+    """清扫挂在 `ensure_home_dirs` 上（第一次解密之前），且每进程只扫一次。"""
+    from agent_wechat import decrypt
+    home = tmp_path / "home"
+    (home / "tmp").mkdir(parents=True)
+    monkeypatch.setattr(paths, "HOME_DIR", home)
+    monkeypatch.setattr(decrypt, "_swept_stale", False)
+
+    import subprocess as _sub, sys as _sys
+    dead = _sub.Popen([_sys.executable, "-c", "pass"])
+    dead.wait()
+    stale = _mk_awdec(home, dead.pid)
+
+    db = tmp_path / "message_0.db"
+    db.write_bytes(b"x" * 8192)
+    monkeypatch.setattr(decrypt.subprocess, "run",
+                        lambda argv, **kw: (_ for _ in ()).throw(
+                            AssertionError("不该走到 sqlcipher")))
+    with pytest.raises(Exception):
+        with decrypt.decrypted(db, b"w" * 32):
+            pass
+    assert not stale.exists(), "第一次解密之前就该把陈旧明文清掉"
+    # 幂等：第二次调用不再重复扫（flag 置位后 tmp 下新出现的目录不动）
+    again = _mk_awdec(home, dead.pid, "later")
+    decrypt.ensure_home_dirs()
+    assert again.exists(), "每进程只扫一次"
+
+
+def test_the_tmpdir_the_pipeline_creates_is_recognizable_by_the_sweeper(tmp_path, monkeypatch):
+    """创建点与清扫点的**形态必须同源**（EA-019）：`decrypted()` 建的目录名要能被
+    `_AWDEC_RE` 认出并解出**本进程的 pid**。
+
+    否则清扫形同虚设——它只认带 pid 的形态，而崩溃残留永远认不出来。这一点在「手工造
+    目录」的用例里测不到（变异 D4：把创建前缀退回 `awdec-` 时，那两条用例照样全绿）。
+    """
+    home = tmp_path / "home"
+    (home / "tmp").mkdir(parents=True)
+    monkeypatch.setattr(paths, "HOME_DIR", home)
+    monkeypatch.setattr(decrypt, "_swept_stale", True)      # 只看它建了什么
+
+    seen = {}
+
+    def fake_run(argv, **kw):
+        seen["names"] = [p.name for p in (home / "tmp").iterdir()]
+        raise RuntimeError("停在 sqlcipher 这一步")
+    monkeypatch.setattr(decrypt.subprocess, "run", fake_run)
+
+    db = tmp_path / "message_0.db"
+    db.write_bytes(b"x" * 8192)
+    with pytest.raises(RuntimeError):
+        with decrypt.decrypted(db, b"w" * 32):
+            pass
+
+    names = seen["names"]
+    assert len(names) == 1, names
+    m = decrypt._AWDEC_RE.match(names[0])
+    assert m, f"清扫认不出这个形态：{names[0]}"
+    assert int(m.group(1)) == os.getpid(), names
