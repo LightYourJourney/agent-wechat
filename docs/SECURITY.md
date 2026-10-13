@@ -210,7 +210,7 @@ Time Machine 的排除是绑在 **inode** 上的扩展属性，文件一旦被�
 | # | 出口 | 机制 |
 |---|---|---|
 | 1 | `--out DIR` 导出（`moments` / `media` / `chat export` / `decrypt --out`） | **无**。明文写到任意目录，不受 Time Machine 排除、不受 `purge` 覆盖，**只靠人记得删**。刻意不加自动排除：一次性目录加上排除只会留下悬空配置 |
-| 2 | **git 提交**（含提交信息） | `pre-commit` + `commit-msg` 两个钩子，命中即拦。**这是本仓库唯一反复复发过的出口（2026-09-13 / 09-17 / 09-27 三次）**。机制（见 `内部设计记录`）：钩子**源随仓库入库**（`security/hooks/`，带执行位），每个 clone 跑一次 `git config core.hooksPath security/hooks`；`pull` 后**立即生效、不需要重装**，且「装了但没执行位」结构性不可能。⚠️ 该 clone 下 `.git/hooks/` 被**整体旁路**。**自检**：`security/scan.py --check-hooks`（五态；它的失效形态可以完全静默，所以要主动跑）。本机**已装且已验**：2026-10-12 实测伪造值提交被 `pre-commit` 拦、只进提交信息的同串被 `commit-msg` 拦（四条与收尾自证见 spec §7 的执行记录）——「**已装**」与「**已验**」是两件事，这行现在两者都有 |
+| 2 | **git 提交**（含提交信息） | `pre-commit` + `commit-msg` 两个钩子，命中即拦。**这是本仓库唯一反复复发过的出口（2026-09-13 / 09-17 / 09-27 三次）**。机制（见 `内部设计记录`）：钩子**源随仓库入库**（`security/hooks/`，带执行位），每个 clone 跑一次 `git config core.hooksPath security/hooks`；`pull` 后**立即生效、不需要重装**，且**安装路径**上丢不了执行位（由 git 跟踪）——但本地 `chmod -x` 仍会让 git 跳过钩子，自检会报出来。⚠️ 该 clone 下 `.git/hooks/` 被**整体旁路**。**自检**：`uv run python security/scan.py --check-hooks`（五态；它的失效形态可以完全静默，所以要主动跑）。本机**已装且已验**：2026-10-12 实测伪造值提交被 `pre-commit` 拦、只进提交信息的同串被 `commit-msg` 拦（四条与收尾自证见 spec §7 的执行记录）——「**已装**」与「**已验**」是两件事，这行现在两者都有 |
 | 3 | 备份 | 承载内容的位置已 `tmutil addexclusion`（见 §4），**当下七条全在排除范围内**。⚠️ 其中 `~/.claude/bash-commands.log` 是**活跃日志**：文件重建后排除随旧 inode 一起丢失（实测发生过一次），**要定期用 `tmutil isexcluded` 复查、丢了就 `tmutil addexclusion` 重做**。**清单是短的、人工确认的**——不要照抄扫描输出（扫描会把第三方插件夹具也列进来） |
 | 4 | `/tmp` | 一次性清理，不改配置。系统重启也会清 |
 | 5 | MCP 信封 → LLM | **无机制，且已不可撤回**（见 §1） |

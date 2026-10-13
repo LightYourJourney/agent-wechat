@@ -46,7 +46,7 @@ uv run pytest tests/ -q          # 运行测试
 - **提交前必须做敏感数据自查**：`git status` + 抽查新增文件，确认无真实聊天内容、
   无联系人样本、无密钥材料。`docs/` 下的 schema 探测原始输出（含真实数据）不得入库，
   只保留手工整理的纯结构文档
-- **换 clone / 换机器、或怀疑机制时**，跑 `security/scan.py --check-hooks`：它报安装状态
+- **换 clone / 换机器、或怀疑机制时**，跑 `uv run python security/scan.py --check-hooks`：它报安装状态
   的五态（未装 / 旧机制 / 配置指错 / 本地改动 / 正常）。提交拦截是唯一反复复发过的出口，
   而它的失效可以是完全静默的
 - **账号标识一律用占位符**：真实 wxid（本机账号目录名、联系人 username）不得入库，
