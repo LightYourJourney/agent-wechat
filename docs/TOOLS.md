@@ -153,6 +153,11 @@
 随后用 `get_task_status` 轮询（建议间隔 10-30 秒）。中断（Ctrl-C / 进程退出）安全：
 重跑自动从断点继续。
 
+**同一次工作的重复请求会复用既有任务**：目标字段（`contact` / `full` / `account`）全部
+相同的请求仍在跑时，返回**既有** `task_id`（不会叠加第二个同目标任务）；目标不同的请求
+各起一条。也就是说返回的 `task_id` 可能是「已经在跑的那个」，轮询到 `done` 时目标已经
+完成——两者对调用方等价。
+
 ---
 
 ## 5. get_task_status
@@ -168,9 +173,15 @@
 
 ```json
 { "id": "a1b2c3d4e5f6", "kind": "export", "account": "wxid_xxx_ab12",
-  "chat_id": null, "status": "done", "rows": 841584,
-  "started_at": 1789044000, "finished_at": 1789044110, "error": null }
+  "chat_id": null, "full": false, "status": "done", "rows": 841584,
+  "pid": 68996, "started_at": 1789044000, "finished_at": 1789044110, "error": null }
 ```
+
+`pid` 是登记该任务的进程号，也是 `running` 记录的收割判据：进程退出/被杀后记录仍留在
+文件里，直到**下一次任意进程读到它**时改判 `failed`（`error` = 「进程中断，任务未完成」）
+——判据是 `pid` 是否还活着，外加 **24 小时**的时间兜底（pid 可能被无关进程复用）。
+两个 MCP server 共享同一个 `AGENT_WECHAT_HOME` 时，两边看到的任务列表一致：注册表
+每次操作都重读磁盘，写入按记录合并（不会把对方刚写的记录抹掉）。
 
 `status`: `running` / `done` / `failed`；失败时 `error` 含中文原因。`rows` 与 `skipped`
 **按 kind 各有各的口径，别混用**：
