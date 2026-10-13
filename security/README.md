@@ -58,11 +58,14 @@ git config core.hooksPath security/hooks
 
 - 生效的就是仓库里那一份 ⇒ **`git pull` 后立即生效，不需要重装**（旧机制是拷贝到共享
   hooks 目录，改了源忘了重装就漂移）；
-- **执行位由 git 跟踪**（`100755`）⇒「装了但没 `+x`」这个失效形态**结构性不可能**；
+- **安装路径上丢不了执行位**（由 git 跟踪，`100755`）⇒「装了但没 `+x`」在 clone / checkout
+  这条路上不会出现；但**本地** `chmod -x` 仍会让 git 跳过它，自检会报出来（见下节「本地改动」态）；
 - 相对路径按**各工作树自己的顶层**解析，且 `core.hooksPath` 是仓级配置 ⇒ **worktree 自动继承**。
 
 **装完自检**：`uv run python security/scan.py --check-hooks`（五态见下节）。
 **迁完把旧副本删掉**：`.git/hooks/{pre-commit,commit-msg}`（它们已被旁路，留着会让人改它却发现没用）。
+**回退**（回到旧机制）：`git config --unset core.hooksPath`，再把 `security/hooks/` 两份拷回
+`.git/hooks/`（记得带执行位）；回退后自检会报「旧机制」，可自证。
 
 ⚠️ **`.git/hooks/` 被整体旁路**：以后往那儿放任何钩子都**不会跑**，别往那儿放东西。
 

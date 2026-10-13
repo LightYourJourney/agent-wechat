@@ -728,9 +728,9 @@ CONTRIBUTING §4 那条「本机绝对路径不得入库」（示例与夹具用
 
 - **钩子源随仓库入库**（`security/hooks/`，带执行位）：换 clone / 换机器不再需要照抄两个文件，
   跑一次 `git config core.hooksPath security/hooks` 即可；`git pull` 后**立即生效、不需要重装**
-- **「装了但没执行位」结构性消失**：执行位由 git 跟踪；旧机制那条「拷进去忘了 `chmod +x`、
-  git 静默跳过」的失效形态不复存在（**订正**：实测 git 2.56 会打一句 advice 提示，
-  见 `security/README.md`）
+- **「装了但没执行位」在安装路径上消失**：执行位由 git 跟踪，旧机制那条「拷进去忘了 `chmod +x`、
+  git 静默跳过」在拷贝这一步不复存在（**订正**：实测 git 2.56 会打一句 advice 提示；但**本地**
+  `chmod -x` 仍会让 git 跳过它——自检会报出来，见 `security/README.md`）
 - **新增 `security/scan.py --check-hooks`**：报安装状态的五态（未装 / 旧机制 / 配置指错 /
   本地改动 / 正常），外加一句「共享 hooks 目录里还有已被旁路的同名文件」的警告（不改退出码）
 - **`.git/hooks/` 被整体旁路**：以后别往那儿放钩子（不会跑）
