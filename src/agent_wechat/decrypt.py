@@ -80,7 +80,10 @@ def sweep_stale_tempdirs() -> int:
         if not m or _pid_alive(int(m.group(1))):
             continue
         shutil.rmtree(d, ignore_errors=True)
-        if not d.exists():
+        # 判「真的没了」用 `lexists`：悬空符号链接与自指链接环下 `rmtree` 会拒绝执行、
+        # 而 `exists()` 对它们返回 False——用它计数会把「没清掉」记成「清掉了」
+        # （复验实测这两种形态各虚增 1）。`lexists` 对它们返回 True。
+        if not os.path.lexists(d):
             swept += 1
     return swept
 

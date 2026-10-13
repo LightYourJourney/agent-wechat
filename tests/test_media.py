@@ -2358,6 +2358,10 @@ def test_sticker_cdn_urls_reports_an_unreadable_shard(tmp_path, monkeypatch):
     assert urls == {}
     assert note, "分片打不开必须带出原因，不许静默返回空字典"
     assert "分片" in note and "凭据" in note, note          # 与「本机没有凭据」区分开
+    # 钉**新文案本身**（复验指出上一轮的「R4 验红」是假的：只断言「含『分片』与『凭据』」
+    # 的话，换回旧版自相矛盾的文案（「N 条贴纸查不到凭据——这与『本机没有凭据』不是一回事」）
+    # 照样绿）。判别法：把 note 换回旧版，下面这条必红。
+    assert "回源条目" in note and "查证" in note, note
 
 
 def test_sticker_shard_failure_reaches_the_degraded_channel(tmp_path, monkeypatch):
