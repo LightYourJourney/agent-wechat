@@ -28,10 +28,14 @@ server = MCPServer(
 def _guard(fn: Callable[..., Any]) -> Callable[..., Any]:
     """把 core 抛出的项目异常翻成 {"error"[, "hint"]} 信封。
 
-    必须包住每个工具：MCP SDK 的兜底是 `except Exception`，SystemExit（不是
-    Exception 子类）会直接杀死常驻 stdio server；且 SDK 会把任何异常改写成语焉
-    不详的 "Error executing tool <name>"，core 写好的中文修复指引到不了 agent。
+    必须包住每个工具：MCP SDK 的兜底会把任何异常改写成语焉不详的
+    "Error executing tool <name>"，core 写好的中文修复指引到不了 agent。
     对外信封与旧的手写 dict 返回逐字节一致（errors.to_payload）。
+
+    **不捕 `SystemExit`**（最后一支是 `except Exception`，EA-027）：常驻 server 不被它
+    杀死靠的是另一条不变量——**core 任何模块都不抛 `SystemExit`**（源码级护栏
+    `tests/test_errors.py::test_core_never_raises_systemexit`）。刻意不扩到
+    `except BaseException`：那会把 Ctrl-C 的 `KeyboardInterrupt` 一起吞成一条工具结果。
     """
     @functools.wraps(fn)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
@@ -196,6 +200,7 @@ def build_vector_index(rebuild: bool = False, account: str | None = None) -> dic
 def export_chat_media(contact: str, kinds: str = "image,voice,video",
                       months: str | None = None, limit: int = 500,
                       force: bool = False, with_cdn: bool = False,
+                      out_dir: str | None = None,
                       account: str | None = None) -> dict:
     """导出某会话的媒体文件到本机（图片解密 / 语音转 WAV / 视频复制），返回计数与输出目录。
 
@@ -220,6 +225,9 @@ def export_chat_media(contact: str, kinds: str = "image,voice,video",
     res = usecases.media_export(
         contact, kinds=[k.strip() for k in kinds.split(",") if k.strip()],
         months=[m.strip() for m in months.split(",") if m.strip()] if months else None,
+        # EA-028：out_dir 此前只在**描述**里承诺、签名里没有——SDK 静默丢弃未知实参，
+        # 「照描述行事」的调用落到默认根（与 export_chat 的 out_dir 组合即全死链，§12）。
+        out_dir=out_dir,
         limit=limit, force=force, account=account, with_cdn=with_cdn)
     if isinstance(res, usecases.NeedConfirm):
         return _need_confirm(res)
@@ -305,6 +313,7 @@ def get_message_media(contact: str, keys: str | None = None, months: str | None 
 @_guard
 def export_moments(contact: str | None = None, months: str | None = None,
                    with_media: bool = False, limit: int = 500,
+                   out_dir: str | None = None,
                    account: str | None = None) -> dict:
     """导出朋友圈为可读的 HTML 时间线（读取本账号可见的动态、评论与点赞）。
 
@@ -335,6 +344,7 @@ def export_moments(contact: str | None = None, months: str | None = None,
     res = usecases.moments_export(
         contact,
         months=[m.strip() for m in months.split(",") if m.strip()] if months else None,
+        out_dir=out_dir,                                # EA-028：描述承诺过、签名此前没有
         with_media=with_media, limit=limit, account=account)
     if isinstance(res, usecases.NeedConfirm):
         return _need_confirm(res)

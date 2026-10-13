@@ -815,6 +815,27 @@ def test_iter_all_survives_a_shard_without_name2id_and_records_the_drift(env, tm
                for d in r._drift), [(d.capability, d.table) for d in r._drift]
 
 
+def test_username_pool_degrades_when_a_name_only_source_is_undecryptable(env, tmp_path,
+                                                                        monkeypatch):
+    """EA-079：降级面要覆盖「文件在、**解不开**」（`DecryptError`）——`session` / `contact`
+    是**纯名字源**，坏了应跳过（池里仍有其余源的名字，解析不出的会话走既有的 `md5:<hex>`
+    回落）；**分片源**坏掉仍必须抛：跳过会让时间线静默出现空洞（两条方向都要钉住）。
+
+    把 `username_pool` 里纯名字源的 except 去掉 `DecryptError`，第一条断言必红。
+    """
+    root = tmp_path / "wx_pool"
+    shutil.copytree(env.wx, root)
+    monkeypatch.setattr(paths, "XWECHAT_FILES", root)
+    (root / ACCT / "db_storage" / "session" / "session.db").write_bytes(b"\x00" * 8192)
+
+    pool = reader.MessageReader(ACCT).username_pool()      # 不许抛
+    assert FRIEND in pool, "一个名字源解不开 ≠ 什么都查不到（其余源照常供名字）"
+
+    (root / ACCT / "db_storage" / "message" / "message_0.db").write_bytes(b"\x00" * 8192)
+    with pytest.raises(errors.DecryptError):
+        reader.MessageReader(ACCT).username_pool()         # 分片源：必须响亮地抛
+
+
 def test_iter_all_chat_id_set_is_unchanged(env):
     """名字池不变式：合成夹具里的会话必须全部解出真名，退化形态（`md5:<hex>`）一条都不许出现。
 

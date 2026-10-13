@@ -1,10 +1,14 @@
 """统一错误契约：core 只抛 AgentWeChatError 子类，由适配层（mcp_server / cli）翻译。
 
 为什么不能靠 SDK 兜底：
-- `SystemExit` 不是 `Exception` 的子类，而 MCP SDK 的兜底是 `except Exception`——
-  逃出去会直接杀死常驻 stdio server；
 - 即使是 `Exception`，SDK 也会统一改写成 "Error executing tool <name>" 的通用文案，
   异常自带的中文修复指引只留在服务端日志，到不了 agent。
+
+配套的不变量（EA-027）：**core 任何模块都不抛 `SystemExit`**——它不是 `Exception`
+的子类，两个适配层的兜底（`except Exception`）都接不住，逃出去会直接杀死常驻 stdio
+server。这条由源码级护栏钉住（`tests/test_errors.py::test_core_never_raises_systemexit`
+按源码文本核对，全仓唯一一处抛出点在 CLI 的退出漏斗）；适配层**不**扩到 `except
+BaseException`，否则会把 Ctrl-C 的 `KeyboardInterrupt` 一起吞成一条工具结果。
 
 所以 core 层一律抛本模块的类型，适配层用 to_payload / to_text 翻回对外形状。
 本模块只放类型与纯翻译函数，不 import MCP SDK。

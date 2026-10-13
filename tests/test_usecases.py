@@ -10,8 +10,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent_wechat import (account, cli, errors, mcp_server, messages, paths, reader, search,
-                          store, tasks, usecases, vector)
+from agent_wechat import (account, cli, errors, keys, mcp_server, messages, paths, reader,
+                          search, store, tasks, usecases, vector)
 # 合成微信目录（真实 sqlcipher 解密链路；路径全部指向 tmp_path，绝不碰真实数据）
 from test_reader_export_pipeline import ACCT, FRIEND, env, wechat  # noqa: F401
 
@@ -103,6 +103,41 @@ def test_chat_context_reader_is_lazy_and_reused(stub):
     ctx.resolve("张三")
     ctx.resolve("李四")
     assert stub["readers"] == ["acct"]
+
+
+def test_the_usecase_limit_defaults_match_the_documented_value():
+    """EA-094：媒体/朋友圈两个用例层的 `limit` 默认曾是 2000——与 TOOLS.md §9/§10 的默认列
+    （500）和两个入口（MCP 500）都不一致，且两个入口**都恒传** limit，用例层那份只在测试
+    里可达。默认值应当只存在于入口；这两处对齐成文档值。把它改回 2000，断言必红。
+    """
+    import inspect
+
+    for fn in (usecases.media_export, usecases.moments_export):
+        assert inspect.signature(fn).parameters["limit"].default == 500, fn.__name__
+
+
+def test_semantic_search_survives_without_a_passphrase_cache(env, monkeypatch):
+    """EA-024：没有密钥缓存（`purge --keys` 之后、或换机只拷了 index.db 的机器）时，
+    语义检索**不该整条失败**——展示名富化把「本地索引可查」绑死在它并不需要的密钥上。
+
+    真链路（不桩 reader）：桩掉 `vector.semantic_search` 只留下用例层富化那一行；把富化的
+    try/except 删掉，第一条断言必红（`KeyNotFound` 穿出，而 `build_vector_index` 同样
+    不需要密钥——「先 build 再 semantic」这条常规路径会在第二步炸）。
+    """
+    monkeypatch.setattr(keys, "CACHE_FILE", env.home / "被-purge--keys-删掉的那份.json")
+    monkeypatch.setattr(vector, "semantic_search", lambda *a, **k: {
+        "mode": "semantic", "total": 1,
+        "hits": [{"chat_id": FRIEND, "ts": 1, "sender": "x", "is_self": False,
+                  "content": "爬山", "media_hint": None, "distance": 0.1}]})
+
+    res = usecases.semantic_search("爬山", account=ACCT)
+    assert res["hits"][0]["display"] == FRIEND, res       # 读不到名册 → 回落裸 chat_id
+    assert "hits" in usecases.search_history("你好", account=ACCT), "兄弟工具同一时刻照常"
+
+    # 反例：缓存正常时 display 仍是展示名（回落不许变成常态）
+    monkeypatch.setattr(keys, "CACHE_FILE", env.home / "passphrase.json")
+    res2 = usecases.semantic_search("爬山", account=ACCT)
+    assert res2["hits"][0]["display"] == "张三", res2
 
 
 def test_result_shapes(stub, monkeypatch):

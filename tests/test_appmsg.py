@@ -407,6 +407,26 @@ def test_deeply_nested_payload_does_not_blow_the_stack():
     assert r.reason is None
 
 
+def test_link_des_and_title_are_exempt_by_design():
+    """EA-103（T8）：`_NAMED_LEAVES` 把 `url`/`des` 从 `fields` 摘走后，只有 `url`
+    继承了值过滤闸门——`des`/`title` 是**用户可见的卡片摘要**，按设计免过滤
+    （对用户内容做值过滤 = 静默丢正文，比泄漏更难发现；真机 3,392 条 kind=5 里
+    命中凭据形态 0 条）。这条把两半都钉住：改 `des` 去过滤 → 第二条红；
+    摘掉 `url` 的过滤 → 第一条红；`fields` 的值过滤失效 → 第三条红。
+    """
+    from agent_wechat import appmsg as am
+
+    xml = ('<msg><appmsg><type>5</type><title>t</title>'
+           '<des>https://cdn.example/x?filekey=DEADBEEF&amp;idx=1</des>'
+           '<weappinfo><iconurl>https://cdn.example/x?filekey=DEADBEEF</iconurl></weappinfo>'
+           '<url>https://cdn.example/x?filekey=DEADBEEF</url></appmsg></msg>')
+    a = am.parse(xml).appmsg
+    assert a.link.url is None, "url 是凭据通道 → 必须过值过滤"
+    assert a.link.des == "https://cdn.example/x?filekey=DEADBEEF&idx=1", \
+        "des 是用户内容，按设计免过滤（改动它必须同时改 _link 的豁免名单注释）"
+    assert a.fields == (), "同一个值走 fields 会被丢——两个具名叶子只有 url 继承了闸门"
+
+
 def test_link_url_is_subject_to_the_value_filter():
     """回归：`_link` 直接 findtext("url") 会绕过值过滤——同一个值走 `fields` 就丢、
     走 `Link` 就进信封（spec §4.5 明列信封含 link）。删掉 `_link` 里那道过滤会红。

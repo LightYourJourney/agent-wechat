@@ -355,7 +355,7 @@ class MediaExportResult:
 
 
 def media_export(contact: str, *, kinds: list[str], months: list[str] | None = None,
-                 out_dir=None, limit: int = 2000, force: bool = False,
+                 out_dir=None, limit: int = 500, force: bool = False,
                  account: str | None = None,
                  with_cdn: bool = False) -> MediaExportResult | NeedConfirm:
     """媒体导出用例：会话消歧 + 交 media.export_media。kinds/months 由入口解析成列表。
@@ -1254,7 +1254,16 @@ def semantic_search(query: str, contact: str | None = None, limit: int = 10,
                                  limit=clamp_limit(limit, LIMIT_SEMANTIC),
                                  account=ctx.account)
     for h in res.get("hits", []):
-        h["display"] = _display_or_id(ctx, h["chat_id"])   # 缓存命中，只解密一次
+        try:
+            h["display"] = _display_or_id(ctx, h["chat_id"])   # 缓存命中，只解密一次
+        except errors.AgentWeChatError:
+            # EA-024：富化是**锦上添花**——语义检索的数据源是本地索引 + 本地模型，不需要
+            # 微信密钥；富化要读 contact.db，才需要。`purge --keys` 之后、或换机只拷了
+            # 索引的机器上，`_display_or_id` 只接 SchemaDrift 会让整个工具 100% 失败
+            # （错误文案还把用户引向唯一需要 sudo 的 bootstrap），而兄弟工具
+            # `search_history` 同一时刻照常出结果。读不到就不富化：`display` 回落裸
+            # chat_id——§3 已文档化的降级形态（degraded 里 roster 那条说的就是这件事）。
+            h["display"] = h["chat_id"]
     res["degraded"] = ctx.degradations()
     return res
 
@@ -1308,7 +1317,7 @@ class MomentsExportResult:
 
 
 def moments_export(contact: str | None = None, *, months: list[str] | None = None,
-                   with_media: bool = False, limit: int = 2000, out_dir=None,
+                   with_media: bool = False, limit: int = 500, out_dir=None,
                    account: str | None = None, fetch=None) -> "MomentsExportResult | NeedConfirm":
     """朋友圈导出用例：解析 →（可选）下载解密 → 渲染 HTML。
 

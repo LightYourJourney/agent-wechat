@@ -204,7 +204,11 @@ class MessageReader:
                     self._check("username_pool", rel, con)
                     pool |= {u.decode("utf-8", "replace")
                              for (u,) in con.execute(sql) if isinstance(u, bytes)}
-            except (DataNotFound, errors.SchemaDrift):
+            except (DataNotFound, errors.SchemaDrift, errors.DecryptError):
+                # EA-079：「文件在、**解不开**」（换钥/半截文件/损坏）与「缺文件/结构漂移」
+                # 对**纯名字源**是同一种处置——跳过（池子仍有其余源，解析不出的会话走既有
+                # 的 `md5:<hex>` 回落，usecases 会把降级呈现给用户）。下面**分片源不加**
+                # 这一条：跳过会让时间线静默出现空洞。
                 continue
         for shard in paths.message_shards(self.acct):
             rel = f"message/{shard.name}"

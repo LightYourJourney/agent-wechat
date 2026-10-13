@@ -347,6 +347,12 @@ def _link(appmsg_el: ET.Element) -> Link:
     含 `link`），这种不一致本身就是缺陷。**只有 `url` 需要这道过滤**——`Quote` 的
     `content`/`displayname`/`from_usr` 是被引用的**用户正文**，对它做值过滤会连用户内容一起丢；
     `FileRef.md5` 是内容指纹不是凭据；`Transfer` 没有凭据字段。**不要顺手扩大。**
+
+    `des` / `title` **按设计免过滤**（EA-103 的显式豁免名单，此前只是「没被过滤」）：
+    它们是卡片摘要 = 用户可见的内容，与 `Quote.content` 同类——对用户内容做值过滤是
+    **静默丢正文**，比泄漏更难发现。真机实测 kind=5 全量 3,392 条里 `des`/`title` 命中
+    凭据形态 **0** 条（「敞着但没走人的门」）；若未来真机出现带凭据的 `des`，回到审计
+    条目 EA-103 的 (a) 方案重新评估（改用 `_has_credential_param` 拦下）。
     """
     url = appmsg_el.findtext("url")
     # 与 `fields` 的值过滤**同源**：同一个凭据走 fields 被丢、走 Link 却进信封，

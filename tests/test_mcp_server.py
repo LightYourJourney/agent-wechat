@@ -16,8 +16,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent_wechat import (account, errors, export, media, messages, mcp_server, paths,
-                          reader, store, tasks, usecases)
+from agent_wechat import (account, errors, export, media, messages, mcp_server, moments,
+                          paths, reader, store, tasks, usecases)
 # 合成微信目录（真实 sqlcipher 解密链路；路径全部指向 tmp_path，绝不碰真实数据）
 from test_reader_export_pipeline import ACCT, drift_tree, env, wechat  # noqa: F401
 
@@ -300,6 +300,43 @@ def test_search_history_envelope_carries_degraded_key(env, tmp_path, monkeypatch
 
 # ---------- T7：export_chat_media 的信封（spec §4.6） ----------
 
+def test_the_export_tools_declare_out_dir_and_pass_it_through(monkeypatch):
+    """EA-028：两个工具的 wire 描述承诺了 `out_dir`，签名里却没有——SDK 静默丢弃 schema
+    之外的实参，agent「照描述行事」拿到的是**静默错位置**。最坏形态是两步组合：
+    `export_chat(contact, out_dir=X)`（**有**这个参数）先把产物写进 X，再
+    `export_chat_media(contact, out_dir=X)` 静默落回默认根——§12 明写「两者必须同根」，
+    于是 agent 按文档做的每一步都对，产物却是全死链。
+
+    透传（两条）＋ wire 冻结（签名含 out_dir）一起钉；把 `out_dir=out_dir` 从任一调用里
+    删掉，对应的 kwargs 断言必红。
+    """
+    import inspect
+
+    seen: dict = {}
+
+    def fake_media(contact, **kw):
+        seen["media"] = kw
+        return usecases.MediaExportResult(chat_id="wxid_target", out_dir=kw["out_dir"],
+                                          report=media.MediaReport())
+
+    def fake_moments(contact=None, **kw):
+        seen["moments"] = kw
+        return usecases.MomentsExportResult(out_dir=kw["out_dir"],
+                                            report=moments.MomentsReport())
+
+    monkeypatch.setattr(usecases, "media_export", fake_media)
+    monkeypatch.setattr(usecases, "moments_export", fake_moments)
+
+    _call(mcp_server.export_chat_media, contact="张三", out_dir="/tmp/custom-root")
+    assert seen["media"]["out_dir"] == "/tmp/custom-root"
+    _call(mcp_server.export_moments, out_dir="/tmp/custom-root")
+    assert seen["moments"]["out_dir"] == "/tmp/custom-root"
+
+    # wire 冻结：两个工具的对外签名必须声明它（SDK 按签名校验入参）
+    for tool in (mcp_server.export_chat_media, mcp_server.export_moments):
+        assert "out_dir" in inspect.signature(tool).parameters, tool.__name__
+
+
 def test_export_chat_media_envelope(monkeypatch):
     """正常路径：counts 三类 + degraded 恒存在 + truncated；顺带钉参数编组
     （kinds/months 拆列表、limit/account 透传）。media_export 打桩：不打真库。"""
@@ -333,7 +370,8 @@ def test_export_chat_media_envelope(monkeypatch):
                    "degraded": ["pilk 不可用：语音导出为原始 .slk"], "truncated": True}
     assert seen == {"contact": "张三", "kinds": ["image", "voice"],
                     "months": ["2026-08", "2026-09"], "limit": 10, "force": False,
-                    "account": "acct", "with_cdn": False}
+                    "account": "acct", "with_cdn": False,
+                    "out_dir": None}
 
 
 def test_export_chat_media_defaults_split_cleanly(monkeypatch):
@@ -350,7 +388,7 @@ def test_export_chat_media_defaults_split_cleanly(monkeypatch):
     res = _call(mcp_server.export_chat_media, contact="张三")
     assert seen == {"contact": "张三", "kinds": ["image", "voice", "video"],
                     "months": None, "limit": 500, "force": False, "account": None,
-                    "with_cdn": False}
+                    "with_cdn": False, "out_dir": None}
     assert res["counts"] == {"sticker": {"ok": 0, "failed": 0, "missing": 0,
                                          "skipped": 0, "remaining": 0},
                              "image": {"ok": 0, "failed": 0, "missing": 0,
