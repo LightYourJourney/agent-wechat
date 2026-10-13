@@ -23,7 +23,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from . import account as acc_mod
-from . import appmsg, chatview, errors, exclusions, export, keys, messages, paths, reader, search, store, tasks, vector
+from . import (appmsg, chatview, errors, exclusions, export, keys, media, messages, paths,
+               reader, search, store, tasks, vector)
 # 模板模块名与下面的用例函数 `chat_index()` **同名**：这里起别名，否则函数定义会遮蔽
 # 模块名（`index_html.render` 那处引用会变成调用函数自身）。
 from . import chat_index as index_html
@@ -32,7 +33,6 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
     # 仅类型检查期：media 顶层拉起 cryptography，运行时在 media_export 内惰性 import
-    from . import media
 
 # ---------- 参数归一化 ----------
 
@@ -351,7 +351,6 @@ def media_export(contact: str, *, kinds: list[str], months: list[str] | None = N
     `with_cdn`（默认 False）：贴纸本机那份是加密的、解不开，故只有显式打开它才从微信 CDN
     取件。**不开则一次网络请求都不发**（`SECURITY.md` 的零网络承诺）。
     """
-    from . import media                       # 惰性：media 顶层拉起 cryptography
     ctx = ChatContext(account)
     chat_id = ctx.resolve(contact)
     if isinstance(chat_id, NeedConfirm):
@@ -413,7 +412,6 @@ def _voice_keys_for(account: str) -> frozenset[tuple[str, int]] | None:
     （顶层会拉起 cryptography，见文件头部的 TYPE_CHECKING 注释），模块级取属性会在
     import 期就 NameError。生产路径上就是 `media.voice_body_keys`。
     """
-    from . import media
     return media.voice_body_keys(account)
 
 
@@ -451,7 +449,6 @@ def _state_of(row: dict, ref: tuple[str, str | None] | None, *,
               out_root: pathlib.Path, account: str,
               voice_keys: frozenset | None) -> MediaRefState:
     """单条消息的四态判定。顺序严格按 spec §4.1：none → exported → exportable → gone。"""
-    from . import media                       # 惰性：media 顶层拉起 cryptography
     # none 只由 msg_type 判（索引内实测有 259 条媒体消息拿不到 ref）：ref 只提供 file_key
     kind = _KIND_OF_TYPE.get(row["msg_type"])
     if kind is None:
@@ -505,7 +502,6 @@ def _month_clause(months: list[str] | None) -> tuple[str, list[int]]:
     """
     if not months:
         return "", []
-    from . import media                       # 惰性：media 顶层拉起 cryptography
     parts: list[str] = []
     args: list[int] = []
     for lo, hi in media.month_bounds(months):
@@ -526,7 +522,6 @@ def message_media(contact: str, *, keys: Sequence[str] | None = None,
     months 在 SQL 里筛（不是取回后再滤）：limit 卡的必须是**命中月份**的条数。
     truncated=True 表示 limit 截断了答案，别把它当成「那个月没有媒体」。
     """
-    from . import media                       # 惰性：media 顶层拉起 cryptography
     ctx = _ctx or ChatContext(account)
     chat_id = ctx.resolve(contact)
     if isinstance(chat_id, NeedConfirm):
@@ -697,7 +692,6 @@ def chat_export(contact: str, *, months: list[str] | None = None, limit: int = 5
     标题（`view.title`）走既有的 `_display_or_id` —— 与 `recent` / `search` 同一个来源，
     contact 表漂移时回落 `chat_id`（漂移随 degraded 出去）。
     """
-    from . import media                       # 惰性：media 顶层拉起 cryptography
     ctx = ChatContext(account)
     chat_id = ctx.resolve(contact)
     if isinstance(chat_id, NeedConfirm):
@@ -956,7 +950,6 @@ def chat_index(out_dir: str | None = None, account: str | None = None) -> ChatIn
     `contacts(limit=5000)` 的 5000 行窗口，窗口外的会话会静默回落裸 id（真机 772 个会话
     只有 18% 在窗口内）——那条已 park，别在这里顺手接上。
     """
-    from . import media                     # 只为 export_root()：本函数此前不 import media
     # 与 `chat_export` 同款绝对化：`--out` 给相对路径时，`out_dir`/`file` 才是能直接打开、
     # 也能与 `chat export` 对齐的路径。
     out_root = (pathlib.Path(out_dir) if out_dir else media.export_root()).resolve()
@@ -987,7 +980,6 @@ def chat_index(out_dir: str | None = None, account: str | None = None) -> ChatIn
             label=row["chat_id"] if row else messages.degraded_chat_id(chat_md5),
             messages=row["n"] if row else None,  # 查不到时**未知**：`None`，不是 0 条
             has_md=(p.parent / "index.md").exists()))
-    from . import media                       # 惰性：media 顶层拉起 cryptography
     target = media.ensure_tree(out_root) / "index.html"
     try:
         target.write_text(index_html.render(entries), encoding="utf-8")
@@ -1008,10 +1000,11 @@ def purge_chat_targets(contact: str, account: str | None = None) -> list[dict] |
     **空集也回一条**（`account` 为空串，见下），所以调用方拿到的列表恒非空：会话名解析
     不出会抛 `ContactNotFound`、有歧义会回 `NeedConfirm`，两者都不走这条路。
 
-    `chat_md5` 走 **`messages.chat_md5()`**，不是 `messages.md5_of()`：后者对退化形态
+    `chat_md5` 在**函数内部**用它查排除清单（**`messages.chat_md5()`**，不是 `messages.md5_of()`——后者对退化形态
     （`md5:<hex>`，`degraded_chat_id` 的产物）会**再哈希一次**，得到一个错的 md5。
     错法是静默的——`media/<chat_md5>/` 指向不存在的目录、导出物删不掉，而核查会报
-    「0 行、目录不存在」一片 ✅（spec §5.1 第 1 步、终审 D1）。
+    「0 行、目录不存在」一片 ✅（spec §5.1 第 1 步、终审 D1）。返回给调用方的**不含**
+    `chat_md5`（按 `purge_chat_targets` 的返回契约——消费者要 md5 自行派生，EA-092）。
 
     跨账号：隐私不是按账号分的，凡是索引里有这个会话的账号都要删；`chat_md5` 与账号无关，
     所以 `media/<chat_md5>/` 天然是共享的。
@@ -1061,8 +1054,8 @@ def purge_chat_targets(contact: str, account: str | None = None) -> list[dict] |
         # 导出物只取决于 chat_md5、与账号无关，于是计划表印得出那一行、`--yes` 删得掉它。
         # 索引侧各项恒为 0 且不会误伤——`account` 是账号目录名，生产上不可能为空，所以
         # `account=''` / 前缀 `'|md5|'` 一个真实行都命不中；墓碑也因此自然为 0 条。
-        return [{"account": "", "chat_id": chat_id, "chat_md5": md5}]
-    return [{"account": r[0], "chat_id": chat_id, "chat_md5": md5} for r in rows]
+        return [{"account": "", "chat_id": chat_id}]
+    return [{"account": r[0], "chat_id": chat_id} for r in rows]
 
 
 def media_rebuild_refs(account: str | None = None,
@@ -1297,7 +1290,7 @@ def moments_export(contact: str | None = None, *, months: list[str] | None = Non
     `with_media=False`（默认）时**全程零网络**——这是零网络红线上本次新增的例外开关，
     默认必须关闭。`fetch` 仅作测试注入，生产调用方不传。
     """
-    from . import media, moments, moments_html, sns_media   # 惰性：moments_html 只在导出时用
+    from . import moments, moments_html, sns_media          # 惰性：moments_html 只在导出时用（media 已顶层）
     ctx = ChatContext(account)
     author = ctx.resolve_optional(contact)
     if isinstance(author, NeedConfirm):
@@ -1364,7 +1357,7 @@ _HEX32 = re.compile(r"^[0-9a-fA-F]{32}\Z")
 def _resolve_media(p: "moments.SnsPost", out_root, report, with_media: bool,
                    do_fetch) -> "moments.SnsPost":
     """逐条媒体决定「下载并落盘」还是「标注未下载」。单条失败只计数，不外抛。"""
-    from . import media, moments, sns_media
+    from . import moments, sns_media
     out = []
     for m in p.media:
         if not with_media:
@@ -1390,7 +1383,7 @@ def _resolve_media(p: "moments.SnsPost", out_root, report, with_media: bool,
             raw = m.md5 or ""
             stem = (raw if _HEX32.match(raw)
                     else hashlib.md5((m.url or "").encode()).hexdigest())
-            saved = media._save(out_root, "media", m.kind,
+            saved = media.save_artifact(out_root, "media", m.kind,
                                 media.month_of(p.create_time), stem, ext, data)
             if saved is None:
                 report.media_failed += 1
@@ -1419,7 +1412,7 @@ def _resolve_media(p: "moments.SnsPost", out_root, report, with_media: bool,
                             if cext is None:
                                 report.media_garbage += 1
                         else:
-                            csaved = media._save(out_root, "media", m.kind,
+                            csaved = media.save_artifact(out_root, "media", m.kind,
                                                  media.month_of(p.create_time),
                                                  f"{stem}_thumb", cext, cdata)
                             if csaved is None:

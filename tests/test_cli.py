@@ -1921,12 +1921,18 @@ def test_purge_chat_targets_derives_the_md5_of_a_degraded_chat_id(tmp_path, monk
     删不掉，而核查对着空目录报一片 ✅。判别法：这里换回 `messages.md5_of`，这条必红。
     """
     _isolate(tmp_path, monkeypatch)
-    from agent_wechat import messages
+    from agent_wechat import exclusions, messages
     with store.open() as con:
-        store.upsert_batch(con, [_chat_row(1, chat_id="md5:aaaa")])
+        store.upsert_batch(con, [_chat_row(1, chat_id="md5:aaaa", account="b")])
+        # 判别力靠这一支：墓碑按**正确的** md5 建，走 md5_of 就命中不了它
+        exclusions.add(con, [("wxid_abc123def456|" + messages.chat_md5("md5:aaaa") + "|0.db|1",
+                              "a", messages.chat_md5("md5:aaaa"))])
+        con.commit()
     _stub_resolution(monkeypatch, "md5:aaaa")
     targets = usecases.purge_chat_targets("小李")
-    assert targets == [{"account": "a", "chat_id": "md5:aaaa", "chat_md5": "aaaa"}]
+    assert targets == [{"account": "a", "chat_id": "md5:aaaa"},
+                       {"account": "b", "chat_id": "md5:aaaa"}], "账号 a 只能经墓碑支命中"
+    assert set(targets[0]) == {"account", "chat_id"}, "EA-092：返回不含 chat_md5（消费者自行派生）"
     assert messages.md5_of("md5:aaaa") != "aaaa", "前提：走 md5_of 会得到另一个值"
 
 

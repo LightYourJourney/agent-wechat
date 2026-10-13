@@ -554,13 +554,34 @@ def test_verify_reports_still_held_index(tmp_path, monkeypatch):
     assert "index.db-wal" not in rep.held
 
 
-def test_verify_finds_tmp_lldb_leftovers(tmp_path, monkeypatch):
-    """bootstrap.py:85 的 mkstemp 未传 dir=，落 $TMPDIR；进程被 kill 时残留。
-    spec §2 那张表的第四行——核查必须实际检查它。"""
+def test_tmp_leaks_probe_follows_the_writer(tmp_path, monkeypatch):
+    """bootstrap 的 mkstemp（`prefix=TMP_PREFIX`，未传 dir=）落 `tempfile.gettempdir()`；
+    进程被 kill 时残留。spec §2 那张表的第四行——核查必须检查**同一个目录**（EA-101）。
+
+    两个形态都钉：① TMPDIR 指到别处（且要清 `tempfile` 的缓存，否则 gettempdir() 仍答旧值）；
+    ② TMPDIR 指向**不可写**目录——gettempdir() 的回落链决定实际落点，探测必须跟着它走，
+    不能在 purge 里另写一份 `os.environ.get("TMPDIR","/tmp")`。"""
+    import tempfile as _tf
+
+    from agent_wechat import bootstrap
+
     monkeypatch.setenv("TMPDIR", str(tmp_path))
-    (tmp_path / "awcap_abc123.lldb").write_text("script")
+    monkeypatch.setattr(_tf, "tempdir", None)          # 清缓存：gettempdir() 首次调用后不再看 env
+    (tmp_path / (bootstrap.TMP_PREFIX + "abc123.lldb")).write_text("script")
     rep = purge.verify(purge.plan(frozenset({"keys"})))
     assert any("awcap_" in x for x in rep.tmp_leaks)
+
+    bad = tmp_path / "nowrite"
+    bad.mkdir(mode=0o500)
+    monkeypatch.setenv("TMPDIR", str(bad))
+    monkeypatch.setattr(_tf, "tempdir", None)
+    real = _tf.gettempdir()
+    (pathlib.Path(real) / (bootstrap.TMP_PREFIX + "def456.lldb")).write_text("script")
+    try:
+        rep2 = purge.verify(purge.plan(frozenset({"keys"})))
+        assert any("def456" in x for x in rep2.tmp_leaks), real
+    finally:
+        (pathlib.Path(real) / (bootstrap.TMP_PREFIX + "def456.lldb")).unlink()
 
 
 def test_verify_degrades_when_tmutil_missing(monkeypatch):

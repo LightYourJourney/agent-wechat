@@ -664,11 +664,11 @@ def _dest(out_root: pathlib.Path, cm: str, kind: str, mon: str,
     return _out_path(out_root, cm, kind, mon, stem, ext)
 
 
-def _save(out_root: pathlib.Path, cm: str, kind: str, mon: str,
-          stem: str, ext: str, data: bytes) -> pathlib.Path | None:
+def save_artifact(out_root: pathlib.Path, rel_dir: str, kind: str, mon: str,
+                  stem: str, ext: str, data: bytes) -> pathlib.Path | None:
     """写一个导出文件（0600）。落盘失败（磁盘满/权限/只读挂载）返回 None（Ruling 20）——
     调用方按自己的口径计数（图片 failed / 视频 missing / 语音 failed），裸 OSError 不逃出 core。"""
-    p = _dest(out_root, cm, kind, mon, stem, ext)
+    p = _dest(out_root, rel_dir, kind, mon, stem, ext)
     try:
         p.write_bytes(data)
         p.chmod(0o600)                         # 导出的是明文媒体：除了属主谁也读不到
@@ -723,7 +723,7 @@ def exported_path(out_root: pathlib.Path, *, chat_md5: str, kind: str, ts: int,
         if file_key is None:
             return None
         months = _month_window(ts)
-        # 与 resolve_image 的后缀优先级一致：写盘用的是**源文件**的 stem（`_save(..., dat.stem, ...)`），
+        # 与 resolve_image 的后缀优先级一致：写盘用的是**源文件**的 stem（`save_artifact(..., dat.stem, ...)`），
         # 而源文件可能是 K_hd.dat —— 只探裸 K 会漏掉真正存在的那份产物。
         cands = [c for suf in _SUFFIX_PRIORITY
                  for c in _out_candidates(kind, f"{file_key}{suf}")]
@@ -858,7 +858,7 @@ def export_media(account: str, chat_ids: list[str], *, kinds: list[str],
                                 report.degraded.append(
                                     "wxgf 图未转 JPEG（无 ffmpeg 或转码失败），存原容器")
                                 wxgf_warned = True
-                            if _save(out_root, cm, "image", mon, dat.stem, ext, buf) is None:
+                            if save_artifact(out_root, cm, "image", mon, dat.stem, ext, buf) is None:
                                 report.image.failed += 1     # 落盘失败（Ruling 20）
                                 continue
                         report.image.ok += 1
@@ -937,7 +937,7 @@ def export_media(account: str, chat_ids: list[str], *, kinds: list[str],
                     # 名字逐字取自**源文件**（`{K}.mp4` / `{K}_raw.mp4` / `{K}_thumb.jpg`），与
                     # 账号级枚举那条路一致：`media.exported_path` 正是按这三个名字探测的，改成
                     # `{K}.jpg` 会让它找不到缩略图，机器上既有的产物也会被误报成「未导出」。
-                    if _save(out_root, cm, "video", month_of(ts),
+                    if save_artifact(out_root, cm, "video", month_of(ts),
                              src.stem, src.suffix[1:], buf) is None:
                         report.video.missing += 1        # 落盘失败 → 同归口（Ruling 20）
                         continue
@@ -983,7 +983,7 @@ def export_media(account: str, chat_ids: list[str], *, kinds: list[str],
                         except OSError:
                             report.video.missing += 1    # 文件在、拿不到本体（Ruling 9）
                             continue
-                        if _save(out_root, cm, "video", mon, f.stem, "mp4", buf) is None:
+                        if save_artifact(out_root, cm, "video", mon, f.stem, "mp4", buf) is None:
                             report.video.missing += 1    # 落盘失败 → 与读不到本体同归口（Ruling 20）
                             continue
                         mp4_stems.add(f.stem.removesuffix("_raw"))
@@ -1013,7 +1013,7 @@ def export_media(account: str, chat_ids: list[str], *, kinds: list[str],
                         except OSError:
                             report.video.missing += 1    # 缩略图也拿不到：同样的归口
                             continue
-                        if _save(out_root, cm, "video", mon, f.stem, "jpg", buf) is None:
+                        if save_artifact(out_root, cm, "video", mon, f.stem, "jpg", buf) is None:
                             report.video.missing += 1    # 同上：缩略图也 write 不出来
                             continue
                         report.video.thumb += 1
@@ -1386,7 +1386,7 @@ def _export_stickers(account: str, chat_ids: list[str], out_root: pathlib.Path,
             if ext == "wxgf" and not wxgf_warned:
                 report.degraded.append("wxgf 贴纸未转 JPEG（无 ffmpeg 或转码失败），存原容器")
                 wxgf_warned = True
-            if _save(out_root, cm, "sticker", mon, md5, ext, data) is None:
+            if save_artifact(out_root, cm, "sticker", mon, md5, ext, data) is None:
                 report.sticker.failed += 1
                 continue
         report.sticker.ok += 1
@@ -1474,12 +1474,12 @@ def _export_voices_from(con, chat_ids, out_root, report, want, is_full, bump,
                 except Exception:
                     wav_bytes = None  # 解码失败 → 落到 .slk 回退
             if wav_bytes is not None:
-                if _save(out_root, cm, "voice", mon, f"{ts}_{lid}", "wav", wav_bytes) is None:
+                if save_artifact(out_root, cm, "voice", mon, f"{ts}_{lid}", "wav", wav_bytes) is None:
                     report.voice.failed += 1         # 落盘失败（Ruling 20）
                     continue
                 report.voice.ok += 1
             else:
-                if _save(out_root, cm, "voice", mon, f"{ts}_{lid}", "slk", blob) is None:
+                if save_artifact(out_root, cm, "voice", mon, f"{ts}_{lid}", "slk", blob) is None:
                     report.voice.failed += 1
                     continue
                 report.voice.raw_only += 1

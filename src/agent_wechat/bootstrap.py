@@ -28,6 +28,9 @@ from typing import Callable
 from . import account, keys, paths
 from .errors import CaptureError
 
+# lldb 捕获脚本的临时文件前缀：核查端（purge 的 tmp_leaks 探测）从这里取值，别写第二份。
+TMP_PREFIX = "awcap_"
+
 DEFAULT_TIMEOUT = 300
 
 _MIN_HEXDUMP_LINE = re.compile(r"\s*0x[0-9a-f]+:\s+((?:0x[0-9a-f]{2}\s*)+)$")
@@ -82,7 +85,7 @@ def capture_passphrase_lldb(timeout: int = DEFAULT_TIMEOUT) -> str:
         "DONE\n"
         "process continue\n"
     )
-    fd, sp = tempfile.mkstemp(suffix=".lldb", prefix="awcap_")
+    fd, sp = tempfile.mkstemp(suffix=".lldb", prefix=TMP_PREFIX)
     with os.fdopen(fd, "w") as f:
         f.write(script)
 

@@ -19,12 +19,13 @@ import pathlib
 import shutil
 import sqlite3
 import subprocess
+import tempfile
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
 
-from . import (decrypt, errors, exclusions, keys, media, messages, moments, paths, store,
-               tasks, vector)
+from . import (bootstrap, decrypt, errors, exclusions, keys, media, messages, moments, paths,
+               store, tasks, vector)
 
 _run = subprocess.run          # 模块级替换点（同 account._run）：测试注入桩
 
@@ -586,8 +587,9 @@ def verify(plan: PurgePlan) -> ResidueReport:
     held = {i.artifact.path.name: pids
             for i in plan.items if i.exists and (pids := _holders(i.artifact.path))}
 
-    tmpdir = os.environ.get("TMPDIR", "/tmp")
-    tmp_leaks = tuple(sorted(glob.glob(os.path.join(tmpdir, "awcap_*"))))
+    # 目录用 tempfile 的口径（mkstemp 落在那儿；**不要**在这里复刻回落链——EA-101）
+    tmp_leaks = tuple(sorted(glob.glob(os.path.join(
+        tempfile.gettempdir(), bootstrap.TMP_PREFIX + "*"))))
 
     return ResidueReport(
         not_removed=not_removed, kept=kept, held=held, tmp_leaks=tmp_leaks,

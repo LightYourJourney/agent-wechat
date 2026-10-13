@@ -745,7 +745,7 @@ def test_export_media_voice_silk_to_wav(tmp_path, monkeypatch):
     with wave.open(str(wavs[0])) as f:
         assert f.getnchannels() == 1 and f.getsampwidth() == 2 and f.getframerate() == 24000
         assert f.getnframes() == 4800                 # 0.2s × 24kHz
-    assert _mode(wavs[0]) == 0o600                    # 明文媒体只有属主可读（经 _save）
+    assert _mode(wavs[0]) == 0o600                    # 明文媒体只有属主可读（经 save_artifact）
     for p in (out, out / cm, out / cm / "voice", out / cm / "voice" / mon):
         assert _mode(p) == 0o700, p
 
@@ -949,12 +949,12 @@ def test_export_media_image_write_error_counts_failed(tmp_path, monkeypatch):
 def test_export_media_partial_write_is_unlinked(tmp_path, monkeypatch):
     """写到一半失败（磁盘满）不许留下半成品：否则下一轮的 skip 判定把它当成品，永久坏且报健康。
 
-    `exported_path` 只探测**存在性**：改前 `_save` 的 except 不清盘，残留文件会让之后每一轮都
+    `exported_path` 只探测**存在性**：改前 `save_artifact` 的 except 不清盘，残留文件会让之后每一轮都
     `skipped += 1`、`failed=0` —— 唯一出路是 `--force`，而没有任何输出会告诉用户这件事。
     （改前每次无条件覆写，这类残留会自愈；本分支引入 skip 后它变成永久的。）与
     `_wxgf_to_jpeg` 的「不留坏文件」是同一条约定。
 
-    变异：删掉 `_save` except 分支里的 `p.unlink(...)` → 下面三条断言全红。
+    变异：删掉 `save_artifact` except 分支里的 `p.unlink(...)` → 下面三条断言全红。
     """
     root, account = make_tree(tmp_path, monkeypatch)
     code = "999999"
@@ -983,7 +983,7 @@ def test_export_media_partial_write_is_unlinked(tmp_path, monkeypatch):
     out = root / "home" / "media"
     dest = out / cm / "image" / "2026-09" / "beef.jpg"
 
-    assert media._save(out, cm, "image", "2026-09", "beef", "jpg", b"x" * 8) is None
+    assert media.save_artifact(out, cm, "image", "2026-09", "beef", "jpg", b"x" * 8) is None
     assert not dest.exists()                     # 半成品必须已被清掉
 
     rep = media.export_media(account, ["chatA@chatroom"], kinds=["image"],
@@ -995,7 +995,7 @@ def test_export_media_partial_write_is_unlinked(tmp_path, monkeypatch):
 def test_export_media_video_write_error_counts_missing(tmp_path, monkeypatch):
     """Ruling 20：视频本体/缩略图落盘失败 → video.missing（写不出来 = 拿不到本体）。
 
-    这条打的是 `_save` 里 write 成功之后的 chmod——Ruling 20 点名了 write_bytes 与
+    这条打的是 `save_artifact` 里 write 成功之后的 chmod——Ruling 20 点名了 write_bytes 与
     chmod 两条语句，两条都要归口。
     """
     root, account = make_tree(tmp_path, monkeypatch)
@@ -1537,7 +1537,7 @@ def test_voice_body_keys_skips_rows_without_voice_data(tmp_path, monkeypatch):
 def test_export_media_skips_already_exported(tmp_path, monkeypatch):
     """重跑必须推进：第二次跑同一条命令，已导出的被跳过、且**不吃** --limit 预算。
 
-    改前 `_save` 无条件覆写、`full()` 只认 produced —— 第二次跑会走**同一顺序**
+    改前 `save_artifact` 无条件覆写、`full()` 只认 produced —— 第二次跑会走**同一顺序**
     （`_safe_iter` 用 sorted、语音 `ORDER BY create_time, local_id`、执行序固定
     image→video→voice），在同一处撞顶，一条都不多。真机症状：2239 条语音跑了 1923
     条后再跑还是 1923 条。

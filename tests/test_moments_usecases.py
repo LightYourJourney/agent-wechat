@@ -382,7 +382,7 @@ def test_export_unparseable_window_is_not_1970(env):
 
 def test_export_save_failure_is_counted_and_isolated(env, monkeypatch):
     """落盘失败（磁盘满/权限）只计数，不中断整批（media._save 返回 None 的路径）。"""
-    monkeypatch.setattr(media, "_save", lambda *a, **k: None)
+    monkeypatch.setattr(media, "save_artifact", lambda *a, **k: None)
     res = usecases.moments_export(account=ACCT, with_media=True,
                                   fetch=lambda m, **k: _jpeg())
     assert res.report.media_failed == 1
