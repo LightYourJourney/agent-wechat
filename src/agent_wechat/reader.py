@@ -124,7 +124,7 @@ class MessageReader:
         if not db.exists():
             raise DataNotFound(f"{db} 不存在")
         with decrypt.decrypted(db, self.passphrase) as plain:
-            con = sqlite3.connect(f"file:{plain}?mode=ro", uri=True)
+            con = decrypt.open_plain(plain)
             con.text_factory = bytes   # 库内 TEXT 含非 UTF-8 字节，统一按 bytes 取
             try:
                 yield con

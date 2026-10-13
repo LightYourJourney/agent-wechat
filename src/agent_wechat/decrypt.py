@@ -42,10 +42,10 @@ def snapshot(db: pathlib.Path, td: pathlib.Path) -> pathlib.Path:
 
 
 @contextlib.contextmanager
-def decrypted(db: pathlib.Path, passphrase: bytes, tmpdir: pathlib.Path | None = None):
+def decrypted(db: pathlib.Path, passphrase: bytes):
     """上下文管理器：yield 解密后的明文库路径，退出时自动清理临时文件。"""
     ensure_home_dirs()
-    td = pathlib.Path(tempfile.mkdtemp(prefix="awdec-", dir=tmpdir or tmp_dir()))
+    td = pathlib.Path(tempfile.mkdtemp(prefix="awdec-", dir=tmp_dir()))
     try:
         snap = snapshot(db, td)
         page1 = snap.read_bytes()[:keys.PAGE_SZ]

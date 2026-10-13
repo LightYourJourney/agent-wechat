@@ -2376,3 +2376,24 @@ def test_sticker_wxgf_without_transcode_saves_container_and_says_so(tmp_path, mo
     assert names == [f"{md5}.wxgf"]
     assert rep.sticker.ok == 1                       # 原容器保留了，算导出来了
     assert rep.degraded == ["wxgf 贴纸未转 JPEG（无 ffmpeg 或转码失败），存原容器"]
+
+def test_derive_xor_key_reads_only_the_tail(tmp_path, monkeypatch):
+    """EA-086：样本扫描只读每份 dat 的**末 2 字节**（此前是 `read_bytes()` 整文件读）。
+
+    判别法：把 `Path.read_bytes` 换成会抛的桩——回退成整文件读，本用例必红。
+    """
+    import pathlib as _p
+
+    from agent_wechat import media as m
+
+    dats = []
+    for i in range(5):
+        p = tmp_path / f"{i}.dat"
+        p.write_bytes(b"\x00" * 4096 + bytes([0x5A ^ 0xFF, 0x5A ^ 0xD9]))
+        dats.append(p)
+
+    def _boom(self):
+        raise AssertionError("整文件读：EA-086 要的是尾部两字节")
+
+    monkeypatch.setattr(_p.Path, "read_bytes", _boom)
+    assert m._derive_xor_key(dats) == 0x5A

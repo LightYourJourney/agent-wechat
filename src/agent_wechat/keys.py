@@ -133,8 +133,5 @@ def get_passphrase(account: str) -> bytes:
 
 
 def get_passphrase_hex(account: str) -> str:
-    bare = paths.bare_wxid(account)
-    hexstr = load_cached_hex(bare)
-    if not hexstr:
-        raise KeyNotFound(f"账号 {bare} 无 passphrase 缓存，请先运行 bootstrap。")
-    return hexstr
+    """`get_passphrase` 的十六进制视图（EA-048：文案只留一份，不再各写各的错误消息）。"""
+    return get_passphrase(account).hex()

@@ -79,7 +79,7 @@ def cmd_decrypt(args: argparse.Namespace) -> int:
             out.chmod(0o600)      # EA-050：整库明文，权限与目录侧承诺对齐
             print(f"已导出明文: {out}")
         else:
-            con = sqlite3.connect(f"file:{plain}?mode=ro", uri=True)
+            con = decrypt.open_plain(plain)
             ok = con.execute("PRAGMA quick_check").fetchone()[0]
             print(f"quick_check: {ok}")
             con.close()
@@ -95,7 +95,7 @@ def cmd_inspect(args: argparse.Namespace) -> int:
         return 1
     passphrase = keys.get_passphrase(acc)
     with decrypt.decrypted(db, passphrase) as plain:
-        con = sqlite3.connect(f"file:{plain}?mode=ro", uri=True)
+        con = decrypt.open_plain(plain)
         # 库里有非 UTF-8 的 TEXT 列，默认解码会直接抛异常；统一按 bytes 取，展示时再防御解码
         con.text_factory = bytes
         print(f"== {args.db} ==")

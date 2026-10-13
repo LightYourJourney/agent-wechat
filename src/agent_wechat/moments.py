@@ -347,7 +347,7 @@ def iter_posts(account: str, *, chat_filter: str | None = None,
         raise errors.DataNotFound(f"{db} 不存在（该微信版本可能没有朋友圈库）")
     want = set(months) if months else None
     with decrypt.decrypted(db, keys.get_passphrase(account)) as plain:
-        con = sqlite3.connect(f"file:{plain}?mode=ro", uri=True)
+        con = decrypt.open_plain(plain)
         con.text_factory = bytes          # 库内含非 UTF-8 字节，统一按 bytes 取
         try:
             try:

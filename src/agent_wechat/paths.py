@@ -80,12 +80,18 @@ def message_shards(account: str) -> list[pathlib.Path]:
 
 
 def key_info_dat(account: str) -> pathlib.Path:
-    """app_data/login/<裸wxid>/key_info.dat（每次登录重写的那份）。"""
+    """app_data/login/<裸wxid>/key_info.dat（每次登录重写的那份）。
+
+    **磁盘解密路线已结项**（见 ARCHITECTURE §3.2）：此函数仅为路径形状留档，无生产调用。
+    """
     return APP_DATA / "login" / bare_wxid(account) / "key_info.dat"
 
 
 def key_info_db(account: str) -> pathlib.Path:
-    """xwechat_files/all_users/login/<裸wxid>/key_info.db（明文 SQLite，56 行包裹 blob）。"""
+    """xwechat_files/all_users/login/<裸wxid>/key_info.db（明文 SQLite，56 行包裹 blob）。
+
+    **磁盘解密路线已结项**（见 ARCHITECTURE §3.2）：此函数仅为路径形状留档，无生产调用。
+    """
     return XWECHAT_FILES / "all_users" / "login" / bare_wxid(account) / "key_info.db"
 
 

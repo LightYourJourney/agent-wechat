@@ -17,6 +17,7 @@ import base64
 import binascii
 import datetime
 import hashlib
+import os
 import pathlib
 import re
 import sqlite3
@@ -144,21 +145,24 @@ def _attach_dats(account: str) -> list[pathlib.Path]:
     return _safe_iter(paths.XWECHAT_FILES / account / "msg/attach", "*/*/Img/*.dat")
 
 
-def _derive_xor_key(account: str, limit: int = 200) -> int | None:
-    """扫样本 dat 尾部：b[-2]^0xFF == b[-1]^0xD9（JPEG EOI）取众数；≥4 个一致才认可。"""
+def _derive_xor_key(dats, limit: int = 200) -> int | None:
+    """扫样本 dat **尾部两字节**（EA-086：不整文件读）：b[-2]^0xFF == b[-1]^0xD9（JPEG EOI）
+    取众数；≥4 个一致才认可。`dats` 由调用方物化一次传进来（别再 glob 第二遍）。"""
     counts: dict[int, int] = {}
     scanned = 0
-    for p in _attach_dats(account):
+    for p in dats:
         if scanned >= limit:
             break
         try:
-            b = p.read_bytes()
+            if p.stat().st_size < 8:
+                continue
+            with p.open("rb") as f:
+                f.seek(-2, os.SEEK_END)
+                tail = f.read(2)
         except OSError:
             continue
-        if len(b) < 8:
-            continue
-        k = b[-2] ^ 0xFF
-        if k == b[-1] ^ 0xD9:
+        k = tail[0] ^ 0xFF
+        if len(tail) == 2 and k == tail[1] ^ 0xD9:
             counts[k] = counts.get(k, 0) + 1
         scanned += 1
     if not counts:
@@ -170,8 +174,9 @@ def _derive_xor_key(account: str, limit: int = 200) -> int | None:
 def derive_keys(account: str) -> MediaKeys:
     """推导并**验证**图片密钥。无 code / 无样本 / 验证不过 → MediaKeyError（能力级降级）。"""
     codes = _kvcomm_codes()
-    xor_key = _derive_xor_key(account)
-    sample = next(iter(_attach_dats(account)), None)
+    dats = list(_attach_dats(account))        # EA-086：物化一次，两个消费者共用
+    xor_key = _derive_xor_key(dats)
+    sample = next(iter(dats), None)
     if sample is None:
         raise errors.MediaKeyError("msg/attach 下没有样本 dat，图片密钥无从验证")
     if xor_key is None:
@@ -1073,7 +1078,7 @@ def voice_body_keys(account: str) -> frozenset[tuple[str, int]] | None:
     for db in _voice_db_paths(account):
         try:
             with decrypt.decrypted(db, passphrase) as plain:
-                con = sqlite3.connect(f"file:{plain}?mode=ro", uri=True)
+                con = decrypt.open_plain(plain)
                 con.text_factory = bytes
                 try:
                     n2i = {rid: (u.decode("utf-8", "replace")
@@ -1411,7 +1416,7 @@ def _export_voices(account, chat_ids, out_root, report, want, is_full, bump, pro
         try:
             passphrase = keys_mod.get_passphrase(account)
             with decrypt.decrypted(db, passphrase) as plain:
-                con = sqlite3.connect(f"file:{plain}?mode=ro", uri=True)
+                con = decrypt.open_plain(plain)
                 con.text_factory = bytes
                 try:
                     _export_voices_from(con, chat_ids, out_root, report,
