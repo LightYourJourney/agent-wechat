@@ -27,6 +27,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import re
+
 from . import appmsg, chat_text
 
 if TYPE_CHECKING:
@@ -41,8 +43,46 @@ def _b(head: str, tail: str) -> str:
 
 
 def _t(v: str | None) -> str:
-    """正文**不转义**，但 `<` / `>` 换实体 —— 见模块头的注入段。"""
+    """**我们的措辞**：`<` / `>` 换实体，其余原样（见模块头的注入段）。"""
     return (v or "").replace("<", "&lt;").replace(">", "&gt;")
+
+
+# Markdown 的**行内**结构字符（在任何位置都有语义）；反斜杠转义是 CommonMark 的正式做法。
+# **不含 `.` `-` `+` `#` `>`**：它们只在**行首**才有结构义，一律转义会把 `¥100.00` 弄成
+# `¥100\.00`（渲染无差异、源却脏了）——行首那一档在 `_esc_md` 里单独处理。
+_MD_INLINE = "\\`*_[]()!|~"
+_MD_LINE_START = "#>+-*"
+
+
+_OL_START = re.compile(r"\d+\.")          # 行首的 `1.` / `12.`（有序列表）
+
+
+def _esc_md(v: str | None) -> str:
+    """**用户内容**的 Markdown 硬转义（EA-037）：正文 / 昵称 / 转账字段里的 Markdown
+    元字符一律反斜杠转义。
+
+    不转义的后果（审计实测，四条都会真的发生）：
+      · `![](http://evil/x.png)` → 产物里成为**远程图片引用**：打开导出就会去打那个 URL；
+      · `[点我](javascript:…)` → 可点链接；
+      · 行首 `#` / `>` → **假标题 / 假引用块**（看着像我们生成的）；
+      · 行首 `---` → 假分隔线。
+     `<`/`>` 沿用实体转义（`_t`）——两者都成立，实体更保险（HTML 侧也安全）。
+
+    分两档：**行内**字符（`` ` `` `*` `_` `[` `]` `(` `)` `!` `|` `~`）在任何位置都转义；
+    **行首**字符（`#` `>` `-` `+` `*`）只在行首转义，外加 `1.` 形态的有序列表。
+    """
+    out = []
+    for line in _t(v).split("\n"):
+        ol = _OL_START.match(line)          # 在原行上取位置（`1` 与 `.` 都不在行内集合，转义后不位移）
+        line = "".join(("\\" + ch) if ch in _MD_INLINE else ch for ch in line)
+        # **行首那一档必须在行内转义之后**：`\` 自身在 `_MD_INLINE` 里（要转义字面反斜杠），
+        # 先加行首反斜杠的话，它会被行内那一轮再转义一次 → `\\#`（两个反斜杠）。实测踩过。
+        if line[:1] and line[0] in _MD_LINE_START:
+            line = "\\" + line
+        elif ol:
+            line = line[:ol.end() - 1] + "\\." + line[ol.end():]
+        out.append(line)
+    return "\n".join(out)
 
 
 def _media_block(m: MediaRefState, prefix: str, out_dir: str) -> str:
@@ -73,7 +113,7 @@ def _transfer_line(t: appmsg.Transfer) -> str:
     **字段清单、顺序与标签全在 `chat_text.transfer_fields`**（与 HTML 侧**同一份**，
     不是两份互校的副本）；本模板只加 Markdown 自己的行首 `- ` 与转义。
     """
-    return "- " + _t(" · ".join(chat_text.transfer_fields(t)))
+    return "- " + _esc_md(" · ".join(chat_text.transfer_fields(t)))
 
 
 def _appmsg_lines(a: AppMsg, ref_anchor: str | None) -> list[str]:
@@ -116,10 +156,10 @@ def _message_lines(m: ViewMsg, prefix: str, out_dir: str) -> list[str]:
     `self` / `other` 同一件事（Markdown 没有对齐，只能用标记）。"""
     who = "我" if m.is_self else (m.sender or "（未知发送者）")
     tag = "（自己）" if m.is_self else ""
-    out = [f"## {_t(who)}{tag} · {chat_text.when(m.ts)} · {_t(m.kind)}", ""]
+    out = [f"## {_esc_md(who)}{tag} · {chat_text.when(m.ts)} · {_t(m.kind)}", ""]
     # appmsg 的 `text` 是 `[appmsg: 标题]` 形态的提示，解析成功时与下面的结构化块逐字重复。
     if m.text and m.appmsg is None:
-        out += [_t(m.text), ""]
+        out += [_esc_md(m.text), ""]
     if m.media is not None:
         block = _media_block(m.media, prefix, out_dir)
         if block:

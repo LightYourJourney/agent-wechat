@@ -262,3 +262,26 @@ def test_sticker_gone_makes_no_local_presence_claim():
     """
     from agent_wechat import chat_text
     assert "本机有" not in chat_text.STICKER_GONE
+
+
+def test_user_content_is_hard_escaped_against_markdown_injection():
+    """EA-037：`_t` 只换 `<`/`>`，Markdown 元字符原样进产物——一条
+    `![](http://evil/x.png)` 的消息在产物里成为**远程图片引用**：打开导出就会去打那个 URL
+    （泄露「你打开过这份导出」+ IP）；行首 `#` / `>` 变成**假标题 / 假引用块**（看着像我们
+    生成的）；`[点我](javascript:…)` 变成可点链接。
+
+    用户内容（正文 / 昵称 / 转账字段）现在走 `_esc_md` 硬转义；**我们的措辞**（`〔…〕`、
+    计数、时间）仍走 `_t`。把三处 `_esc_md` 换回 `_t` 本测试必红。
+    """
+    out = chat_md.render(_view(rows=[
+        {"msg_key": "k1", "ts": 1, "msg_type": 1,
+         "content": "![](http://evil.example/x.png)\n# 假标题\n[点我](javascript:alert(1))",
+         "sender_name": "张*三", "is_self": False}]))
+
+    assert r"\!\[" in out, "远程图片引用没被挡住"
+    assert r"\# 假标题" in out, "行首的假标题没被挡住"
+    assert r"\[点我\]\(javascript" in out, "可点链接没被挡住"
+    assert r"张\*三" in out, "昵称里的 Markdown 元字符没被转义"
+    assert "![](" not in out and "](javascript" not in out
+    # 反向守卫：**我们的**措辞不转义（时间与标签由程序生成，转义只会让产物难读）
+    assert "1970-01-01" in out

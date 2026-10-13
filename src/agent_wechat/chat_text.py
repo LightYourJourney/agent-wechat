@@ -27,6 +27,46 @@ from typing import TYPE_CHECKING
 INCONSISTENT_EXPORTED = "已导出，但拿不到产物路径 —— 状态与路径不一致"
 
 
+def whatwg_ipv4(host: str) -> bool:
+    """这个 host 会被 WHATWG 当 IPv4 解析吗（而页面上的徽章会把它原样显示出来）。
+
+    判据是 WHATWG「ends in a number」那一步的**超集**：末段是纯数字或 `0x`/`0X` 开头的
+    十六进制即为真——前导零的八进制（`017700000001` → 127.0.0.1）也是纯数字，裸 IPv4
+    （`192.168.1.1`）同样命中；真机上外链都是域名，一并降级不损失什么。先去掉末尾的点：
+    `192.168.1.1.` 是绝对域名形式，浏览器照样落到 192.168.1.1。二进制 `0b101` 不在判据内
+    ——实测 node 的 `new URL("https://0b101/x").hostname` 就是 `0b101`，WHATWG 不认它。
+    """
+    import re as _re
+    label = host.rstrip(".").rsplit(".", 1)[-1]
+    # 与 `moments_html` 原实现**逐字一致**（搬移不改行为）：`0[xX][0-9a-fA-F]*` 用 `*` 而非
+    # `+`——裸 `0x` 也是命中（WHATWG 认它、原用例 `[0x]` 钉着这一点）。
+    return bool(_re.fullmatch(r"(?:[0-9]+|0[xX][0-9a-fA-F]*)", label))
+
+
+def url_is_safe(url: str) -> bool:
+    """URL 能不能安全地做成**可点链接**（EA-034：两个渲染模板共用这一处判据）。
+
+    `html.escape` 挡不住 scheme（`javascript:alert(1)` 转义后仍是可执行链接），也挡不住
+    **反斜杠或非 ASCII 主机**：Python 的 `urlsplit` 不把反斜杠当分隔符，浏览器按 WHATWG 会
+    ——`https://evil.com` 后面接反斜杠再接 `mp.weixin.qq.com/x` 时，页面显示的是后者，
+    点下去却落到 `evil.com`。反斜杠**必须查 `netloc` 而不是 `hostname`**（`hostname` 已
+    把 userinfo 丢掉，而 WHATWG 先按 `\` 切一刀）。第三类：WHATWG 会当 IPv4 解析的 host
+    与含 `%` 的 host（`urlsplit` 不解百分号编码、WHATWG 解）。
+
+    **从 `moments_html._link_block` 搬来（EA-034）**：那里一直有这套守卫，而 `chat_html`
+    的 appmsg 链接块**完全没有**——同一个输入在两个产物里一个被拦、一个成为可点链接。
+    搬到这里是因为 `chat_text` 已经是两模板共享的纯函数层。
+    """
+    from . import moments                      # 复用它的 `split_url`（容错解析）
+    s = moments.split_url(url)
+    host = (s.hostname or "").lower() if s is not None else ""
+    if s is None or s.scheme not in ("http", "https") or not host:
+        return False
+    if "\\" in s.netloc or not host.isascii() or "%" in host or whatwg_ipv4(host):
+        return False
+    return True
+
+
 def unknown_status_note(status: str) -> str:
     """四态之外的取值：照实印出来，不猜也不吞（上游将来加枚举值时两个产物同时变）。"""
     return f"未知媒体状态 {status}"

@@ -77,6 +77,37 @@ def test_quote_renders_as_a_jump_link_when_target_in_range():
     assert 'href="#' not in outside, "目标不在范围内时不许给锚点（那是死锚点）"
 
 
+def test_a_javascript_link_in_an_appmsg_is_not_rendered_as_a_link():
+    """EA-034：appmsg 链接块此前**完全没有** URL 守卫——`javascript:` 直接成为可点链接，
+    且锚文本用 `title` 把真实 URL 藏起来；而 `moments_html` 对同一类输入有一整套守卫
+    （scheme / 反斜杠主机 / WHATWG-IPv4 / `%`）。判据现已共用 `chat_text.url_is_safe`。
+
+    把 `chat_html` 的守卫去掉（回到无条件 `<a href=…>`）本测试必红。
+    """
+    link = appmsg.AppMsg(kind=appmsg.KIND_LINK, title="点我", fields=(),
+                         link=appmsg.Link(url="javascript:alert(1)", title="点我", des=None),
+                         file=None, transfer=None, quote=None)
+    out = chat_html.render(chatview.build(
+        "c", title="t", rows=[{"msg_key": "k2", "ts": 2, "msg_type": 49, "content": "",
+                               "sender_name": "我", "is_self": True}],
+        parts={"k2": link}, media={}, out_dir="/tmp",
+        truncated=False, unparsed=0, rejected=0, degraded=()))
+    assert "javascript:" not in out.split("href=")[0] or 'href="javascript' not in out, out
+    assert "<a href=\"javascript" not in out, "javascript: 成了可点链接"
+    assert "链接：" in out, "不安全的 URL 要**显示**出来（用户看得见去哪），只是不可点"
+
+    # 反向守卫：正常 https 链接照常可点（别把守卫做成一刀切）
+    ok = appmsg.AppMsg(kind=appmsg.KIND_LINK, title="正常", fields=(),
+                       link=appmsg.Link(url="https://mp.weixin.qq.com/s/X", title="正常", des=None),
+                       file=None, transfer=None, quote=None)
+    out2 = chat_html.render(chatview.build(
+        "c", title="t", rows=[{"msg_key": "k2", "ts": 2, "msg_type": 49, "content": "",
+                               "sender_name": "我", "is_self": True}],
+        parts={"k2": ok}, media={}, out_dir="/tmp",
+        truncated=False, unparsed=0, rejected=0, degraded=()))
+    assert '<a href="https://mp.weixin.qq.com/s/X"' in out2
+
+
 def test_escapes_message_content():
     """消息正文是对手可控的 —— 不许原样注入 HTML。"""
     out = chat_html.render(_view(rows=[{"msg_key": "k1", "ts": 1, "msg_type": 1,

@@ -10,7 +10,7 @@ import html
 import re
 from typing import Iterable
 
-from . import moments
+from . import chat_text, moments
 
 _CSS = """body{font-family:-apple-system,"PingFang SC",sans-serif;max-width:720px;
 margin:0 auto;padding:16px;background:#f7f7f7;color:#1a1a1a;line-height:1.6}
@@ -90,12 +90,11 @@ def _link_block(link: moments.SnsLink) -> str:
     浏览器解码成 `2852039166.` 后照样落到 169.254.169.254。**只加数字判据挡不住它**，
     故 `%` 一并拒掉（合法主机名里没有 `%`，正常域名/IPv6 字面量都不含）。
     """
-    s = moments.split_url(link.url)
-    host = (s.hostname or "").lower() if s is not None else ""
-    if (s is None or s.scheme not in ("http", "https") or not host
-            or "\\" in s.netloc or not host.isascii()
-            or "%" in host or _whatwg_ipv4(host)):
+    # EA-034：判据已搬到 `chat_text.url_is_safe`（两个模板共用一处）——本函数只留呈现。
+    if not chat_text.url_is_safe(link.url):
         return f'<div class="ph">[链接：{_esc(link.url)}]</div>'
+    s = moments.split_url(link.url)
+    host = (s.hostname or "").lower() if s is not None else ""   # 徽章显示用（判据已过）
     title = _esc(link.title) or _esc(link.url)
     return (f'<div class="link"><a href="{_esc(link.url)}" target="_blank" '
             f'rel="noopener noreferrer nofollow">{title}</a>'

@@ -35,6 +35,7 @@ import html
 from typing import TYPE_CHECKING
 
 from . import appmsg, chat_text
+from . import chat_text
 
 if TYPE_CHECKING:
     from .appmsg import AppMsg
@@ -137,7 +138,14 @@ def _appmsg_block(a: AppMsg, ref_anchor: str | None) -> str:
     if a.link is not None:
         url, title = a.link.url, a.link.title or a.link.url
         if url:
-            inner.append(f'<div><a href="{_esc(url)}">{_esc(title)}</a></div>')
+            # EA-034：这里此前**完全没有** URL 守卫——`javascript:` 直接成为可点链接，
+            # 且锚文本用 `title` 把真实 URL 藏起来（`moments_html` 对同一类输入有一整套
+            # 守卫，两处判据现已共用 `chat_text.url_is_safe`）。不安全的 URL 降级成纯文本
+            # ——照常显示出来（用户看得见去哪），只是不可点。
+            if chat_text.url_is_safe(url):
+                inner.append(f'<div><a href="{_esc(url)}">{_esc(title)}</a></div>')
+            else:
+                inner.append(f'<div>[链接：{_esc(url)}]</div>')
         if a.link.des:
             inner.append(f"<div>{_esc(a.link.des)}</div>")
     if a.file is not None:
