@@ -48,8 +48,10 @@
 
 1. **首次构建向量索引时下载模型**（既有）：`vector.FastEmbedEmbedder` 先在本地缓存
    `~/.agent-wechat/models` 里找模型，找不到才联网取约 95MB 公共资产
-   （`vector.FastEmbedEmbedder._ensure`：先纯离线加载，缓存缺失才回退下载）；模型就位后嵌入与
-   检索完全离线（见 FAQ Q15）。它与下面这条一样，都是**入站下载**。
+   （`vector.FastEmbedEmbedder._ensure`：先纯离线加载，**只有「缓存缺失」才回退下载**——
+   实测形态是 `ValueError`，另含 `FileNotFoundError`／huggingface_hub 的
+   `LocalEntryNotFoundError`；权限错、只读卷、坏文件等**原样抛出**、不触发下载，见 EA-060）；
+   模型就位后嵌入与检索完全离线（见 FAQ Q15）。它与下面这条一样，都是**入站下载**。
 2. **朋友圈媒体下载**：下面详述（HTTPS）。
 3. **贴纸 CDN 取件**（2026-09-23 新增）：本节末尾详述。**它走明文 HTTP**——见下。
 
