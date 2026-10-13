@@ -52,7 +52,7 @@
 **默认全程零网络，没有任何数据会被上传**：解密、索引、embedding（本地 ONNX 推理）、
 MCP（stdio）均无网络路径，MCP 只在你的 Agent 客户端与本地 Server 之间通信。
 
-只有两个都需要你**主动触发**的例外：
+只有三个都需要你**主动触发**的例外：
 
 1. 首次构建向量索引时下载约 95MB 的模型文件（fastembed + `bge-small-zh-v1.5`）到
    `~/.agent-wechat/models`；模型就位后嵌入与检索完全离线（见 Q15）。
@@ -63,7 +63,12 @@ MCP（stdio）均无网络路径，MCP 只在你的 Agent 客户端与本地 Ser
    （`MicroMessenger Client`）与 `Accept: */*`，**不含本机任何聊天 / 索引内容**，无请求体；
    **不使用代理**，一律直连。⚠️ 目标主机受白名单约束，但**端口不受约束**（见 SECURITY.md §1）。
 
-第 2 条是本项目零网络红线上**本次新增的**显式例外，详见 SECURITY.md §1「零网络例外」。
+3. **贴纸 CDN 取件**：只有显式指定 `--with-cdn`（CLI `media export`）/ `with_cdn=True`
+   （MCP `export_chat_media`）时才把该贴纸的 `filekey` 发往腾讯 CDN——后缀 `*.tc.qq.com`
+   / `*.qpic.cn` / `*.wechat.com`，加精确主机 `wxapp.tc.qq.com`；不上传任何聊天 / 索引
+   内容；同样**端口不受约束**（见 SECURITY.md §1）。
+
+第 2、3 两条是本项目零网络红线上**本次新增的**显式例外，详见 SECURITY.md §1「零网络例外」。
 
 **Q8：为什么需要 sudo 和重签名？能避免吗？**
 lldb attach 需要 `task_for_pid` 权限；Hardened Runtime 会阻止它，所以要 ad-hoc

@@ -31,7 +31,7 @@ uv sync
 uv run agent-wechat status
 ```
 
-依赖极简：运行时仅 `mcp`（MCP SDK）+ `zstandard`（WCDB 压缩解码），其余全为标准库。
+依赖 6 个：`mcp`（MCP SDK）、`zstandard`（WCDB 压缩解码）、`fastembed` + `sqlite-vec`（本地向量检索，首次下载模型）、`cryptography`（图片 dat 的 AES 解密）、`pilk`（语音 SILK→WAV）；其余全为标准库。语音 / 向量为按需能力：缺 `pilk` 只降级、缺 `sqlite-vec` 则向量功能不可用。
 
 ### 2.1 全局命令（可选，推荐）
 
@@ -111,7 +111,8 @@ sudo uv run --directory <仓库路径> agent-wechat bootstrap
 
 ### 6.1 Claude Code
 
-**项目级**（推荐）：仓库根目录已带 [.mcp.json](../.mcp.json)：
+**项目级**（推荐）：仓库根目录已带 [.mcp.json](../.mcp.json)——本机实际形态是**直调**
+`.venv/bin/agent-wechat-mcp`；下面给的是等价的 `uv run` 写法（两种形态都可用）：
 
 ```json
 {
