@@ -656,6 +656,26 @@ def test_chat_index_links_to_each_exported_chat(con, chat_env):
     assert "aaaa/chat/index.html" in page
 
 
+def test_chat_index_lists_a_markdown_only_export(con, chat_env):
+    """EA-035：枚举此前是 `*/chat/index.html`——**只导 md 的会话永远不出现在索引页上**
+    （`has_md` 只覆盖反方向：有 HTML 时才查 md 在不在）。索引页是用户唯一的入口，
+    漏掉的是整批会话，不是一行。
+
+    把枚举换回 `*/chat/index.html` 本测试必红。
+    """
+    _seed(con)
+    usecases.chat_export("wxid_testacct02", out_dir=str(chat_env), account="acct",
+                         formats=["md"])
+    assert (chat_env / "aaaa" / "chat" / "index.md").exists()
+    assert not (chat_env / "aaaa" / "chat" / "index.html").exists()
+
+    res = usecases.chat_index(out_dir=str(chat_env), account="acct")
+    assert res.chats == 1, "只有 md 的会话被漏掉了"
+    page = pathlib.Path(res.file).read_text(encoding="utf-8")
+    assert "aaaa/chat/index.md" in page, "名字该链到存在的那份"
+    assert "index.html" not in page, "没有 HTML 就不许链 HTML（死链）"
+
+
 def test_chat_index_on_empty_out_dir_writes_nothing(tmp_path):
     """没有产物时：不抛异常、**也不写一个空壳页面**（空产物比没有产物更难分辨）。"""
     res = usecases.chat_index(out_dir=str(tmp_path / "nothing"), account="acct")

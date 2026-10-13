@@ -490,3 +490,35 @@ def test_default_keys_include_sticker_messages(tmp_path, monkeypatch, idx):
     assert got[rows[-1]["msg_key"]].kind == "sticker"
     assert got[rows[-1]["msg_key"]].status == "gone"   # 没有 ref 也是 gone，不是 none
     assert res.by_kind["sticker"] == {"gone": 1}
+
+
+
+def test_a_video_thumbnail_alone_is_not_reported_as_exported(tmp_path, monkeypatch, idx):
+    """EA-036：`media.exported_path` 会命中 **`{stem}_thumb.jpg`**（视频的**缩略图**），
+    而 `_state_of` 一律报 `exported`——两个模板于是产出
+    `<video controls src="…/{stem}_thumb.jpg">`：**坏播放器**（jpg 不是视频源，浏览器里是
+    黑框）。该分支在全量测试里零覆盖（变异删掉它套件全绿）。
+
+    四态契约**不加第五态**（贴纸设计时已定）：缩略图命中时按「本体不在」继续判。
+    判据在 `_state_of`（有信息的那一层），这里直接喂给它两种产物路径。
+    把判据里的 `not media.is_thumbnail(p)` 删掉本测试必红。
+    """
+    con, _ = idx
+    vrow = _row(7, messages.TYPE_VIDEO)
+    store.upsert_batch(con, [vrow])
+    con.commit()
+    monkeypatch.setattr(media, "resolve_video", lambda *a, **k: None)   # 本体不在本机
+
+    # ① 产物命中**缩略图** → 不是「已导出」（本体没导出来）
+    monkeypatch.setattr(media, "exported_path",
+                        lambda *a, **k: str(tmp_path / "video" / "ef01_thumb.jpg"))
+    st = usecases._state_of(vrow, ("video", "ef01"), out_root=tmp_path,
+                            account=ACCT, voice_keys=None)
+    assert st.status == "gone", f"缩略图不是本体，却报成 {st.status}"
+
+    # ② 反向守卫：真本体（.mp4）仍必须报 exported（别把判据做成一刀切）
+    monkeypatch.setattr(media, "exported_path",
+                        lambda *a, **k: str(tmp_path / "video" / "ef01.mp4"))
+    st2 = usecases._state_of(vrow, ("video", "ef01"), out_root=tmp_path,
+                             account=ACCT, voice_keys=None)
+    assert st2.status == "exported" and st2.path.endswith("ef01.mp4")

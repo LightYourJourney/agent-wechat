@@ -47,6 +47,8 @@ class ChatIndexEntry:
     label: str              # 展示名：`chat_id`，查不到时是 `md5:{chat_md5}`
     messages: int | None    # **`None` = 索引里没有这个会话 → 条数未知，不是 `0 条`**
     has_md: bool            # 同级真的存在 `index.md`（写失败过就只有 HTML）
+    has_html: bool          # 同级真的存在 `index.html`（EA-035：`--format md` 导出的会话
+                            # 只有 md——枚举只有 html 时它们**整批不出现在索引页上**）
 
 
 def _esc(v: str | None) -> str:
@@ -67,8 +69,12 @@ def render(entries: Sequence[ChatIndexEntry]) -> str:
                 else "条数未知（索引里没有这个会话）")
         # `index.md` 只在真的写出来了才链：`chatview.write` 单文件失败时目录里只有 HTML，
         # 无条件印就是一条死链（`has_md` 的全部意义）。
-        md = f'<a class="md" href="{base}/chat/index.md">Markdown</a>' if e.has_md else ""
-        rows.append(f'<li class="chat"><a class="name" href="{base}/chat/index.html">'
+        # EA-035：名字链到**存在的那份**（html 优先）；两份都在时另给一个 md 链接，
+        # 只有 md 时名字本身就是 md 链接（不再重复印）。
+        name_href = (f"{base}/chat/index.html" if e.has_html else f"{base}/chat/index.md")
+        md = (f'<a class="md" href="{base}/chat/index.md">Markdown</a>'
+              if e.has_md and e.has_html else "")
+        rows.append(f'<li class="chat"><a class="name" href="{name_href}">'
                     f'{_esc(e.label)}</a><span class="n">{meta}</span>{md}</li>')
     return ('<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">'
             '<meta name="viewport" content="width=device-width,initial-scale=1">'

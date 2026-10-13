@@ -740,6 +740,17 @@ def _month_window(ts: int) -> tuple[str, str, str]:
     return (mon, _shift_month(mon, -1), _shift_month(mon, 1))
 
 
+def is_thumbnail(path: str | pathlib.Path) -> bool:
+    """产物是不是**视频缩略图**（`{stem}_thumb.jpg`）——它不是视频本体（EA-036）。
+
+    视频导出在本体拿不到时会回退缩略图，产物名是 `{本体 stem}_thumb.jpg`。判「已导出」时
+    必须把它排除：渲染端会把 `exported` 的路径塞进 `<video src=…>`，而 jpg 不是视频源
+    （浏览器里是黑框 + 不可播）。判据只看文件名——与写入端 `_out_candidates` 的 stem 变体
+    同源，不需要再探一次磁盘。
+    """
+    return pathlib.Path(path).stem.endswith("_thumb")
+
+
 def exported_path(out_root: pathlib.Path, *, chat_md5: str, kind: str, ts: int,
                   file_key: str | None = None,
                   local_id: int | None = None) -> pathlib.Path | None:

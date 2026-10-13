@@ -492,7 +492,10 @@ def _state_of(row: dict, ref: tuple[str, str | None] | None, *,
     local_id = row["local_id"]
     p = media.exported_path(out_root, chat_md5=row["chat_md5"], kind=kind,
                             ts=row["ts"], file_key=file_key, local_id=local_id)
-    if p is not None:
+    if p is not None and not media.is_thumbnail(p):
+        # EA-036：命中的可能是**视频缩略图**（`{stem}_thumb.jpg`）——它不是本体，报
+        # `exported` 会让渲染端产出指向 jpg 的 `<video>`（坏播放器）。四态契约**不加第五态**：
+        # 缩略图命中时按「本体不在」继续往下判（`exportable` / `gone`）。
         return MediaRefState(row["msg_key"], row["ts"], kind, "exported", str(p))
     if kind == "voice":
         # 语音库读不到（None）时不能当成空集合：那会把「读不到」谎报成「本机没有」
@@ -988,7 +991,12 @@ def chat_index(out_dir: str | None = None, account: str | None = None) -> ChatIn
     # 与 `chat_export` 同款绝对化：`--out` 给相对路径时，`out_dir`/`file` 才是能直接打开、
     # 也能与 `chat export` 对齐的路径。
     out_root = (pathlib.Path(out_dir) if out_dir else media.export_root()).resolve()
-    found = list(out_root.glob("*/chat/index.html"))
+    # EA-035：枚举 `index.*` 后按 `{chat_md5}` **归并**——此前只枚举 `index.html`，
+    # 于是用 `--format md` 导出的会话**永远不出现在索引页上**（`has_md` 只覆盖反方向）。
+    # 排序让页面顺序不依赖文件系统。
+    found: dict[str, set[str]] = {}
+    for p in out_root.glob("*/chat/index.*"):
+        found.setdefault(p.parent.parent.name, set()).add(p.name)
     if not found:
         return ChatIndexResult(out_dir=str(out_root), file=None, chats=0)
     ctx = ChatContext(account)
@@ -1006,15 +1014,15 @@ def chat_index(out_dir: str | None = None, account: str | None = None) -> ChatIn
         ) from exc
     indexed = {r["chat_md5"]: r for r in rows}
     entries = []
-    for p in found:
-        chat_md5 = p.parent.parent.name         # {out}/{chat_md5}/chat/index.html
+    for chat_md5, names in sorted(found.items()):   # {out}/{chat_md5}/chat/index.*
         row = indexed.get(chat_md5)
         entries.append(index_html.ChatIndexEntry(
             chat_md5=chat_md5,
             chat_id=row["chat_id"] if row else "",
             label=row["chat_id"] if row else messages.degraded_chat_id(chat_md5),
             messages=row["n"] if row else None,  # 查不到时**未知**：`None`，不是 0 条
-            has_md=(p.parent / "index.md").exists()))
+            has_md="index.md" in names,
+            has_html="index.html" in names))
     target = media.ensure_tree(out_root) / "index.html"
     try:
         target.write_text(index_html.render(entries), encoding="utf-8")
