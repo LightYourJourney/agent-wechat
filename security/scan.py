@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import argparse
+import codecs
 import hashlib
 import os
 import re
@@ -210,6 +211,13 @@ def check_hooks() -> int:
     rc, _ = _git_rc("diff", "--quiet", "HEAD", "--", "security/hooks")
     if rc != 0:
         problems.append("工作区与 HEAD 不一致（未提交的本地改动，或少了文件）")
+    # EA-065：`diff --quiet` 只看 **tracked** 内容——`security/hooks/` 里多出一个未跟踪的
+    # 钩子文件时它照样退 0。但 `hooksPath` 指到目录上，那个文件**是真的会生效的**，
+    # 而「正常」这句会让用户以为机制与声明一致。
+    rc_u, out_u = _git_rc("ls-files", "--others", "--exclude-standard", "--", "security/hooks")
+    if rc_u == 0 and out_u.strip():
+        problems.append("security/hooks/ 里有未跟踪的文件（git 不追踪，但 hooksPath 机制下会生效）：%s"
+                        % "、".join(out_u.split()))
     if problems:
         for line in problems:
             print(line)
@@ -393,11 +401,27 @@ def verify_allowlist() -> list[str]:
     return sorted(fingerprint(v) for v in load_allowlist() - seen)
 
 
-def _b_side_path(token: str) -> str | None:
-    """二进制行里的 `b/<路径>` → `<路径>`；删除那一侧是 `/dev/null` → None。"""
+def _unquote_git_path(token: str) -> str:
+    """还原 git 的引号 + C 风格转义（`"b/\346\226\207.txt"` → `b/文.txt`）。
+
+    EA-010：git 对含空格/非 ASCII 的路径加引号，并把非 ASCII 字节写成**八进制转义**。
+    只去引号不还原字节时，存在性检查拿到转义文本 → 合法提交被 `ScannerError` 拦下（退 2），
+    报文却说「路径解析不出来」——其实它就在那儿。
+    """
     token = token.strip()
     if len(token) >= 2 and token.startswith('"') and token.endswith('"'):
-        token = token[1:-1]          # 含空格 / 非 ASCII 时 git 会加引号（不展开转义）
+        body = token[1:-1]
+        try:
+            raw = codecs.escape_decode(body.encode("utf-8"))[0]
+            return raw.decode("utf-8", "surrogateescape")
+        except (ValueError, UnicodeDecodeError):
+            return body                       # 解不开就按原样（宁可响亮，不猜）
+    return token
+
+
+def _b_side_path(token: str) -> str | None:
+    """`b/<路径>` → `<路径>`；删除那一侧是 `/dev/null` → None。引号与转义交给上面那个。"""
+    token = _unquote_git_path(token)
     if token == "/dev/null":
         return None
     return token[2:] if token.startswith("b/") else token
@@ -440,14 +464,19 @@ def staged_added_lines(diff_text: str | None = None) -> list[tuple[str, int, str
     path = None
     lineno = 0
     seen_hunk = False
-    for line in diff.splitlines():
+    # EA-008：**按 git 的语义切**（只认 `\n`）。`str.splitlines()` 认 10 个换行字符，
+    # 文件内容里的那 9 个能把一条 git 行切成片段；片段恰好以 `diff --git ` 开头时会命中
+    # 头分支，把该文件其余行静默丢弃（fail-open、退 0）。`\r` 留在行尾无害——
+    # 四个形状的字符类都不含它。（不给 `_DIFF_HEADER` 加 `seen_hunk` 守卫：真 diff 里
+    # 下一个文件的头就出现在上一个 hunk 之后，加了会把多文件 diff 的第二份头当内容。）
+    for line in diff.split("\n"):
         if _DIFF_HEADER.match(line):
             path = None
             seen_hunk = False
             continue
         if not seen_hunk and line.startswith("+++ "):
-            target = line[4:].strip()
-            path = None if target == "/dev/null" else target[2:]   # 去掉 "b/"
+            # EA-010：与二进制点名行共用 `_b_side_path`——引号 + 八进制转义都要还原。
+            path = _b_side_path(line[4:])
             if path is not None:
                 if Path(path).name in SKIP_NAMES:
                     path = None       # 与 scan_repo() 同一条规则，别让两条路各说各话
@@ -510,6 +539,21 @@ def _build_parser() -> argparse.ArgumentParser:
     return ap
 
 
+def _report_unregistered(hits, allow, args) -> int:
+    """「命中汇报 + `--show-values` 警告 + 退出码」三件事（EA-044：两条路径此前各写一份）。
+
+    行为逐字节不变；抽它的理由不是行数，而是**改一处即漂移**（改 `--staged` 那条忘了改
+    默认全扫那条，输出就会分叉，而既有断言只覆盖各自那一半）。
+    """
+    unregistered = unregistered_hits(hits, allow)
+    for rel, lineno, shape, value in unregistered:
+        shown = value if args.show_values else "%d 字符" % len(value)
+        print("%s:%d  %s · %s · 未登记" % (rel, lineno, SHAPE_LABEL[shape], shown))
+    if args.show_values and unregistered:
+        print("⚠️ 上面打印了命中值本身——它已进入你的会话记录。", file=sys.stderr)
+    return EXIT_HITS if unregistered else EXIT_CLEAN
+
+
 def _run(args: argparse.Namespace) -> int:
     """各模式的分派。**整个函数体就是那条 fail-closed 边界**（`main` 那层只作兜底）。
 
@@ -563,23 +607,11 @@ def _run(args: argparse.Namespace) -> int:
                         for _, _, shape, value in hits_in_text(text)
                         if not path_exempt(rel, shape)]
             allow = load_allowlist()      # 读文件，在边界之内（同上）
-            unregistered = unregistered_hits(hits, allow)
-            for rel, lineno, shape, value in unregistered:
-                shown = value if args.show_values else "%d 字符" % len(value)
-                print("%s:%d  %s · %s · 未登记" % (rel, lineno, SHAPE_LABEL[shape], shown))
-            if args.show_values and unregistered:
-                print("⚠️ 上面打印了命中值本身——它已进入你的会话记录。", file=sys.stderr)
-            return EXIT_HITS if unregistered else EXIT_CLEAN
+            return _report_unregistered(hits, allow, args)
 
         hits = scan_repo()
         allow = load_allowlist()          # 读文件，在边界之内
-        unregistered = unregistered_hits(hits, allow)
-        for rel, lineno, shape, value in unregistered:
-            shown = value if args.show_values else "%d 字符" % len(value)
-            print("%s:%d  %s · %s · 未登记" % (rel, lineno, SHAPE_LABEL[shape], shown))
-        if args.show_values and unregistered:
-            print("⚠️ 上面打印了命中值本身——它已进入你的会话记录。", file=sys.stderr)
-        return EXIT_HITS if unregistered else EXIT_CLEAN
+        return _report_unregistered(hits, allow, args)
     except Exception as exc:      # 唯一的函数级边界：任何分支的异常都从这里退 2
         print("scan: 扫描器出错：%s" % exc, file=sys.stderr)
         return EXIT_ERROR

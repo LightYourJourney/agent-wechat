@@ -615,6 +615,24 @@ def test_staged_added_lines_extracts_new_side_only(scan, tmp_path, monkeypatch):
         "行号要取 + 侧、只取新增行、且删掉的文件（+++ /dev/null）不许混进来"
 
 
+def test_staged_non_ascii_path_with_octal_escapes_is_decoded(scan, tmp_path, monkeypatch):
+    """EA-010：git 对非 ASCII 文件名加引号并把字节写成八进制转义
+    （`+++ "b/\\346\\226\\207.txt"` = `b/文.txt`）。只去引号不还原字节 → 存在性检查
+    拿到转义文本 → **合法提交被拦（退 2）**，报文还说「路径解析不出来」。
+
+    红过：修前 `staged_added_lines` 对这段 diff 抛 ScannerError。
+    """
+    monkeypatch.setattr(scan, "REPO_ROOT", tmp_path)
+    (tmp_path / "\u6587.txt").write_text("x\n", encoding="utf-8")
+    diff = ('diff --git "a/\\346\\226\\207.txt" "b/\\346\\226\\207.txt"\n'
+            '--- "a/\\346\\226\\207.txt"\n'
+            '+++ "b/\\346\\226\\207.txt"\n'
+            '@@ -1 +1 @@\n'
+            '+x\n')
+    rows = scan.staged_added_lines(diff)
+    assert [(r[0], r[1]) for r in rows] == [("\u6587.txt", 1)], rows
+
+
 def test_staged_unresolvable_path_is_fail_closed(scan, tmp_path, monkeypatch):
     """路径解析不出来时必须炸，不能静默跳过——静默跳过会让「装了但从没拦过」不可见。"""
     monkeypatch.setattr(scan, "REPO_ROOT", tmp_path / "nowhere")
@@ -633,6 +651,39 @@ index 1111111..2222222 100644
 +++ /dev/null
 +still a hit " + FAKE + "
 """
+
+
+def test_staged_special_newlines_cannot_forge_a_diff_header(scan, tmp_path, monkeypatch):
+    """EA-008：`str.splitlines()` 认 **10** 个换行字符，而 git 的 diff 只以 `\n` 分行。
+
+    文件内容里出现这 9 个字符（`\r` 之外的那批）时，一条 git 行会被切成多个片段；切出的
+    片段恰好以 `diff --git ` 开头时，`_DIFF_HEADER` 分支会在**不看 `seen_hunk`** 的情况下
+    命中，此后该文件的所有行被 `if path is None: continue` 静默丢弃——**fail-open、退 0**。
+
+    验收：9 字符表每一格，同一文件里的伪造 wxid 形值都必须被报出。
+    （形状字面量一律拼接，本文件自身不被扫描器命中。）
+    """
+    monkeypatch.setattr(scan, "REPO_ROOT", tmp_path)
+    (tmp_path / "f.py").write_text("ok\n", encoding="utf-8")
+    fake = "wx" + "id_" + "e2eprobe9x7q2m"
+    for ch in ("\r", "\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"):
+        diff = ("diff --git a/f.py b/f.py\n--- a/f.py\n+++ b/f.py\n@@ -0,0 +1,2 @@\n"
+                f"+ok\n+{ch}diff --git a/x b/y\n+{fake}\n")
+        hits = scan.staged_added_lines(diff)
+        assert any(fake in text for _rel, _n, text in hits), repr(ch)
+
+
+def test_staged_special_newline_before_a_fake_hunk_is_handled_as_content(scan, tmp_path, monkeypatch):
+    """EA-008 变体 2：`@@ <非 hunk 头>` 被切出来的片段会让 `_HUNK` 匹配失败而**抛错退 2**
+    （合法提交被拦）。修后它只是内容行，值照常被报出、不抛。
+    """
+    monkeypatch.setattr(scan, "REPO_ROOT", tmp_path)
+    (tmp_path / "f.py").write_text("ok\n", encoding="utf-8")
+    fake = "wx" + "id_" + "e2eprobe9x7q2m"
+    diff = ("diff --git a/f.py b/f.py\n--- a/f.py\n+++ b/f.py\n@@ -0,0 +1,2 @@\n"
+            f"+ok\n+\u2028@@ not-a-hunk\n+{fake}\n")
+    hits = scan.staged_added_lines(diff)
+    assert any(fake in text for _rel, _n, text in hits)
 
 
 def test_staged_header_mimic_does_not_swallow_the_rest_of_the_file(scan, tmp_path, monkeypatch):
@@ -865,8 +916,11 @@ def test_hook_sources_point_at_the_scanner_and_are_executable():
 
 # ---------- --check-hooks：安装状态自检（spec 2026-10-12 hook-install-design §4.3） ----------
 
-def _fake_git(scan, monkeypatch, *, config, common=".git", diff_rc=0):
-    """桩在**进程边界**（git 调用）上——判据逻辑一行都不桩。config=None 表示未设置。"""
+def _fake_git(scan, monkeypatch, *, config, common=".git", diff_rc=0, untracked=""):
+    """桩在**进程边界**（git 调用）上——判据逻辑一行都不桩。config=None 表示未设置。
+
+    `untracked` 喂给 `ls-files --others`（EA-065 的新判据）；默认空 = 没有未跟踪的钩子文件。
+    """
     def fake(*args):
         kind = args[0]
         if kind == "config":
@@ -875,12 +929,14 @@ def _fake_git(scan, monkeypatch, *, config, common=".git", diff_rc=0):
             return 0, common + "\n"
         if kind == "diff":
             return diff_rc, ""
+        if kind == "ls-files":
+            return 0, untracked
         raise AssertionError("意外的 git 调用：%r" % (args,))
     monkeypatch.setattr(scan, "_git_rc", fake)
 
 
 def _lay_out_hooks(scan, tmp_path, monkeypatch, *, config, copies=False,
-                   copy_from_src=True, exec_bit=True, diff_rc=0, drop=None):
+                   copy_from_src=True, exec_bit=True, diff_rc=0, drop=None, untracked=""):
     """造一套 tmp 结构：仓库侧 security/hooks/ 两份 + 共享 hooks 目录（可选放副本）。"""
     src = tmp_path / "security" / "hooks"
     src.mkdir(parents=True)
@@ -897,7 +953,7 @@ def _lay_out_hooks(scan, tmp_path, monkeypatch, *, config, copies=False,
             body = (src / name).read_bytes() if copy_from_src else b"# foreign hook\n"
             (common / name).write_bytes(body)
     monkeypatch.setattr(scan, "REPO_ROOT", tmp_path)
-    _fake_git(scan, monkeypatch, config=config, diff_rc=diff_rc)
+    _fake_git(scan, monkeypatch, config=config, diff_rc=diff_rc, untracked=untracked)
     return src, common
 
 
@@ -981,6 +1037,21 @@ def test_check_hooks_names_the_exec_bit_loss_separately(scan, tmp_path, monkeypa
     assert "工作区与 HEAD 不一致" in out.out, "两种成因都要报，别只报一种"
     assert not any("执行位丢了" in ln and "工作区与 HEAD 不一致" in ln
                    for ln in out.out.splitlines()), "两种成因要各打一行，不许混成一句"
+
+
+def test_check_hooks_reports_untracked_hook_files(scan, tmp_path, monkeypatch, capsys):
+    """EA-065：`diff --quiet HEAD -- security/hooks` 只看 **tracked** 内容——目录里多出一个
+    未跟踪的钩子文件时它照样退 0。但 `hooksPath` 指到目录上，那个文件**是真会生效的**，
+    而「正常」这句会让用户以为机制与声明一致。新判据应报它并退 1。
+
+    把新判据删掉，本用例必红。
+    """
+    _lay_out_hooks(scan, tmp_path, monkeypatch, config="security/hooks",
+                   untracked="security/hooks/pre-push\n")
+    rc = scan.main(["--check-hooks"])
+    out = capsys.readouterr()
+    assert rc == scan.EXIT_HITS, "未跟踪的钩子文件必须让自检退 1"
+    assert "未跟踪" in out.out and "pre-push" in out.out
 
 
 def test_check_hooks_reports_local_edit_and_a_missing_half(scan, tmp_path, monkeypatch, capsys):
