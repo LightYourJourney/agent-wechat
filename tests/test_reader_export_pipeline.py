@@ -668,6 +668,43 @@ def test_recent_private_messages_use_display_names(env):
     assert from_friend[0].sender_name == "张三"
 
 
+def test_iter_all_decrypts_each_shard_once_plus_the_two_static_sources(env, monkeypatch):
+    """EA-018：一次 `iter_all` 里每个分片**只解密一次**（名字与消息同一次读走），
+    加上 session + contact 两次静态源 = 分片数 + 2。
+
+    此前名字池先把每个分片解密一遍，扫描时再解一遍（2×分片数 + 2）——把
+    `iter_all` 里的 `chat_map = ...static | set(n2i.values())` 换回 `self.md5_map()`，
+    本用例必红。
+    """
+    from agent_wechat import decrypt as dec_mod
+    from agent_wechat import paths as paths_mod
+
+    calls = []
+    real = dec_mod.decrypted
+
+    def spy(db, passphrase):
+        calls.append(str(db))
+        return real(db, passphrase)
+
+    monkeypatch.setattr(dec_mod, "decrypted", spy)
+    n_shards = len(paths_mod.message_shards("wxid_t_a1b2"))
+    rows = [r for batch, _refs in reader.MessageReader("wxid_t_a1b2").iter_all()
+            for r in batch]
+    assert rows, "夹具必须有行，否则这条断言是空转"
+    assert len(calls) == n_shards + 2, f"分片 {n_shards} 个，解密 {len(calls)} 次：{calls}"
+
+
+def test_iter_all_chat_id_set_is_unchanged(env):
+    """EA-018 的行为侧不变式：分片内名字（＋静态源）足以解出全部 chat_id——
+    退化形态（`md5:<hex>`）一条都不许出现。某个会话的名字只在**别的**分片 Name2Id 里
+    出现时，本用例会红——那说明「同分片名字够用」这个前提在真机形态下不成立。"""
+    rows = [r for batch, _refs in reader.MessageReader("wxid_t_a1b2").iter_all()
+            for r in batch]
+    assert rows
+    assert all(not r["chat_id"].startswith("md5:") for r in rows), \
+        sorted({r["chat_id"] for r in rows if r["chat_id"].startswith("md5:")})
+
+
 def test_iter_all_still_emits_raw_usernames(env):
     """**这是「新旧混杂」的守卫。** `iter_all` 是 export 的数据源，它必须继续产出
     wxid——查询时由 join 统一覆盖，存量与新数据才走同一条路。没有这条，
