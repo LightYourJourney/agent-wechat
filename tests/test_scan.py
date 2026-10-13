@@ -757,6 +757,29 @@ def test_text_mode_is_fail_closed_on_undecodable_input(scan, tmp_path, capsys):
     assert "utf-8" in capsys.readouterr().err.lower()
 
 
+def test_allow_cannot_register_a_commit_message_only_value(scan, tmp_path, monkeypatch, capsys):
+    """EA-009：值只出现在提交信息里（`--text` 的目标）时，登记闭环走不通——
+    `--allow` 退 2（清单只收 tracked 内容），手抄必被 `--verify-allowlist` 判死条目。
+    文案必须说清这条边界（只说「先跑 --values」是误导：跑了也看不到它）。
+    """
+    monkeypatch.setattr(scan, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(scan, "ALLOWLIST_PATH", tmp_path / "allowlist.txt")
+    (tmp_path / "allowlist.txt").write_text("", encoding="utf-8")
+    # 真建一个 git 仓库：`--allow` 走 collect_values → scan_repo（git ls-files），
+    # 不 init 的话它会以 git 错误退 2——那测的就不是本条要断言的文案了。
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    probe = "wx" + "id_" + "ea9probe7q2mx5"      # 未登记值（拼接，不入形状字面量）
+    msg = tmp_path / "COMMIT_EDITMSG"
+    msg.write_text("subject\n\n引用了 " + probe + "\n", encoding="utf-8")
+
+    assert scan.main(["--text", str(msg)]) == scan.EXIT_HITS      # 拦下 ✓
+    capsys.readouterr()
+    fp = scan.fingerprint(probe)
+    assert scan.main(["--allow", fp]) == scan.EXIT_ERROR, "提交信息里的值登记不上"
+    out = capsys.readouterr()
+    assert "提交信息" in out.err, out.err[:300]
+
+
 def test_text_mode_reports_hits_without_values(scan, tmp_path, monkeypatch, capsys):
     """豁免清单必须打桩——`FAKE` 自己就在本仓库里（它在 `tests/test_scan.py` 与计划文档里），
     所以 Task 7 把它登记进真清单之后，这条会**跟着变红**。判据不该依赖仓库当前登记了什么。
@@ -893,7 +916,8 @@ HOOKS_SRC = Path(__file__).resolve().parent.parent / "security" / "hooks"
 
 
 def test_hook_sources_are_tracked_with_the_exec_bit():
-    """钩子源要入库、要带执行位（100755）——那是「装了但没 +x」被结构性消掉的前提。
+    """钩子源要入库、要带执行位（100755）——那是「装了但没 +x」在**安装路径上**丢不了的前提
+    （本地 `chmod -x` 仍能让 git 跳过钩子，`--check-hooks` 会报出来；seed A1 的收窄口径）。
 
     没跑 `chmod +x` 就 `git add`，这条会因为 mode 是 100644 而红。
     """
@@ -1055,13 +1079,19 @@ def test_check_hooks_reports_untracked_hook_files(scan, tmp_path, monkeypatch, c
 
 
 def test_check_hooks_reports_local_edit_and_a_missing_half(scan, tmp_path, monkeypatch, capsys):
-    """目录在而**少了一份**（半死）属于「本地改动」，不是「正常」。"""
+    """目录在而**少了一份**（半死）属于「本地改动」，不是「正常」。
+
+    EA-067（种子 B1）：诊断必须说「**缺失**」而不是「执行位丢了」——`os.access` 不查存在性，
+    修前这里印的是与事实相反的那句。把分类改回单条 `os.access`，下面那条断言会红。
+    """
     _lay_out_hooks(scan, tmp_path, monkeypatch, config="security/hooks",
                    drop="pre-commit", diff_rc=1)
     rc = scan.main(["--check-hooks"])
     out = capsys.readouterr()
     assert rc == scan.EXIT_HITS
     assert "工作区与 HEAD 不一致" in out.out
+    assert "钩子文件缺失：security/hooks/pre-commit" in out.out
+    assert "执行位丢了：security/hooks/pre-commit" not in out.out, "缺失≠丢执行位"
 
 
 def test_check_hooks_does_not_vouch_for_foreign_hooks(scan, tmp_path, monkeypatch, capsys):

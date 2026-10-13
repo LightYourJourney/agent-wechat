@@ -60,6 +60,7 @@
 - **触发条件**：只有用户显式指定 `--with-media`（CLI `moments export`）或
   `with_media=True`（MCP `export_moments`）时才成立。两者默认都是 `False`
   ——不加则整次导出一个网络请求都不发。
+   **真机测试路径**（EA-046，2026-10-13 审计补记）：`tests/test_moments_real.py` 的第三条用例（`test_real_media_download_decrypts_one_image`）会**直调** `sns_media.fetch`、向微信 CDN 发**一次**真实请求；它带 `slow`/`real` 标记，默认不跑（`-m real` 显式启用），失败即 skip。
 - **目标域**：只连微信 CDN——后缀 `*.qpic.cn` / `*.video.qq.com`，加精确主机
   `wxapp.tc.qq.com`（**不含子域**）；代码里两部分都在，且**跨重定向也成立**；
   其余主机一个请求都不发（`build_url` 前置判 host，直接标「不去取」），
@@ -214,6 +215,10 @@ Time Machine 的排除是绑在 **inode** 上的扩展属性，文件一旦被�
 | 3 | 备份 | 承载内容的位置已 `tmutil addexclusion`（见 §4），**当下七条全在排除范围内**。⚠️ 其中 `~/.claude/bash-commands.log` 是**活跃日志**：文件重建后排除随旧 inode 一起丢失（实测发生过一次），**要定期用 `tmutil isexcluded` 复查、丢了就 `tmutil addexclusion` 重做**。**清单是短的、人工确认的**——不要照抄扫描输出（扫描会把第三方插件夹具也列进来） |
 | 4 | `/tmp` | 一次性清理，不改配置。系统重启也会清 |
 | 5 | MCP 信封 → LLM | **无机制，且已不可撤回**（见 §1） |
+
+**自动层的触发边界**（EA-066）：两条钩子只由 `git commit` 触发（`merge` 会触发
+`commit-msg`）；`cherry-pick` / `revert` / `rebase` **两枚都不触发**。经这些路径进来的内容
+不在自动层的覆盖里——`git log` 里出现了没被 `--staged` 看过的行，不是矛盾，是这条边界。
 
 **自动层的覆盖边界**：`security/scan.py` 认四种**形状**——`wxid_*`、`*@chatroom`、
 手机号、本机路径（`/Users/<第一段>`；2026-10-12 补，守的是 CONTRIBUTING §4 那条

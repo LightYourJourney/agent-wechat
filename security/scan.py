@@ -206,7 +206,12 @@ def check_hooks() -> int:
 
     problems = []
     for name in HOOK_NAMES:
-        if not os.access(src / name, os.X_OK):
+        p = src / name
+        # EA-067（种子 B1）：`os.access` 不查存在性——文件**缺了**时它也报「执行位丢了」，
+        # 诊断与事实相反（同输出里「工作区与 HEAD 不一致」那行才是对的）。
+        if not p.exists():
+            problems.append("钩子文件缺失：security/hooks/" + name)
+        elif not os.access(p, os.X_OK):
             problems.append("执行位丢了：security/hooks/" + name)
     rc, _ = _git_rc("diff", "--quiet", "HEAD", "--", "security/hooks")
     if rc != 0:
@@ -360,8 +365,12 @@ def allow_value(key: str) -> str:
     if key not in table:
         # **不回显 key**：这是唯一可能拿到任意用户串的入口。有人把**值本身**粘进来时
         # （而不是指纹），回显就等于扫描器亲手把值打印到了 stdout/stderr（spec §4.4）。
-        raise ScannerError("这个编号不在命中表里——编号是值的 sha256 前 8 位小写十六进制"
-                           "（先跑 --values 看有哪些），**不要把值本身粘进来**")
+        raise ScannerError(
+            "这个编号不在命中表里——编号是值的 sha256 前 8 位小写十六进制"
+            "（先跑 --values 看有哪些），**不要把值本身粘进来**。"
+            "**若这个值只出现在提交信息里**（被 commit-msg 拦下的那种），它**不在清单的"
+            "收录面内**（清单只收 tracked 文件内容）——登记了也会被 --verify-allowlist "
+            "判成死条目；那种情况的出路是改提交信息（EA-009）")
     entry = table[key]
     if not allowlistable(entry["shape"]):
         # 前门这一处必须拦：登记一个真路径**不会**被 §4.3 的不变式 1 抓到——那个值仍在
