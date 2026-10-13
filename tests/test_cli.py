@@ -7,6 +7,7 @@
 """
 import json
 import os
+import re
 import pathlib
 from types import SimpleNamespace
 
@@ -2090,6 +2091,23 @@ def test_decrypt_out_absolute_path_is_written_there_and_chmods_0600(tmp_path, mo
     assert target.read_bytes() == b"SECRET", "绝对路径按原样写入"
     assert (target.stat().st_mode & 0o777) == 0o600, "整库明文必须 0600"
     assert str(target) in capsys.readouterr().out
+
+def test_core_index_hints_name_no_entry_specific_commands():
+    """F4（复审补强）：`usecases` 里四条 IndexUnavailable hint 只给**中立动作**，
+    命令名由适配层追加——把任一条改回 `export_full_history`，本用例必红。
+
+    （为什么不用端到端：今天没有 CLI 入口会真抛这条——`search`/`chat index` 在缺表时
+    走 EA-013/EA-033 的降级返回 0；等 T6 修好 EA-013 后可把这条升级成端到端。）
+    """
+    import inspect
+
+    from agent_wechat import usecases
+
+    hints = re.findall(r'hint="索引库可能损坏；[^"]*"', inspect.getsource(usecases))
+    assert len(hints) == 4, f"四条核心 hint，实际 {len(hints)}"
+    for h in hints:
+        assert "export_full_history" not in h and "agent-wechat" not in h, h
+
 
 def test_render_degradations_marks_only_real_drift(capsys):
     """EA-095：`结构不符` 只属于真漂移；非漂移成因（未回填 / 覆盖不足）不加后缀。

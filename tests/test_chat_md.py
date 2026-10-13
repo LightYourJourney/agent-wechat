@@ -75,7 +75,7 @@ def test_quote_becomes_blockquote_with_original_text():
 
 
 def test_image_uses_markdown_syntax_and_voice_uses_a_link():
-    """Markdown 的三处固有损失之一：音视频没有原生语法。"""
+    """Markdown 的四处固有损失之一：音视频没有原生语法。"""
     from agent_wechat.usecases import MediaRefState
     st = lambda k, p: MediaRefState(msg_key="k1", ts=1, kind=k, status="exported", path=p)
     img = chat_md.render(chatview.build("c", title="t", rows=[{"msg_key": "k1", "ts": 1,

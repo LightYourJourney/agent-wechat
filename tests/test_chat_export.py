@@ -264,13 +264,21 @@ def test_chat_export_writes_both_files_under_the_chat_media_tree(con, chat_env):
     assert "第1条" in (chat_env / "aaaa" / "chat" / "index.html").read_text(encoding="utf-8")
 
 
-def test_chat_export_degrades_loudly_when_msg_parts_is_empty(con, chat_env):
+def test_chat_export_degrades_loudly_when_msg_parts_is_empty(con, chat_env, capsys):
     """回归：**未回填**必须与「这些消息本来就没有可读内容」印得不一样（丙 R23 同形）。
-    把 `count_msg_parts == 0` 那段降级公告删掉，这条断言会红。"""
+    把 `count_msg_parts == 0` 那段降级公告删掉，这条断言会红。
+
+    F4（复审补强）：再加一段**生产端 → 渲染器**的接线——把 usecases 里的 `drift=False`
+    删掉，下面那句「不含结构不符」必须红（此前用例手造对象，绕过了生产者）。"""
     _seed(con)
     res = usecases.chat_export("wxid_testacct02", out_dir=str(chat_env), account="acct")
     caps = {d.capability for d in res.degraded}
     assert any("msg_parts" in c for c in caps), f"未回填必须公告，实际 degraded={caps}"
+    from agent_wechat import cli
+    cli._render_degradations(res.degraded)
+    err = capsys.readouterr().err
+    assert "msg_parts" in err
+    assert "结构不符" not in err, "非漂移成因不许印成「结构不符」（生产端 drift 标记必须一路生效）"
 
 
 def test_chat_export_counts_unparsed_and_rejected_separately(con, chat_env):

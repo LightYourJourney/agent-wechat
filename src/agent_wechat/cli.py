@@ -643,8 +643,8 @@ def _render_residue(rep: purge.ResidueReport) -> None:
 def _render_degradations(degraded) -> None:
     """降级说明走 stderr：成功但有保留，不该污染 stdout（spec §7）。
 
-    三种形状都要收：`recent` 给 `usecases.Degradation`（dataclass，带 db/table，故能印出
-    那句诊断），search/semantic 给随信封走的 dict（`{"capability", "effect"}`，与 MCP 同一
+    三种形状都要收：`recent` 给 `usecases.Degradation`（dataclass；只有 `drift=True`
+    （缺省）才追加「结构不符」诊断——EA-095：非漂移成因不许印成漂移），search/semantic 给随信封走的 dict（`{"capability", "effect"}`，与 MCP 同一
     形状——它刻意不带表名，用户不需要知道），media 给 media.py 就地写好的整句 str
     （能力级降级的成文权在 core：无 ffmpeg、密钥不可用这些原因只有它自己知道）。
     """

@@ -601,7 +601,7 @@ def message_media(contact: str, *, keys: Sequence[str] | None = None,
         if voice_keys is None:
             degraded.append(Degradation(
                 capability="msg_media", db="message/media_*.db", table="VoiceInfo",
-                missing_columns=(),
+                missing_columns=(), drift=False,     # F7：「读不到」不是「结构不符」
                 # 措辞必须限定在「尚未导出」的那些：导出判定排在语音判定**之前**，已经
                 # 落盘的语音仍会照实报 exported——写「一律」会被同一份结果当场反驳。
                 effect="语音库读不到：尚未导出的语音消息一律按「本体不在本机」呈现"
