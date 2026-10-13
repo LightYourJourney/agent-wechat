@@ -43,12 +43,18 @@ _swept_stale = False          # 每进程只扫一次（EA-019）
 
 
 def _pid_alive(pid: int) -> bool:
-    """`os.kill(pid, 0)` 判活。`PermissionError` = 别人的进程 = **活着**（保守不删）。"""
+    """`os.kill(pid, 0)` 判活。判不出来一律当**活着**（保守不删）。
+
+    `PermissionError` = 别人的进程 = 活着。`OverflowError` 也要接（复审 N1）：pid 超出 C long
+    时 `os.kill` 抛的是 `OverflowError`（`ArithmeticError` 子类，**不是** `OSError`）——不接
+    的话一个 `awdec-<超长数字>-*` 目录会让**每个新进程的第一次解密**都抛它逃出 core
+    （本文件自述的契约是「core 只抛项目异常」），CLI 的每条解密类命令全失败。
+    """
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
-    except OSError:
+    except (OSError, OverflowError):
         return True
     return True
 
@@ -92,8 +98,10 @@ def ensure_home_dirs() -> None:
     if not _swept_stale:
         # 挂在「第一次解密之前」这条路径上（`decrypted()` 每次都先调本函数）：
         # 清扫必须发生在**新建**明文之前，否则刚建的目录会被自己扫掉。
-        _swept_stale = True
+        # flag 置在**清扫之后**（复审 N1）：清扫万一将来开始抛，本进程下次还会再试，
+        # 而不是永久放弃清扫。
         sweep_stale_tempdirs()
+        _swept_stale = True
 
 
 def snapshot(db: pathlib.Path, td: pathlib.Path) -> pathlib.Path:

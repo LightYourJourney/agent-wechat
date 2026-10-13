@@ -207,6 +207,30 @@ def test_the_sweep_runs_before_the_first_decryption(tmp_path, monkeypatch):
     assert again.exists(), "每进程只扫一次"
 
 
+def test_the_sweep_keeps_anything_it_cannot_prove_is_dead(tmp_path, monkeypatch):
+    """复审 N4：「判不出来一律留着」是整条清扫的**安全底座**（docstring、⑤、台账都专门声明），
+    但此前没有任何用例覆盖——而它正是「绝不无条件 rmtree」唯一会救命的场景（别人的活进程）。
+
+    两条支路都钉：`PermissionError`（别人的进程）与 `OverflowError`（pid 超出 C long，
+    `os.kill` 对它抛的**不是** OSError——复审 N1 实测它会逃出 core，让每个新进程的第一次
+    解密都失败）。把 `except (OSError, OverflowError)` 收窄回 `except OSError`
+    （或用 `<` 直接删掉整个 except）本测试必红。
+    """
+    home = tmp_path / "home"
+    (home / "tmp").mkdir(parents=True)
+    monkeypatch.setattr(paths, "HOME_DIR", home)
+
+    import errno as _errno
+    for name, exc in (("someone-elses", PermissionError(_errno.EPERM, "not mine")),
+                      ("silly-pid", OverflowError("Python int too large to convert to C long"))):
+        d = home / "tmp" / f"awdec-{4242}-{name}"
+        d.mkdir()
+        monkeypatch.setattr(decrypt.os, "kill",
+                            lambda pid, sig, _e=exc: (_ for _ in ()).throw(_e))
+        assert decrypt.sweep_stale_tempdirs() == 0
+        assert d.exists(), f"{type(exc).__name__} 下不许删（判不出来 = 留着）"
+
+
 def test_the_tmpdir_the_pipeline_creates_is_recognizable_by_the_sweeper(tmp_path, monkeypatch):
     """创建点与清扫点的**形态必须同源**（EA-019）：`decrypted()` 建的目录名要能被
     `_AWDEC_RE` 认出并解出**本进程的 pid**。

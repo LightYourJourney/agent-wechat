@@ -1263,9 +1263,13 @@ def sticker_cdn_urls(account: str, items: Sequence[tuple[str, str, int]]
     note = None
     if failed_shards:
         n_keys = sum(n for _, n in failed_shards)
+        # 文案（复审 N6）：不能写成「N 条贴纸查不到凭据——这与『没有凭据』不是一回事」——
+        # 字面自相矛盾。要区分的是「**没法查**」与「查过了、确实没有」。计数单位是**回源条目**
+        # （`(chat_md5, local_id)`，同一贴纸的多个候选各计一条），不是「条贴纸」。
         note = (f"{len(failed_shards)} 个消息分片读不出来（首个：{failed_shards[0][0]}），"
-                f"其中 {n_keys} 条贴纸查不到凭据——**这与「本机没有凭据」不是一回事**"
-                "（分片损坏 / 密钥失效 / 结构漂移），请先查库与密钥")
+                f"其中 {n_keys} 条回源条目无法查证是否有凭据"
+                "（分片损坏 / 密钥失效 / 结构漂移）——这与「查过了、确实没有凭据」不是一回事，"
+                "请先查库与密钥")
     return out, note
 
 

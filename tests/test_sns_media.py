@@ -204,15 +204,21 @@ def test_http_404_is_not_retried_and_names_the_real_cause():
 
     把 4xx 分支删掉（回到宽 except）本测试的前两条断言必红。
     """
-    err = urllib.error.HTTPError("http://shmmsns.qpic.cn/x", 404, "Not Found", None, None)
+    m = _m(token="SECRETTOKEN")
+    url = sns_media.build_url(m)
+    assert url and "SECRETTOKEN" in url           # 前提：URL 里确实有 token
+    # 夹具照 `test_fetch_error_never_echoes_token` 的写法：异常的 url **就是**带 token 的请求
+    # URL（真机形态）。此前夹具用的是不含 token 的假 URL，于是「回显 URL」的改法照样绿
+    # （复审 N2 实测：把文案改成带上 `exc.url` 时全绿）——那条断言等于没牙。
+    err = urllib.error.HTTPError(url, 404, "Not Found", None, None)
     op = _Opener([err, err, err])
     with pytest.raises(sns_media.SnsMediaError) as ei:
-        sns_media.fetch(_m(token="SECRETTOKEN"), opener=op)
+        sns_media.fetch(m, opener=op)
     assert len(op.calls) == 1, "4xx 不许重试"
     msg = str(ei.value)
     assert "404" in msg and "清理" in msg, msg
     assert "下载失败" not in msg, "确定性失败不许被说成网络失败"
-    assert "SECRETTOKEN" not in msg
+    assert "SECRETTOKEN" not in msg and url not in msg, "凭据与 URL 都不许回显"
 
 
 def test_a_decrypt_failure_is_not_retried_or_rewritten():
@@ -551,6 +557,10 @@ def test_allowlist_exact_host_not_subtree():
     assert sns_media.host_allowed("https://evil.qpic.cn.attacker.net/a") is False
     assert sns_media.host_allowed("https://x.video.qq.com.attacker.net/a") is False
     assert sns_media.host_allowed("https://qpic.cn/a") is False          # 裸域不是子域
+    # 末尾点（SECURITY §1 把它写成承诺「末尾带点（qpic.cn.）被拒」——补断言把它钉住，
+    # 否则将来有人先 rstrip(".") 再判，承诺就静默失效）
+    assert sns_media.host_allowed("https://shmmsns.qpic.cn./a") is False
+    assert sns_media.host_allowed("https://wxapp.tc.qq.com./a") is False
 
 
 def _jpeg_plain() -> bytes:
