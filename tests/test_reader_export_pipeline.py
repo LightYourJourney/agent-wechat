@@ -773,6 +773,48 @@ def test_iter_all_resolves_a_chat_whose_name_lives_in_another_shard(tmp_path, mo
     assert all(not c.startswith("md5:") for c in cids), sorted(cids)
 
 
+def _tree_with_a_name2id_less_newest_shard(env, tmp_path, monkeypatch):
+    """env 的树 + 一个新分片 message_2.db（编号最大 = 最近）：有**别的会话**的 Msg_ 表，
+    没有目标会话的表，也**没有 `Name2Id`**——EA-017 的触发形态。"""
+    root = tmp_path / "wx_no_n2i"
+    shutil.copytree(env.wx, root)
+    monkeypatch.setattr(paths, "XWECHAT_FILES", root)
+    cols = ("local_id INTEGER, local_type INTEGER, real_sender_id INTEGER, "
+            "create_time INTEGER, message_content, WCDB_CT_message_content INTEGER, "
+            "packed_info_data BLOB, server_id INTEGER")
+    enc_db(root / ACCT / "db_storage" / "message" / "message_2.db", {
+        f"Msg_{md5(GROUP)}": (f"CREATE TABLE Msg_{md5(GROUP)} ({cols})",
+                              [(1, 1, 1, T0 + 30, "别的会话的正文", 0, None, None)])})
+
+
+def test_recent_survives_a_shard_without_name2id_and_without_the_chat(env, tmp_path, monkeypatch):
+    """EA-017（recent 侧）：目标会话在**最新分片**里没有表、那个分片还没有 `Name2Id`——
+    修复前 `n2i = self._name2id(con)` 在 `if tables:` **之外**无条件执行，裸
+    `sqlite3.OperationalError: no such table: Name2Id` 从这里穿出 core 层（守卫白设）。
+    修后该分片整体跳过，继续往更早的分片找，照常返回。
+
+    把缩进挪回去（无条件读 Name2Id），本用例必红。
+    """
+    _tree_with_a_name2id_less_newest_shard(env, tmp_path, monkeypatch)
+    msgs = reader.MessageReader(ACCT).recent(FRIEND, limit=10)
+    assert len(msgs) == 7, [m.content for m in msgs]     # shard0 的 5 条 + shard1 的 2 条
+    assert msgs[-1].ts == T0 + 14
+
+
+def test_iter_all_survives_a_shard_without_name2id_and_records_the_drift(env, tmp_path,
+                                                                        monkeypatch):
+    """EA-017（iter_all 侧）：同一棵树上不抛；缺 `Name2Id` 的分片漂移经 `username_pool`
+    记进 `_drift`（由 T5 呈现给用户）。两条路径的**可见性不同**——`recent` 不碰名册池，
+    没有漂移可记；这正是条目那条「断言抛 SchemaDrift」的验收写岔了的地方。
+    """
+    _tree_with_a_name2id_less_newest_shard(env, tmp_path, monkeypatch)
+    r = reader.MessageReader(ACCT)
+    rows = [row for batch, _ in r.iter_all(FRIEND) for row in batch]
+    assert len(rows) == 7, [x["content"] for x in rows]
+    assert any(d.capability == "username_pool" and d.table == "Name2Id"
+               for d in r._drift), [(d.capability, d.table) for d in r._drift]
+
+
 def test_iter_all_chat_id_set_is_unchanged(env):
     """名字池不变式：合成夹具里的会话必须全部解出真名，退化形态（`md5:<hex>`）一条都不许出现。
 

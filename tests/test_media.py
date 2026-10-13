@@ -485,6 +485,10 @@ def test_loc_of_msg_key_rejects_a_non_numeric_local_id():
     assert m._loc_of_msg_key("acct|md5v|message_0.db|notanumber") is None
     assert m._loc_of_msg_key("acct|md5v|message_0.db") is None
     assert m._loc_of_msg_key("acct|md5v|message_0.db|7|extra") is None
+    # F5（T6 复审）：`isdigit()` 覆盖 Numeric_Type=Digit（上标 `²`、圈号 `⑦`）但 `int()`
+    # 不接受——判据必须是 isdecimal（可 int 解析），否则同一个 ValueError 从 Unicode 角落照穿。
+    assert m._loc_of_msg_key("acct|md5v|message_0.db|²") is None
+    assert m._loc_of_msg_key("acct|md5v|message_0.db|⑦") is None
 
 
 

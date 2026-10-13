@@ -394,9 +394,11 @@ def _loc_of_msg_key(msg_key: str) -> tuple[str, str, int] | None:
 
     EA-085：此前 `_locs` 只查「四段」，末段不是数字时 `int()` 裸抛 `ValueError`（core 层
     只抛项目异常）——坏索引会让整批贴纸导出崩。判据收在这里，坏键由调用方按 `failed` 归口。
+    判据必须是 `isdecimal`（可 `int` 解析）而不是 `isdigit`——后者含 `²`/`⑦` 这类
+    Numeric_Type=Digit 的字符，`int()` 照样抛（F5，T6 复审）。
     """
     parts = msg_key.split("|")
-    if len(parts) != 4 or not parts[3].isdigit():
+    if len(parts) != 4 or not parts[3].isdecimal():
         return None
     return parts[1], parts[2], int(parts[3])
 

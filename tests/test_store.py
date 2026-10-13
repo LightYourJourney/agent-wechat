@@ -260,20 +260,28 @@ def test_search_reports_a_damaged_index_instead_of_silently_zero(con, monkeypatc
     assert res["total"] == 0
 
 
-def test_search_raises_on_an_unclassified_sqlite_error(con, monkeypatch):
-    """EA-013：不认识的 OperationalError 一律原样重抛成项目异常（响亮），不吞。"""
+def test_search_translates_runtime_sqlite_errors_and_rejects_nul(con, monkeypatch):
+    """EA-013 + F6（T6 复审）：不认识的 OperationalError 一律抛**项目异常**（响亮），不吞；
+    但类别要归对——「out of memory / database is locked」是**库侧**运行时问题
+    （`IndexUnavailable`，带可执行 hint），此前一律塞进 `SearchInputError`（语义是
+    入参不合法），「等写者结束再试」这条动作到不了用户。NUL 才是真正的入参问题 → 入口直接拒。
+    """
     import sqlite3
 
     from agent_wechat import errors, search
+
+    # NUL：入参问题（在 store.open 之前就被拒，不碰库）
+    with pytest.raises(errors.SearchInputError):
+        search.search("爬\x00山", account="acct")
 
     class _Boom:
         def execute(self, *a, **k):
             raise sqlite3.OperationalError("out of memory")
 
     monkeypatch.setattr(store, "open", lambda: _Ctx(_Boom()))
-    import pytest as _pytest
-    with _pytest.raises(errors.SearchInputError):
+    with pytest.raises(errors.IndexUnavailable) as ei:
         search.search("爬山", account="acct")
+    assert ei.value.hint, "库侧失败必须带可执行动作（重试/重建），否则用户只看到一句错"
 
 
 class _Ctx:
@@ -314,3 +322,62 @@ def test_search_rejects_blank_query_and_escapes_like_wildcards(con, monkeypatch)
     res = search.search("a%", account="acct")
     assert res["mode"] == "like", res
     assert [h["content"] for h in res["hits"]] == ["a%b"], res
+
+
+def test_search_distinguishes_a_stale_fts_index_from_a_genuine_miss(con):
+    """F1（T6 复审）：`store.open()` 用 `CREATE VIRTUAL TABLE IF NOT EXISTS` 把**被删掉的**
+    `messages_fts` 静默重建为**空索引**（不回填）——此后 MATCH 恒 0 行，与「真的没搜到」
+    逐字节相同（mode=fts、degraded=[]）。修后：FTS 索引空而**消息表非空** = 失同步，
+    必须说出来并给重建路径；健康库的普通非命中仍保持安静（第二条断言钉假阳性面）。
+
+    删掉探针，第一条失同步断言必红；把探针写成「有 messages 就报」，健康库断言必红。
+    """
+    from agent_wechat import messages, search
+
+    store.upsert_batch(con, [
+        messages.make_row(account="acct", chat_md5="a" * 32, chat_id="wxid_abc123def456",
+                          shard="message_0.db", local_id=1, ts=1700000001, msg_type=1,
+                          sender_id=None, sender_name=None, is_self=0, content="爬山去了",
+                          media_hint=None)])
+    con.commit()
+
+    miss = search.search("没人发过这串字", account="acct")
+    assert miss["mode"] == "fts" and miss["total"] == 0
+    assert miss["degraded"] == [], f"健康库的普通非命中不许被误报成失同步：{miss}"
+
+    con.execute("DROP TABLE messages_fts")     # 真实管线里下一次 open 会把它重建为空
+    con.commit()
+    res = search.search("爬山去", account="acct")
+    assert res["mode"] == "fts" and res["total"] == 0
+    assert res["degraded"], "索引为空而消息表非空就是失同步，不许静默"
+    assert "失同步" in res["degraded"][0]["effect"], res
+
+
+def test_search_like_fallback_on_a_drifted_index_does_not_leak_sqlite(con):
+    """F2（T6 复审）：`display_names` 掉列（老库列级漂移）后，**1-2 字**查询跌进 LIKE 兜底，
+    而那条 `con.execute` 在 try **之外**——裸 `sqlite3.OperationalError` 穿出 core 层
+    （CLI 整段 traceback、MCP 只报「内部错误」）。修后与 FTS 支路同一套降级：
+    空结果 + 说明，绝不裸抛。
+
+    把 LIKE 的 execute 挪出守卫（或删掉那条 except），本用例必红。
+    """
+    from agent_wechat import search
+
+    con.execute("ALTER TABLE display_names DROP COLUMN display_name")   # 列级漂移
+    con.commit()
+
+    res = search.search("爬山", account="acct")    # 2 字 → 必走 LIKE 兜底，且列已掉
+    assert res["mode"] == "like" and res["total"] == 0
+    assert res["degraded"] and "索引库结构不完整" in res["degraded"][0]["effect"], res
+
+
+def test_the_fts_update_trigger_covers_chat_id(con):
+    """F8（T6 复审）：EA-012 把 `msg_fts_au` 的扩面改成 `OF content, chat_id`——今天唯一
+    写路径（`_INSERT_SQL` 恒设 content）下这是空转，但没有这条断言时把它改回 `OF content`
+    全量测试全绿（该半改动零回归网）。断言必须锚 `UPDATE OF` 子句本身：`chat_id` 在触发器
+    **体**里也有，只查「含 chat_id」会是一条假护栏。
+    """
+    sql = con.execute(
+        "SELECT sql FROM sqlite_master WHERE type='trigger' AND name='msg_fts_au'"
+    ).fetchone()[0]
+    assert "UPDATE OF content, chat_id" in sql, sql

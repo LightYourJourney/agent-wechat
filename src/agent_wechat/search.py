@@ -22,9 +22,34 @@ def _fts_safe(q: str) -> str:
     return '"' + q.replace('"', '""') + '"'
 
 
+def _is_structural(msg: str) -> bool:
+    """sqlite 报的是「索引库结构不完整」（可降级），还是别的失败（要翻译/重抛）。"""
+    return "no such table" in msg or "no such column" in msg
+
+
+def _structural_degrade(notes: list[dict], msg: str) -> None:
+    """结构不完整 → 追加降级说明；同一能力只记一条（FTS 支路记过之后 LIKE 又撞同一堵墙）。"""
+    if any(n["capability"] == "search_fts" for n in notes):
+        return
+    notes.append({"capability": "search_fts",
+                  "effect": f"索引库结构不完整（{msg}）——已退回 LIKE 兜底；"
+                            "删除 index.db 后重跑一次导出即可重建"})
+
+
+def _runtime_failure(msg: str) -> errors.IndexUnavailable:
+    """非结构类的 sqlite 失败 = **库侧**运行时问题（写锁/损坏/内存）。
+
+    F6（T6 复审）：此前一律塞进 `SearchInputError`（语义是入参不合法），
+    「等写者结束再试 / 重建库」这条可执行动作到不了用户。
+    """
+    return errors.IndexUnavailable(
+        f"检索失败：{errors.redact(msg)}",
+        hint="索引库可能被占用或损坏：等导出/构建结束后重试；持续失败则删除 index.db 后重跑一次导出")
+
+
 def search(query: str, chat_id: str | None = None, limit: int = 20,
            account: str | None = None) -> dict:
-    """返回 {"hits": [...], "mode": "fts"|"like", "total": n}。
+    """返回 {"hits": [...], "mode": "fts"|"like", "total": n, "degraded": [...]}。
 
     account 必传：检索严格限定该账号的数据（多账号索引隔离）。
     """
@@ -34,6 +59,9 @@ def search(query: str, chat_id: str | None = None, limit: int = 20,
         # EA-073：空/全空白 query 曾退化成 LIKE '%%'（全表匹配）——在入口直接拒绝，
         # 别让一次手滑变成全表扫。
         raise SearchInputError("检索串不能为空（或全空白）")
+    if "\x00" in query:
+        # F6：NUL 是**入参**问题（FTS 的 MATCH 会拒它）——按入参拒，不混进「库侧失败」。
+        raise SearchInputError("检索串不能包含 NUL 字符")
     where, args = ["m.account = ?"], [account]
     if chat_id:
         where.append("m.chat_id = ?")
@@ -56,15 +84,12 @@ def search(query: str, chat_id: str | None = None, limit: int = 20,
             # 此前吞掉**全部** OperationalError：索引损坏与将来的 SQL 拼装错误都静默成
             # 「0 命中，mode=fts」——真故障看起来和「没搜到」一模一样。
             msg = str(exc)
-            if "no such table" in msg or "no such column" in msg:
+            if _is_structural(msg):
                 rows = []
                 mode = "like"            # 降级要说出来：不再假报 mode=fts
-                notes.append({"capability": "search_fts",
-                              "effect": f"索引库结构不完整（{msg}）——已退回 LIKE 兜底；"
-                                        "删除 index.db 后重跑一次导出即可重建"})
+                _structural_degrade(notes, msg)
             else:
-                raise errors.SearchInputError(   # 编程/输入错误的原样重抛（响亮）
-                    f"检索失败：{errors.redact(msg)}") from exc
+                raise _runtime_failure(msg) from exc
 
         if not rows and len(query.strip()) <= 2:
             # trigram 无法匹配 <3 字符 → LIKE 兜底（有 chat 过滤则快，无过滤为全表扫）
@@ -76,7 +101,29 @@ def search(query: str, chat_id: str | None = None, limit: int = 20,
                    f"WHERE m.content LIKE ? ESCAPE '\\' AND {w} "
                    f"ORDER BY m.ts DESC LIMIT ?")
             args2 = [like, *args, limit]
-            rows = con.execute(sql, args2).fetchall()
+            try:
+                rows = con.execute(sql, args2).fetchall()
+            except sqlite3.OperationalError as exc:
+                # F2（T6 复审）：这条 execute 此前在守卫**之外**——裸 sqlite3 穿出 core 层。
+                # 两条 SQL 共用同一组列清单（_HIT_COLUMNS）：FTS 结构不完整时这里必然也撞
+                # 同一堵墙，按同一套降级收口（空结果 + 说明），非结构类仍翻成项目异常。
+                msg = str(exc)
+                if _is_structural(msg):
+                    rows = []
+                    _structural_degrade(notes, msg)
+                else:
+                    raise _runtime_failure(msg) from exc
+
+        if not rows and mode == "fts":
+            # F1（T6 复审）：`connect()` 的 `CREATE VIRTUAL TABLE IF NOT EXISTS` 会把**被删掉的**
+            # messages_fts 静默重建为**空索引**（不回填）——此后 MATCH 恒 0 行，与「真的没搜到」
+            # 逐字节相同。两个 O(1) 探针把这两种「空」分开：影子表 `messages_fts_docsize` 有行
+            # ⟺ 索引里有行（直接扫 messages_fts 不行——外部内容表会去读内容表，空索引照样"有"行）。
+            if (con.execute("SELECT 1 FROM messages_fts_docsize LIMIT 1").fetchone() is None
+                    and con.execute("SELECT 1 FROM messages LIMIT 1").fetchone() is not None):
+                notes.append({"capability": "search_fts",
+                              "effect": "FTS 索引失同步：索引里一行都没有而消息表非空"
+                                        "（搜索会漏掉全部结果）——运行 `agent-wechat export --full` 重建"})
 
     hits = [dict(r) for r in rows]
     return {"hits": hits, "mode": mode, "total": len(hits), "degraded": notes}

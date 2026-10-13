@@ -37,12 +37,16 @@
   "current_account": "wxid_xxx_ab12",
   "accounts": ["wxid_xxx_ab12", "wxid_yyy_cd34"],
   "key_ready": true,
-  "index": { "messages": 841584, "chats": 772, "last_ts": 1789046525 }
+  "index": { "messages": 841584, "chats": 772, "last_ts": 1789046525 },
+  "schema_notes": []
 }
 ```
 
 **异常**：微信未运行时 `wechat_running=false`、`current_account=null`（不报错）；
 索引库不存在时 `index` 计数为 0。
+
+`schema_notes`：「老库 + 新代码」的触发器体不一致说明（**只报不改库**）。这类差异通常
+不影响既有行为（例如触发器只是多了个触发列），重建索引时自然消除——不需要为它专门重建。
 
 ---
 
@@ -188,7 +192,7 @@
 
 | 参数 | 类型 | 必填 | 默认 | 说明 |
 |---|---|---|---|---|
-| `query` | string | **是** | — | 检索词（≥3 字符走 FTS5 trigram；1-2 字自动 LIKE） |
+| `query` | string | **是** | — | 检索词（≥3 字符走 FTS5 trigram；1-2 字自动 LIKE；空/全空白被拒，`%`/`_` 按字面量） |
 | `contact` | string | 否 | null | 限定会话：username 直接使用；展示名解析出多个联系人时返回 `need_confirm`，未命中返回 `error`——**不会静默扩大检索范围** |
 | `limit` | int | 否 | 20 | 返回上限 |
 | `account` | string | 否 | null | 同通用约定（检索严格限定该账号的索引数据） |
@@ -219,8 +223,9 @@
   与 `hits` 里既有的 `id`（`messages.id`，DB rowid）不是一回事——rowid 随重建变化，
   `msg_key` 由消息的身份/位置字段派生（不含内容，编辑消息不会改它），
   可用于 `get_message_media` 指认消息。
-- `degraded` 键（§3）在显示名降级时非空：那时 `sender_name` 会回落成 wxid，
-  **不要**当成真实姓名呈现
+- `degraded` 键（§3）非空有两类来源：显示名降级（那时 `sender_name` 会回落成 wxid，
+  **不要**当成真实姓名呈现）与索引库问题（结构不完整 / FTS 失同步——按 `effect`
+  里的说明处理，失同步时本次结果**不完整**，别把它当「真的没搜到」）
 - 命中里的 `content` 是消息在该索引里的正文投影。**贴纸（`msg_type=47`）的 `content` 与
   `media_hint` 是分开的两列**：前者是可读标识 `[贴纸:名称]` / `[贴纸#md5前8位]`，
   后者**恒为 `[sticker]`**——按 `media_hint` 判「这是不是贴纸」可以，按它判「哪个贴纸」

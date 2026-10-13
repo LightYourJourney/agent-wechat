@@ -1038,8 +1038,10 @@ def undo_chat(targets: list[dict], *, apply: bool = False) -> tuple[UndoEntry, .
                 for e in per:
                     exclusions.remove_chat(con, e.account, e.chat_md5)
                 con.commit()      # remove_chat 不 commit（它的契约）：由调用方收口
-    except (sqlite3.Error, OSError, errors.IndexUnavailable) as exc:   # EA-074：connect 段已翻过一次
+    except (sqlite3.Error, OSError) as exc:
         # 读不出来就一行拒绝，不许裸异常穿到 CLI 的漏斗之外（core 层只抛项目异常）。
+        # F10（T6 复审）：本路径走 `exclusions.standalone()`，**不经** `store.connect`——
+        # 不存在可命中的 IndexUnavailable（EA-074 的翻译到不了这里），元组里不留死项。
         raise errors.PurgeRefused(
             f"撤销未执行：{exc}",
             hint=f"检查 {exclusions.path()} 是否可读、是否损坏"

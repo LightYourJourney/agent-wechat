@@ -259,8 +259,12 @@ def schema_drift_notes(con: sqlite3.Connection) -> list[str]:
         if row is None:
             notes.append(f"触发器 {name} 不存在（索引库不完整）")
         elif " ".join((row[0] or "").split()) != want:
+            # F8（T6 复审）：扩面的那一类差异（如 UPDATE OF 多一列）实测**不影响既有行为**
+            # （写路径恒设 content，老触发器照样触发）——措辞别让用户为一条无功能影响的
+            # 差异去重建 238 MB 索引。
             notes.append(f"触发器 {name} 的库内文本与代码不一致"
-                         "（改过 DDL 的老库不会自动升级；重建索引可消除）")
+                         "（改过 DDL 的老库不会自动升级；只报不改库——此类差异通常不影响"
+                         "既有行为，重建索引时自然消除）")
     return notes
 
 
