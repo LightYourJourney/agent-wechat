@@ -8,7 +8,7 @@ import pytest
 
 from agent_wechat import vector
 
-pytestmark = pytest.mark.slow
+pytestmark = [pytest.mark.slow, pytest.mark.real]     # EA-115：真机层（与另三个 _real 文件同款）
 
 
 def test_real_embedder_returns_512_dim_vectors():

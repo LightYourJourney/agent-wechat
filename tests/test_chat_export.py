@@ -144,7 +144,8 @@ def test_messages_in_range_filters_and_reports_not_truncated(con):
     `(m.ts >= ? AND m.ts < ?)`、`tests/test_media.py:143` 把 `month_bounds` 钉成
     `[lo, hi)`「下界含、相邻月首尾相接无缝隙」。**而 T6 把 `month_bounds` 的值直接喂给
     `after_ts`/`before_ts`** —— 照初稿写就是给 `chat export --months` 的**每月第一秒开一个
-    静默数据丢失的缝**。（T5 实施者发现并拒绝改断言，标 `xfail(strict=True)` 请裁定。）
+    静默数据丢失的缝**。（T5 实施者发现初稿断言写错；**终审裁定下界含**，断言已按 `[lo, hi)`
+    改正，`xfail` 已撤——EA-116。）
     """
     con.executemany(
         "INSERT INTO messages (msg_key, account, chat_md5, chat_id, shard, local_id,"

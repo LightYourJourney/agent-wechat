@@ -36,6 +36,8 @@ uv run pytest tests/ -q          # 运行测试
   验证快照→派生→解密→校验全链路，含错误密钥拒绝路径） |
 | 密钥获取 / 真实 schema / 媒体内容 | **真机人工验证**（无法 mock）：跑 `status --verify-keys`、
   `inspect`、`recent`，按 [TROUBLESHOOTING.md](TROUBLESHOOTING.md) §6 自检 |
+| 真机层（`slow` ＋ `real` 标记的用例） | `uv run pytest tests/ -m slow` **或** `uv run pytest tests/ -m real`
+  ——两个入口都要能收全（EA-115：此前 `-m real` 漏掉 `test_vector_real.py`，两处口径分叉） |
 
 新增功能时：先写能复现问题的测试，再修；涉及数据写入的功能必须补幂等性测试
 （连续跑两次结果一致）。

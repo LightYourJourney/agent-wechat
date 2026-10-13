@@ -34,13 +34,29 @@ def test_resolve_account_unresolvable_current_raises_account_not_found(monkeypat
 
 def test_all_project_errors_share_one_base():
     """适配层只 except 基类即可覆盖全部项目错误；且都仍是 RuntimeError
-    （既有 pytest.raises(RuntimeError) 断言继续成立）。"""
-    for name in ("KeyNotFound", "VectorError", "CaptureError", "AccountNotFound",
-                 "SearchInputError", "ContactNotFound", "DecryptError",
-                 "DependencyMissing", "DataNotFound"):
-        cls = getattr(errors, name)
-        assert issubclass(cls, errors.AgentWeChatError), name
-        assert issubclass(cls, RuntimeError), name
+    （既有 pytest.raises(RuntimeError) 断言继续成立）。
+
+    EA-006：断言**全集不变量**（子类集合从模块派生），不是 C1 时刻的白名单快照——
+    白名单版对「新增一个忘记继承基类的错误类」不会红（实测：C1 之后新增的 8 个子类
+    全部漏在名单外）。把任一类临时改成继承 `Exception`，本用例立刻红（正控）。
+    """
+    derived = {n for n, c in vars(errors).items()
+               if isinstance(c, type) and issubclass(c, errors.AgentWeChatError)
+               and c is not errors.AgentWeChatError}
+    # 双向夹逼：派生集合必须**恰好**等于名册。纯派生（不做这一步）有个洞——
+    # 某类改成继承 `Exception` 时它只是从集合里**消失**，断言照样绿（实测踩过）；
+    # 名册相等让「丢基类」与「新增未登记」两种漂移都红。
+    expected = {
+        "AccountNotFound", "CaptureError", "ContactNotFound", "DataNotFound",
+        "DecryptError", "DependencyMissing", "HomeUnavailable", "IndexUnavailable",
+        "KeyNotFound", "MediaKeyError", "MediaOutputError", "PurgeRefused",
+        "SchemaDrift", "SearchInputError", "SnsMediaError", "TaskNotFound",
+        "VectorError", "VectorIndexEmpty",
+    }
+    assert derived == expected, {
+        "丢了基类": sorted(expected - derived), "新增未登记": sorted(derived - expected)}
+    for name in sorted(derived):
+        assert issubclass(getattr(errors, name), RuntimeError), name
 
 
 def test_to_payload_and_to_text_shapes():
