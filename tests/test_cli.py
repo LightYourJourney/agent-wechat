@@ -2133,3 +2133,111 @@ def test_render_degradations_marks_only_real_drift(capsys):
     assert "msg_parts 未回填" in err
     assert err.count("结构不符") == 1, "只有真漂移那条带后缀"
     assert "（contact.db 的 contact 结构不符）" in err
+
+def test_decrypt_without_out_runs_quick_check(tmp_path, monkeypatch, capsys):
+    """EA-097/114：省略 `--out` 时走 `quick_check` 分支（退出码 0、stdout 有 `quick_check:`）。
+
+    把 `cmd_decrypt` 的 `--out` 分支改成无条件走 / 或把退出码改错，本用例（或它的两条兄弟）
+    必红。
+    """
+    import sqlite3
+
+    from agent_wechat import decrypt, keys
+    db = tmp_path / "message" / "message_0.db"
+    db.parent.mkdir(parents=True)
+    db.write_bytes(b"x")
+    plain = tmp_path / "plain.db"
+    con = sqlite3.connect(plain)
+    con.execute("CREATE TABLE t(x)")
+    con.commit()
+    con.close()
+    monkeypatch.setattr(account, "resolve_account", lambda a: "wxid_testacct01_ab12")
+    monkeypatch.setattr(paths, "db_storage", lambda acc: db.parent)
+    monkeypatch.setattr(keys, "get_passphrase", lambda acc: b"p" * 32)
+
+    class _Ctx:
+        def __enter__(self):
+            return plain
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(decrypt, "decrypted", lambda d, pp: _Ctx())
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["decrypt", "message_0.db"])
+    assert ei.value.code == 0
+    assert "quick_check: ok" in capsys.readouterr().out
+
+
+def test_decrypt_out_relative_path_lands_under_home_with_0700_parent(tmp_path, monkeypatch, capsys):
+    """EA-097/114：相对 `--out` 落在 `paths.HOME_DIR` 下，父目录 0700（整库明文的目录面）。"""
+    from agent_wechat import decrypt, keys
+    db = tmp_path / "message" / "message_0.db"
+    db.parent.mkdir(parents=True)
+    db.write_bytes(b"x")
+    plain = tmp_path / "plain.db"
+    plain.write_bytes(b"SECRET")
+    home = tmp_path / "home"
+    monkeypatch.setattr(account, "resolve_account", lambda a: "wxid_testacct01_ab12")
+    monkeypatch.setattr(paths, "db_storage", lambda acc: db.parent)
+    monkeypatch.setattr(paths, "HOME_DIR", home)
+    monkeypatch.setattr(keys, "get_passphrase", lambda acc: b"p" * 32)
+
+    class _Ctx:
+        def __enter__(self):
+            return plain
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(decrypt, "decrypted", lambda d, pp: _Ctx())
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["decrypt", "message_0.db", "--out", "sub/m0.db"])
+    assert ei.value.code == 0
+    target = home / "sub" / "m0.db"
+    assert target.read_bytes() == b"SECRET"
+    assert (target.parent.stat().st_mode & 0o777) == 0o700
+    assert (target.stat().st_mode & 0o777) == 0o600
+
+
+def test_decrypt_missing_db_is_one_line_and_exit_1(tmp_path, monkeypatch, capsys):
+    """EA-097：`db` 不存在 → stderr 一行中文、退出码 1（不是 traceback）。"""
+    monkeypatch.setattr(account, "resolve_account", lambda a: "wxid_testacct01_ab12")
+    monkeypatch.setattr(paths, "db_storage", lambda acc: tmp_path / "message")
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["decrypt", "message_9.db"])
+    assert ei.value.code == 1
+    out, err = capsys.readouterr()
+    assert "库不存在" in err and "Traceback" not in err and out == ""
+
+def test_status_success_path_covers_both_entries(tmp_path, monkeypatch, capsys):
+    """EA-038：`status` 的**成功面**此前零覆盖（MCP 说明书第一句点名的工具）。一条用例盖
+    两个入口：CLI `cmd_status` 的四行输出 ＋ MCP `get_account_status` 的信封。
+
+    把 `key_ready` 写成 `True` 常量（或改掉 `缓存✓/✗` 判据），本用例必红。
+    """
+    from types import SimpleNamespace
+
+    from agent_wechat import keys as keys_mod
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(paths, "HOME_DIR", home)
+    monkeypatch.setattr(keys_mod, "CACHE_FILE", home / "passphrase.json")
+    monkeypatch.setattr(account, "status", lambda: SimpleNamespace(
+        running=True, pid=999, current="wxid_testacct01_ab12",
+        accounts=["wxid_testacct01_ab12"]))
+    keys_mod.save_cached_hex("wxid_testacct01", "aa" * 32)
+
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["status"])
+    assert ei.value.code == 0
+    out = capsys.readouterr().out
+    assert "微信运行: True  pid: 999" in out
+    assert "当前登录: wxid_testacct01_ab12" in out
+    assert "wxid_testacct01_ab12: 缓存✓" in out
+
+    from agent_wechat import mcp_server
+
+    res = mcp_server.get_account_status()
+    assert res["wechat_running"] is True and res["current_account"] == "wxid_testacct01_ab12"
+    assert res["accounts"] == ["wxid_testacct01_ab12"] and res["key_ready"] is True

@@ -227,7 +227,11 @@ class _Ctx:
 @pytest.fixture()
 def chat_env(tmp_path, monkeypatch):
     """chat_export 的环境：桩掉 ChatContext 与 message_media。
+
     **`con` 夹具已把 `store.DB_PATH` 指向临时库，这里不碰真实 index.db、不碰微信目录。**
+
+    `_ctx` 的实参面不在这里（这段桩收 `**k` 就把 `_ctx=ctx` 吞了）——见
+    `test_chat_export_passes_limit_and_ctx_to_message_media`（EA-026②，spy 收实参）。
     """
     monkeypatch.setattr(usecases, "ChatContext", _Ctx)
     monkeypatch.setattr(
@@ -280,6 +284,27 @@ def test_chat_export_degrades_loudly_when_msg_parts_is_empty(con, chat_env, caps
     err = capsys.readouterr().err
     assert "msg_parts" in err
     assert "结构不符" not in err, "非漂移成因不许印成「结构不符」（生产端 drift 标记必须一路生效）"
+
+
+def test_chat_export_passes_limit_and_ctx_to_message_media(con, chat_env, monkeypatch):
+    """EA-026②：`chat_export → message_media` 的**实参现场**（`usecases.py:750-751`）此前零覆盖
+    ——把 `limit=len(keys) or 1` 改成 `limit=1`、或删掉 `_ctx=ctx`，全仓测试**全绿**。
+    用 spy 收实参钉住这两个变异。
+    """
+    seen = {}
+
+    def spy(contact, *, keys=None, limit=None, _ctx=None, **kw):
+        seen.update(contact=contact, keys=keys, limit=limit, ctx=_ctx)
+        return usecases.MessageMediaResult(chat_id="wxid_testacct02", out_dir=str(chat_env),
+                                           states=[], counts={})
+
+    monkeypatch.setattr(usecases, "message_media", spy)
+    _seed(con, n=3)
+    usecases.chat_export("wxid_testacct02", out_dir=str(chat_env), account="acct")
+    assert seen["contact"] == "wxid_testacct02"
+    assert seen["keys"], "keys 必须随调用传下去（媒体块靠它）"
+    assert seen["limit"] == max(len(seen["keys"]), 1), "limit 必须跟 keys 走（EA-026 的变异面）"
+    assert seen["ctx"] is not None, "_ctx 必须传（跨族调用共用上下文，别各开各的库）"
 
 
 def test_chat_export_counts_unparsed_and_rejected_separately(con, chat_env):

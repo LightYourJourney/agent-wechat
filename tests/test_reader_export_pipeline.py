@@ -544,6 +544,54 @@ def test_search_modes_and_isolation(env):
 
 # ---------- export 增量正确性（双分片） ----------
 
+def test_chat_export_renders_media_blocks_without_stubs(env, tmp_path):
+    """EA-026①：**不起桩**的集成——真 `ChatContext` + 真 `message_media`：索引里种一行
+    图片消息 ＋ 一条 media_refs → `chat_export` 真跑 → 产物里出现媒体块、counts 记到那一类。
+
+    （此前的集成面被 `chat_env` 的桩整个替换，「怎么调」落进测试网外。）
+    """
+    from agent_wechat import messages as msg_mod
+    from agent_wechat import usecases
+
+    export.run_export(ACCT, full=True)
+    with store.open() as con:
+        rows = con.execute(
+            "SELECT chat_id, chat_md5, shard, local_id, ts FROM messages LIMIT 1").fetchone()
+        assert rows, "夹具必须有消息行"
+        chat_id, chat_md5, shard, lid, ts = rows
+        key = f"{ACCT}|{chat_md5}|{shard}|{lid}"
+        con.execute(
+            "INSERT OR IGNORE INTO messages (msg_key, account, chat_md5, chat_id, shard,"
+            " local_id, ts, msg_type, is_self, content, exported_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (f"{ACCT}|{chat_md5}|{shard}|9001", ACCT, chat_md5, chat_id, shard, 9001, ts,
+             msg_mod.TYPE_IMAGE, 0, "[图片]", 0))
+        store.upsert_media_refs(con, [(f"{ACCT}|{chat_md5}|{shard}|9001", "image",
+                                       "aa" * 16, "bb" * 16)])
+        con.commit()
+
+    out = tmp_path / "out"
+    res = usecases.chat_export(chat_id, out_dir=str(out), account=ACCT)
+    html = (out / chat_md5 / "chat" / "index.html").read_text(encoding="utf-8")
+    assert "media" in html and ("<img" in html or "ph" in html), html[:400]
+    assert res.counts.get("image", 0) >= 1, res.counts
+
+
+def test_iter_all_respects_the_batch_size(env, monkeypatch):
+    """EA-111：批次切分（`store.BATCH` 压到 2）：每批 ≤ 批大小、无空批、各批合起来不重不漏。
+
+    批是**按分片（及其表）**刷的，不是全局计数——所以「批数 = ⌈n/批大小⌉」不成立
+    （首稿这么写，实测 5 ≠ 4 被本用例自己否掉）；钉住的是可证伪的那三条。
+    删掉批次刷新那段的 `rows = []` 初始化，本用例必红。
+    """
+    monkeypatch.setattr(store, "BATCH", 2)
+    batches = list(reader.MessageReader(ACCT).iter_all())
+    rows = [r for b, _refs in batches for r in b]
+    assert rows, "夹具必须有行"
+    assert len(rows) == len({r["msg_key"] for r in rows}), "批次边界上丢行或重复"
+    assert all(0 < len(b) <= 2 for b, _ in batches), [len(b) for b, _ in batches]
+
+
 def test_incremental_export_covers_non_latest_shard(tmp_path, monkeypatch):
     wx = tmp_path / "xwechat_files"
     home = tmp_path / "home"

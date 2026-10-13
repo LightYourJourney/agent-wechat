@@ -48,3 +48,52 @@ def test_media_refs_by_keys_spans_batches_and_tolerates_duplicate_keys(con):
     keys = [f"k{i}" for i in range(900)] + ["k0"]        # 重复的 key 只是输入噪声：结果按 msg_key 键控，重复不会导致重复计数
     got = store.media_refs_by_keys(con, keys)
     assert len(got) == 900 and got["k899"] == ("image", "dd" * 16)
+
+def test_count_media_refs_scopes_by_chat_ids_and_kind(con):
+    """EA-078①：`count_media_refs` 的 `chat_ids=` 与 `kind=` 两个过滤面此前零用例。
+
+    `chat_ids` 经 md5 派生前缀限流（`messages.md5_of`），`kind` 只数该类型——
+    counting 不 join messages（rebuild-refs 只写 refs），两个过滤都必须独立成立。
+    """
+    from agent_wechat import messages
+
+    a_md5 = messages.md5_of("wxid_abc123def456")
+    b_md5 = messages.md5_of("wxid_testacct01_ab12")
+    store.upsert_media_refs(con, [
+        (f"acct|{a_md5}|message_0.db|1", "image", "aa" * 16, None),
+        (f"acct|{a_md5}|message_0.db|2", "video", "bb" * 16, None),
+        (f"acct|{b_md5}|message_0.db|1", "video", "cc" * 16, None),
+    ])
+    assert store.count_media_refs(con, "acct") == 3
+    assert store.count_media_refs(con, "acct", kind="video") == 2
+    assert store.count_media_refs(con, "acct", chat_ids=["wxid_abc123def456"]) == 2
+    assert store.count_media_refs(con, "acct", chat_ids=["wxid_abc123def456"],
+                                  kind="video") == 1
+    assert store.count_media_refs(con, "acct", chat_ids=["wxid_testacct01_ab12"]) == 0
+
+
+def test_media_refs_by_chat_filters_kind_and_spans_batches(con, monkeypatch):
+    """EA-078②：`media_refs_by_chat` 的 kind 过滤 + 跨批累积。
+
+    夹具把 `KEYS_BATCH` 压到 2：把 `out`/累积写进循环（只留最后一批）会红；
+    kind 过滤去掉会把 image 混进 sticker 结果。
+    """
+    from agent_wechat import messages
+
+    md5a = messages.md5_of("wxid_abc123def456")
+    rows = [(f"acct|{md5a}|message_0.db|{i}", "sticker", "ab" * 16, None) for i in range(1, 6)]
+    rows.append((f"acct|{md5a}|message_0.db|9", "image", "aa" * 16, None))
+    # refs 的读取 join `messages` 取 ts/local_id 排序——没有消息行就一条都取不到
+    store.upsert_batch(con, [messages.make_row(
+        account="acct", chat_md5=md5a, chat_id="wxid_abc123def456", shard="message_0.db",
+        local_id=i, ts=1700000000 + i, msg_type=49, sender_id="wxid_abc123def456",
+        sender_name=None, is_self=0, content=f"[sticker] {i}", media_hint=None)
+        for i in list(range(1, 6)) + [9]])
+    store.upsert_media_refs(con, rows)
+    monkeypatch.setattr(store, "KEYS_BATCH", 2)
+    assert store.KEYS_BATCH == 2          # 前提自检：patch 真的生效
+    got = store.media_refs_by_chat(con, "acct", ["wxid_abc123def456"], kind="sticker")
+    got_rows = got["wxid_abc123def456"]
+    assert len(got_rows) == 5, "跨批累积丢了行"
+    assert all(k.count(
+        "|") == 3 for k, _ts, _fk in got_rows)
