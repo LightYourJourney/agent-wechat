@@ -34,7 +34,7 @@ from __future__ import annotations
 import html
 from typing import TYPE_CHECKING
 
-from . import appmsg, chat_text
+from . import appmsg, chat_text, msgextra
 
 if TYPE_CHECKING:
     from .appmsg import AppMsg
@@ -162,6 +162,21 @@ def _appmsg_block(a: AppMsg, ref_anchor: str | None) -> str:
     return '<div class="app">' + "".join(inner) + "</div>"
 
 
+def _extra_block(x: msgextra.Extra) -> str:
+    """位置（48）/ 名片（42）的结构化块（EA-041）。
+
+    复用 `.app` 那套容器与字段表样式（**不加新 CSS**）——它与 appmsg 的字段表在读者眼里是
+    同一类东西。没有可读字段时印共享的那句占位（`chat_text.EXTRA_NO_FIELDS`），不印空块。
+    """
+    inner = [f'<div class="ttl">{_esc(msgextra.kind_name(x.kind))}</div>']
+    if x.fields:
+        rows = "".join(f"<tr><td>{_esc(k)}</td><td>{_esc(v)}</td></tr>" for k, v in x.fields)
+        inner.append(f"<table>{rows}</table>")
+    else:
+        inner.append(f'<div class="empty">{_esc(chat_text.EXTRA_NO_FIELDS)}</div>')
+    return '<div class="app">' + "".join(inner) + "</div>"
+
+
 def _msg_block(m: ViewMsg, prefix: str, out_dir: str) -> str:
     """单条消息。`is_self` 决定 `self` / `other` —— 左右对齐与「谁发的」都由它派生。"""
     who = "我" if m.is_self else (m.sender or "（未知发送者）")
@@ -171,12 +186,14 @@ def _msg_block(m: ViewMsg, prefix: str, out_dir: str) -> str:
              f'<span class="kind">{_esc(m.kind)}</span></div>']
     # appmsg 的 `text` 是 `[appmsg: 标题]` 形态的提示（`content` 语义不变，见 spec §2.4），
     # 解析成功时它与下面的结构化块逐字重复，故只在没有结构化块时才印它。
-    if m.text and m.appmsg is None:
+    if m.text and m.appmsg is None and m.extra is None:
         inner.append(f'<div class="text">{_esc(m.text)}</div>')
     if m.media is not None:
         inner.append(_media_block(m.media, prefix, out_dir))
     if m.appmsg is not None:
         inner.append(_appmsg_block(m.appmsg, m.ref_anchor))
+    if m.extra is not None:
+        inner.append(_extra_block(m.extra))
     return f'<div class="msg {cls}" id="{_esc(m.anchor)}">{"".join(inner)}</div>'
 
 

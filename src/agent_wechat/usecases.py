@@ -23,8 +23,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from . import account as acc_mod
-from . import (appmsg, chatview, errors, exclusions, export, keys, media, messages, paths,
-               reader, search, store, tasks, vector)
+from . import (appmsg, chatview, errors, exclusions, export, keys, media, messages,
+                msgextra, paths, reader, search, store, tasks, vector)
 # 模板模块名与下面的用例函数 `chat_index()` **同名**：这里起别名，否则函数定义会遮蔽
 # 模块名（`index_html.render` 那处引用会变成调用函数自身）。
 from . import chat_index as index_html
@@ -664,6 +664,26 @@ def message_media(contact: str, *, keys: Sequence[str] | None = None,
                               degraded=tuple(degraded) + collect_degradations(ctx.reader))
 
 
+def _decode_extra(msg_type: int, payload: bytes) -> "msgextra.Extra | None":
+    """解压 + 解析一条 `msg_extras` 载荷（EA-041）。**对任意 bytes 全定义、不抛**——与
+    `_decode_part` 同一条理由：`payload` 是别人写进去的字节，裸 `zlib.error` /
+    `UnicodeDecodeError` 不得逃出 core 层；而 `msgextra.parse` 自己就对任意 `str` 全定义。
+
+    两者的失败面**合并处置**（返回 None）：这一族没有 `unparsed` / `rejected` 的计数
+    （`msg_parts` 那边的分母是 spec §5 定的，48/42 不参与），消费点只问「这条有没有结构化
+    载荷」。解不开 = 没有。
+
+    `chat_export` 与 `message_parts` 共用这一份——同一个解码两处实现，迟早漂移成
+    「同一张表在两个入口一个显示一个不显示」（`_decode_part` 的 docstring 记着这条）。
+    """
+    try:
+        raw = zlib.decompress(payload).decode("utf-8", "ignore")
+    except (zlib.error, UnicodeDecodeError):
+        return None
+    # 类型由库里那一列给出；这里不信任它是不是 48/42——`parse` 自己会挡（不在族里返回 None）。
+    return None if not raw else msgextra.parse(msg_type, raw)
+
+
 def _decode_part(raw_xml: bytes) -> tuple["appmsg.AppMsg | None", str, int]:
     """解压 + 解析一条 `msg_parts` 载荷 → `(AppMsg | None, 结果, 剔掉的不透明块数)`。
 
@@ -774,6 +794,9 @@ def chat_export(contact: str, *, months: list[str] | None = None, limit: int = 5
             # messages，join 出来的条数会把「没回填」与「这些消息本来就没有可读内容」混成
             # 一种（丙 R23 的教训——两者在产物里长得一模一样）。
             backfilled = store.count_msg_parts(con, ctx.account)
+            # EA-041 的位置/名片：**与 parts 同一趟、同一个 keys 集合**读出原始载荷，
+            # 解析在库外做（与 parts 的分工一致：store 只管字节，解析归用例层）。
+            extras_raw = store.extras_by_keys(con, keys)
     except (sqlite3.Error, OSError) as exc:
         # 裸 sqlite3/OSError 会穿透 core 层（CLI 印 traceback、MCP 落 generic_payload 兜底）。
         # 索引读不了就是什么都答不了：一个空产物只会把「库坏了」谎报成「这个会话没有消息」。
@@ -816,6 +839,16 @@ def chat_export(contact: str, *, months: list[str] | None = None, limit: int = 5
         elif parsed is not None:
             parts[key] = parsed
 
+    # 位置/名片：**空表是常态**（老库、没跑过 `extras rebuild` 的机器），两个模板因此一行
+    # 都不印——不是印「未知」。**不发降级**：这一族没有 `msg_parts` 那种「回填过没有」的
+    # 可判定状态（「表是空的」与「这些消息本来就没有位置/名片」在库里分不开），公告一句
+    # 「可能没回填」会在绝大多数会话上是假警（丙 R23：两者在产物里长得一样，那就别猜）。
+    extras: dict[str, msgextra.Extra] = {}
+    for key, (msg_type, payload) in extras_raw.items():
+        x = _decode_extra(msg_type, payload)
+        if x is not None:
+            extras[key] = x
+
     degraded: list[Degradation] = []
     if not backfilled:
         # 与「这些消息本来就没有可读内容」**必须印得不一样**：前者可以补救（跑一次回填），
@@ -845,7 +878,8 @@ def chat_export(contact: str, *, months: list[str] | None = None, limit: int = 5
         # 富化（取展示名）**先**做，降级**后**收：`_display_or_id` 回落 chat_id 的那次
         # SchemaDrift 记在 `ctx.reader._drift` 上，这个顺序才让它随 degraded 出去
         # （`_display_or_id` 的注释把这条顺序写成约定）。
-        degraded=tuple(degraded) + collect_degradations(ctx.reader), refs=refs)
+        degraded=tuple(degraded) + collect_degradations(ctx.reader), refs=refs,
+        extras=extras)
     files = chatview.write(view, formats=formats)
     return ChatExportResult(
         chat_id=chat_id, out_dir=view.out_dir, files=tuple(str(p) for p in files),
@@ -1130,6 +1164,64 @@ def media_rebuild_refs(account: str | None = None,
     if on_skipped is not None and skipped:
         on_skipped(skipped)
     return n
+
+
+def msgextra_rebuild(account: str | None = None,
+                     progress: Callable[[int], None] | None = None,
+                     on_skipped: Callable[[int], None] | None = None) -> dict:
+    """全量重扫微信库回填 `msg_extras`（EA-041）。幂等；**只写 msg_extras**——
+    不碰 messages / FTS / 向量 / 水位线 / msg_parts。
+
+    **为什么是一条独立命令而不是并进 `chat export`**：与 `appmsg rebuild` / `media
+    rebuild-refs` 同一个理由（`cli.py` 那张「谁写谁」的表）——导出链每多写一张表，
+    就多一个「导出到一半失败留下半张表」的形态；而这三张旁路表都是**可重算**的，
+    让它们各自有一条显式的、幂等的回填入口更省事。历史行也借此可补（原始 XML 只在
+    微信库里，导出时不解压 48/42）。
+
+    计数的分母（与 `media_rebuild_refs` / `appmsg_rebuild_parts` 同款）：
+      · `extras` = **实际落库**的条数（缓冲数 − 被排除清单挡下的）；被挡下的行一条都不落库
+        ——本命令直接回微信库重扫，不拦的话 `purge --chat` 删掉的位置/名片载荷会重新长回来
+        （spec §5.4 第 2 条）；
+      · `empty` = 落库了但**没有一个可读字段**的条数——两种成因都算：载荷危险 / 解不开 /
+        缺承载元素（`parse` 返回 None），或解得开但一个白名单属性都没命中（`fields` 为空元组）。
+        它不是错误：`empty + 有字段的` 才是本轮扫到的总数；
+      · `skipped` = 被排除清单挡下的行数（`on_skipped` 有值时回调一次，「成功但有保留」的出口）。
+    """
+    ctx = ChatContext(account)
+    stored = empty = skipped = 0
+    with store.open() as con:
+        # 入口就开 IMMEDIATE：本函数是这次写入的事务 owner（commit 在 `store.open()` 出口）。
+        # 与 `appmsg_rebuild_parts` 不同，这里**没有 TEMP 表**先开 deferred 事务，
+        # 所以 `upsert_extras` 里那句 guard 会正常触发；入口这一句是为了让整次回填
+        # （含排除判据的读）落在同一把写锁下。
+        con.execute("BEGIN IMMEDIATE")
+        buf: list[tuple[str, int, bytes]] = []
+
+        def flush() -> None:
+            nonlocal skipped
+            if buf:
+                skipped += store.upsert_extras(con, buf)
+                buf.clear()
+                if progress:
+                    # 报**实际落库**的数（与另两处同款）：报缓冲数会让进度条上的最后一个数
+                    # 比完成行还大，两句话对不上。
+                    progress(stored - skipped)
+
+        for key, msg_type, payload in ctx.reader.iter_extras_input():
+            # `empty` 的判据是「**没有一个可读字段**」，不是「parse 返回 None」——两者不等价：
+            # 载荷解得开、承载元素也在，但一个白名单属性都没命中时 `Extra.fields` 是**空元组**，
+            # 那正是「这条没有可读内容」的常态（真机 42 里有只带 `percard` 的名片）。
+            extra = msgextra.parse(msg_type, zlib.decompress(payload).decode())
+            if extra is None or not extra.fields:
+                empty += 1
+            buf.append((key, msg_type, payload))
+            stored += 1
+            if len(buf) >= store.BATCH:
+                flush()
+        flush()
+    if on_skipped is not None and skipped:
+        on_skipped(skipped)
+    return {"extras": stored - skipped, "empty": empty, "skipped": skipped}
 
 
 def appmsg_rebuild_parts(account: str | None = None,

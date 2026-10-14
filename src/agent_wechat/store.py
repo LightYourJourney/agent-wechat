@@ -120,6 +120,12 @@ CREATE TABLE IF NOT EXISTS msg_parts (
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS idx_parts_ref ON msg_parts(ref_msg_key)
     WHERE ref_msg_key IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS msg_extras (
+    msg_key  TEXT PRIMARY KEY,      -- = messages.msg_key
+    msg_type INTEGER NOT NULL,      -- 48 位置 / 42 名片（**原样记**，不猜语义）
+    payload  BLOB NOT NULL          -- 规范化后的 XML，zlib 压缩（与 msg_parts.raw_xml 同款）
+) WITHOUT ROWID;
 """
 
 # ---------- 向量索引（sqlite-vec；由 vector.py 在加载扩展后建表） ----------
@@ -390,12 +396,13 @@ def chat_row_counts(con: sqlite3.Connection, account: str, chat_id: str) -> dict
                     if _has_table(con, "vec_messages") else 0),
         "parts": n("SELECT count(*) FROM msg_parts WHERE substr(msg_key, 1, ?) = ?", (len(p), p)),
         "refs": n("SELECT count(*) FROM media_refs WHERE substr(msg_key, 1, ?) = ?", (len(p), p)),
+        "extras": n("SELECT count(*) FROM msg_extras WHERE substr(msg_key, 1, ?) = ?", (len(p), p)),
         "display_names": n("SELECT count(*) FROM display_names WHERE account=? AND chat_id=?", a),
     }
 
 
 def delete_chat(con: sqlite3.Connection, *, account: str, chat_id: str) -> dict[str, int]:
-    """删掉一个会话在本工具里的全部副本。**七处，一处不漏**（spec §5.1）。
+    """删掉一个会话在本工具里的全部副本。**八处，一处不漏**（spec §5.1；第八处是 EA-041 的 `msg_extras`——它与 `msg_parts` / `media_refs` 同属按 `msg_key` 前缀删的宽谓词那一类，孤儿行照样盖得住）。
 
     **调用方负责**：① 事务边界（自己 `BEGIN IMMEDIATE` / `commit`）；
     ② `PRAGMA secure_delete=ON`——实测默认设置下被删消息的正文仍留在 index.db 的 freelist
@@ -410,7 +417,7 @@ def delete_chat(con: sqlite3.Connection, *, account: str, chat_id: str) -> dict[
     - **墓碑必须先落**（由调用方在本函数之前写，同一事务）：先删后挡的话，崩在中间就是
       「删了但没挡」，那批东西会复活；先挡后删最坏只是「挡住了但没删掉」，核查看得见、重跑能收口。
 
-    另三处**按宽谓词删**（`vec_messages` 用 `acct_chat` 分区键，`msg_parts`/`media_refs` 用
+    另**四**处**按宽谓词删**（`vec_messages` 用 `acct_chat` 分区键，`msg_parts`/`media_refs` 用
     `msg_key` 前缀），不是经 `messages` 子查询删——所以它们与 `messages` 的先后不再有约束，
     而且消息行早就不在了的**孤儿行照样盖得住**（子查询版会漏掉孤儿，见 `chat_row_counts`）。
     """
@@ -429,6 +436,7 @@ def delete_chat(con: sqlite3.Connection, *, account: str, chat_id: str) -> dict[
     # 不能用 LIKE：account 里含 `_` 与 `%`，两个都是通配符。
     con.execute("DELETE FROM msg_parts WHERE substr(msg_key, 1, ?) = ?", (len(p), p))
     con.execute("DELETE FROM media_refs WHERE substr(msg_key, 1, ?) = ?", (len(p), p))
+    con.execute("DELETE FROM msg_extras WHERE substr(msg_key, 1, ?) = ?", (len(p), p))
     con.execute("DELETE FROM messages WHERE account=? AND chat_id=?", a)   # FTS 由触发器跟随
     con.execute("DELETE FROM display_names WHERE account=? AND chat_id=?", a)
     # 向量水位线：min 而非 max。**不要复用 vector._set_vector_watermark**——它的 upsert 写的是
@@ -608,6 +616,49 @@ def count_media_refs(con: sqlite3.Connection, account: str, *,
 # ---------- appmsg 原始载荷（msg_parts） ----------
 # `raw_xml` 是 appmsg 正文的**权威**；appmsg_type / ref_svrid / ref_msg_key 是它的**投影**，
 # 存在的唯一理由是「不必解压就能筛选与重解析」。与「content 是消息的检索投影」同构。
+
+
+def upsert_extras(con: sqlite3.Connection,
+                  rows: list[tuple[str, int, bytes]]) -> int:
+    """批量幂等写 msg_extras。返回**被排除而跳过的**行数（`0` = 全写入）。
+    不 commit：与 `upsert_msg_parts` / `upsert_media_refs` 同约定，由调用方收口。
+
+    被排除的 `msg_key` 一条都不落库——回填命令直接回微信库重扫，不拦的话 `purge --chat`
+    删掉的位置/名片载荷会重新长回来（spec §5.4 第 2 条，与 `upsert_msg_parts` 同一理由）。
+
+    调用方（`usecases.msgextra_rebuild`）**不开事务**：它没有 TEMP 表的缓冲，
+    所以这里那句 guard 真的会触发（`upsert_msg_parts` 的 docstring 记着它那边的例外形态）。
+    """
+    if not rows:
+        return 0
+    if not con.in_transaction:
+        con.execute("BEGIN IMMEDIATE")
+    skip = _filter_excluded(con, [r[0] for r in rows])
+    keep = [r for r in rows if r[0] not in skip]
+    if keep:
+        con.executemany(
+            "INSERT INTO msg_extras (msg_key, msg_type, payload) VALUES (?,?,?) "
+            "ON CONFLICT(msg_key) DO UPDATE SET msg_type=excluded.msg_type, "
+            "payload=excluded.payload", keep)
+    return len(rows) - len(keep)
+
+
+def extras_by_keys(con: sqlite3.Connection,
+                   keys: Sequence[str]) -> dict[str, tuple[int, bytes]]:
+    """按 `msg_key` 取 48/42 的原始载荷：`{msg_key: (msg_type, payload)}`。
+
+    查不到的 key **不出现在结果里**（与 `msg_parts_by_keys` 同约定）——上层靠「在不在」
+    区分「这条没有结构化载荷」与「解析成空」。
+    """
+    if not keys:
+        return {}
+    out: dict[str, tuple[int, bytes]] = {}
+    for i in range(0, len(keys), KEYS_BATCH):
+        chunk = keys[i:i + KEYS_BATCH]
+        sql = ("SELECT msg_key, msg_type, payload FROM msg_extras WHERE msg_key IN ("
+               + ",".join("?" * len(chunk)) + ")")
+        out.update({k: (t, p_) for k, t, p_ in con.execute(sql, chunk)})
+    return out
 
 
 def upsert_msg_parts(con: sqlite3.Connection,

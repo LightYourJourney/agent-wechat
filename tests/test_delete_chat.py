@@ -54,6 +54,12 @@ def _seed(con):
     # 这两行是本文件最重要的回归：按 msg_key 前缀的宽谓词必须把它们扫掉。
     store.upsert_msg_parts(con, [(f"a|{VICTIM_MD5}|message_0.db|90", 57, None, None, b"<orphan/>")])
     store.upsert_media_refs(con, [(f"a|{VICTIM_MD5}|message_0.db|91", "image", "e" * 32, None)])
+    # EA-041 的 msg_extras 与那两张表同属「按 msg_key 前缀删的宽谓词」那一类，故**同样要有
+    # 一条挂存活行的、一条孤儿**——否则新表在 `delete_chat` 的覆盖是空的（前缀写宽/写窄、
+    # 或忘了删它，两种回归都不会红）。
+    store.upsert_extras(con, [(f"a|{VICTIM_MD5}|message_0.db|1", 48, b"<msg><location/></msg>")])
+    store.upsert_extras(con, [(f"a|{KEEPER_MD5}|message_0.db|1", 42, b"<msg username=\"k\"/>")])
+    store.upsert_extras(con, [(f"a|{VICTIM_MD5}|message_0.db|92", 48, b"<orphan/>")])
     con.execute("INSERT INTO display_names VALUES ('a',?,'u1','受害人')", (VICTIM,))
     con.execute("INSERT INTO display_names VALUES ('a',?,'u2','留下的人')", (KEEPER,))
     con.commit()
@@ -123,19 +129,20 @@ def test_vec_exec_passes_other_operational_errors_through(_vec_index_db, _temp_i
     assert "no such module" not in str(ei.value)
 
 
-def test_delete_chat_removes_all_five_places(_temp_index):
+def test_delete_chat_removes_every_place(_temp_index):
     con = _temp_index
     got = store.delete_chat(con, account="a", chat_id=VICTIM)
     # parts/refs 各 2：一条挂在存活消息上、一条是孤儿。**子查询版这里只会是 1**——孤儿看不见。
-    assert got == {"messages": 2, "vectors": 0, "parts": 2, "refs": 2, "display_names": 1}
+    assert got == {"messages": 2, "vectors": 0, "parts": 2, "extras": 2, "refs": 2,
+                   "display_names": 1}
     assert store.chat_row_counts(con, "a", VICTIM) == {
-        "messages": 0, "vectors": 0, "parts": 0, "refs": 0, "display_names": 0}
+        "messages": 0, "vectors": 0, "parts": 0, "extras": 0, "refs": 0, "display_names": 0}
     # 这两条是**宽谓词的回归**（也是上面那两条断言的补丁）：子查询版删不到孤儿，两张表各留一行
     # （`msg_parts.raw_xml` 就是 purge 要销毁的那份载荷），而上面照样全绿。
     # 判据在测试里**独立写一遍**（不借 chat_row_counts，也不用全表计数——keeper 在这两张表里
     # 本来就有一行，"全表为 0" 会被它挡住；要问的是「victim 这个分区还剩不剩」）。
     pref = f"a|{VICTIM_MD5}|"
-    for table in ("msg_parts", "media_refs"):
+    for table in ("msg_parts", "media_refs", "msg_extras"):
         assert con.execute(f"SELECT count(*) FROM {table} WHERE substr(msg_key, 1, ?) = ?",
                            (len(pref), pref)).fetchone()[0] == 0, f"{table} 里还留着 victim 的行"
 
@@ -144,13 +151,14 @@ def test_delete_chat_leaves_the_other_chat_untouched(_temp_index):
     """**反向断言**：范围泄漏在这门命令上不可逆，比正断言重要。"""
     con = _temp_index
     store.delete_chat(con, account="a", chat_id=VICTIM)
-    # keeper 的五项一个不少：前缀是 `account|chat_md5|`，**多一个 `|` 少一个 `|`、或者拿账户当前缀
-    # 都会串到别的会话**（keeper 在 parts/refs 里各有一行，就是用来钉这件事的——前缀写宽了会把它
+    # keeper 的六项一个不少：前缀是 `account|chat_md5|`，**多一个 `|` 少一个 `|`、或者拿账户当前缀
+    # 都会串到别的会话**（keeper 在 parts/extras/refs 里各有一行，就是用来钉这件事的——前缀写宽了会把它
     # 一起删掉）。keeper 与 victim **同 account、前缀不同**：这正是「删除范围只能由 account+chat_id
     # 唯一定出」的判据；把 `chat_md5` 换回调用方传参、或让它与 `chat_row_counts` 的派生不一致，
     # 都会在这里或上一条断言的 `got` 上现形。
     assert store.chat_row_counts(con, "a", KEEPER) == {
-        "messages": 1, "vectors": 0, "parts": 1, "refs": 1, "display_names": 1}
+        "messages": 1, "vectors": 0, "parts": 1, "extras": 1, "refs": 1,
+        "display_names": 1}
     assert con.execute("SELECT count(*) FROM display_names WHERE chat_id=?", (KEEPER,)
                        ).fetchone()[0] == 1
     assert con.execute("SELECT count(*) FROM messages_fts").fetchone()[0] == 1, \

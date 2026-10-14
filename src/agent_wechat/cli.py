@@ -306,6 +306,21 @@ def cmd_appmsg_rebuild(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_extras_rebuild(args: argparse.Namespace) -> int:
+    from . import usecases
+
+    def progress(n: int) -> None:
+        print(f"  已回填 {n} 条位置/名片…", flush=True)
+
+    res = usecases.msgextra_rebuild(account=args.account, progress=progress,
+                                    on_skipped=_note_skipped)
+    # `empty` 单列：它是「落库了但没有可读字段」的条数（载荷危险 / 解不开 / 缺承载元素），
+    # 与「本轮扫到多少」是两个分母，并排印会被读成同一件事（同 `appmsg rebuild` 那条注释）。
+    print(f"完成：本轮写入 msg_extras {res['extras']} 条"
+          f"（其中 {res['empty']} 条没有可读字段）")
+    return 0
+
+
 def cmd_media_locate(args: argparse.Namespace) -> int:
     """按消息列出媒体归属。与 MCP get_message_media 同一个用例，只是渲染成人类可读。
 
@@ -715,6 +730,7 @@ _CHAT_TABLES = (
     ("messages", "消息", "含 FTS 索引（由既有触发器跟随）"),
     ("vectors", "向量", ""),
     ("parts", "appmsg 部件", ""),
+    ("extras", "位置 / 名片载荷", ""),
     ("refs", "媒体引用", ""),
     ("display_names", "群成员显示名", ""),
 )
@@ -1054,6 +1070,12 @@ def main(argv: list[str] | None = None) -> None:
     rsp = asp.add_parser("rebuild", help="全量重扫微信库回填 msg_parts")
     rsp.add_argument("--account", default=None)
     rsp.set_defaults(fn=cmd_appmsg_rebuild)
+
+    sp = sub.add_parser("extras", help="位置（48）/ 名片（42）的原始载荷")
+    esp = sp.add_subparsers(dest="extras_cmd", required=True)
+    xsp = esp.add_parser("rebuild", help="全量重扫微信库回填 msg_extras")
+    xsp.add_argument("--account", default=None)
+    xsp.set_defaults(fn=cmd_extras_rebuild)
 
     args = p.parse_args(argv)
     if args.cmd == "purge":

@@ -26,6 +26,10 @@ from typing import TYPE_CHECKING
 # 标记（`[...]` vs `〔…〕`）仍归各模板自己套。
 INCONSISTENT_EXPORTED = "已导出，但拿不到产物路径 —— 状态与路径不一致"
 
+# 位置/名片的结构化块在**没有可读字段**时的占位（EA-041）。两个模板共用一句：
+# 空块读起来像渲染坏了，而这句说的是实情——载荷在、只是白名单属性一个都没命中。
+EXTRA_NO_FIELDS = "（没有可读字段）"
+
 
 def whatwg_ipv4(host: str) -> bool:
     """这个 host 会被 WHATWG 当 IPv4 解析吗（而页面上的徽章会把它原样显示出来）。

@@ -37,7 +37,7 @@ from typing import TYPE_CHECKING
 
 import re
 
-from . import appmsg, chat_text
+from . import appmsg, chat_text, msgextra
 
 if TYPE_CHECKING:
     from .appmsg import AppMsg
@@ -194,6 +194,23 @@ def _transfer_line(t: appmsg.Transfer) -> str:
     return "- " + _esc_md(" · ".join(chat_text.transfer_fields(t)))
 
 
+def _extra_lines(x: msgextra.Extra) -> list[str]:
+    """位置（48）/ 名片（42）→ 结构化块（EA-041）。
+
+    形状与 `_appmsg_lines` 的字段表**故意一致**（标题行 + `- 名：值`）：在读者眼里它们是
+    同一类东西，长得不一样只会让人以为漏了渲染。名与值都走 `_esc_md`——`label` 是地点的
+    名字、`nickname` 是别人的昵称，**都是用户内容**。
+
+    没有可读字段的形态（`fields` 为空元组）**要说出来**：空块读起来像渲染坏了。
+    """
+    out = [f"**{_t(msgextra.kind_name(x.kind))}**"]
+    if x.fields:
+        out += [f"- {_esc_md(k)}：{_esc_md(v)}" for k, v in x.fields]
+    else:
+        out.append(chat_text.EXTRA_NO_FIELDS)
+    return out
+
+
 def _appmsg_lines(a: AppMsg, ref_anchor: str | None) -> list[str]:
     """appmsg 的结构化呈现（具名块优先，其余叶子进列表）。"""
     head = _t(appmsg.kind_name(a.kind))
@@ -245,7 +262,9 @@ def _message_lines(m: ViewMsg, prefix: str, out_dir: str) -> list[str]:
     tag = "（自己）" if m.is_self else ""
     out = [f"## {_esc_md(who)}{tag} · {chat_text.when(m.ts)} · {_t(m.kind)}", ""]
     # appmsg 的 `text` 是 `[appmsg: 标题]` 形态的提示，解析成功时与下面的结构化块逐字重复。
-    if m.text and m.appmsg is None:
+    # 位置/名片同理：`[location]` / `[type42]` 占位（`content` 契约不变）在结构化块出现时
+    # 也是重复的一句，故一并收进同一个条件。
+    if m.text and m.appmsg is None and m.extra is None:
         out += [_esc_md(m.text), ""]
     if m.media is not None:
         block = _media_block(m.media, prefix, out_dir)
@@ -253,6 +272,8 @@ def _message_lines(m: ViewMsg, prefix: str, out_dir: str) -> list[str]:
             out += [block, ""]
     if m.appmsg is not None:
         out += _appmsg_lines(m.appmsg, m.ref_anchor) + [""]
+    if m.extra is not None:
+        out += _extra_lines(m.extra) + [""]
     return out
 
 

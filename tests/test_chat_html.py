@@ -260,3 +260,36 @@ def test_sticker_gone_makes_no_local_presence_claim():
     """
     from agent_wechat import chat_text
     assert "本机有" not in chat_text.STICKER_GONE
+
+
+# ---------- EA-041：位置 / 名片的结构化块 ----------
+
+def test_a_location_renders_as_a_structured_block():
+    """与 MD 侧同一件事（`test_chat_md.py::test_a_location_renders_its_fields...`）：
+    结构化块出现、`[location]` 占位收掉、没有 extras 时一行都不印。"""
+    from agent_wechat import msgextra
+    x = msgextra.Extra(48, (("x", "39.9"), ("y", "116.4"), ("label", "某地")))
+    view = chatview.build(
+        "c", title="t", rows=[{"msg_key": "k1", "ts": 1, "msg_type": 48,
+                               "content": "[location]", "sender_name": "我", "is_self": True}],
+        parts={}, media={}, out_dir="/tmp", truncated=False, unparsed=0, rejected=0,
+        degraded=(), extras={"k1": x})
+    out = chat_html.render(view)
+    assert "位置" in out and "39.9" in out and "某地" in out
+    assert "[location]" not in out
+    plain = chat_html.render(chatview.build(
+        "c", title="t", rows=[{"msg_key": "k1", "ts": 1, "msg_type": 48,
+                               "content": "[location]", "sender_name": "我", "is_self": True}],
+        parts={}, media={}, out_dir="/tmp", truncated=False, unparsed=0, rejected=0,
+        degraded=()))
+    assert "[location]" in plain and "位置" not in plain
+
+
+def test_a_card_without_readable_fields_says_so():
+    from agent_wechat import chat_text, msgextra
+    view = chatview.build(
+        "c", title="t", rows=[{"msg_key": "k1", "ts": 1, "msg_type": 42,
+                               "content": "[type42]", "sender_name": "我", "is_self": True}],
+        parts={}, media={}, out_dir="/tmp", truncated=False, unparsed=0, rejected=0,
+        degraded=(), extras={"k1": msgextra.Extra(42, ())})
+    assert chat_text.EXTRA_NO_FIELDS in chat_html.render(view)

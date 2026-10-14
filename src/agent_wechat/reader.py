@@ -10,10 +10,12 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import sqlite3
+import zlib
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, asdict
 
-from . import decrypt, errors, keys, media, messages, paths, roster, schema, store
+from . import (appmsg, decrypt, errors, keys, media, messages, msgextra,
+                paths, roster, schema, store)
 from .errors import DataNotFound, DependencyMissing
 
 try:
@@ -551,6 +553,38 @@ class MessageReader:
                             refs = []
                     if rows:
                         yield rows, refs
+
+    def iter_extras_input(self) -> Iterator[tuple[str, int, bytes]]:
+        """为 `msg_extras` 回填供料：逐条 yield `(msg_key, msg_type, payload)`。
+
+        `payload` 是 `appmsg.normalize` 规范化后、**zlib 压缩**的 XML（与
+        `msg_parts.raw_xml` 同一存盘形态）——只对 48/42 解压，其余类型一层代价都不付。
+
+        **不在这里判「有没有可读字段」**：那是 `usecases` 的事（它要用同一份
+        `msgextra.parse` 同时产出「落库的字节」与「跑完后的计数」）。被判空
+        （`msgextra.parse` 返回 None）的行**照样落库**：那一趟解压已经付过了，
+        丢掉只会让下次重扫再解一遍；而「这条没有可读字段」本身也是结论。
+
+        **刻意不调 `md5_map()`**（与 `iter_parts_input` 同一条理由）：产物里没有 chat_id。
+        """
+        for shard in paths.message_shards(self.acct):
+            with self._open(f"message/{shard.name}") as con:
+                tables = self._shard_tables(con, None)
+                if tables:
+                    self._check("messages", f"message/{shard.name}", con, table=tables[0])
+                for table in tables:
+                    md5hex = table[4:]
+                    for lid, ltype, mc, ct in con.execute(
+                            f"SELECT local_id, local_type, message_content, "
+                            f"WCDB_CT_message_content FROM '{table}'"):
+                        t = ltype & 0xffffffff
+                        if t not in msgextra.KINDS or mc is None:
+                            continue
+                        raw = _decode_content(mc, ct)
+                        if not raw:
+                            continue
+                        yield (messages.row_key(self.acct, md5hex, shard.name, lid), t,
+                               zlib.compress(appmsg.normalize(raw).encode(), 6))
 
     def iter_parts_input(self) -> Iterator[tuple[int | None, str, str | None]]:
         """为 msg_parts 回填供料：**全量扫描**，逐条 yield `(server_id, msg_key, appmsg_raw)`。

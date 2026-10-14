@@ -505,3 +505,62 @@ def test_crlf_and_cr_are_treated_as_line_endings():
          "sender_name": "我", "is_self": True}]))
     assert "\r" not in out, "产物里还留着 CR（渲染器按规范切行时它仍是行结束）"
     assert _line_with(out, "假标题").startswith("\\#")
+
+
+# ---------- EA-041：位置 / 名片的结构化块 ----------
+
+def _extra_view(**kw):
+    return chatview.build(
+        "c", title="t", rows=[{"msg_key": "k1", "ts": 1, "msg_type": kw.pop("t", 48),
+                               "content": kw.pop("text", "[location]"),
+                               "sender_name": "我", "is_self": True}],
+        parts={}, media={}, out_dir="/tmp", truncated=False, unparsed=0, rejected=0,
+        degraded=(), **kw)
+
+
+def test_a_location_renders_its_fields_and_drops_the_placeholder():
+    """EA-041 的验收：位置消息在产物里出现 **x / y / label 结构化块**。
+
+    `text` 那一行（`[location]` 占位）必须**消失**——它与结构化块逐字重复，这正是 appmsg
+    那条既有的处置（`content` 的契约不变，只是产物里不再重复印一遍）。
+    """
+    from agent_wechat import msgextra
+    x = msgextra.Extra(48, (("x", "39.9"), ("y", "116.4"), ("label", "某地")))
+    out = chat_md.render(_extra_view(extras={"k1": x}))
+    assert "**位置**" in out
+    # 坐标里的 `.` 会被行首那一档的「有序列表」判据（`\d+\.`）转义成 `39\.9`——**既有行为**，
+    # 不是本批引入：`_esc_md` 逐值调用，判不出这个值最终落在行中还是行首，于是按行首处理。
+    # 渲染结果相同（pandoc 两边都出 `39.9`），只是源码多一个反斜杠；已在台账记为观察项。
+    assert "- x：39\.9" in out and "- y：116\.4" in out and "- label：某地" in out
+    assert "[location]" not in out, "占位行与结构化块重复，必须收掉"
+    # 没有 extras 时**一行都不印**，且占位行照旧（老库 / 没跑过 extras rebuild 的机器）
+    plain = chat_md.render(_extra_view())
+    # 占位行本身是**用户内容**吗？不是——但它是**我们**从 `content` 直接印出来的一句，走
+    # `_esc_md`（`[` `]` 会被转义）：所以判据写成转义后的形态。
+    assert "位置" not in plain and r"\[location\]" in plain
+
+
+def test_a_card_renders_its_identity_fields():
+    from agent_wechat import msgextra
+    x = msgextra.Extra(42, (("username", "wxid_a"), ("nickname", "甲"), ("alias", "A")))
+    out = chat_md.render(_extra_view(t=42, text="[type42]", extras={"k1": x}))
+    assert "**名片**" in out and "- nickname：甲" in out
+    assert r"\[type42\]" not in out
+
+
+def test_an_extra_without_readable_fields_says_so():
+    """没命中任何白名单属性时**印共享的那句占位**，不印一个空块——空块读起来像渲染坏了。
+    与 HTML 侧共用 `chat_text.EXTRA_NO_FIELDS`（改一处两个产物同时变）。"""
+    from agent_wechat import chat_text, msgextra
+    out = chat_md.render(_extra_view(t=42, text="[type42]",
+                                     extras={"k1": msgextra.Extra(42, ())}))
+    assert chat_text.EXTRA_NO_FIELDS in out
+    assert "**名片**" in out
+
+
+def test_extra_field_values_are_hard_escaped():
+    """字段值是**用户内容**：`label` 是地点的名字、`nickname` 是别人的昵称。"""
+    from agent_wechat import msgextra
+    x = msgextra.Extra(48, (("label", _ATK),))
+    out = chat_md.render(_extra_view(extras={"k1": x}))
+    assert _ATK not in out and r"\!\[" in out

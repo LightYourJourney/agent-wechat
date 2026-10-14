@@ -194,6 +194,13 @@ def _is_opaque_blob(value: str) -> bool:
     return bool(_OPAQUE_B64.match(value))
 
 
+# 跨模块复用点（`msgextra` 的字段表过同一道过滤）：判据只应有**一份**——「什么叫像密钥的
+# 名字」的规则全项目就是上面那个 `_SECRET_SEG`（那段注释写着为什么不能各写一份备选表）。
+# 给公开名而不是让别处 `import _is_secret`：私有名的跨模块使用在 grep 时读不出「这是契约」。
+is_secret = _is_secret
+is_opaque_blob = _is_opaque_blob
+
+
 @dataclass(frozen=True)
 class Quote:
     """引用（type 57）的载荷 `refermsg`。"""

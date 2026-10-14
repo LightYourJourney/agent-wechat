@@ -31,7 +31,7 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from . import chat_html, chat_md, errors, messages
+from . import chat_html, chat_md, errors, messages, msgextra
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -73,6 +73,10 @@ class ViewMsg:
     media: MediaRefState | None     # 丙的四态，直接用（`None` = 该 msg_key 没有媒体状态）
     anchor: str                     # msg_key 的 12 位 blake2s
     ref_anchor: str | None          # 引用目标在本次范围内时才非空，否则 None（不是空串）
+    extra: msgextra.Extra | None    # 位置（48）/ 名片（42）的载荷；None = 这条没有。
+                                    # **与 `appmsg` 分开一个字段**（EA-041 的修复建议明写）：
+                                    # 塞进 `AppMsg` 会让两个模板里 `a.quote`/`a.link` 那几处
+                                    # 变成依赖运行时类型的分支
 
 
 @dataclass(frozen=True)
@@ -99,6 +103,7 @@ def build(chat_id: str, *, title: str, rows: Sequence[dict], parts: Mapping[str,
           media: Mapping[str, MediaRefState] | None = None, out_dir: str, truncated: bool,
           unparsed: int, rejected: int, degraded: tuple[Degradation, ...],
           refs: Mapping[str, str] | None = None,
+          extras: Mapping[str, msgextra.Extra] | None = None,
           generated_at: int | None = None) -> ChatView:
     """把三份**已经在手上**的数据拼成 `ChatView`。不查库、不读文件、不联网。
 
@@ -112,6 +117,8 @@ def build(chat_id: str, *, title: str, rows: Sequence[dict], parts: Mapping[str,
       否则是 `None` —— `None` 让模板退化成「内联显示原文 + 一句『原消息不在本次范围内』」，
       而空串会渲染成一个指向自己的死锚点。原文一直在 `AppMsg.quote.content` 里，
       **渲染从不依赖回指成功**。
+    - `extras`：`msg_key → msgextra.Extra`（EA-041 的旁路表）。缺省空表——**老库与没跑过
+      `extras rebuild` 的机器上它就是空的**，两个模板因此一行都不印（不是印「未知」）。
     - `generated_at`：缺省读一次时钟；测试要确定性时显式传值。
     """
     # 先物化：下面要遍历两遍（先收 in_range 再逐行建 ViewMsg）。上游是 list，这一步不是
@@ -121,6 +128,7 @@ def build(chat_id: str, *, title: str, rows: Sequence[dict], parts: Mapping[str,
     in_range = {row["msg_key"] for row in rows}
     refs = refs or {}
     media = media or {}
+    extras = extras or {}
 
     out: list[ViewMsg] = []
     for row in rows:
@@ -135,6 +143,7 @@ def build(chat_id: str, *, title: str, rows: Sequence[dict], parts: Mapping[str,
             text=row["content"] or "",
             appmsg=parts.get(key),
             media=media.get(key),
+            extra=extras.get(key),
             anchor=anchor_of(key),
             ref_anchor=anchor_of(target) if target in in_range else None,
         ))
