@@ -213,3 +213,33 @@ def test_ensure_home_dirs_raises_project_error_on_symlink_loop(tmp_path, monkeyp
     with pytest.raises(errors.HomeUnavailable) as ei:
         paths.ensure_home_dirs()
     assert "不可用" in str(ei.value)
+
+
+def test_every_home_dir_path_owner_goes_through_the_gate():
+    """EA-003 的收口项（T16 之后补）：**模块级的 `HOME_DIR` 派生常量**——那条路径的 owner
+    ——必须自己调用 `paths.ensure_home_dirs()`。
+
+    判据是「谁拥有这条路径，谁负责过闸」：owner 是唯一知道该往哪写的人。此前 `vector`
+    （`HOME_DIR/models` 的 owner）不调它，只靠 `store.open()` **间接**过关——相对
+    `AGENT_WECHAT_HOME` 那条确实会被拦住，但那是**传递性**保证：换一条不碰索引的入口，
+    `MODEL_CACHE_DIR.mkdir()` 就会把模型落到进程的当前工作目录（EA-003 的原形态）。
+
+    **豁免只有一个**：`paths.py` 自己（闸门的实现与 `HOME_DIR` 的定义处）。零豁免表是刻意的
+    ——名单一旦要维护，「新 owner 忘了登记」就重新变成可能，而这条护栏要防的正是那个。
+
+    **它覆盖不到的面**（写清楚，免得被读成全覆盖）：就地拼 `paths.HOME_DIR / "x"` 而**不**建
+    模块常量的新写者。判据只认「模块级常量」这个形态——它是本仓四种 owner 的**共同**形态，
+    而按行为驱动每个写入口成本高得多（见 `内部审计记录` ⑦）。
+    """
+    import re
+    root = pathlib.Path(paths.__file__).parent
+    owners = {}
+    for f in sorted(root.glob("*.py")):
+        m = re.search(r"^[A-Z_]+ = paths\.HOME_DIR", f.read_text(), re.M)
+        if m:
+            owners[f.name] = f
+    # `paths.py` 不在里面是对的：它**定义** `HOME_DIR`（`pathlib.Path(...)`），不是从它派生。
+    assert set(owners) == {"keys.py", "store.py", "tasks.py", "vector.py"}, \
+        f"owner 名单变了，先核一遍再改这条：{sorted(owners)}"
+    missing = [n for n, f in owners.items() if "ensure_home_dirs()" not in f.read_text()]
+    assert not missing, f"这些 owner 没过闸（它们的产物会落到当前工作目录）：{missing}"

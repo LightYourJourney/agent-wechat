@@ -154,6 +154,11 @@ class FastEmbedEmbedder:
     def _ensure(self):
         if self._model is None:
             from fastembed import TextEmbedding
+            # **本模块是 `HOME_DIR/models` 的 owner，闸门就得在这里**（EA-003 的收口项）：
+            # 此前它只靠 `store.open()` **间接**过关——相对 `AGENT_WECHAT_HOME` 那条确实会被
+            # 拦住，但那是传递性保证：换一条不碰索引的入口（或将来把模型缓存挪到别处）就没了，
+            # 而这里一 `mkdir` 就会把模型落到进程的当前工作目录。
+            paths.ensure_home_dirs()
             MODEL_CACHE_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
             kwargs = dict(model_name=MODEL_NAME, cache_dir=str(MODEL_CACHE_DIR))
             if not self._local_only:
