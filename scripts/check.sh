@@ -7,7 +7,7 @@
 #
 # 五步与 spec §7 的对应：
 #   ① 运行时 import 环（scripts/check_import_cycles.py）
-#   ② vulture 候选数 **≤ 基线**，且**不许出现基线外的新条目**（security/gate-baseline.txt）
+#   ② vulture 候选**集**不超基线（scripts/check_vulture.py；基线 security/gate-baseline.txt）
 #   ③ pytest 全量
 #   ④ security/scan.py --all（占位符/形状扫描）
 #   ⑤ security/scan.py --check-hooks（钩子自检）
@@ -36,26 +36,16 @@ step() {                      # step <名字> <要跑的...>
 step "① import 环" "$PY" scripts/check_import_cycles.py
 
 if [ "${1:-}" != "--fast" ]; then
-  # ② vulture：候选集必须**不比基线多**。基线只许放**存量**条目（spec §7③）——
+  # ② vulture 候选**集**必须不比基线多。基线只许放**存量**条目（spec §7③）——
   #    新增同类即失败，删掉旧的不会失败（那是改善，只在输出里提示一行）。
-  # 基线文件里 `#` 开头的是说明（与 security/allowlist.txt 同款），**不进比较**。
-  # **行号不进比较**（`file:12:` → `file::`）：条目的身份是 (文件, 类别, 符号)，行号只是
-  # 它这一刻坐在哪——拿行号当身份的话，随便在前文加一行注释就会让整份基线失效，
-  # 而那种门禁的下场是被绕过。
-  norm() { sed -E 's/:[0-9]+:/::/' | sort; }
-  BASE=$(grep -v '^#' security/gate-baseline.txt | grep -v '^$' | norm)
-  echo "── ② vulture 候选（基线 $(printf '%s\n' "$BASE" | grep -c . ) 条）"
-  VOUT=$(uvx --offline vulture src/ --min-confidence 60 2>/dev/null | norm)
-  NEW=$(comm -13 <(printf '%s\n' "$BASE") <(printf '%s\n' "$VOUT") | grep -v '^$' || true)
-  GONE=$(comm -23 <(printf '%s\n' "$BASE") <(printf '%s\n' "$VOUT") | grep -v '^$' || true)
-  if [ -n "$NEW" ]; then
-    echo "❌ 新增的 vulture 候选（要么修掉，要么走一次显式的基线更新）：" >&2
-    printf '   %s\n' $NEW >&2
-    FAILED+=("② vulture")
-  else
-    echo "✅ 没有基线外的候选"
-  fi
-  [ -n "$GONE" ] && echo "ℹ️ 基线里这几条已经不存在了（可以从基线删掉）：$(printf '%s ' $GONE)"
+  #
+  #    判据本身在 scripts/check_vulture.py 里（Python，能被 pytest 钉住）。**为什么不在这一段
+  #    shell 里**：2026-10-14 它在这里一天错了两次，两次都只在「工具在场/缺席」变化时才现形
+  #    （先是取不到 vulture 时把空输出当成「没有候选」印了个 ✅，真放行过一次 push；改完又把
+  #    vulture 的 rc=3「找到死代码」当成工具坏了，门禁在工具完全正常时恒红）。两次都不是引号
+  #    或 `comm` 的用法问题，是判据本身没人验——所以按 ① 的规格挪成脚本，退出码 0/1/2
+  #    （1＝有新增候选，2＝**这一步没跑起来**）与全部来龙去脉写在那个文件的 docstring 里。
+  step "② vulture 候选" "$PY" scripts/check_vulture.py
 
   step "③ pytest" "$PY" -m pytest tests/ -q
   step "④ scan --all" "$PY" security/scan.py --all

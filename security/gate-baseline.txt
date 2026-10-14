@@ -3,8 +3,16 @@
 # **只许放存量条目**：门禁比较的是「候选集是否比这里多」，新增同类即失败。
 # 删掉已经修好的行不会失败（那是改善），门禁会在输出里提示一行。
 #
-# 生成命令（`scripts/check.sh` 用它自己的那条，口径必须一致）：
-#   uvx --offline vulture src/ --min-confidence 60 | sort
+# 生成／比较命令（口径必须与 `scripts/check_vulture.py` 里那条逐字一致）：
+#   <当前解释器> -m vulture src/ --min-confidence 60
+# 即 `.venv/bin/python -m vulture src/ --min-confidence 60`。vulture 是 dev 依赖
+# （`pyproject.toml` 的 dev 组）——2026-10-14 之前它走 `uvx --offline`，而那条路会随 uv 缓存
+# 被清掉而**悄悄消失**，当时的 shell 判据把「取不到工具」当成了「没有候选」（详见该脚本
+# docstring 记的两次事故）。
+#
+# **本文件的条目按「(文件, 类别, 符号)」去重后写**：vulture 对同一符号是逐节点报的，实测
+# `src/agent_wechat/media.py` 的 `text_factory` 在 1162 与 1490 两处各报一条。行号不进身份，
+# 重复条目也不进——它们是同一条。
 #
 # 阈值 60 是审计期机械层（M2）用的同一档——换阈值等于换口径，基线要重出。
 src/agent_wechat/appmsg.py:: unused variable 'from_usr' (60% confidence)

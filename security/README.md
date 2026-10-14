@@ -85,7 +85,15 @@ git config core.hooksPath security/hooks
 **门禁的单一入口是 `scripts/check.sh`**（`--fast` 只跑第①步，给 `pre-commit` 用）。
 vulture 那一步比的是**候选集**而不是条数：`security/gate-baseline.txt` 只许放存量条目，
 **新增同类即失败**（条目身份是「文件 + 类别 + 符号」，**行号不进比较**——拿行号当身份的话，
-在前文加一行注释就会让整份基线失效，而那种门禁的下场是被绕过）。
+在前文加一行注释就会让整份基线失效，而那种门禁的下场是被绕过；同一身份在同一文件里
+报两条也只算一条）。
+
+这一步的判据在 `scripts/check_vulture.py`（不是 `check.sh` 里的一段 shell），退出码
+**0 干净 / 1 有新增候选 / 2 这一步没跑起来**——1 与 2 分开是因为要人做的事不同（删代码 vs
+修环境），混成一个码，报告里就分不出那次红是哪一种。2026-10-14 它在这里的 shell 版本一天里
+错了两次（空输出被当成「没有候选」而放过一次 push；改完又把 vulture 的 rc=3「找到死代码」
+当成工具坏了），所以按 ① 的规格挪成**能被 pytest 钉住**的脚本，
+`tests/test_vulture_gate.py` 真跑 vulture 来守它。
 
 **真实失败场景演示（2026-10-14 首建时做的）**：给 `paths.py` 加一行 `from . import purge`
 （`purge` 顶层就 import `paths`）造出运行时环 →
