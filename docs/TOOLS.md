@@ -712,6 +712,14 @@ rebuild 与否）各起一条。（F-D，T7 复验：与 §4 同款的合并语�
                     "invalid_time": 1789600000, "is_red_envelope": false },
       "ref_msg_key": null }
   ],
+  "extras": [
+    { "msg_key": "wxid_abc123def456|9f2c1a0b7d3e|message_0.db|81241",
+      "kind": 48, "kind_name": "位置",
+      "fields": [ ["x", "39.9"], ["y", "116.4"], ["label", "某地"] ] },
+    { "msg_key": "wxid_abc123def456|9f2c1a0b7d3e|message_0.db|81242",
+      "kind": 42, "kind_name": "名片",
+      "fields": [ ["username", "wxid_friend01"], ["nickname", "甲"], ["alias", "a1"] ] }
+  ],
   "unparsed": 0,
   "rejected": 0,
   "dropped_blobs": 0,
@@ -722,6 +730,16 @@ rebuild 与否）各起一条。（F-D，T7 复验：与 §4 同款的合并语�
 **说明**：
 - 每条恒有十个键：`msg_key` / `kind` / `kind_name` / `title` / `fields` / `quote` / `link` /
   `file` / `transfer` / `ref_msg_key`。顺序按入参 `keys`（去重后、保序）。
+- **`extras` 是位置（48）/ 名片（42）的载荷**，与 `parts` **平行的一个键**（不是并进它）：
+  它们的形状不同（没有 `quote`/`link`/`file`/`transfer`），并进去会让每个消费者都要判
+  「这条到底是不是 appmsg」。每条恒有四个键：`msg_key` / `kind` / `kind_name` / `fields`，
+  顺序同样按 `keys`。**字段是白名单过的**：只留阅读用得上的那些（位置的 `x`/`y`/`label`/
+  `poiname`…、名片的 `username`/`nickname`/`alias`…），真机里同族的
+  `antispamticket`（加好友凭据）、`brandHomeUrl` / `brandSubscriptConfigUrl` /
+  `biznamecardinfo`（官方号装修块，最长 2,487 字符）**一律不进信封**——它们是凭据或纯噪声，
+  而 `appmsg` 那套「名字像密钥 / 值像不透明块」的过滤器抓不住它们。
+  **需先运行 `agent-wechat extras rebuild`**；没跑过时这个键是空数组（与「这些消息本来就没有
+  位置/名片」**在信封里分不开**——这一族没有 `msg_parts` 那样的账号级回填状态，故不设降级位）。
 - `kind` 是 appmsg 的数字 `type`；`kind_name` 是中文名（引用 57 / 链接 5 / 文件 6 / 转账 2000 /
   合并转发 19 / 小程序 33 / 视频号 51 / 接龙 53 / 表情 8）。**含义未经确认的类型回落成
   `appmsg:<type>`——不猜**（如 4 / 62 / 87 / 36 / 2001）。

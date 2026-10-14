@@ -1703,3 +1703,60 @@ def test_recent_and_iter_all_pass_emoticon_captions_down(env, tmp_path, monkeypa
     rows = [row for batch, _ in r.iter_all(FRIEND) for row in batch]
     assert [x["content"] for x in rows if x["msg_type"] == 47] == ["[贴纸:滑稽]"] * 3
     assert len(calls) == 1, f"iter_all 该在循环外取一次名字，实际取了 {len(calls)} 次"
+
+
+# ---------- EA-042：增量不重扫「同一 local_id 内容被改写」的行 ----------
+
+def test_rewriting_a_message_in_place_is_not_picked_up_incrementally(tmp_path, monkeypatch):
+    """**characterization 夹具**（EA-042）——它钉的是**现状**，写完全绿是预期，
+    **不是红转绿**（批 B10 的批报告里注明）。
+
+    水位线只按 `max(local_id)` 推进，所以同一条消息的内容被改写（撤回后重发 / 编辑 /
+    对方用同一个 local_id 覆盖）时，**增量导出不会重扫它**；`--full` 会。
+    这是**契约**而不是缺陷：要修得让每轮都做内容比对（改增量语义）或加 `content_hash` 列
+    （条目列出的更大路径，本期按预裁不做）。对策是文档那一句：定时任务用 `--full`。
+
+    **自建一棵树**，不用 module 级的 `wechat` 夹具：这条测试要**改写源库**，而那个夹具是
+    模块级共享的——T12 记过这条（往共享夹具里加一个分片，同模块 4 条用例当场红）。
+    """
+    root = tmp_path / "wxenv"
+    root.mkdir(parents=True)          # `home.mkdir` 不建父目录（夹具那里是 mktemp 先建的）
+    wx = root / "xwechat_files"
+    home = root / "home"
+    home.mkdir(mode=0o700)
+    ds = wx / ACCT / "db_storage"
+    enc_db(ds / "session" / "session.db", {
+        "SessionTable": ("CREATE TABLE SessionTable (username TEXT)", [(FRIEND,)])})
+    enc_db(ds / "contact" / "contact.db", {
+        "name2id": ("CREATE TABLE name2id (username TEXT)", [(FRIEND,)]),
+        "contact": ("CREATE TABLE contact (username TEXT, alias TEXT, remark TEXT, "
+                    "nick_name TEXT, delete_flag INTEGER)",
+                    [(FRIEND, None, "张三", "zc", None)]),
+    })
+    rows_v1 = [(1, 1, 1, T0 + 10, "第一版正文", 0)]
+    build_shard(wx, ACCT, "message_0.db", {FRIEND: rows_v1}, [FRIEND])
+    monkeypatch.setattr(paths, "XWECHAT_FILES", wx)
+    monkeypatch.setattr(paths, "HOME_DIR", home)
+    monkeypatch.setattr(keys, "CACHE_FILE", home / "passphrase.json")
+    monkeypatch.setattr(store, "DB_PATH", home / "index.db")
+    keys.save_cached_hex(SELF, PW.encode().hex())
+    key = f"{ACCT}|{md5(FRIEND)}|message_0.db|1"
+
+    assert export.run_export(ACCT) == 1
+    with store.open() as con:
+        assert con.execute("SELECT content FROM messages WHERE msg_key=?",
+                           (key,)).fetchone()[0] == "第一版正文"
+
+    # 同一个 local_id、改了正文——**这就是撤回/编辑在库里的形态**
+    build_shard(wx, ACCT, "message_0.db", {FRIEND: [(1, 1, 1, T0 + 10, "第二版正文", 0)]},
+                [FRIEND])
+    assert export.run_export(ACCT) == 0, "增量导出没有新行可导（水位线停在那里）"
+    with store.open() as con:
+        assert con.execute("SELECT content FROM messages WHERE msg_key=?",
+                           (key,)).fetchone()[0] == "第一版正文", \
+            "**这就是契约**：增量不修正原地改写（改了它说明契约变了，得同时改文档）"
+
+    export.run_export(ACCT, full=True)
+    with store.open() as con:
+        assert con.execute("SELECT content FROM messages WHERE msg_key=?",
+                           (key,)).fetchone()[0] == "第二版正文", "--full 必须重扫到改写后的正文"

@@ -888,6 +888,13 @@ def chat_export(contact: str, *, months: list[str] | None = None, limit: int = 5
 
 
 @dataclass(frozen=True)
+class ExtraPart:
+    """一条位置/名片的已解析载荷（EA-041）。形状与 `MessagePart` 平行但**不带 `AppMsg`**。"""
+    msg_key: str
+    extra: msgextra.Extra
+
+
+@dataclass(frozen=True)
 class MessagePart:
     """一条消息的 appmsg 内容：`msg_key` + **已解析**的 `AppMsg` + 回指目标。
 
@@ -929,6 +936,12 @@ class MessagePartsResult:
     rejected: int
     dropped_blobs: int
     backfilled: bool
+    #: EA-041：位置（48）/ 名片（42）的结构化载荷，按 `keys` 保序。**与 `parts` 分开一个
+    #: 字段**——它们的形状不同（没有 quote/link/file/transfer），并进 `parts` 会让每个消费者
+    #: 都要判「这个 AppMsg 到底是不是 appmsg」。空表是常态（没跑过 `extras rebuild`）。
+    #: `extras` 这一族**没有 `backfilled` 那样的账号级状态**：表空与「这些消息本来就没有
+    #: 位置/名片」在库里分不开，故不设对应的降级位（与 `chat_export` 那边同一决定）。
+    extras: tuple["ExtraPart", ...] = ()
 
 
 def message_parts(contact: str, *, keys: Sequence[str],
@@ -957,6 +970,8 @@ def message_parts(contact: str, *, keys: Sequence[str],
     try:
         with store.open() as con:
             got = store.msg_parts_by_keys(con, wanted)
+            # EA-041：与 parts 同一趟、同一个 wanted 集合读出原始载荷，解析在库外做。
+            extras_raw = store.extras_by_keys(con, wanted)
             # 「回填过没有」只能由表的状态回答（`count_msg_parts` 不 join messages）：
             # join 出来的条数会把「未回填」与「本来就没有可读内容」混成一种（丙 R23）。
             # 存成**布尔**（不是条数）：入口要的是「回填过没有」这一个判断，条数没人用，
@@ -983,8 +998,14 @@ def message_parts(contact: str, *, keys: Sequence[str],
             unparsed += 1
         elif parsed is not None:
             out.append(MessagePart(key, parsed, row[2]))   # 四元组的第三项是 ref_msg_key
+    # 位置/名片：**按 `wanted` 保序**（与 `parts` 同一个序），解析失败的静默略过
+    # （「解不开」与「没有」在这一族不可分，理由见 `_decode_extra`）。
+    extras = tuple(ExtraPart(key, x) for key in wanted
+                   if (row2 := extras_raw.get(key)) is not None
+                   and (x := _decode_extra(row2[0], row2[1])) is not None)
     return MessagePartsResult(parts=tuple(out), unparsed=unparsed, rejected=rejected,
-                              dropped_blobs=dropped_blobs, backfilled=backfilled)
+                              dropped_blobs=dropped_blobs, backfilled=backfilled,
+                              extras=extras)
 
 
 @dataclass(frozen=True)

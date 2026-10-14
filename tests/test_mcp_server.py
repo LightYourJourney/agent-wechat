@@ -740,7 +740,11 @@ def test_get_message_parts_envelope_shape(monkeypatch):
     res = _call(mcp_server.get_message_parts, contact="张三",
                 keys=",".join(key(i) for i in (2, 3, 4, 5, 6)))
     # 已回填：不带 hint（hint 只在未回填时给）；解不开/被拒/剔块三个计数恒存在（这里都是 0）
-    assert set(res) == {"parts", "unparsed", "rejected", "dropped_blobs", "degraded"}
+    assert set(res) == {"parts", "extras", "unparsed", "rejected", "dropped_blobs",
+                        "degraded"}
+    # EA-041：位置/名片**另起一个键**（形状不同，并进 parts 会让每个消费者都要判
+    # 「这条到底是不是 appmsg」）。这份夹具全是 appmsg，故它是空的。
+    assert res["extras"] == []
     assert (res["unparsed"], res["rejected"], res["dropped_blobs"]) == (0, 0, 0)
     assert [p["msg_key"] for p in res["parts"]] == [key(i) for i in (2, 3, 4, 5, 6)]
     assert [p["kind"] for p in res["parts"]] == [57, 5, 6, 2000, 33]
@@ -929,3 +933,35 @@ def test_get_message_parts_index_unavailable_is_error_envelope(monkeypatch):
     monkeypatch.setattr(store, "open", boom)
     res = _call(mcp_server.get_message_parts, contact="张三", keys="x")
     assert "本地检索库不可用" in res["error"]
+
+
+def test_get_message_parts_carries_location_and_card_payloads(monkeypatch):
+    """EA-041 的信封那一半：48/42 的载荷走 `extras` 键，字段是**白名单过的**
+    （`antispamticket` 那类凭据与无信息量的 brand* 一律不进信封）。
+
+    与产物侧同一份判据（`msgextra._KEEP` + `appmsg.is_secret`）——两处各写一遍的话，
+    「同一个字段一个入口显示一个不显示」迟早发生。
+    """
+    import zlib
+    from agent_wechat import msgextra
+    # 第二段必须是 `messages.chat_md5(chat_id)` 的**派生值**：`message_parts` 只答属于该会话
+    # 的 key（前缀对不上的一律静默略过）——写死一个 `aaa` 会让这条断言永远空。
+    cm = messages.chat_md5("c")
+    key = f"acct|{cm}|message_0.db|1"
+    monkeypatch.setattr(usecases, "ChatContext",
+                        lambda acct=None: _StubCtx(account="acct", chat_id="c"))
+    loc = ('<msg><location x="39.9" y="116.4" scale="1" label="某地" poiname="P"'
+           ' antispamticket="T"/></msg>')
+    card = '<msg username="wxid_friend01" nickname="甲" brandHomeUrl="http://h/"/>'
+    with store.open() as con:
+        store.upsert_extras(con, [(key, 48, zlib.compress(loc.encode(), 6)),
+                                  (f"acct|{cm}|message_0.db|2", 42,
+                                   zlib.compress(card.encode(), 6))])
+    res = _call(mcp_server.get_message_parts, contact="c",
+                keys=key + f",acct|{cm}|message_0.db|2")
+    assert [e["kind_name"] for e in res["extras"]] == ["位置", "名片"]
+    first = dict(res["extras"][0]["fields"])
+    assert first["x"] == "39.9" and first["label"] == "某地"
+    assert "antispamticket" not in first
+    assert set(dict(res["extras"][1]["fields"])) == {"username", "nickname"}
+    assert msgextra.kind_name(48) == "位置"      # 与产物侧同一处措辞

@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 from mcp.server.mcpserver import MCPServer
 
-from . import appmsg, errors, usecases
+from . import appmsg, errors, msgextra, usecases
 
 if TYPE_CHECKING:
     # 仅类型检查期：reader 已由 usecases 间接载入，这里只为让注解可解析
@@ -461,6 +461,13 @@ def get_message_parts(contact: str, keys: str, account: str | None = None) -> di
                                 if p.appmsg.transfer else None),
                    "ref_msg_key": p.ref_msg_key}
                   for p in res.parts],
+        # EA-041：位置 / 名片的载荷**另起一个键**，与 parts 平行。形状不同（没有
+        # quote/link/file/transfer 那四个具名块），并进 parts 会让每个消费者都要判
+        # 「这条到底是不是 appmsg」。字段与文件那几个一样是白名单过的（凭据不进信封）。
+        "extras": [{"msg_key": e.msg_key, "kind": e.extra.kind,
+                    "kind_name": msgextra.kind_name(e.extra.kind),
+                    "fields": [[name, value] for name, value in e.extra.fields]}
+                   for e in res.extras],
         "unparsed": res.unparsed, "rejected": res.rejected,
         "dropped_blobs": res.dropped_blobs, "degraded": []}
     if not res.backfilled:
