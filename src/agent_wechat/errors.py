@@ -119,18 +119,21 @@ class SchemaDrift(AgentWeChatError):
     """
 
     def __init__(self, capability: str, db: str, table: str,
-                 missing_columns: tuple[str, ...] = ()):
+                 missing_columns: tuple[str, ...] = (), *,
+                 detail: str | None = None, hint: str | None = None):
+        """`detail` / `hint` 可覆盖（EA-105）：有一种形态**不是结构漂移**——库文件损坏
+        （`file is not a database`）。复用本类型可以（降级策略相同），但默认文案会说
+        「表不存在 / 微信升级」并把用户指向 `inspect`，对损坏的库是**错诊断**。"""
         self.capability = capability
         self.db = db
         self.table = table
         self.missing_columns = missing_columns
-        if missing_columns:
-            detail = f"缺少列 {', '.join(missing_columns)}"
-        else:
-            detail = "表不存在"
+        if detail is None:
+            detail = (f"缺少列 {', '.join(missing_columns)}" if missing_columns
+                      else "表不存在")
         super().__init__(
             f"微信库结构与预期不符（{capability}）：{db} 的 {table} {detail}",
-            hint="微信升级可能改变了库结构；可用 `agent-wechat inspect` 对比结构")
+            hint=hint or "微信升级可能改变了库结构；可用 `agent-wechat inspect` 对比结构")
 
 
 class TaskNotFound(AgentWeChatError):

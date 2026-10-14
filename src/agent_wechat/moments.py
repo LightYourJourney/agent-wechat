@@ -370,7 +370,10 @@ def iter_posts(account: str, *, chat_filter: str | None = None,
                 # ——EA-105：按 `sqlite3.Error` 宽口径收口，别让裸 sqlite3 异常穿透到适配层
                 # （CLI 印 traceback、MCP 退化成通用内部错误）。「core 只抛 AgentWeChatError
                 # 子类」这条契约在此收口（spec §5 的原话就是 SchemaDrift）。
-                raise errors.SchemaDrift("朋友圈", str(db), "SnsTimeLine") from exc
+                raise errors.SchemaDrift(
+                    "朋友圈", str(db), "SnsTimeLine",
+                    detail="读不出来（不是 SQLite 库，或文件已损坏）",
+                    hint="该库可能损坏：从备份恢复，或确认它是否是有效的 sns.db") from exc
             out = []
             for tid, content in rows:
                 p = parse_post(str(tid), _dec(content))

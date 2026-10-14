@@ -3,17 +3,21 @@
 与 `chat_html.render` **逐一对应**：同一份 `ChatView`、同样的媒体相对路径契约、
 同样的四个状态、同样的三个计数印在顶部，只是输出语法不同。不写文件、不联网、不查库。
 
-**Markdown 的四处固有损失**（如实记在 `USAGE.md`，**不假装与 HTML 等价**）：
+**Markdown 的三处固有损失**（如实记在 `USAGE.md`，**不假装与 HTML 等价**）：
 1. **语音 / 视频没有原生语法** —— 图片才有 `![]()`，音视频只能给链接（`[语音](…)`）；
 2. **引用没有可点锚点** —— HTML 侧是 `<a href="#…">`，这里降级成 blockquote，
    位置信息丢失（**原文照常出现**，spec §2.6：渲染从不依赖回指成功）；
-3. **字段表比 HTML 朴素** —— 平铺成 `- 路径：值` 列表，没有表格的列对齐；
-4. **Markdown 语法不转义** —— 正文 / 昵称 / 字段值里的行首标记与 `![]()` / `[]()`
-   会被渲染器当结构解析（`_t` 只做 HTML 实体替换，不做 Markdown 硬转义）。
+3. **字段表比 HTML 朴素** —— 平铺成 `- 路径：值` 列表，没有表格的列对齐。
+（原先还有第 4 条「Markdown 语法不转义」——**已在 EA-037/EA-034 收口**，见下。）
 
-**注入**：正文**不转义**（`&lt;` 之类会毁掉可读性），但 `<` / `>` 一律换成 HTML 实体
-（`_t`）。Markdown 渲染器允许内联 HTML，原文里的 `<script>` 一旦原样透出就是一条注入
-——消息内容是对手可控的，任何人能给你发一条。
+**注入（EA-037，2026-10-14 收口）**：**用户内容**（正文 / 昵称 / 转账字段 / appmsg 的
+标题、描述、引用正文、文件名、字段表 / 会话标题）一律走 `_esc_md` **硬转义**——行内结构
+字符（`` ` `` `*` `_` `[` `]` `(` `)` `!` `|` `~`）在任何位置转义；`#` `>` `-` `+` `*` `=`
+与 `1.` **只在行首**；行首 4 空格 / 制表符（缩进代码块）也转义。分档的理由：一律转义会把
+`¥100.00` 弄成「`¥100` + 反斜杠 + `00`」（渲染无差异、源却脏）。**我们的措辞**（计数 / 时间 / 状态说明）
+仍走 `_t`（只换 `<` / `>` 实体）——它们由程序生成，转义只会让产物难读。
+appmsg 的链接另过 `chat_text.url_is_safe`（与 HTML、朋友圈同一处判据）：不安全降级成
+可见纯文本。此前一条 `![](http://evil/x.png)` 的消息会变成**远程图片引用**，现在不是了。
 
 **相对路径的契约（与 HTML 侧逐字一致）**：`view.out_dir` 是**本会话的媒体树根**
 `{--out}/{chat_md5}`，产物写在它的 `chat/` 子目录里，于是默认 `media_prefix=".."`
@@ -51,7 +55,7 @@ def _t(v: str | None) -> str:
 # **不含 `.` `-` `+` `#` `>`**：它们只在**行首**才有结构义，一律转义会把 `¥100.00` 弄成
 # `¥100\.00`（渲染无差异、源却脏了）——行首那一档在 `_esc_md` 里单独处理。
 _MD_INLINE = "\\`*_[]()!|~"
-_MD_LINE_START = "#>+-*"
+_MD_LINE_START = "#>+-*="          # `=` 是 setext 标题（`标题\n===`）——复审实测的漏挡面
 
 
 _OL_START = re.compile(r"\d+\.")          # 行首的 `1.` / `12.`（有序列表）
@@ -74,10 +78,15 @@ def _esc_md(v: str | None) -> str:
     out = []
     for line in _t(v).split("\n"):
         ol = _OL_START.match(line)          # 在原行上取位置（`1` 与 `.` 都不在行内集合，转义后不位移）
+        # 缩进代码块（行首 4 空格 / 制表符）：转义**行首那一格**即可——渲染仍是空格/制表符，
+        # 但不再是代码块（复审实测：不处理时正文能把自己变成 `<pre><code>`）。
+        indented = line.startswith("    ") or line.startswith("\t")
         line = "".join(("\\" + ch) if ch in _MD_INLINE else ch for ch in line)
         # **行首那一档必须在行内转义之后**：`\` 自身在 `_MD_INLINE` 里（要转义字面反斜杠），
         # 先加行首反斜杠的话，它会被行内那一轮再转义一次 → `\\#`（两个反斜杠）。实测踩过。
-        if line[:1] and line[0] in _MD_LINE_START:
+        if indented:
+            line = "\\" + line
+        elif line[:1] and line[0] in _MD_LINE_START:
             line = "\\" + line
         elif ol:
             line = line[:ol.end() - 1] + "\\." + line[ol.end():]
@@ -120,13 +129,13 @@ def _appmsg_lines(a: AppMsg, ref_anchor: str | None) -> list[str]:
     """appmsg 的结构化呈现（具名块优先，其余叶子进列表）。"""
     head = _t(appmsg.kind_name(a.kind))
     if a.title:
-        head += "：" + _t(a.title)
+        head += "：" + _esc_md(a.title)
     out = [f"**{head}**"]
     if a.quote is not None:
         # displayname 为空是 0.81% 的常态：补一个**显式的**「未署名」，不猜名字，
         # 也不留空 —— 留空的行看起来像渲染坏了。
-        who = _t(a.quote.displayname) or "（未署名）"
-        out.append(f"> **{who}**：{_t(a.quote.content)}")
+        who = _esc_md(a.quote.displayname) or "（未署名）"
+        out.append(f"> **{who}**：{_esc_md(a.quote.content)}")
         if not ref_anchor:
             # **不用 `> ` 前缀**：这条是「没有跳转目标」的元说明，不是被引用的内容。
             # 若它也写成 blockquote，用例里的 `"> " in out` 就会被这一行满足，
@@ -135,19 +144,24 @@ def _appmsg_lines(a: AppMsg, ref_anchor: str | None) -> list[str]:
     if a.link is not None:
         url, title = a.link.url, a.link.title or a.link.url
         if url:
-            out.append(f"[{_t(title)}]({_t(url)})")
+            # EA-034（复审）：MD 侧此前**没有** URL 守卫——`[title](javascript:…)` 与
+            # HTML 侧同一类输入，一个被拦一个可点。判据与 HTML/朋友圈共用。
+            if chat_text.url_is_safe(url):
+                out.append(f"[{_esc_md(title)}]({_t(url)})")
+            else:
+                out.append(f"[链接：{_esc_md(url)}]")
         if a.link.des:
-            out.append(_t(a.link.des))
+            out.append(_esc_md(a.link.des))
     if a.file is not None:
         bits = [b for b in (a.file.title, a.file.fileext) if b]
         if a.file.totallen:
             bits.append(f"{a.file.totallen} 字节")
         if bits:
-            out.append("文件名：" + _t(" · ".join(bits)))
+            out.append("文件名：" + _esc_md(" · ".join(bits)))
     if a.transfer is not None:
         out.append(_transfer_line(a.transfer))
     for k, v in a.fields:
-        out.append(f"- {_t(k)}：{_t(v)}")
+        out.append(f"- {_esc_md(k)}：{_esc_md(v)}")
     return out
 
 
@@ -192,7 +206,7 @@ def _notice_lines(view: ChatView) -> list[str]:
 
 def render(view: ChatView, media_prefix: str = "..") -> str:
     """`ChatView` → Markdown 文档字符串。纯函数、零 IO、确定性（不读时钟）。"""
-    lines = [f"# 会话：{_t(view.title or view.chat_id)}", ""]
+    lines = [f"# 会话：{_esc_md(view.title or view.chat_id)}", ""]
     lines += _notice_lines(view)
     lines.append("")
     if not view.msgs:

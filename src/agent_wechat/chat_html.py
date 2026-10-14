@@ -35,7 +35,6 @@ import html
 from typing import TYPE_CHECKING
 
 from . import appmsg, chat_text
-from . import chat_text
 
 if TYPE_CHECKING:
     from .appmsg import AppMsg

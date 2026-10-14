@@ -265,9 +265,9 @@ def test_host_that_whatwg_resolves_as_ipv4_is_not_rendered_as_link(host):
     浏览器实际去 **169.254.169.254**。这正是 spec §7.4 那条守卫自己的设计理由所禁止的
     ——「两套 URL 语义不一致…它本身就是骗人的」。
 
-    两处判据各自 load-bearing，**分别删都会红**（变异实测）：
-      · 删 `_whatwg_ipv4(host)` → 前 11 条红；
-      · 删 `"%" in host` → 最后一条（`2852039166%2e`）红——只查数字会被它绕过。
+    判据已搬到 `chat_text.url_is_safe` 那一族（EA-034 让两个模板共用一处）——在这里删任何东西都不会红；
+    仍 load-bearing 的一半：删 `chat_text.url_is_safe` 里的 `"%" in host` → 最后一条红（副本实测）。
+
 
     二进制 `0b101` 不在判据内：node 的 `new URL("https://0b101/x").hostname` 就是
     `0b101`，WHATWG 不认它（已实测，故不必为它降级）。

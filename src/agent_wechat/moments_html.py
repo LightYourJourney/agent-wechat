@@ -54,23 +54,6 @@ def _media_block(m: moments.SnsMedia) -> str:
 # WHATWG 把「末段是数字」的 host 当 IPv4 试解析（纯十进制、`0x…` 十六进制、前导零按
 # 八进制）；Python 的 `urlsplit` 只管切字符串。于是 `https://2852039166/promo` 徽章上
 # 写着 `2852039166`，浏览器实际去 **169.254.169.254**（云 metadata / link-local）。
-_NUMERIC_LABEL = re.compile(r"^(?:[0-9]+|0[xX][0-9a-fA-F]*)\Z")
-
-
-def _whatwg_ipv4(host: str) -> bool:
-    """这个 host 会被 WHATWG 当 IPv4 解析吗（而徽章会把它原样显示出来）。
-
-    判据是 WHATWG「ends in a number」那一步的**超集**：末段是纯数字或 `0x`/`0X`
-    开头的十六进制即为真——前导零的八进制（`017700000001` → 127.0.0.1）也是纯数字，
-    裸 IPv4（`192.168.1.1`）同样命中；真机上外链都是域名，一并降级不损失什么。
-    先去掉末尾的点：`192.168.1.1.` 是绝对域名形式，浏览器照样落到 192.168.1.1。
-    二进制 `0b101` 不在判据内——实测 node 的 `new URL("https://0b101/x").hostname`
-    就是 `0b101`，WHATWG 不认它。
-    """
-    label = host.rstrip(".").rsplit(".", 1)[-1]
-    return bool(_NUMERIC_LABEL.match(label))
-
-
 def _link_block(link: moments.SnsLink) -> str:
     """外链块——本模块唯一有真实安全面的渲染。
 

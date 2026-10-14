@@ -15,10 +15,11 @@ from agent_wechat import account, errors, moments, sns_media, usecases
 # real：真机冒烟的统一入口标记，`-m real` 只跑真实数据路径的用例。
 pytestmark = [pytest.mark.slow, pytest.mark.real]
 
-# `sqlite3.Error` 与项目异常同级：sns.db 损坏/半写时 `iter_posts` 抛的是裸
-# `sqlite3.DatabaseError`（`parse_post` 只 catch `ET.ParseError`）。本机数据不可用
-# 一律 skip 而不是 fail——与 `test_media_real.py` 的语音探针同一个口径。
-_UNAVAILABLE = (errors.AgentWeChatError, sqlite3.Error)
+# 本机数据不可用一律 skip 而不是 fail——与 `test_media_real.py` 的语音探针同一个口径。
+# **`sqlite3.Error` 不再列入**（EA-105，2026-10-14 复审）：`iter_posts` 已把
+# `sqlite3.Error` 收口成 `errors.SchemaDrift`，所以它不再从这里逃出来；留在集合里会让
+# 「真机的 sns.db 损坏」被 skip 而不是 fail——那正是这类漂移唯一该被看见的时候。
+_UNAVAILABLE = (errors.AgentWeChatError,)
 
 
 def test_real_sns_parses_posts():

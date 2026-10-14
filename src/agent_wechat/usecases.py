@@ -996,7 +996,10 @@ def chat_index(out_dir: str | None = None, account: str | None = None) -> ChatIn
     # 排序让页面顺序不依赖文件系统。
     found: dict[str, set[str]] = {}
     for p in out_root.glob("*/chat/index.*"):
-        found.setdefault(p.parent.parent.name, set()).add(p.name)
+        # 白名单：只认**真的两种产物名**（复审 #3）——`index.txt` / `index.md.bak` 这类
+        # 外部文件会让条目带一条**必死链**，而 `has_md` 存在的全部意义就是「不印死链」。
+        if p.name in ("index.html", "index.md"):
+            found.setdefault(p.parent.parent.name, set()).add(p.name)
     if not found:
         return ChatIndexResult(out_dir=str(out_root), file=None, chats=0)
     ctx = ChatContext(account)
