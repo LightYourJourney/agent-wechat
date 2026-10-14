@@ -951,7 +951,7 @@ def test_broken_allowlist_is_fail_closed_on_every_entry(scan, tmp_path, monkeypa
 HOOKS_SRC = Path(__file__).resolve().parent.parent / "security" / "hooks"
 
 
-def test_hook_sources_are_tracked_with_the_exec_bit():
+def test_hook_sources_are_tracked_with_the_exec_bit(scan):
     """钩子源要入库、要带执行位（100755）——那是「装了但没 +x」在**安装路径上**丢不了的前提
     （本地 `chmod -x` 仍能让 git 跳过钩子，`--check-hooks` 会报出来；seed A1 的收窄口径）。
 
@@ -960,8 +960,11 @@ def test_hook_sources_are_tracked_with_the_exec_bit():
     out = subprocess.run(["git", "ls-files", "-s", "security/hooks"],
                          cwd=ROOT, capture_output=True, text=True, check=True).stdout
     modes = {line.split()[3]: line.split()[0] for line in out.splitlines()}
-    assert set(modes) == {"security/hooks/pre-commit", "security/hooks/commit-msg"}, \
-        "两份钩子源都要入库：%r" % modes
+    # **名单从 `scan_module.HOOK_NAMES` 来**，不手抄：手抄的话，往名单里加第三枚钩子
+    # （2026-10-14 加的 `pre-push`）时这条会红在一个与内容无关的集合比较上——而它红得对
+    # （新钩子确实必须入库、必须带执行位），只是不该靠手抄才发现。
+    want = {"security/hooks/" + n for n in scan.HOOK_NAMES}
+    assert set(modes) == want, "钩子源都要入库：%r" % modes
     assert set(modes.values()) == {"100755"}, "执行位必须随提交入库：%r" % modes
 
 
