@@ -18,10 +18,17 @@ PY=${PY:-.venv/bin/python}
 [ -x "$PY" ] || PY=python3
 FAILED=()
 
+# 每一步的完整输出**同时**落进一个日志文件：失败时只印一行「哪一步」在事后是查不出原因的
+# ——2026-10-14 就吃过一次（③ pytest 红了一次、复跑又绿，而那次的细节已经被截断的终端吃掉）。
+# 日志用 mktemp，失败时把路径印出来。
+LOG=$(mktemp -t awgate.XXXXXX)
+
 step() {                      # step <名字> <要跑的...>
   local name=$1; shift
   echo "── $name"
-  if ! "$@"; then FAILED+=("$name"); fi
+  if ! "$@" 2>&1 | tee -a "$LOG"; then FAILED+=("$name"); fi
+  # `pipefail` 未开时管道的退出码取最后一段（tee）——显式取第一个命令的状态
+  [ "${PIPESTATUS[0]:-0}" != "0" ] && [ "${FAILED[-1]:-}" != "$name" ] && FAILED+=("$name")
 }
 
 step "① import 环" "$PY" scripts/check_import_cycles.py
@@ -56,7 +63,9 @@ fi
 if [ ${#FAILED[@]} -gt 0 ]; then
   echo
   echo "❌ 门禁未通过：${FAILED[*]}" >&2
+  echo "   完整输出（含那一步的原始报错）：$LOG" >&2
   exit 1
 fi
+rm -f "$LOG"
 echo
 echo "✅ 门禁通过"
