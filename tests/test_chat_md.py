@@ -1,4 +1,6 @@
 # tests/test_chat_md.py
+import pytest
+
 from agent_wechat import appmsg, chat_md, chatview
 
 
@@ -285,3 +287,177 @@ def test_user_content_is_hard_escaped_against_markdown_injection():
     assert "![](" not in out and "](javascript" not in out
     # 反向守卫：**我们的**措辞不转义（时间与标签由程序生成，转义只会让产物难读）
     assert "1970-01-01" in out
+
+
+# ---------- 修轮 2：目的地、块级结构与「每个用户内容点各有一条能红的用例」 ----------
+
+_ATK = "![](http://evil.example/x.png)"
+
+
+def _render_appmsg(a: appmsg.AppMsg) -> str:
+    """一条 appmsg 走**真路径**（`chatview.build` → `chat_md.render`）后的产物。"""
+    return chat_md.render(chatview.build(
+        "c", title="t", rows=[{"msg_key": "k1", "ts": 1, "msg_type": 49, "content": "",
+                               "sender_name": "我", "is_self": True}],
+        parts={"k1": a}, media={}, out_dir="/tmp",
+        truncated=False, unparsed=0, rejected=0, degraded=()))
+
+
+def _empty(kind: int, **kw) -> appmsg.AppMsg:
+    base = dict(kind=kind, title=None, fields=(), quote=None, link=None, file=None,
+                transfer=None)
+    base.update(kw)
+    return appmsg.AppMsg(**base)
+
+
+def _line_with(out: str, needle: str) -> str:
+    return next(ln for ln in out.split("\n") if needle in ln)
+
+
+@pytest.mark.parametrize("point, a", [
+    pytest.param("appmsg 标题",
+                 _empty(appmsg.KIND_LINK, title=_ATK,
+                        link=appmsg.Link(url="https://ok.example/", title="t", des=None)),
+                 id="title"),
+    pytest.param("字段表的键与值",
+                 _empty(appmsg.KIND_LINK, fields=(("a.b", _ATK),),
+                        link=appmsg.Link(url="https://ok.example/", title="t", des=None)),
+                 id="fields"),
+    pytest.param("引用自带的原文",
+                 _empty(appmsg.KIND_QUOTE, title="引用",
+                        quote=appmsg.Quote(svrid=1, displayname="张*三", content=_ATK,
+                                           create_time=1, from_usr=None)),
+                 id="quote-content"),
+    pytest.param("链接的标题",
+                 _empty(appmsg.KIND_LINK,
+                        link=appmsg.Link(url="https://ok.example/", title=_ATK, des=None)),
+                 id="link-title"),
+    pytest.param("链接的描述",
+                 _empty(appmsg.KIND_LINK,
+                        link=appmsg.Link(url="https://ok.example/", title="t", des=_ATK)),
+                 id="link-des"),
+    pytest.param("文件的名字",
+                 _empty(appmsg.KIND_FILE, title="文件",
+                        file=appmsg.FileRef(title=_ATK, fileext="pdf", totallen=2048,
+                                            md5=None)),
+                 id="file-title"),
+    pytest.param("转账的备注",
+                 _empty(appmsg.KIND_TRANSFER, title="转账",
+                        transfer=appmsg.Transfer(
+                            paysubtype="3", amount_desc="¥100.00", memo=_ATK, payer=None,
+                            receiver="wxid_testacct02", transaction_id="TXN1",
+                            transfer_id="TR1", begin_time=None, effective_date=None,
+                            invalid_time=None, is_red_envelope=False)),
+                 id="transfer-memo"),
+])
+def test_every_user_content_point_in_an_appmsg_is_hard_escaped(point, a):
+    """修轮 2（复验 ⑥-3）：修轮给 7 个用户内容点补了 `_esc_md`，而**一处覆盖都没有**——
+    复验在副本里逐个把它们换回 `_t`，全量 1184 条**一个都不红**。
+
+    这条按点参数化，每一条都能为「它自己那一处」的变异变红（写完之后逐点验过）。
+    `_ATK` 是能造出**远程图片引用**的最小载荷：打开导出就会去打那个 URL。
+    """
+    out = _render_appmsg(a)
+    assert _ATK not in out, f"{point}里的载荷原样落进了产物"
+    assert r"\!\[" in out, f"{point}没有被转义"
+
+
+def test_the_page_title_is_hard_escaped():
+    """页面标题（`# 会话：{view.title}`）修轮前完全没转义：会话名里的 `[]()` 能把整页
+    标题撕开（这一处比 appmsg 子字段更近——`--chat` 一跑就渲染）。
+
+    行首那个 `#` 是**我们的**结构（不转义），被转义的是标题**内容**。
+    """
+    out = chat_md.render(_view(title="张三 " + _ATK))
+    assert _ATK not in out
+    assert "# 会话：张三 \\!\\[" in out
+
+
+def test_md_side_url_guard_refuses_a_javascript_link():
+    """复验 ⑥-3 的 M2：把 MD 侧的 `url_is_safe` 守卫整个拿掉，1184 条**全绿**。
+
+    与 HTML 侧同一类输入（`test_chat_html` 有一条镜像用例）：那边一直拦着，MD 侧在
+    EA-034 之前 `[点我](javascript:…)` 是**可点**的。
+    """
+    out = _render_appmsg(_empty(appmsg.KIND_LINK, title="限时活动",
+                                link=appmsg.Link(url="javascript:alert(1)", title="点我",
+                                                 des=None)))
+    assert "](javascript" not in out, "javascript: 成了可点链接"
+    assert "链接：" in out, "不安全的 URL 要**显示**出来（用户看得见去哪），只是不可点"
+
+    ok = _render_appmsg(_empty(appmsg.KIND_LINK, title="正常",
+                               link=appmsg.Link(url="https://example.com/docs?a=1",
+                                                title="示例", des=None)))
+    assert "[示例](https://example.com/docs?a=1)" in ok, "正常链接被一并拒了"
+
+
+@pytest.mark.parametrize("sep, name", [
+    ("\n", "换行"), ("\r", "回车"), ("\t", "制表符"), (" ", "空格"), (")", "右括号"),
+])
+def test_a_url_that_cannot_be_written_as_a_destination_is_never_made_a_link(sep, name):
+    """修轮 2（复验 ①-A1）：目的地用 `_t`（只换 `<>`）拼出来，而 `url_is_safe` 看不见
+    `urlsplit` **静默删掉**的控制字符——于是这几种形态在产物里**真的**造出 `<img>`：
+
+        [点我](https://ok.example/promo<换行>![](http://evil.example/x.png))
+
+    pandoc 的 gfm 与 commonmark 两个 reader 实测都会渲染出
+    `<img src="http://evil.example/x.png" />`（`)" 与空格那两种是目的地被提前终止）。
+    载具是真的：appmsg 的 `<url>` 字段经 `appmsg.parse` 原样带出（凭据过滤不拦它）。
+
+    判据放在 **MD 侧**而不是 `url_is_safe`：`()` 在 URL 里是**合法且常见**的
+    （`…/wiki/Foo_(bar)`），把它们加进共用判据会让 HTML 侧也拒绝正常的维基链接。
+    这里问的是另一件事——「这个串能不能原样写进 `](…)` 而不改变它在哪结束」。
+    """
+    bad = f"https://ok.example/promo{sep}![]({_ATK[4:]})"
+    out = _render_appmsg(_empty(appmsg.KIND_LINK, title="限时活动",
+                                link=appmsg.Link(url=bad, title="点我", des=None)))
+    assert "](" not in out, f"{name}把用户内容漏出了链接目的地"
+    assert _ATK not in out, f"{name}形态下载荷进了正文"
+    assert "ok.example/promo" in out, "退成纯文本后 URL 本身仍要看得见"
+
+
+def test_a_safe_url_still_becomes_a_clickable_link():
+    """反向守卫：判据别做成一刀切（正常链接、带查询串与锚点的都要照常）。"""
+    for url in ("https://example.com/docs?a=1&b=2", "https://example.com/a#frag",
+                "https://example.com/a-b_c~d"):
+        out = _render_appmsg(_empty(appmsg.KIND_LINK, title="正常",
+                                    link=appmsg.Link(url=url, title="示例", des=None)))
+        assert f"[示例]({url})" in out, f"{url} 不该被拒"
+
+
+@pytest.mark.parametrize("payload, needle", [
+    pytest.param("   # 假标题", "假标题", id="1-3 空格 + ATX 标题"),
+    pytest.param("   - 假列表", "假列表", id="1-3 空格 + 无序列表"),
+    pytest.param("  1. 假有序", "假有序", id="1-3 空格 + 有序列表"),
+    pytest.param("标题行\n ===", "===", id="1 空格 + setext 下划线"),
+    pytest.param("标题行\n   ---", "---", id="3 空格 + 分隔线"),
+    pytest.param("    code", "code", id="4 空格 = 缩进代码块"),
+    pytest.param(" \t制表符", "制表符", id="空格 + 制表符（制表位凑满 4 列）"),
+    pytest.param("abc\r# 回车后", "回车后", id="裸 CR 也是行结束（CommonMark 规范）"),
+])
+def test_block_structure_cannot_be_created_from_a_line_start(payload, needle):
+    """修轮 2（复验 ①-A2）：行首那一档只认**第 0 列**，而 CommonMark 允许块级标记前有
+    **最多 3 个空格**（ATX 标题 / 列表 / setext 下划线 / 分隔线全都如此），制表符还要按
+    4 列制表位算——复验实测 `"   # 假标题"`、`"标题\\n ==="`、`" \\t# x"` 三种都真的成了结构。
+
+    判据：载荷那一行的**行首 5 个字符内**必须出现转义反斜杠。缩进最多 3 列，所以转义要么
+    落在第 0 列（缩进代码块那种「在行首打断缩进」的写法），要么落在标记的第一个字符之前。
+    """
+    out = chat_md.render(_view(rows=[
+        {"msg_key": "k1", "ts": 1, "msg_type": 1, "content": payload,
+         "sender_name": "我", "is_self": True}]))
+    line = _line_with(out, needle)
+    assert "\\" in line[:5], f"行首没有被转义：{line!r}"
+
+
+def test_crlf_and_cr_are_treated_as_line_endings():
+    """`\\r\\n` / 裸 `\\r` 与 `\\n` 同义（CommonMark 把它们都列为行结束）。
+
+    只按 `\\n` 切行时，`abc\\r# 假标题` 是**一行**，行首是 `abc` → 什么都不转义，
+    而按规范切行的渲染器会看到一个真的 ATX 标题。
+    """
+    out = chat_md.render(_view(rows=[
+        {"msg_key": "k1", "ts": 1, "msg_type": 1, "content": "abc\r\n# 假标题\r\nxyz",
+         "sender_name": "我", "is_self": True}]))
+    assert "\r" not in out, "产物里还留着 CR（渲染器按规范切行时它仍是行结束）"
+    assert _line_with(out, "假标题").startswith("\\#")

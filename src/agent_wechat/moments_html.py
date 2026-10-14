@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import datetime
 import html
-import re
 from typing import Iterable
 
 from . import chat_text, moments
@@ -67,7 +66,8 @@ def _link_block(link: moments.SnsLink) -> str:
     而 WHATWG 先按 `\\` 切一刀——`https://evil.com\\@mp.weixin.qq.com/x` 的 `hostname`
     是干干净净的 `mp.weixin.qq.com`，徽章显示它，浏览器却落到 `evil.com`。
 
-    同一族里还有第三类：**WHATWG 会当 IPv4 解析的 host**（`_whatwg_ipv4`）与
+    同一族里还有第三类：**WHATWG 会当 IPv4 解析的 host**（判据在
+    `chat_text.whatwg_ipv4`——本模块那份副本已随 EA-034 的收口删掉）与
     **含 `%` 的 host**。`urlsplit` 不解百分号编码，WHATWG 解——
     `https://2852039166%2e/promo` 的 `hostname` 是 `2852039166%2e`（看着不像地址），
     浏览器解码成 `2852039166.` 后照样落到 169.254.169.254。**只加数字判据挡不住它**，

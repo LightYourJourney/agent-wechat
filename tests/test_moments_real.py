@@ -5,8 +5,6 @@
 已并入 `SECURITY.md` §1 的例外条目——EA-046；默认 deselect，`-m real` 显式启用），
 不写回微信目录，产物不落盘。
 """
-import sqlite3
-
 import pytest
 
 from agent_wechat import account, errors, moments, sns_media, usecases

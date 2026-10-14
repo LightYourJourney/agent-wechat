@@ -92,7 +92,10 @@ def test_a_javascript_link_in_an_appmsg_is_not_rendered_as_a_link():
                                "sender_name": "我", "is_self": True}],
         parts={"k2": link}, media={}, out_dir="/tmp",
         truncated=False, unparsed=0, rejected=0, degraded=()))
-    assert "javascript:" not in out.split("href=")[0] or 'href="javascript' not in out, out
+    # 此前这里还有一句析取：`"javascript:" not in out.split("href=")[0] or 'href="javascript'
+    # not in out`——**第一个析取项对两种状态都恒真**（没成链接时 `split("href=")[0]` 就是全文、
+    # 而全文里那个 `javascript:` 是我们**故意印出来**的），照这个形状写会给人「多了一重守卫」
+    # 的错觉（复审 T12 的 #9 第三条）。真正判别的是下面两条。
     assert "<a href=\"javascript" not in out, "javascript: 成了可点链接"
     assert "链接：" in out, "不安全的 URL 要**显示**出来（用户看得见去哪），只是不可点"
 

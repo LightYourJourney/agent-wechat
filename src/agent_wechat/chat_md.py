@@ -16,8 +16,12 @@
 与 `1.` **只在行首**；行首 4 空格 / 制表符（缩进代码块）也转义。分档的理由：一律转义会把
 `¥100.00` 弄成「`¥100` + 反斜杠 + `00`」（渲染无差异、源却脏）。**我们的措辞**（计数 / 时间 / 状态说明）
 仍走 `_t`（只换 `<` / `>` 实体）——它们由程序生成，转义只会让产物难读。
-appmsg 的链接另过 `chat_text.url_is_safe`（与 HTML、朋友圈同一处判据）：不安全降级成
-可见纯文本。此前一条 `![](http://evil/x.png)` 的消息会变成**远程图片引用**，现在不是了。
+「行首」按 CommonMark 的算法算（最多 3 空格 / 凑不满 4 列的制表符之后仍算行首），行结束只认
+`\n` `\r` `\r\n` 并统一成 `\n`——两条都是复审实测出来的漏面，细节在 `_esc_md` 的 docstring。
+appmsg 的链接过**两道**判据：`chat_text.url_is_safe`（与 HTML、朋友圈同一处，问 scheme/host
+会不会骗人）与 `_md_dest_ok`（本模块独有，问这个串能不能原样写进 `](…)`）；任一道不过就
+降级成可见纯文本。此前一条 `![](http://evil/x.png)` 的消息会变成**远程图片引用**，现在不是了
+——换行 / 空格 / `)` 这几种形态是修轮 2 才堵上的（见 `_md_dest_ok`）。
 
 **相对路径的契约（与 HTML 侧逐字一致）**：`view.out_dir` 是**本会话的媒体树根**
 `{--out}/{chat_md5}`，产物写在它的 `chat/` 子目录里，于是默认 `media_prefix=".."`
@@ -60,6 +64,51 @@ _MD_LINE_START = "#>+-*="          # `=` 是 setext 标题（`标题\n===`）—
 
 _OL_START = re.compile(r"\d+\.")          # 行首的 `1.` / `12.`（有序列表）
 
+# CommonMark 的行结束：`\n` / `\r` / `\r\n`（**只有这三种**——`str.splitlines()` 还会按
+# `\v` `\f` `\x1c` ` ` 切，那是 Python 的口径，不是规范的口径，会把一行内容劈成两行）。
+_LINE_BREAK = re.compile(r"\r\n|\r|\n")
+
+# Markdown 的**链接目的地**（`](…)`）在源码层面装不下的字符：ASCII 控制字符（空白与行结束
+# 都在其中，`\v` `\f` 也是空白）、DEL、以及 `(` `)` `<` `>`——前两者改变嵌套层级、后两者
+# 改变定界。见 `_md_dest_ok`。
+_MD_DEST_UNSAFE = frozenset(map(chr, range(0x20))) | frozenset("\x7f()<>")
+
+
+def _md_dest_ok(url: str) -> bool:
+    """这个 URL 能**原样**写进 `](…)` 吗——问的不是「它是不是一个安全的 URL」。
+
+    安全与否是 `chat_text.url_is_safe` 的事（与 HTML 侧共用）；这里问的是「把它原样拼进
+    目的地之后，**目的地在哪结束**还由我们说了算吗」。两者会分叉，实测三条：
+      · `urlsplit` 会**静默删掉** `\\t` `\\r` `\\n` 再解析（CPython 的
+        `_UNSAFE_URL_BYTES_TO_REMOVE`），于是 `url_is_safe` 压根看不见它们，而产物里落的是
+        **带真换行**的字符串——`[点我](https://ok.example/promo<换行>![](http://evil/x))`，
+        pandoc 的 gfm 与 commonmark **都**渲染出 `<img src="http://evil/x" />`（实测）；
+      · `)` 直接终止目的地、空格亦然，其后的 `![](...)` 就落回正文（同上，两种 reader 都实测出图）；
+      · 载具是真的：appmsg 的 `<url>` 值经 `appmsg.parse` 原样带出（凭据过滤不拦它）。
+
+    **判据不进 `chat_text.url_is_safe`**：那边问的是 scheme/host 会不会骗人，而 `()` 在 URL 里
+    合法且常见（`…/wiki/Foo_(bar)`），加进共用判据会让 HTML 侧也拒掉正常的维基链接。
+    这里只决定「要不要把它做成**可点**链接」：判否就退成纯文本 `[链接：…]`——URL 仍看得见，
+    只是不可点，与 HTML 侧不安全的那些同一个处置。
+    """
+    return not any(ch in _MD_DEST_UNSAFE for ch in url)
+
+
+def _indent_width(line: str) -> int:
+    """行首缩进的**列数**：制表符按 4 列制表位推进（CommonMark 的算法）。
+
+    数「几个空格」会漏掉 `" \\t"` 这种混排——它凑满 4 列、在 gfm 下就是 `<pre><code>`（复验实测）。
+    """
+    col = 0
+    for ch in line:
+        if ch == " ":
+            col += 1
+        elif ch == "\t":
+            col += 4 - col % 4
+        else:
+            break
+    return col
+
 
 def _esc_md(v: str | None) -> str:
     """**用户内容**的 Markdown 硬转义（EA-037）：正文 / 昵称 / 转账字段里的 Markdown
@@ -73,23 +122,31 @@ def _esc_md(v: str | None) -> str:
      `<`/`>` 沿用实体转义（`_t`）——两者都成立，实体更保险（HTML 侧也安全）。
 
     分两档：**行内**字符（`` ` `` `*` `_` `[` `]` `(` `)` `!` `|` `~`）在任何位置都转义；
-    **行首**字符（`#` `>` `-` `+` `*`）只在行首转义，外加 `1.` 形态的有序列表。
+    **块级**标记（`#` `>` `-` `+` `*` `=` 与 `1.`）只在**行首**转义——但「行首」按 CommonMark
+    的算法算：**最多 3 个空格**（或凑不满 4 列的制表符）之后仍算行首（复验实测
+    `"   # 假标题"` 与 `"标题\\n ==="` 都真的成了结构）；缩进**满 4 列**则是缩进代码块，
+    在行首插一个 `\\` 把缩进打断（渲染会多出一个可见的 `\\`，这是挡住 `<pre><code>` 的代价）。
+
+    行结束按规范只认 `\\n` / `\\r` / `\\r\\n`，并且**统一成 `\\n`**：只按 `\\n` 切行时
+    `"abc\\r# 假标题"` 是一行、行首是 `abc`，而按规范切行的渲染器会看到一个真的 ATX 标题。
     """
     out = []
-    for line in _t(v).split("\n"):
-        ol = _OL_START.match(line)          # 在原行上取位置（`1` 与 `.` 都不在行内集合，转义后不位移）
-        # 缩进代码块（行首 4 空格 / 制表符）：转义**行首那一格**即可——渲染仍是空格/制表符，
-        # 但不再是代码块（复审实测：不处理时正文能把自己变成 `<pre><code>`）。
-        indented = line.startswith("    ") or line.startswith("\t")
+    for line in _LINE_BREAK.split(_t(v)):
+        lead = len(line) - len(line.lstrip(" \t"))     # 缩进=空白前缀（`_indent_width` 再折算列数）
+        ol = _OL_START.match(line[lead:])              # `1` 与 `.` 都不在行内集合，转义不位移
+        indented = _indent_width(line) >= 4
         line = "".join(("\\" + ch) if ch in _MD_INLINE else ch for ch in line)
-        # **行首那一档必须在行内转义之后**：`\` 自身在 `_MD_INLINE` 里（要转义字面反斜杠），
-        # 先加行首反斜杠的话，它会被行内那一轮再转义一次 → `\\#`（两个反斜杠）。实测踩过。
+        body = line[lead:]                             # 行内转义只插在缩进之后，前缀仍是原样
+        # **块级那一档必须在行内转义之后、且判据落在转义后的行上**：`*` 既在行内集合、又在
+        # 块级集合里，行内那一轮已经把它转义成 `\*`，此时 `body[0]` 是 `\`、不再命中块级集合
+        # ——判据若落在原行上就会再插一个反斜杠，得到 `\\*`（两个）。`\` 自身在 `_MD_INLINE`
+        # 里，这个顺序反过来也会踩到，实测踩过两次。
         if indented:
             line = "\\" + line
-        elif line[:1] and line[0] in _MD_LINE_START:
-            line = "\\" + line
+        elif body[:1] and body[0] in _MD_LINE_START:
+            line = line[:lead] + "\\" + body            # 转义插在标记**之前**，缩进留着
         elif ol:
-            line = line[:ol.end() - 1] + "\\." + line[ol.end():]
+            line = line[:lead] + body[:ol.end() - 1] + "\\." + body[ol.end():]
         out.append(line)
     return "\n".join(out)
 
@@ -146,8 +203,12 @@ def _appmsg_lines(a: AppMsg, ref_anchor: str | None) -> list[str]:
         if url:
             # EA-034（复审）：MD 侧此前**没有** URL 守卫——`[title](javascript:…)` 与
             # HTML 侧同一类输入，一个被拦一个可点。判据与 HTML/朋友圈共用。
-            if chat_text.url_is_safe(url):
-                out.append(f"[{_esc_md(title)}]({_t(url)})")
+            # 修轮 2：再加一道**目的地**判据（`_md_dest_ok`）——两个读者问的不是同一件事，
+            # 复验实测换行/空格/`)` 三种都能从目的地里逃出去变成真的 `<img>`。
+            # 目的地原样写 `url`（不加 `_t`）：`_md_dest_ok` 已排除 `<`/`>`，`_t` 在这是空操作，
+            # 而它会把 URL 里合法的 `&` 之外的实体写法搅乱——不写更诚实。
+            if chat_text.url_is_safe(url) and _md_dest_ok(url):
+                out.append(f"[{_esc_md(title)}]({url})")
             else:
                 out.append(f"[链接：{_esc_md(url)}]")
         if a.link.des:
