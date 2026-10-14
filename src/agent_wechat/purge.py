@@ -366,7 +366,8 @@ def _escapes_home(link: pathlib.Path, home: pathlib.Path) -> bool:
       · **文件型**具名范围走 unlink → 只删链接，**目标必留存** → 无条件拒绝（见 execute 的 links）；
       · **目录型**具名范围（`tmp/`）的 item 路径与子树、以及 `--all` 的**整树扫描**走 rmtree →
         目标也在树内时会一并删除，不存在 false-clean，故这几条走本函数判定。
-        （`--all` 的 **item 路径**不在此列：文件型的 item 在 execute 里被无条件拒绝，够不到本函数。）
+        （`--all` 的 **item 路径**同样走本函数——EA-100 改判之后，文件型 item 在 `--all` 下
+        不再被无条件拒绝：`--all` 的删除面是整棵树，树内目标会被 rmtree 一并删掉。）
     只有目标逃出树外时才真的对应 spec §5.1 第 2 步那句「其实还在外置盘上」。
 
     为什么不能一律拒绝：vector.py 用 huggingface_hub 下载模型，其 blob/snapshot 布局会在
@@ -530,8 +531,12 @@ def execute(plan: PurgePlan) -> PurgeReport:
             hint="请先修正权限（父目录需要读 + 进入权限），再重试") from exc
     links = list(dict.fromkeys(links))     # 同一路径可能既在 items 又在树扫描里，去重
     if links:
+        # **总数放最前**（与 `execute_chat` 那条同形）：`errors.redact` 会把超过 300
+        # 字符的消息从尾部剪掉——一对绝对路径就 ~150 字符起，全部列出来必被剪，
+        # 用户连「有几处」都看不到（复审实测 8 个硬链接即被剪，链接那条同理）。
         raise errors.PurgeRefused(
-            "待删路径是符号链接，拒绝删除：" + "、".join(str(p) for p in links),
+            f"待删路径是符号链接，共 {len(links)} 处，拒绝删除：{links[0]}"
+            + (f"（另有 {len(links) - 1} 处）" if len(links) > 1 else ""),
             hint="删链接不会删目标，会造成「已清干净」的假象；请手工处理")
     hard = list(dict.fromkeys(hard))
     if hard:
@@ -545,8 +550,9 @@ def execute(plan: PurgePlan) -> PurgeReport:
         # APFS 的写时复制克隆（`cp -c`）连 `nlink` 都不变，属同一类里**不可检测**的形态，
         # 已在 SECURITY.md 的「删不干净」清单里申报。
         raise errors.PurgeRefused(
-            f"待删路径存在硬链接（同一个 inode 还有别的名字），拒绝删除："
-            f"{'、'.join(str(p) for p in hard)}",
+            f"待删路径存在硬链接，共 {len(hard)} 处（同一个 inode 还有别的名字），"
+            f"拒绝删除：{hard[0]}"
+            + (f"（另有 {len(hard) - 1} 处）" if len(hard) > 1 else ""),
             hint="删名字不会删字节，会造成「已清干净」的假象；"
                  "请先处理那些链接（`ls -li` 看 inode 相同的就是）再重试")
 
@@ -909,6 +915,25 @@ def _escaping_links(plan: ChatPlan, home: pathlib.Path) -> list[pathlib.Path]:
     return out
 
 
+def _hardlinked_entries(plan: ChatPlan) -> list[pathlib.Path]:
+    """导出树里**还有第二个名字**的条目（硬链接）——`execute_chat` 的闸门之一（EA-030）。
+
+    `rmtree` 删的是目录项：同 inode 的另一个名字不受影响，而报告（`export_removed=True`）
+    与核查（`export_still_there=False`）都会说「清干净了」。判据、取舍与产物轴同源
+    （`_has_another_name`：只判文件，目录的 `st_nlink` 天生 > 1）。
+
+    **导出树那一侧不设「树内目标」那样的例外**：硬链接没有「目标」——两个名字是平的，
+    谁也说不准另一个是不是也在删除面里（`--chat` 的删除面只有 `media/<md5>/`，而另一个
+    名字按定义在树外才构成问题；在树内的情形见 `--all` 那条的取舍说明）。
+    """
+    out: list[pathlib.Path] = []
+    for d in dict.fromkeys(e.export_dir for e in plan.entries):
+        if d.is_symlink():
+            continue              # 根是链接时 `os.walk` 会跟随它，列出来的是目标的内部条目
+        out += [p for p in _tree_entries(d) if _has_another_name(p)]
+    return out
+
+
 def _link_target(link: pathlib.Path) -> str:
     """链接指向哪里——**只用于错误消息**。读不出来就照实说，不猜。"""
     try:
@@ -951,6 +976,18 @@ def execute_chat(plan: ChatPlan) -> tuple[ChatReport, ...]:
             f"{links[0]} → {_link_target(links[0])}"
             + (f"（另有 {len(links) - 1} 处，同在该目录树内）" if len(links) > 1 else ""),
             hint="删链接不会删目标，会造成「已清干净」的假象；请手工处理这些链接后重试")
+    hard = _hardlinked_entries(plan)
+    if hard:
+        # EA-030 的会话轴那一半（复审 T13 的条件②）：`rmtree` 删的是目录项，同 inode 的
+        # 另一个名字不受影响——而本命令的报告（`export_removed=True`）与核查
+        # （`export_still_there=False`）都会说「清干净了」。判据与产物轴同源。
+        # 总数同样放最前（理由见上面那段的注释）。
+        raise errors.PurgeRefused(
+            f"导出目录里有 {len(hard)} 处硬链接（同一个 inode 还有别的名字），拒绝删除："
+            f"{hard[0]}"
+            + (f"（另有 {len(hard) - 1} 处）" if len(hard) > 1 else ""),
+            hint="删名字不会删字节，会造成「已清干净」的假象；请先处理那些链接"
+                 "（`ls -li` 看 inode 相同的就是）再重试")
     out = []
     # fail-closed（spec §4.2）：读不出排除清单就没法建立不可逆性，这一次删除就只是「暂时看不见」。
     # 宁可什么都不做，也不做一个看起来成功的假删除。

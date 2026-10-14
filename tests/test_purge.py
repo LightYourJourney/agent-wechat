@@ -1635,8 +1635,11 @@ def test_verify_reports_snapshots_from_tmutil(monkeypatch, tmp_path):
     """EA-032：`snapshots` 字段**零测试断言**（全仓只有 `tm_excluded` 的两条降级断言）。
     将来 `listlocalsnapshots` 的参数或解析被改动，测试侧完全无声。
 
-    这条钉住「有快照时字段里真的有那几个名字」；渲染侧的判定句见
-    `tests/test_cli.py::test_render_residue_flags_included_and_snapshots`。
+    这条钉住的是**取数那条链路**：调用参数是 `tmutil listlocalsnapshots /`，且 stdout 原样
+    进字段。**它不管「数得对不对」**——数数在渲染层的 `_snapshots_line` 里，由
+    `tests/test_cli.py::test_render_residue_flags_an_included_home_and_local_snapshots`
+    与 `::test_render_residue_keeps_the_undecidable_wording` 守住（复审 T13 指出这句
+    docstring 原先自称的口径比断言宽，如实改窄）。
     """
     calls = []
 
@@ -1653,3 +1656,65 @@ def test_verify_reports_snapshots_from_tmutil(monkeypatch, tmp_path):
     rep = purge.verify(purge.plan(frozenset({"keys"})))
     assert rep.snapshots.count("com.apple.TimeMachine") == 2
     assert ["tmutil", "listlocalsnapshots", "/"] in calls
+
+
+def test_execute_chat_refuses_a_hardlinked_export(tmp_path):
+    """EA-030 的**会话轴**那一半（复审 T13 的条件②）：`execute_chat` 只 rmtree
+    `media/<md5>/`、`_escaping_links` 只看符号链接、`verify_chat` 只看目录名还在不在——
+    **没有任何 nlink 判据**，于是 EA-030 那个假象在会话轴上原样成立：报告说
+    `export_removed=True`、核查说不在、而明文在另一个名字下原样可读，退 0。
+
+    本批把同一族判据补在产物轴上之后这个不对称才可见，故一并挂上（判据、消息形状与
+    产物轴同源）。反向仍是硬要求：树内**没有**第二名字的导出物照常删得掉（下一条）。
+    """
+    home = tmp_path / "home"; home.mkdir(parents=True)
+    with store.open() as con:
+        store.upsert_batch(con, [_victim_row(1)])
+    d = home / "media" / VICTIM_MD5
+    (d / "chat").mkdir(parents=True)
+    (d / "chat" / "index.html").write_text("明文导出物")
+    outside = tmp_path / "keep.html"
+    os.link(d / "chat" / "index.html", outside)      # 同 inode 的第二个名字，在树外
+    plan = purge.plan_chat([{"account": "a", "chat_id": VICTIM, "chat_md5": VICTIM_MD5}])
+    with pytest.raises(errors.PurgeRefused) as ei:
+        purge.execute_chat(plan)
+    assert "硬链接" in str(ei.value)
+    assert outside.read_text() == "明文导出物", "拒绝之后一个字节都不该少"
+    assert (d / "chat" / "index.html").exists()
+
+
+def test_execute_chat_deletes_an_export_without_second_names(tmp_path):
+    """复审条件②的反向守卫：正常的导出物（每个名字 nlink==1）**不得**被新闸门拒——否则
+    会话销毁在全量用户上直接不可用。"""
+    home = tmp_path / "home"; home.mkdir(parents=True)
+    with store.open() as con:
+        store.upsert_batch(con, [_victim_row(1)])
+    d = home / "media" / VICTIM_MD5
+    (d / "chat").mkdir(parents=True)
+    (d / "chat" / "index.html").write_text("导出物")
+    plan = purge.plan_chat([{"account": "a", "chat_id": VICTIM, "chat_md5": VICTIM_MD5}])
+    report = purge.execute_chat(plan)
+    assert report[0].export_removed is True
+    assert not os.path.lexists(d)
+
+
+def test_the_refusal_message_survives_redaction_when_there_are_many_entries(tmp_path,
+                                                                          monkeypatch):
+    """复审 T13 的条件③：拒绝消息必须**带总数、只点第一处**——`errors.redact` 会把超过 300
+    字符的消息从尾部剪掉（`execute_chat` 的逃逸链接那条早就为同一个原因这么写了，注释里
+    记着实测）。修轮前实测：8 个硬链接就把「有几处」剪没了，用户只看到头两条路径。
+
+    判据走**与 CLI 同一条通道**（`errors.render`，它内部就是 `redact(str(exc))`），断的是
+    用户真正看到的那句话里还有没有总数。
+    """
+    outside = tmp_path / "keep.bin"
+    outside.write_bytes(b"P" * 64)
+    home = tmp_path / "home"; home.mkdir()
+    for i in range(8):
+        os.link(outside, home / f"f{i}.bin")
+    monkeypatch.setattr(paths, "HOME_DIR", home)
+    with pytest.raises(errors.PurgeRefused) as ei:
+        purge.execute(purge.plan(frozenset(), all_=True))
+    shown = errors.to_text(ei.value)
+    assert "共 8 处" in shown, f"总数被 redact 剪掉了：{shown!r}"
+    assert outside.read_bytes() == b"P" * 64
