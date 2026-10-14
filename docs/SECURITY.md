@@ -243,9 +243,15 @@ Time Machine 的排除是绑在 **inode** 上的扩展属性，文件一旦被�
 | 4 | `/tmp` | 一次性清理，不改配置。系统重启也会清 |
 | 5 | MCP 信封 → LLM | **无机制，且已不可撤回**（见 §1） |
 
-**自动层的触发边界**（EA-066）：两条钩子只由 `git commit` 触发（`merge` 会触发
-`commit-msg`）；`cherry-pick` / `revert` / `rebase` **两枚都不触发**。经这些路径进来的内容
-不在自动层的覆盖里——`git log` 里出现了没被 `--staged` 看过的行，不是矛盾，是这条边界。
+**自动层的触发边界**（EA-066）：`pre-commit` / `commit-msg` 只由 `git commit` 触发（`merge`
+会触发 `commit-msg`）；`cherry-pick` / `revert` / `rebase` **两枚都不触发**。经这些路径进来的
+内容不在自动层的覆盖里——`git log` 里出现了没被 `--staged` 看过的行，不是矛盾，是这条边界。
+
+**`pre-push` 那一枚覆盖到 push**（2026-10-14 加，spec §7）：它跑 `scripts/check.sh` 的全量
+五步（运行时 import 环 / vulture 候选集不超基线 / `pytest` / `scan --all` / 钩子自检）。
+**它同样不是「内容出门的最后一道」**：`git push --no-verify` 会跳过它，而本仓的红线是
+「不公开推送」——那条靠人守（`--no-verify` 在本仓**禁止使用**，见 CONTRIBUTING）。它挡的是
+**质量退化**（环、新死代码、红测试、新形状命中），不是恶意绕过。
 
 **自动层的覆盖边界**：`security/scan.py` 认四种**形状**——`wxid_*`、`*@chatroom`、
 手机号、本机路径（`/Users/<第一段>`；2026-10-12 补，守的是 CONTRIBUTING §4 那条

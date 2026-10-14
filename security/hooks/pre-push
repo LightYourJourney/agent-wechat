@@ -1,0 +1,9 @@
+#!/bin/sh
+# 全量门禁（spec §7 的五步合一）：`scripts/check.sh`。实测 ~70 s，绝大部分是 pytest。
+#
+# 为什么在这里而不是 pre-commit：五步里 pytest 全量要 40 s+，逐次提交都付会让「钩子碍事」
+# 变成绕过的理由；而 push 是内容离开本机的动作（本仓的红线是**不外流**），值得那 70 s。
+# 参数（remote 名与 URL）刻意不用：本仓没有「只推某些远端才检查」的形态，一律跑。
+set -u
+root=$(git rev-parse --show-toplevel) || exit 1
+exec "$root/scripts/check.sh"

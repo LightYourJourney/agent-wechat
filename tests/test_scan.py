@@ -997,10 +997,15 @@ def _fake_git(scan, monkeypatch, *, config, common=".git", diff_rc=0, untracked=
 
 def _lay_out_hooks(scan, tmp_path, monkeypatch, *, config, copies=False,
                    copy_from_src=True, exec_bit=True, diff_rc=0, drop=None, untracked=""):
-    """造一套 tmp 结构：仓库侧 security/hooks/ 两份 + 共享 hooks 目录（可选放副本）。"""
+    """造一套 tmp 结构：仓库侧 security/hooks/ 各份 + 共享 hooks 目录（可选放副本）。
+
+    **遍历 `scan.HOOK_NAMES` 而不是手抄那份名单**：手抄的话，往名单里加第三个钩子
+    （2026-10-14 加的 `pre-push`）时这里照样只造两份，四条用例一起红在一片与它无关的
+    断言上——名单的单一来源在 `scan` 里，夹具跟着它走。
+    """
     src = tmp_path / "security" / "hooks"
     src.mkdir(parents=True)
-    for name in ("pre-commit", "commit-msg"):
+    for name in scan.HOOK_NAMES:
         p = src / name
         p.write_text("# hook " + name + "\n", encoding="utf-8")
         p.chmod(0o755 if exec_bit else 0o644)
@@ -1008,7 +1013,7 @@ def _lay_out_hooks(scan, tmp_path, monkeypatch, *, config, copies=False,
         (src / drop).unlink()
     common = tmp_path / ".git" / "hooks"
     common.mkdir(parents=True)
-    for name in ("pre-commit", "commit-msg"):
+    for name in scan.HOOK_NAMES:
         if copies:
             body = (src / name).read_bytes() if copy_from_src else b"# foreign hook\n"
             (common / name).write_bytes(body)

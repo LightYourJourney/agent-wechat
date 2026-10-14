@@ -1,9 +1,16 @@
 #!/bin/sh
-# 标识外流拦截：扫暂存区新增行。装法与理由见 security/README.md。
+# ① 快速结构检查（spec §7①）：运行时 import 环 + `import mcp` 泄漏（实测 ~0.07 s）。
+# ② 标识外流拦截：扫暂存区新增行。
+# 全量门禁不在这里——它在 pre-push（`scripts/check.sh`，五步 ~70 s）。理由见 security/README.md。
 set -u
 root=$(git rev-parse --show-toplevel) || exit 1
-for py in "$root/.venv/bin/python3" /usr/bin/python3; do
-    [ -x "$py" ] && exec "$py" "$root/security/scan.py" --staged
+py=""
+for c in "$root/.venv/bin/python3" /usr/bin/python3; do
+    [ -x "$c" ] && py=$c && break
 done
-echo "scan: 找不到可用的 Python 解释器（试过 .venv/bin/python3 与 /usr/bin/python3）" >&2
-exit 2
+if [ -z "$py" ]; then
+    echo "钩子:找不到可用的 Python 解释器（试过 .venv/bin/python3 与 /usr/bin/python3）" >&2
+    exit 2
+fi
+"$py" "$root/scripts/check_import_cycles.py" || exit 1
+exec "$py" "$root/security/scan.py" --staged

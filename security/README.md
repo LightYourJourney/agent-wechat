@@ -67,10 +67,32 @@ git config core.hooksPath security/hooks
   这条路上不会出现；但**本地** `chmod -x` 仍会让 git 跳过它，自检会报出来（见下节「本地改动」态）；
 - 相对路径按**各工作树自己的顶层**解析，且 `core.hooksPath` 是仓级配置 ⇒ **worktree 自动继承**。
 
-**装完自检**：`uv run python security/scan.py --check-hooks`（五态见下节）。
-**迁完把旧副本删掉**：`.git/hooks/{pre-commit,commit-msg}`（它们已被旁路，留着会让人改它却发现没用）。
-**回退**（回到旧机制）：`git config --unset core.hooksPath`，再把 `security/hooks/` 两份拷回
+**装完自检**：`uv run python security/scan.py --check-hooks`（五态见下节）。名单是
+`scan.HOOK_NAMES`（三枚：`pre-commit` / `commit-msg` / `pre-push`）——**三枚都要有执行位**，
+`hooksPath` 指到目录上时 git 只跑可执行的那些，丢一位就是静默停用。
+**迁完把旧副本删掉**：`.git/hooks/{pre-commit,commit-msg,pre-push}`（它们已被旁路，留着会让人改它却发现没用）。
+**回退**（回到旧机制）：`git config --unset core.hooksPath`，再把 `security/hooks/` 三份拷回
 `.git/hooks/`（记得带执行位）；回退后自检会报「旧机制」，可自证。
+
+## 三枚钩子各管什么（spec §7）
+
+| 钩子 | 跑什么 | 实测耗时 | 为什么在这一枚 |
+|---|---|---|---|
+| `pre-commit` | ① `scripts/check_import_cycles.py`（运行时 import 环 + `import mcp` 泄漏）② `security/scan.py --staged` | ① 0.07 s ② 视改动量 | 逐次提交都付得起的**快速结构检查**；标识外流拦截一直在这儿 |
+| `commit-msg` | `security/scan.py` 的提交信息模式 | 毫秒 | 只进提交信息的同串（EA-009 那族） |
+| `pre-push` | `scripts/check.sh`（**全量五步**：import 环 / vulture 基线 / pytest / `scan --all` / 钩子自检） | **~70 s**（绝大部分是 pytest 的 40 s+） | push 是内容离开本机的动作（本仓红线是**不外流**），值得那 70 s；放进 pre-commit 会让「钩子碍事」变成绕过的理由 |
+
+**门禁的单一入口是 `scripts/check.sh`**（`--fast` 只跑第①步，给 `pre-commit` 用）。
+vulture 那一步比的是**候选集**而不是条数：`security/gate-baseline.txt` 只许放存量条目，
+**新增同类即失败**（条目身份是「文件 + 类别 + 符号」，**行号不进比较**——拿行号当身份的话，
+在前文加一行注释就会让整份基线失效，而那种门禁的下场是被绕过）。
+
+**真实失败场景演示（2026-10-14 首建时做的）**：给 `paths.py` 加一行 `from . import purge`
+（`purge` 顶层就 import `paths`）造出运行时环 →
+`git -c core.hooksPath=security/hooks commit` **rc=1**（打印 `account → bootstrap → … → paths
+→ purge → store → … → account` 的完整环，并逐模块列出回边）；`security/hooks/pre-push`
+**rc=1**（① import 环、③ pytest 同时红——真环会让导入本身就崩）；删掉那一行、md5 与原件
+对拍一致后两枚钩子都恢复绿灯，且**没有多出提交**。
 
 ⚠️ **`.git/hooks/` 被整体旁路**：以后往那儿放任何钩子都**不会跑**，别往那儿放东西。
 

@@ -1,0 +1,38 @@
+# vulture 候选基线（spec §7②③）。
+#
+# **只许放存量条目**：门禁比较的是「候选集是否比这里多」，新增同类即失败。
+# 删掉已经修好的行不会失败（那是改善），门禁会在输出里提示一行。
+#
+# 生成命令（`scripts/check.sh` 用它自己的那条，口径必须一致）：
+#   uvx --offline vulture src/ --min-confidence 60 | sort
+#
+# 阈值 60 是审计期机械层（M2）用的同一档——换阈值等于换口径，基线要重出。
+src/agent_wechat/appmsg.py:: unused variable 'from_usr' (60% confidence)
+src/agent_wechat/cli.py:: unused attribute 'text_factory' (60% confidence)
+src/agent_wechat/keys.py:: unused function 'get_passphrase_hex' (60% confidence)
+src/agent_wechat/mcp_server.py:: unused function 'export_chat_media' (60% confidence)
+src/agent_wechat/mcp_server.py:: unused function 'export_chat' (60% confidence)
+src/agent_wechat/mcp_server.py:: unused function 'export_full_history' (60% confidence)
+src/agent_wechat/mcp_server.py:: unused function 'export_moments' (60% confidence)
+src/agent_wechat/mcp_server.py:: unused function 'get_account_status' (60% confidence)
+src/agent_wechat/mcp_server.py:: unused function 'get_message_media' (60% confidence)
+src/agent_wechat/mcp_server.py:: unused function 'get_message_parts' (60% confidence)
+src/agent_wechat/mcp_server.py:: unused function 'get_recent_messages' (60% confidence)
+src/agent_wechat/mcp_server.py:: unused function 'get_task_status' (60% confidence)
+src/agent_wechat/mcp_server.py:: unused function 'list_contacts' (60% confidence)
+src/agent_wechat/media.py:: unused attribute 'text_factory' (60% confidence)
+src/agent_wechat/media.py:: unused attribute 'text_factory' (60% confidence)
+src/agent_wechat/messages.py:: unused function 'is_sticker_display' (60% confidence)
+src/agent_wechat/messages.py:: unused function 'sticker_name_of' (60% confidence)
+src/agent_wechat/moments.py:: unused attribute 'text_factory' (60% confidence)
+src/agent_wechat/moments.py:: unused variable 'duration' (60% confidence)
+src/agent_wechat/moments.py:: unused variable 'enc_idx' (60% confidence)
+src/agent_wechat/moments.py:: unused variable 'is_rich' (60% confidence)
+src/agent_wechat/moments.py:: unused variable 'is_video_post' (60% confidence)
+src/agent_wechat/moments.py:: unused variable 'live_key' (60% confidence)
+src/agent_wechat/moments.py:: unused variable 'post_id' (60% confidence)
+src/agent_wechat/paths.py:: unused function 'key_info_dat' (60% confidence)
+src/agent_wechat/paths.py:: unused function 'key_info_db' (60% confidence)
+src/agent_wechat/reader.py:: unused attribute 'text_factory' (60% confidence)
+src/agent_wechat/store.py:: unused attribute 'row_factory' (60% confidence)
+src/agent_wechat/store.py:: unused function 'get_watermark' (60% confidence)

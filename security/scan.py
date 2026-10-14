@@ -112,7 +112,9 @@ def path_exempt(rel: str, shape: str) -> bool:
 
 
 HOOKS_PATH_VALUE = "security/hooks"
-HOOK_NAMES = ("pre-commit", "commit-msg")
+# 三个都必须**存在且有执行位**：`hooksPath` 指到目录上时，git 只跑可执行的那些，
+# 执行位一丢就是**静默停用**（这条自检存在的全部理由）。
+HOOK_NAMES = ("pre-commit", "commit-msg", "pre-push")
 
 
 def _hooks_src() -> Path:
