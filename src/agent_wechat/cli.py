@@ -587,8 +587,13 @@ def cmd_purge(args: argparse.Namespace) -> int:
                 print("排除清单已随之删除（条数读不出来）——被删内容下次导出会回来。")
         elif ex_count is not None:
             print(f"排除清单保留：{ex_count} 条（exclusions.db），重建索引后仍生效。")
-    _render_residue(purge.verify(plan))
-    return 1 if report.failed else 0
+    # EA-029：退出码**读核查**，与会话轴（`_cmd_purge_chat` 的
+    # `1 if report.failed or res.not_removed else 0`）同一条规则。此前只读 `report.failed`，
+    # 于是「报告说删了 0 项、核查印 ❌、退出码 0」可以在同一份输出里并存——脚本只看退出码
+    # 就会把一次什么都没删的销毁读成完成（spec §6 那张表要求「部分失败 → 1」）。
+    res = purge.verify(plan)
+    _render_residue(res)
+    return 1 if (report.failed or res.not_removed) else 0
 
 
 def _render_plan(plan: purge.PurgePlan, ex_count: int | None,
@@ -635,6 +640,39 @@ def _render_plan(plan: purge.PurgePlan, ex_count: int | None,
     print("\n未删除任何文件。加 --yes 执行。")
 
 
+def _tm_excluded_line(raw: str) -> str:
+    """`tmutil isexcluded` 的原文 → **判定句**（EA-032）。
+
+    这两格是残留核查里**唯一**直指「外置面 / 可恢复面」的字段，而 `[Included]` 与
+    `[Excluded]` 对用户是同一类中性词——前者的意思是「删除前的明文可能还在备份里」。
+    判定成文在这里（渲染层），`ResidueReport` 的字段语义不动。
+
+    **认不出的形态一律原样印**：`_tmutil` 的「无法判定（…）」与「无输出」说的是「判不出来」，
+    与「没有」正相反（见 `_tmutil` 的 docstring），不许被判定句吞掉。
+    """
+    if "[Included]" in raw:
+        return f"⚠️ 数据目录在 Time Machine 范围内——删除前的明文可能还在备份里（{raw}）"
+    if "[Excluded]" in raw:
+        return f"已排除（{raw}）"
+    return raw
+
+
+def _snapshots_line(raw: str) -> str:
+    """`tmutil listlocalsnapshots` 的原文 → **判定句**（EA-032）。
+
+    **没有快照时它也会印一行表头**（`Snapshots for disk /:`），所以「非空」不是判据——
+    要数的是 `com.apple.TimeMachine.*.local` 那几行。
+    """
+    snaps = [ln.strip() for ln in raw.splitlines()
+             if ln.strip().startswith("com.apple.TimeMachine")]
+    if snaps:
+        return (f"⚠️ 存在 {len(snaps)} 个本地快照——它们可能含删除前的数据，"
+                f"销毁不是不可逆")
+    if raw.startswith("无法判定") or raw.startswith("无输出"):
+        return raw
+    return f"无（{raw.strip()}）" if raw.strip() else "无"
+
+
 def _render_residue(rep: purge.ResidueReport) -> None:
     print("\n残留核查：")
     for p in rep.not_removed:
@@ -646,8 +684,8 @@ def _render_residue(rep: purge.ResidueReport) -> None:
               f"（空间要等该进程退出才释放）")
     for x in rep.tmp_leaks:
         print(f"  ⚠️ $TMPDIR 遗留：{x}")
-    print(f"  Time Machine 排除：{rep.tm_excluded}")
-    print(f"  本地快照：{rep.snapshots}")
+    print(f"  Time Machine 排除：{_tm_excluded_line(rep.tm_excluded)}")
+    print(f"  本地快照：{_snapshots_line(rep.snapshots)}")
     if not (rep.not_removed or rep.kept or rep.held or rep.tmp_leaks):
         print("  ✅ 计划内路径已清空，未发现残留")
 

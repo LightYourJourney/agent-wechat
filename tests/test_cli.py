@@ -2451,3 +2451,86 @@ def test_status_verify_keys_names_the_unreadable_dbs(tmp_path, monkeypatch, caps
     assert ei.value.code == 0
     out = capsys.readouterr().out
     assert "HMAC 1/1" in out and "4 个库读不到" in out, out
+
+
+# ---------- 批 B7 · 销毁路径（T13）----------
+
+def test_purge_named_axis_exits_1_when_the_check_finds_residue(tmp_path, monkeypatch, capsys):
+    """EA-029 的第二半：具名轴的退出码只读 `report.failed`，**不读核查**（`return 1 if
+    report.failed else 0`），而会话轴的 `_cmd_purge_chat` 读（`1 if report.failed or
+    res.not_removed else 0`）——两条轴对同一份 `ResidueReport` 有两种用法，EA-029 那个
+    「退 0 而核查印 ❌」正是这个不对称的产物。
+
+    **这条测的是什么、不测什么**：它直接给 `verify` 喂一份「核查发现残留」的结果，验的是
+    **退出码那一条规则**（核查与 `failed` 任一非空即退 1）。删掉 `or res.not_removed`
+    它必红。第一半（「悬空目录链接被静默当作已删除」）由
+    `tests/test_purge.py::test_a_dangling_dir_symlink_is_reported_not_silently_counted_as_removed`
+    从执行侧覆盖——`_remove` 换回 `exists()` 时那条红、这条不红，两者守的不是同一件事。
+    """
+    from agent_wechat import purge as _purge
+    home = _isolate(tmp_path, monkeypatch)
+    (home / "passphrase.json").write_bytes(b"x" * 10)
+    left = home / "passphrase.json"
+    real_verify = _purge.verify
+
+    def _verify(plan):
+        rep = real_verify(plan)
+        return _purge.ResidueReport(not_removed=(left,), kept=rep.kept, held=rep.held,
+                                    tmp_leaks=rep.tmp_leaks, tm_excluded=rep.tm_excluded,
+                                    snapshots=rep.snapshots)
+
+    monkeypatch.setattr(_purge, "verify", _verify)
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["purge", "--keys", "--yes"])
+    out = capsys.readouterr().out
+    assert "❌ 计划内仍未删除" in out, "核查看见了残留，输出里必须有那一行"
+    assert ei.value.code == 1, "核查发现残留，退出码却是 0——脚本会把它读成完成"
+
+
+def test_render_residue_flags_an_included_home_and_local_snapshots(capsys):
+    """EA-032：残留核查里**唯一**直指「外置面 / 可恢复面」的两格此前只印 tmutil 原文——
+    `[Included]` 与 `[Excluded]` 对用户是同一类中性词，而前者意味着**删除前的明文可能还在
+    备份里**；快照那格更糟：没有任何快照时 `tmutil listlocalsnapshots` 也会印一行表头
+    （`Snapshots for disk /:`），于是「有几个快照」读不出来。
+
+    这条钉住危险义的**成文**（渲染层判定，不改 `ResidueReport` 的字段语义）。
+    """
+    from agent_wechat import purge as _purge
+    rep = _purge.ResidueReport(
+        not_removed=(), kept=(), held={}, tmp_leaks=(),
+        tm_excluded="[Included]  /tmp/h",
+        snapshots=("Snapshots for disk /:\n"
+                   "com.apple.TimeMachine.2026-01-01-120000.local\n"
+                   "com.apple.TimeMachine.2026-01-02-120000.local"))
+    cli._render_residue(rep)
+    out = capsys.readouterr().out
+    assert "在 Time Machine 范围内" in out and "备份" in out, f"没读出危险义：{out!r}"
+    assert "2 个本地快照" in out, f"快照数没数出来：{out!r}"
+
+
+def test_render_residue_says_excluded_and_no_snapshots(capsys):
+    """EA-032 的反向：安全的形态要**说成安全**，而不是把 tmutil 原文换个地方印一遍。
+    没有快照时那一行是 `listlocalsnapshots` 的**表头**（不是快照名），必须读成「无」。"""
+    from agent_wechat import purge as _purge
+    rep = _purge.ResidueReport(
+        not_removed=(), kept=(), held={}, tmp_leaks=(),
+        tm_excluded="[Excluded]  /tmp/h",
+        snapshots="Snapshots for disk /:")
+    cli._render_residue(rep)
+    out = capsys.readouterr().out
+    assert "已排除" in out
+    assert "⚠️" not in out, f"安全形态不该有告警：{out!r}"
+
+
+def test_render_residue_keeps_the_undecidable_wording(capsys):
+    """EA-032 的边界：`_tmutil` 的「无法判定（…）」与「无输出」是**判不出来**，与「没有」
+    正相反（`_tmutil` 的 docstring 记着这条）。新加的判定句不许把它们吞成「已排除 / 无」。"""
+    from agent_wechat import purge as _purge
+    for raw in ("无法判定（tmutil 不可用或超时）", "无输出",
+                "无法判定（tmutil 退出码 64：usage: …）"):
+        rep = _purge.ResidueReport(not_removed=(), kept=(), held={}, tmp_leaks=(),
+                                   tm_excluded=raw, snapshots=raw)
+        cli._render_residue(rep)
+        out = capsys.readouterr().out
+        assert raw in out, f"{raw!r} 被判定句吞掉了：{out!r}"
+        assert "已排除" not in out and "个本地快照" not in out

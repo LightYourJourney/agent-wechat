@@ -1455,3 +1455,201 @@ def test_write_tombstone_goes_through_the_owning_module(monkeypatch):
                             AssertionError("测试播种接口不该被生产路径调用")))
     assert purge._write_tombstone(object(), "acct", "wxid_x") == 3
     assert calls == [("acct", "wxid_x")]
+
+
+# ---------- 批 B7 · 销毁路径（T13） ----------
+
+def test_plan_has_no_second_source_for_the_tree():
+    """EA-031：`plan(home=…)` 与 `execute`/`verify` 操作的不是同一棵树——计划给 A 出的表，
+    执行删的是 `paths.HOME_DIR`（`execute` 只吃 plan、树却写死取全局）。今天全仓零调用方，
+    所以是埋着的雷。
+
+    照同模块 `plan_chat` 的先例**删掉入参**（那处的 `home` 也是同样理由删的：「导出根的
+    拥有者是 `media.export_root()`，本模块开篇那条禁令禁的正是这种第二份来源」）。
+    判据是结构性的：签名里不许再有第二个决定「删哪棵树」的入口。
+    """
+    import inspect
+    assert "home" not in inspect.signature(purge.plan).parameters
+    assert "home" not in inspect.signature(purge.plan_chat).parameters
+
+
+def test_execute_chat_refuses_when_home_is_root(monkeypatch):
+    """EA-099：`_check_home_is_sane` 的调用点是 plan / execute / plan_chat——会话轴的**执行侧
+    没有闸门**（`execute_chat` 自己不调它，而它删的是 `HOME_DIR/media/<md5>`）。CLI 路径上
+    `_cmd_purge_chat` 先走 `plan_chat` 所以今天不可达，但「执行前必须过闸」这条不变量没有落
+    在执行的那一侧——将来多一个入口（MCP、脚本）就会漏。
+
+    照 `test_execute_refuses_when_home_is_root` 的写法手搭 `ChatPlan`：闸门必须是
+    `execute_chat` 的**第一条语句**（在链接闸门与占用检查之前——顺序与 `execute()` 一致，
+    否则坏树下 `_escaping_links` 读 `paths.HOME_DIR` 当基准，判据本身就失真）。
+    """
+    monkeypatch.setattr(paths, "HOME_DIR", pathlib.Path("/"))
+    entry = purge.ChatEntry("a", VICTIM, VICTIM_MD5,
+                            {"messages": 0, "vectors": 0, "parts": 0, "refs": 0,
+                             "display_names": 0},
+                            0, pathlib.Path("/tmp/does-not-matter"), False, 0)
+    with pytest.raises(errors.PurgeRefused) as ei:
+        purge.execute_chat(purge.ChatPlan((entry,)))
+    assert "文件系统根" in str(ei.value)
+
+
+def test_execute_all_allows_intra_tree_file_symlink(tmp_path, monkeypatch):
+    """EA-100：`--all` 下**文件型**产物的树内符号链接被过度拒绝。
+
+    items 那一段的判据是 `kind == "file" or _escapes_home(...)`——文件型**无条件**拒绝，
+    理由（`execute` 里那段注）是「文件型走 unlink，只删链接、目标必留存」。但 `--all` 下
+    文件型 item **根本不走 unlink**，走的是整树 rmtree：目标在树内就会被一并删掉，不存在
+    false-clean。M1 已经为同一形状的目录型（`tmp/` 自己是树内链接）改判过，这一半漏了。
+
+    后果是 `purge --all` 被**永久挡住**（spec §9 否掉了 --force，用户只能回去手敲 rm -rf），
+    而它什么都没保护到。反向仍是硬要求：目标逃出树外必须拒（见下一条同名反向用例）。
+    """
+    home = tmp_path / "home"; home.mkdir(parents=True)
+    (home / "passphrase.json").symlink_to(home / "real-keys.json")   # 树内目标
+    (home / "real-keys.json").write_text("{}")
+    monkeypatch.setattr(paths, "HOME_DIR", home)
+    r = purge.execute(purge.plan(frozenset(), all_=True))
+    assert r.failed == ()
+    assert not home.exists(), "整棵树该被删掉（链接与目标都在树内）"
+
+
+def test_execute_all_still_refuses_a_file_symlink_leaving_the_tree(tmp_path, monkeypatch):
+    """EA-100 的反向守卫：改判之后**树外**目标仍须拒——那才是 `_escapes_home` 要防的
+    false-clean（删掉链接、目标明文留在外置盘上，而核查报「已清空」）。"""
+    real = tmp_path / "elsewhere"; real.mkdir()
+    (real / "keys.json").write_text("secret")
+    home = tmp_path / "home"; home.mkdir(parents=True)
+    (home / "passphrase.json").symlink_to(real / "keys.json")
+    monkeypatch.setattr(paths, "HOME_DIR", home)
+    with pytest.raises(errors.PurgeRefused) as ei:
+        purge.execute(purge.plan(frozenset(), all_=True))
+    assert "符号链接" in str(ei.value)
+    assert (real / "keys.json").read_text() == "secret"
+
+
+def test_execute_refuses_a_hardlinked_artifact(tmp_path, monkeypatch):
+    """EA-030：硬链接绕过**全部**链接闸门——闸门只问 `is_symlink()`，而 `unlink(2)` 删的是
+    目录项：同 inode 的另一个名字完全不受影响。
+
+    实测（审计原样复现）：`ln $OUT $H/index.db` 之后 `purge --index --yes` 报「✅ 计划内路径
+    已清空」并退 0，而那 200 KB 明文在 `$OUT` 下原样可读。`st_nlink` 会诚实地告诉你「还有
+    别的名字」，只是代码没问。
+
+    **不承诺「字节级不存在」**（那是 `purge --index` 都做不到的，见 `execute_chat` 的诚实
+    口径）：只拒绝「还有另一个名字在盘上」，并让用户自己处理。
+    判据只能挂在**文件型**上——目录的 `st_nlink` 恒 > 1（等于 2 + 子目录数）。
+    """
+    home = tmp_path / "home"; home.mkdir(parents=True)
+    outside = tmp_path / "keep-index.db"
+    outside.write_bytes(b"P" * 4096)
+    os.link(outside, home / "index.db")               # nlink=2，不是符号链接
+    monkeypatch.setattr(paths, "HOME_DIR", home)
+    with pytest.raises(errors.PurgeRefused) as ei:
+        purge.execute(purge.plan(frozenset({"index"})))
+    assert "硬链接" in str(ei.value)
+    assert (home / "index.db").exists() and outside.exists()      # 两个名字都在
+    assert outside.read_bytes() == b"P" * 4096                    # 明文原样
+
+
+def test_execute_allows_a_normal_artifact(tmp_path, monkeypatch):
+    """EA-030 的反向守卫：`nlink == 1` 的正常产物**不得**被拒——否则 `--index` 在标准安装
+    上永远跑不起来（实测本机 `~/.agent-wechat` 32,151 个文件 `nlink` 全为 1）。"""
+    home = tmp_path / "home"; home.mkdir(parents=True)
+    (home / "index.db").write_bytes(b"x" * 100)
+    monkeypatch.setattr(paths, "HOME_DIR", home)
+    r = purge.execute(purge.plan(frozenset({"index"})))
+    assert r.failed == ()
+    assert not (home / "index.db").exists()
+
+
+def test_execute_all_refuses_a_hardlinked_file_in_the_tree(tmp_path, monkeypatch):
+    """EA-030 的 `--all` 一侧：树内任意文件有第二个名字时同样拒绝——`--all` 宣称「整棵树
+    没了」，而那个名字下的字节还在。判据挂在 `not is_dir` 上（目录的 nlink 恒 > 1）。"""
+    outside = tmp_path / "keep.db"
+    outside.write_bytes(b"P" * 128)
+    home = tmp_path / "home" / "models"
+    home.mkdir(parents=True)
+    os.link(outside, home / "weight.bin")
+    monkeypatch.setattr(paths, "HOME_DIR", tmp_path / "home")
+    with pytest.raises(errors.PurgeRefused) as ei:
+        purge.execute(purge.plan(frozenset(), all_=True))
+    assert "硬链接" in str(ei.value)
+    assert outside.read_bytes() == b"P" * 128
+
+
+def test_a_dangling_dir_symlink_is_reported_not_silently_counted_as_removed(tmp_path,
+                                                                          monkeypatch):
+    """EA-029：目录型产物是**悬空符号链接**时，报告说「已删除 0 项」并退 0，而同一份输出里
+    核查印 ❌——「退出码」这条通道说的是「全部成功」。
+
+    根因是判据分叉：`_remove()` 用 `Path.exists()`（**跟随**链接）问「有没有内容」，悬空
+    链接答「没有」，于是它走进了「计划生成后已被删掉 → 算成功」那条幂等短路。模块自己在
+    `verify` / `execute_chat` / CLI 三处早就收敛成 `name_there()`，`_remove` 是最后两处
+    例外之一。
+
+    修后行为：`name_there` 说「这个名字还在」→ 真去删 → `rmtree(悬空链接)` 抛
+    `OSError('Cannot call rmtree on a symbolic link')` → 进 `failed` → CLI 退 1。
+    契约（与条目验收一致）：**要么拒绝、要么 `failed` 非空**，且链接仍在盘上。
+    """
+    home = tmp_path / "home"; home.mkdir(parents=True)
+    (home / "media").symlink_to("/nonexistent/target")
+    monkeypatch.setattr(paths, "HOME_DIR", home)
+    plan = purge.plan(frozenset({"media"}))
+    try:
+        r = purge.execute(plan)
+    except errors.PurgeRefused:
+        pass                                    # 「拒绝」也是可接受的一支
+    else:
+        assert r.removed == (), "一个字节都没删，却被算成已删除"
+        assert r.failed, "什么都没删，failed 却是空的——退出码会报成功"
+    assert (home / "media").is_symlink(), "链接本身没动过"
+
+
+def test_execute_all_does_not_count_a_failed_path_as_removed(tmp_path, monkeypatch):
+    """EA-098：`--all` 的「已删除 N 项」把仍在盘上的路径数进去——**同一个路径同时进
+    `removed` 与 `failed`**。根因与 EA-029 同源：回看用的是 `exists()`（跟随链接），而
+    悬空链接的 `exists()` 恒为 False。
+
+    审计原样复现：`chmod 500`（可读可进入、不可写）的 HOME_DIR 里放一个悬空 `dangling.db`，
+    `purge --all --yes` 印「已删除 1 项」而 wéi 一被删掉的是**树**、那个 db 还在，⛔ 与
+    ⚠️ 也都在同一份输出里。
+
+    判据（条目的验收）：`removed ∩ {failed 的路径} == ∅`，且 `removed` 里每个路径都真的不在。
+    """
+    home = tmp_path / "home"; home.mkdir()
+    (home / "dangling.db").symlink_to("/nonexistent/target")
+    (home / "keep.txt").write_text("x")
+    home.chmod(0o500)                                  # 可读可进入、不可写
+    monkeypatch.setattr(paths, "HOME_DIR", home)
+    try:
+        r = purge.execute(purge.plan(frozenset(), all_=True))
+    finally:
+        home.chmod(0o700)                              # 让 pytest 能清理 tmp_path
+    failed_paths = {p for p, _ in r.failed}
+    assert not (set(r.removed) & failed_paths), "同一路径既报「已删除」又报「未能删除」"
+    assert all(not p.exists() for p in r.removed), "removed 里混进了仍在盘上的路径"
+    assert purge.name_there(home / "dangling.db"), "悬空链接必须算「还在」"
+
+
+def test_verify_reports_snapshots_from_tmutil(monkeypatch, tmp_path):
+    """EA-032：`snapshots` 字段**零测试断言**（全仓只有 `tm_excluded` 的两条降级断言）。
+    将来 `listlocalsnapshots` 的参数或解析被改动，测试侧完全无声。
+
+    这条钉住「有快照时字段里真的有那几个名字」；渲染侧的判定句见
+    `tests/test_cli.py::test_render_residue_flags_included_and_snapshots`。
+    """
+    calls = []
+
+    def fake_run(argv, **kw):
+        calls.append(argv)
+        out = ("Snapshots for disk /:\n"
+               "com.apple.TimeMachine.2026-01-01-120000.local\n"
+               "com.apple.TimeMachine.2026-01-02-120000.local\n")
+        return type("R", (), {"stdout": out, "stderr": "", "returncode": 0})()
+
+    monkeypatch.setattr(purge, "_run", fake_run)
+    home = tmp_path / "home"; home.mkdir()
+    monkeypatch.setattr(paths, "HOME_DIR", home)
+    rep = purge.verify(purge.plan(frozenset({"keys"})))
+    assert rep.snapshots.count("com.apple.TimeMachine") == 2
+    assert ["tmutil", "listlocalsnapshots", "/"] in calls

@@ -18,6 +18,7 @@ import os
 import pathlib
 import shutil
 import sqlite3
+import stat
 import subprocess
 import tempfile
 import time
@@ -268,15 +269,20 @@ def _check_home_is_sane(home: pathlib.Path) -> None:
                                       hint="AGENT_WECHAT_HOME 指向了不该被销毁的目录")
 
 
-def plan(scopes: frozenset[str], all_: bool = False,
-         home: pathlib.Path | None = None) -> PurgePlan:
+def plan(scopes: frozenset[str], all_: bool = False) -> PurgePlan:
     """生成删除计划。**纯只读**：不创建、不删除、不写任何东西。
 
     `--all` 的 loose 是「枚举 HOME_DIR 顶层减去**全部已知产物**」（known_artifacts()），
     而不是减去具名范围：后者列不出 models/ 这类**没有开关**的产物，它们会同时出现在 items
     与 loose 里，计划表把同一个路径渲染两遍。
+
+    **没有 `home` 入参**（EA-031）：它曾让「计划里的路径」与「将被删的树」可以由两个不同的
+    来源决定——`plan(home=A)` 给你看 A 的表，而 `execute` 只吃 plan、树却写死取
+    `paths.HOME_DIR`，于是真删删掉 B，连闸门检的都是 B 的理智性。那条入参自诞生起零调用方
+    （全仓 grep 为零），照同模块 `plan_chat` 的先例删掉：树的拥有者只有 `paths.HOME_DIR`
+    一个来源。
     """
-    home = home or paths.HOME_DIR
+    home = paths.HOME_DIR
     # 闸门在 plan 里而不是只在 execute 里：dry-run 的那张表就是用户据以说 --yes 的东西，
     # 计划表照常渲染完再由 execute 拒绝，等于默许了一张「将删除当前目录」的表。
     _check_home_is_sane(home)
@@ -332,8 +338,15 @@ def _remove(item: PlanItem) -> bool:
 
     入口重查存在性：CLI 是「先 plan（默认 dry-run）→ 用户确认 → 再 execute」，
     两步之间产物可能已被删掉，spec §5.1 第 5 步要求这算**成功**而不是失败。
+
+    **判据是 `name_there`，不是 `exists()`**（EA-029）：`exists()` 跟随符号链接，悬空链接
+    答「没有」，于是 `purge --media --yes`（`media/` 是悬空链接）走进上面那条幂等短路——
+    报「已删除 0 项」、退 0，而同一份输出里的核查印 ❌「计划内仍未删除」。模块早就在
+    `verify` / `execute_chat` / CLI 三处收敛到 `name_there`（「这个名字还在不在」），
+    `_remove` 与 CLI 的退出码是这条例外的最后两处——判据只有一处时「报告说删了」与
+    「核查说还在」不可能打架。
     """
-    if not item.artifact.path.exists():
+    if not name_there(item.artifact.path):
         return False
     if item.artifact.kind == "file":
         item.artifact.path.unlink(missing_ok=True)
@@ -400,6 +413,25 @@ def _tree_entries(root: pathlib.Path) -> list[pathlib.Path]:
     return out
 
 
+def _has_another_name(p: pathlib.Path) -> bool:
+    """这个路径在盘上**还有第二个名字**吗（硬链接）——判不出来也算有。
+
+    与 `_escapes_home` 同一口径：判不出来就别删。**目录恒不适用**：目录的 `st_nlink` 是
+    `2 + 子目录数`，天生 > 1（本机实测 `~/.agent-wechat` 32,151 个**文件**的 nlink 全为 1，
+    所以正常安装不会被误伤）。
+
+    `lstat` 而不是 `stat`：符号链接要按链接**自身**的 nlink 算（链接的 nlink 通常为 1），
+    目标是不是硬链接由目标那条路径自己负责。
+    """
+    try:
+        st = p.lstat()
+    except FileNotFoundError:
+        return False                 # 这个名字本来就不在：没有第二个名字的问题（幂等路径）
+    except OSError:
+        return True                  # 判不出来就别删
+    return not stat.S_ISDIR(st.st_mode) and st.st_nlink > 1
+
+
 def _tree_size(root: pathlib.Path) -> int:
     """整树的字节数（只读元数据）。供 --all 用：那条路径绕过 items 循环，没有现成体积可加。
 
@@ -439,18 +471,41 @@ def execute(plan: PurgePlan) -> PurgeReport:
     # **目标**的不相关进程（实测：拿 /etc/hosts 做目标，lsof 列出 7 个持有者），用户照着
     # 那条理由去杀进程也删不掉这个链接，真正的原因只是它是链接。
     try:
+        # EA-100：`--all` 下**文件型** item 不走 unlink 而走整树 rmtree——目标在树内会被
+        # 一并删掉，不存在 false-clean，故与目录型同一个判据。只有**具名轴的**文件型才无条件
+        # 拒绝（那条理由「文件型走 unlink、只删链接、目标必留存」在 `--all` 下不成立）。
+        # 此前一律无条件拒绝，后果是 `purge --all` 被**永久挡住**（spec §9 否掉了 --force，
+        # 用户只能回去手敲 rm -rf），而它什么都没保护到。
         links = [i.artifact.path for i in plan.items
                  if i.artifact.path.is_symlink()
-                 and (i.artifact.kind == "file" or _escapes_home(i.artifact.path, paths.HOME_DIR))]
+                 and (_escapes_home(i.artifact.path, paths.HOME_DIR)
+                      if plan.all_
+                      else (i.artifact.kind == "file"
+                            or _escapes_home(i.artifact.path, paths.HOME_DIR)))]
         # kind="dir" 的**具名**产物（tmp/）与 --all 走同一个原语 rmtree，故同样要扫它整棵树：
         # 树内链接会被 rmtree 当作普通条目 unlink、目标明文留存，而核查会报「已清空」——
         # 实测 `tmp/evil.db -> /outside/secret.db` + `purge --tmp --yes` 退 0、「已删除 1 项」，
         # 树外那 700 KB 一个字都没提。判据仍是 _escapes_home 而不是「见到链接就拒」：树内目标
         # 会被 rmtree 一并删掉，一律拒绝会让 blob/snapshot 式布局永远删不掉。
+        # EA-030：文件型产物走 unlink——同 inode 的另一个名字不受影响。`--all` 时不重复判
+        # （下面那次整树扫描已经覆盖了这些路径）。
+        hard: list[pathlib.Path] = [
+            i.artifact.path for i in plan.items
+            if not plan.all_ and i.artifact.kind == "file"
+            and _has_another_name(i.artifact.path)]
         for i in plan.items:
-            if i.artifact.kind == "dir" and not i.artifact.path.is_symlink():
-                links += [p for p in _tree_entries(i.artifact.path)
-                          if p.is_symlink() and _escapes_home(p, paths.HOME_DIR)]
+            if i.artifact.kind != "dir" or i.artifact.path.is_symlink():
+                continue
+            for p in _tree_entries(i.artifact.path):
+                if p.is_symlink():
+                    if _escapes_home(p, paths.HOME_DIR):
+                        links.append(p)
+                elif _has_another_name(p):
+                    # EA-030：具名目录型（`tmp/`、`media/`）同样是 rmtree，里面一个**硬链接**
+                    # 的另一个名字不受影响——判据与符号链接同源（「删名字不删字节」）。
+                    # 条目只写了文件型与 --all 树扫两处；同一形状在具名目录型的树里留半边，
+                    # 正是 EA-100 那类「不对称未修完」，故一并挂上。
+                    hard.append(p)
         if plan.all_:
             # spec §5.1 第 2 步要求对**每个待删路径**做 lstat。--all 的待删路径是**整棵树**
             # ——plan.loose 只有顶层，那是 §3 对「计划表逐条展示」的要求，与删除范围是两回事。
@@ -458,8 +513,12 @@ def execute(plan: PurgePlan) -> PurgeReport:
             # 核查会报「计划内路径已清空」——正是该步点名的「以为明文没了，其实还在外置盘上」。
             # 所以这里走一遍整棵树，而不是只看 plan.loose——但只拒绝**目标逃出树外**的链接
             # （树内目标会被 rmtree 一并删掉，不存在 false-clean；一律拒绝会让标准安装永远跑不起来）。
-            links += [p for p in _tree_entries(paths.HOME_DIR)
-                      if p.is_symlink() and _escapes_home(p, paths.HOME_DIR)]
+            for p in _tree_entries(paths.HOME_DIR):
+                if p.is_symlink():
+                    if _escapes_home(p, paths.HOME_DIR):
+                        links.append(p)
+                elif _has_another_name(p):
+                    hard.append(p)
             if paths.HOME_DIR.is_symlink():
                 links.append(paths.HOME_DIR)
     except OSError as exc:
@@ -474,6 +533,22 @@ def execute(plan: PurgePlan) -> PurgeReport:
         raise errors.PurgeRefused(
             "待删路径是符号链接，拒绝删除：" + "、".join(str(p) for p in links),
             hint="删链接不会删目标，会造成「已清干净」的假象；请手工处理")
+    hard = list(dict.fromkeys(hard))
+    if hard:
+        # EA-030：闸门问的一直是「**名字**是不是符号链接」，而真正要防的是「**字节**还在不在」
+        # ——`unlink(2)` 删的是目录项，同 inode 的另一个名字完全不受影响，`st_nlink` 会诚实地
+        # 说出来。审计实测：`ln $OUT $H/index.db` 之后 `purge --index --yes` 报「✅ 计划内路径
+        # 已清空」并退 0，而那 200 KB 明文在 `$OUT` 下原样可读。
+        #
+        # **不承诺「字节级不存在」**（那是 `purge --index` 都做不到的，见 `execute_chat` 的诚实
+        # 口径）；这里只拒绝「还有另一个名字在盘上」，让用户自己决定怎么处理那个名字。
+        # APFS 的写时复制克隆（`cp -c`）连 `nlink` 都不变，属同一类里**不可检测**的形态，
+        # 已在 SECURITY.md 的「删不干净」清单里申报。
+        raise errors.PurgeRefused(
+            f"待删路径存在硬链接（同一个 inode 还有别的名字），拒绝删除："
+            f"{'、'.join(str(p) for p in hard)}",
+            hint="删名字不会删字节，会造成「已清干净」的假象；"
+                 "请先处理那些链接（`ls -li` 看 inode 相同的就是）再重试")
 
     # --all 的删除面是**整棵树**，而 items 只是具名产物：loose（models/、tasks.json、散落明文）
     # 同样会被 rmtree 删掉，那里一个被写着的文件 unlink 会「成功但空间不释放」——正是这道检查
@@ -530,8 +605,22 @@ def execute(plan: PurgePlan) -> PurgeReport:
             if paths.HOME_DIR.exists():
                 # 部分失败：把没删掉的那部分从 freed 里扣回去，否则报出的体积大于实际释放的
                 freed -= _tree_size(paths.HOME_DIR)
-            # 删完再回看谁真的没了：部分失败时不会把仍存在的条目虚报为已删
-            removed = [p for p in shown if not p.exists()]
+            # 删完再回看谁真的没了：部分失败时不会把仍存在的条目虚报为已删。
+            # EA-098：判据是 `name_there`（不跟随符号链接）——`exists()` 会把**悬空链接**
+            # 读成「已删除」，于是同一个路径既进 `removed` 又进 `failed`（审计原样复现：
+            # 「已删除 1 项」数的正是上面那条「未能删除」）。已被点名失败的路径一律不算删掉
+            # ——两者同真同假时不许并存。回看判不出来（EACCES 等）就当它还在：这份报告宁可
+            # 少报「已删除」，也不许多报。
+            failed_paths = {p for p, _ in failed}
+            removed = []
+            for p in shown:
+                if p in failed_paths:
+                    continue
+                try:
+                    if not name_there(p):
+                        removed.append(p)
+                except OSError:
+                    continue
             home_removed = not paths.HOME_DIR.exists()
     return PurgeReport(tuple(removed), tuple(failed), freed, home_removed)
 
@@ -841,6 +930,12 @@ def execute_chat(plan: ChatPlan) -> tuple[ChatReport, ...]:
     `vec_messages_auxiliary` 的活跃页里搜到 1–3 次，dbstat 显示它们不在 freelist）。要字节级
     清除只能重建：`purge --index` 后重跑 export。
     """
+    # 与 `execute()` 同一道闸门、同一位置（先闸门，再链接，最后占用/删除）：会话轴此前**只有
+    # `plan_chat` 一道**，执行侧没有——CLI 路径上 `_cmd_purge_chat` 先走 plan_chat 所以今天
+    # 不可达，但「执行前必须过闸」这条不变量没落在执行的那一侧，将来多一个入口就会漏
+    # （EA-099）。顺序不能反：`_escaping_links` 读 `paths.HOME_DIR` 当基准，坏树下判据失真。
+    _check_home_is_sane(paths.HOME_DIR)
+
     # 逃逸链接闸门：**必须在任何删除/提交之前**（与 `execute()` 同一位置——先扫链接，再做
     # 占用/fail-closed 那些检查）。它挡的不是「目标在树外」这件事本身，而是**删完之后目标还
     # 在、而报告与核查都说删干净了**那个 false-clean（终审 I-2）。具名范围对目录型产物是同一
