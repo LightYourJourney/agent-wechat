@@ -431,23 +431,67 @@ def test_a_safe_url_still_becomes_a_clickable_link():
     pytest.param("  1. 假有序", "假有序", id="1-3 空格 + 有序列表"),
     pytest.param("标题行\n ===", "===", id="1 空格 + setext 下划线"),
     pytest.param("标题行\n   ---", "---", id="3 空格 + 分隔线"),
-    pytest.param("    code", "code", id="4 空格 = 缩进代码块"),
-    pytest.param(" \t制表符", "制表符", id="空格 + 制表符（制表位凑满 4 列）"),
     pytest.param("abc\r# 回车后", "回车后", id="裸 CR 也是行结束（CommonMark 规范）"),
 ])
-def test_block_structure_cannot_be_created_from_a_line_start(payload, needle):
-    """修轮 2（复验 ①-A2）：行首那一档只认**第 0 列**，而 CommonMark 允许块级标记前有
-    **最多 3 个空格**（ATX 标题 / 列表 / setext 下划线 / 分隔线全都如此），制表符还要按
-    4 列制表位算——复验实测 `"   # 假标题"`、`"标题\\n ==="`、`" \\t# x"` 三种都真的成了结构。
+def test_block_marker_at_a_line_start_is_escaped(payload, needle):
+    """修轮 2（复验 ①-A2）：块级标记那一档只认**第 0 列**，而 CommonMark 允许块级标记前有
+    **最多 3 个空格**（ATX 标题 / 列表 / setext 下划线 / 分隔线全都如此）——复验实测
+    `"   # 假标题"` 与 `"标题\\n ==="` 都真的成了结构。
 
-    判据：载荷那一行的**行首 5 个字符内**必须出现转义反斜杠。缩进最多 3 列，所以转义要么
-    落在第 0 列（缩进代码块那种「在行首打断缩进」的写法），要么落在标记的第一个字符之前。
+    判据：载荷那一行的**行首 5 个字符内**必须出现转义反斜杠（缩进最多 3 列，所以转义要么
+    落在第 0 列、要么落在标记的第一个字符之前）。
     """
     out = chat_md.render(_view(rows=[
         {"msg_key": "k1", "ts": 1, "msg_type": 1, "content": payload,
          "sender_name": "我", "is_self": True}]))
     line = _line_with(out, needle)
     assert "\\" in line[:5], f"行首没有被转义：{line!r}"
+
+
+def _indent_columns(line: str) -> int:
+    """行首空白折算成列数（制表符按 4 列制表位）——**独立于被测实现**，抄的是 CommonMark。"""
+    col, i = 0, 0
+    while i < len(line) and line[i] in " \t":
+        col += 1 if line[i] == " " else 4 - col % 4
+        i += 1
+    return col
+
+
+@pytest.mark.parametrize("prefix", [
+    pytest.param(p, id=f"{p!r}")
+    for p in ("    ", "     ", "\t", "\t\t", " \t", "\t ", "  \t", " \t ", "\t  \t",
+              "   \t", "\t   ")
+])
+def test_an_indented_line_cannot_start_a_code_block_and_shows_no_backslash(prefix):
+    """缩进满 4 列 = 缩进代码块。打断它的机制**不是**在行首插反斜杠——`\\` + 空白不是
+    CommonMark 的合法转义，那个反斜杠会被原样渲染出来。
+
+    这是复审 2 用真实语料量出来的：400 条真实 appmsg 抽样里 57 条命中这一档，其中 **56 条
+    是段落续行**（前一非空行是普通文本）——那种位置本来就不会成代码块，插反斜杠是**纯代价**
+    （修复前后都没有 `<pre>`，只多一个可见的 `\\`）。改成把行首那一个空白字符写成实体之后，
+    这 56 条的渲染与 EA-037 之前逐字相同，而真正在块首的那些照样不成代码块。
+
+    两条判据各自对应一种退化：`_indent_columns` 那条在「整档删掉」时红，`startswith` 那条
+    在「改回插反斜杠」时红。
+    """
+    out = chat_md.render(_view(rows=[
+        {"msg_key": "k1", "ts": 1, "msg_type": 1, "content": prefix + "缩进正文",
+         "sender_name": "我", "is_self": True}]))
+    line = _line_with(out, "缩进正文")
+    assert _indent_columns(line) < 4, f"这一行仍是缩进代码块：{line!r}"
+    assert not line.startswith("\\"), f"行首插了反斜杠（它会渲染出来）：{line!r}"
+
+
+def test_a_whitespace_only_line_is_left_alone():
+    """只有空白的行**本来就不是**代码块（CommonMark：缩进代码块由非空白行组成），动它会把
+    前后两个段落并成一个——实测 `"甲\\n     \\n乙"`（5 空格）插了实体之后从两个段落变成一个。
+    """
+    out = chat_md.render(_view(rows=[
+        {"msg_key": "k1", "ts": 1, "msg_type": 1, "content": "甲\n     \n乙",
+         "sender_name": "我", "is_self": True}]))
+    assert "&#32;" not in out and "&#9;" not in out
+    assert _line_with(out, "甲").strip() == "甲"
+    assert _line_with(out, "乙").strip() == "乙"
 
 
 def test_crlf_and_cr_are_treated_as_line_endings():

@@ -73,6 +73,9 @@ _LINE_BREAK = re.compile(r"\r\n|\r|\n")
 # 改变定界。见 `_md_dest_ok`。
 _MD_DEST_UNSAFE = frozenset(map(chr, range(0x20))) | frozenset("\x7f()<>")
 
+# 打断缩进代码块用的实体：把行首那**一个**空白字符写成实体（详见 `_esc_md` 的缩进档）。
+_WS_ENTITY = {" ": "&#32;", "\t": "&#9;"}
+
 
 def _md_dest_ok(url: str) -> bool:
     """这个 URL 能**原样**写进 `](…)` 吗——问的不是「它是不是一个安全的 URL」。
@@ -125,7 +128,7 @@ def _esc_md(v: str | None) -> str:
     **块级**标记（`#` `>` `-` `+` `*` `=` 与 `1.`）只在**行首**转义——但「行首」按 CommonMark
     的算法算：**最多 3 个空格**（或凑不满 4 列的制表符）之后仍算行首（复验实测
     `"   # 假标题"` 与 `"标题\\n ==="` 都真的成了结构）；缩进**满 4 列**则是缩进代码块，
-    在行首插一个 `\\` 把缩进打断（渲染会多出一个可见的 `\\`，这是挡住 `<pre><code>` 的代价）。
+    把行首那一个空白字符写成**实体**来打断它（见下面的缩进档）。
 
     行结束按规范只认 `\\n` / `\\r` / `\\r\\n`，并且**统一成 `\\n`**：只按 `\\n` 切行时
     `"abc\\r# 假标题"` 是一行、行首是 `abc`，而按规范切行的渲染器会看到一个真的 ATX 标题。
@@ -134,7 +137,9 @@ def _esc_md(v: str | None) -> str:
     for line in _LINE_BREAK.split(_t(v)):
         lead = len(line) - len(line.lstrip(" \t"))     # 缩进=空白前缀（`_indent_width` 再折算列数）
         ol = _OL_START.match(line[lead:])              # `1` 与 `.` 都不在行内集合，转义不位移
-        indented = _indent_width(line) >= 4
+        # 缩进代码块：**列数** ≥ 4（制表符按 4 列制表位推进）**且行内有内容**。空白行不算
+        # ——CommonMark 的缩进代码块由非空白行组成，动它只会把前后两个段落并成一个（实测）。
+        indented = _indent_width(line) >= 4 and bool(line.strip())
         line = "".join(("\\" + ch) if ch in _MD_INLINE else ch for ch in line)
         body = line[lead:]                             # 行内转义只插在缩进之后，前缀仍是原样
         # **块级那一档必须在行内转义之后、且判据落在转义后的行上**：`*` 既在行内集合、又在
@@ -142,7 +147,14 @@ def _esc_md(v: str | None) -> str:
         # ——判据若落在原行上就会再插一个反斜杠，得到 `\\*`（两个）。`\` 自身在 `_MD_INLINE`
         # 里，这个顺序反过来也会踩到，实测踩过两次。
         if indented:
-            line = "\\" + line
+            # 打断缩进用的是**实体**，不是行首插反斜杠：`\` + 空白**不是** CommonMark 的合法
+            # 转义（它只对 ASCII 标点生效），插进去的反斜杠会被原样渲染出来。首字符一旦变成
+            # `&`，源级行首的缩进就是 0 列，不可能再是缩进代码块——**上下文无关**，判据不依赖
+            # 前一行是什么。
+            # 换掉反斜杠的理由是复审 2 用真实语料量出来的：400 条真实 appmsg 抽样里 57 条命中
+            # 这一档，其中 **56 条是段落续行**（前一非空行是普通文本）——那个位置本来就不会成
+            # 代码块，插反斜杠是**纯代价**；改实体之后这 56 条的渲染与 EA-037 之前**逐字相同**。
+            line = _WS_ENTITY[line[0]] + line[1:]
         elif body[:1] and body[0] in _MD_LINE_START:
             line = line[:lead] + "\\" + body            # 转义插在标记**之前**，缩进留着
         elif ol:
