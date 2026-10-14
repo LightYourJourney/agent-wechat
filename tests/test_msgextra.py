@@ -204,3 +204,44 @@ def test_a_missing_table_is_not_an_error(con):
     assert con.execute("SELECT count(*) FROM msg_extras").fetchone()[0] == 0
     assert store.extras_by_keys(con, ["acct|aaa|message_0.db|1"]) == {}
     assert store.chat_row_counts(con, "acct", "c")["extras"] == 0
+
+
+def test_the_secret_gate_drops_a_credential_carrying_value():
+    """**合成值**夹具（复审 T14 的 N3）：白名单之外还有一道凭据闸（`appmsg.is_secret`，
+    与 `fields` 同一份判据）。真机 202 条上它**从不触发**——所以照真机造夹具抓不到它，
+    必须自造：`?token=` / `&filekey=` 这类参数名会被 `_SECRET_SEG` 逐段命中。
+
+    `_KEEP` 是这一族的第一道防线，但它是**名字**层面的；值层面的凭据只能靠这道闸。
+    把 `parse` 里那行 `is_secret` 删掉，本用例红。
+    """
+    # `&filekey=` 在 XML 里必须写成 `&amp;filekey=`（真机也是转义过的形态）——写成裸 `&`
+    # 的话 `ET` 直接判 malformed，这条用例就变成在测「解不开」而不是测那道闸了（实测踩过）。
+    raw = ('<msg><location x="1" y="2" label="某地?token=SECRET123" '
+           'poiname="A&amp;filekey=abc" adcode="100000"/></msg>')
+    fields = dict(msgextra.parse(48, raw).fields)
+    assert "label" not in fields and "poiname" not in fields, "带凭据参数的值必须被丢掉"
+    assert fields["adcode"] == "100000", "干净的值照常保留（别把闸做成一刀切）"
+
+
+def test_a_corrupt_payload_in_the_table_does_not_raise(con, monkeypatch):
+    """`_decode_extra` 的失败面（复审 T14 的 N3）：`payload` 是**别人写进去的字节**
+    （索引库可被手工改动、半拷贝的 WAL 会落下半页），裸 `zlib.error` / `UnicodeDecodeError`
+    不得逃出 core 层。三条失败支路都返回 None → 该 key 不进 `extras` → 模板回落印占位。
+
+    仓库里此前没有任何用例往 `msg_extras` 写坏载荷（`msg_parts` 那边有先例：
+    `test_chat_export_counts_unparsed_and_rejected_separately`）。把 `_decode_extra` 的
+    `try/except` 删掉，本用例红。
+    """
+    from agent_wechat import usecases
+    bad = [("acct|aaa|message_0.db|1", 48, b"\x00\x01 not-zlib"),
+           ("acct|aaa|message_0.db|2", 48, zlib.compress(b"<msg><location x='&#'" + b"1" * 6000
+                                                         + b";'/></msg>", 6)),
+           ("acct|aaa|message_0.db|3", 48, zlib.compress(b"not xml at all", 6))]
+    for key, t, blob in bad:
+        assert usecases._decode_extra(t, blob) is None, key
+    # 真路径：写进表再读回来，不抛
+    store.upsert_extras(con, bad)
+    con.commit()
+    got = store.extras_by_keys(con, [k for k, _, _ in bad])
+    assert len(got) == 3
+    assert [usecases._decode_extra(t, b) for t, b in got.values()] == [None, None, None]

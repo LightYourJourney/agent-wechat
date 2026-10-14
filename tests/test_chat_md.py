@@ -531,8 +531,14 @@ def test_a_location_renders_its_fields_and_drops_the_placeholder():
     # 坐标里的 `.` 会被行首那一档的「有序列表」判据（`\d+\.`）转义成 `39\.9`——**既有行为**，
     # 不是本批引入：`_esc_md` 逐值调用，判不出这个值最终落在行中还是行首，于是按行首处理。
     # 渲染结果相同（pandoc 两边都出 `39.9`），只是源码多一个反斜杠；已在台账记为观察项。
-    assert "- x：39\.9" in out and "- y：116\.4" in out and "- label：某地" in out
-    assert "[location]" not in out, "占位行与结构化块重复，必须收掉"
+    # **raw string**：`"\."` 在非 raw 串里是**非法转义序列**（SyntaxWarning；
+    # `-W error::SyntaxWarning` 下直接编不过）。复审 T14 抓到我先前那句「零 warning」是
+    # **陈旧 .pyc 掩盖**出来的——清掉 `__pycache__` 再跑就是 2 warnings。
+    assert r"- x：39\.9" in out and r"- y：116\.4" in out and "- label：某地" in out
+    # **必须写转义后的形态**：MD 侧 `[`/`]` 必被 `_esc_md` 转义，未转义串永远不出现——
+    # 写成 `"[location]" not in out` 时这条断言**恒真**（复审 T14 的 M3 实测：占位行还在，
+    # 它照旧通过）。同文件名片那条一开始就写对了，位置这条漏了。
+    assert r"\[location\]" not in out, "占位行与结构化块重复，必须收掉"
     # 没有 extras 时**一行都不印**，且占位行照旧（老库 / 没跑过 extras rebuild 的机器）
     plain = chat_md.render(_extra_view())
     # 占位行本身是**用户内容**吗？不是——但它是**我们**从 `content` 直接印出来的一句，走

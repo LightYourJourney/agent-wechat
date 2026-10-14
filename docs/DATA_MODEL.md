@@ -121,6 +121,29 @@ CREATE TABLE IF NOT EXISTS media_refs (
 - 图片与语音的导出**不查此表**：图片按 attach 树目录枚举、语音按 `media_*.db` 的
   `VoiceInfo` 三元组直接命中。
 
+**位置 / 名片原始载荷表 `msg_extras`**（EA-041；与 `msg_parts` 同一批 DDL 建，无迁移）：
+
+```sql
+CREATE TABLE IF NOT EXISTS msg_extras (
+    msg_key  TEXT PRIMARY KEY,      -- = messages.msg_key
+    msg_type INTEGER NOT NULL,      -- 48 位置 / 42 名片（**原样记**，不猜语义）
+    payload  BLOB NOT NULL          -- 规范化后的 XML，zlib 压缩（与 msg_parts.raw_xml 同款）
+) WITHOUT ROWID;
+```
+
+- **存的是原始 XML，不是解析结果**（与 `msg_parts` 同一条不变量）：白名单与渲染都可以演进，
+  重跑一次回填即可；权威只有微信库里那一份。
+- **字段走白名单**（`msgextra._KEEP`）：只留阅读用得上的那几个（位置的 `x`/`y`/`label`/
+  `poiname`/`poi*`…、名片的 `username`/`nickname`/`alias`…）。真机同族的 `antispamticket`
+  （加好友凭据）、`brandHomeUrl`（最长 2,487 字符）等**不影响存盘**（XML 原样存），
+  但**不进产物、不进信封**——认不出来的属性一律不往外走。
+- **谁写它**：只有 CLI `agent-wechat extras rebuild`（`usecases.msgextra_rebuild`）。
+  全量重扫微信库分片、**只写 `msg_extras`**；幂等。**`export` 不写这张表**——
+  所以「回填之后新到微信」的位置/名片要重跑一次才有内容。
+- **老库兼容**：它是随 SCHEMA 建的 `CREATE TABLE IF NOT EXISTS`，既有 `index.db` 在**下一次
+  `connect()`** 时就有了它；`purge --chat` 那条不可逆路径在老库上实测跑得通（计数、删除、
+  核查三处都按表名读，不对表数量做断言）。
+
 **appmsg 原始载荷表 `msg_parts`**（同一批 DDL 建，无迁移）：
 
 ```sql

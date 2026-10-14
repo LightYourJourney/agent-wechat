@@ -739,7 +739,7 @@ class ChatEntry:
     account: str
     chat_id: str
     chat_md5: str
-    counts: dict[str, int]      # messages/vectors/parts/refs/display_names
+    counts: dict[str, int]      # messages/vectors/parts/extras/refs/display_names
     tombstone: int              # 将写入的排除条数（= counts["messages"]）
     export_dir: pathlib.Path
     export_exists: bool

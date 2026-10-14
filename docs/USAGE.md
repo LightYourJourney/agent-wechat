@@ -101,8 +101,10 @@ agent-wechat export --full
 - **幂等**：主键去重，重复导出不产生重复行
 - **断点续传**：中断后直接重跑 `export`，从水位线继续
 - **增量**：再次运行只导出新消息（秒级）——**判据是「分片内 `local_id` 有没有超过水位线」，
-  不是内容比对**。所以**同一 `local_id` 的内容被改写时，增量导出不会修正它**：撤回后重发、
-  编辑、或对方用同一个 id 覆盖正文，索引里留的都是第一次导出的那一版（EA-042）。
+  不是内容比对**。所以**同一 `local_id` 的内容被改写时，增量导出不会修正它**：编辑、或对方
+  用同一个 id 覆盖正文，索引里留的都是第一次导出的那一版（EA-042）。
+  （**只举「编辑」**：V3 把「撤回后重发」从这条里收窄掉了——撤回在真机上是**新行**
+  type 10002，不是原地改写，本仓没有它改写的证据。）
   要拿到改写后的正文就跑一次 `export --full`（或删掉 `index.db` 重来）。
   **定时同步建议整轮用 `--full`**：本机全量是分钟级，而「正文永久陈旧」是查不出来的那种错。
   （这是**契约**不是缺陷：改它要么让每轮都做内容比对、要么加一列内容哈希——本条目的
@@ -283,7 +285,8 @@ agent-wechat decrypt message/message_0.db --out m0.db   # 导出明文库（调�
 链接 / 文件 / 转账）渲染成结构化块，媒体以相对路径引用**同级**的既有媒体树。
 
 ```bash
-# 前提：先跑过一次 export（读的是本地索引库）；appmsg 的内容还需先 `appmsg rebuild`（见下）
+# 前提：先跑过一次 export（读的是本地索引库）；appmsg 的内容还需先 `appmsg rebuild`，
+# 位置/名片的结构化块还需先 `extras rebuild`（都在下面「旁路表」那一节）
 agent-wechat chat export --chat 小李
 # 会话 wxid_abc123def456   58 条   appmsg=12 image=3 system=2 text=41
 # 产物：/Users/you/.agent-wechat/media/<会话md5>/chat/index.html
@@ -393,7 +396,7 @@ agent-wechat appmsg rebuild
 ```bash
 agent-wechat extras rebuild
 #   已回填 202 条位置/名片…
-# 完成：本轮写入 msg_extras 202 条（其中 0 条没有可读字段）
+# 完成：本轮写入 msg_extras 202 条；扫到的位置/名片里 0 条没有可读字段
 ```
 
 - **为什么另起一条命令而不是并进 `export`**：与 `appmsg rebuild` / `media rebuild-refs`

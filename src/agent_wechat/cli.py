@@ -314,10 +314,11 @@ def cmd_extras_rebuild(args: argparse.Namespace) -> int:
 
     res = usecases.msgextra_rebuild(account=args.account, progress=progress,
                                     on_skipped=_note_skipped)
-    # `empty` 单列：它是「落库了但没有可读字段」的条数（载荷危险 / 解不开 / 缺承载元素），
-    # 与「本轮扫到多少」是两个分母，并排印会被读成同一件事（同 `appmsg rebuild` 那条注释）。
-    print(f"完成：本轮写入 msg_extras {res['extras']} 条"
-          f"（其中 {res['empty']} 条没有可读字段）")
+    # `empty` **不是** `extras` 的子集（它含被排除清单挡下的行，判据只有一处、在
+    # `upsert_extras` 里，见 `msgextra_rebuild` 的 docstring），所以措辞写成并列的两句，
+    # **不用「其中」**——那个词会把它读成包含关系。
+    print(f"完成：本轮写入 msg_extras {res['extras']} 条；"
+          f"扫到的位置/名片里 {res['empty']} 条没有可读字段")
     return 0
 
 

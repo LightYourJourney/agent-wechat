@@ -1760,3 +1760,58 @@ def test_rewriting_a_message_in_place_is_not_picked_up_incrementally(tmp_path, m
     with store.open() as con:
         assert con.execute("SELECT content FROM messages WHERE msg_key=?",
                            (key,)).fetchone()[0] == "第二版正文", "--full 必须重扫到改写后的正文"
+
+
+def test_chat_export_renders_the_location_block_end_to_end(tmp_path, monkeypatch):
+    """**真路径**：合成微信树 → `export` → `extras rebuild` → `usecases.chat_export` → 读产物文件。
+
+    复审 T14 的 N1：本批此前的覆盖只有「绕过 `chat_export`、直调 `chatview.build(extras=…)`」
+    的模板级用例——把 `chat_export` 里那行 `extras=extras` 删掉，或把 `iter_extras_input` 的
+    `md5hex` 切错，**全仓 1255 条全绿而产物里一个结构化块都没有**（本仓记过档的「全绿而功能
+    为零」）。这条用例把那条接线钉住，且**两份产物都读**（HTML 那条链路同样会静默空掉）。
+    """
+    from agent_wechat import usecases
+    root = tmp_path / "wxenv"
+    root.mkdir(parents=True)
+    wx = root / "xwechat_files"
+    home = root / "home"
+    home.mkdir(mode=0o700)
+    ds = wx / ACCT / "db_storage"
+    enc_db(ds / "session" / "session.db", {
+        "SessionTable": ("CREATE TABLE SessionTable (username TEXT)", [(FRIEND,)])})
+    enc_db(ds / "contact" / "contact.db", {
+        "name2id": ("CREATE TABLE name2id (username TEXT)", [(FRIEND,)]),
+        "contact": ("CREATE TABLE contact (username TEXT, alias TEXT, remark TEXT, "
+                    "nick_name TEXT, delete_flag INTEGER)",
+                    [(FRIEND, None, "张三", "zc", None)]),
+    })
+    loc = ('<msg><location x="39.9" y="116.4" scale="1" label="某地" poiname="P"'
+           ' poiCategoryTips="咖啡"/></msg>')
+    build_shard(wx, ACCT, "message_0.db",
+                {FRIEND: [(1, 48, 1, T0 + 10, loc, 0)]}, [FRIEND])
+    monkeypatch.setattr(paths, "XWECHAT_FILES", wx)
+    monkeypatch.setattr(paths, "HOME_DIR", home)
+    monkeypatch.setattr(keys, "CACHE_FILE", home / "passphrase.json")
+    monkeypatch.setattr(store, "DB_PATH", home / "index.db")
+    keys.save_cached_hex(SELF, PW.encode().hex())
+
+    assert export.run_export(ACCT) == 1
+    # **必须显式给 `--account`**：`resolve_account(None)` 走 `lsof` 判本机当前登录的微信账号，
+    # 与 `paths.XWECHAT_FILES` 的 patch 无关——不给就解析到**真实的那个账号**，然后
+    # `KeyNotFound`（实测踩过；`run_export` 那条路是显式传 account 的，所以没暴露）。
+    # **对照组先跑**：没回填时产物里一行都不印（这是契约，不是缺陷）
+    before = usecases.chat_export(FRIEND, account=ACCT)
+    md_before = pathlib.Path(before.files[0]).read_text()
+    assert "某地" not in md_before and "位置" not in md_before
+
+    usecases.msgextra_rebuild(account=ACCT)
+    res = usecases.chat_export(FRIEND, account=ACCT)
+    html = pathlib.Path(next(f for f in res.files if f.endswith(".html"))).read_text()
+    md = pathlib.Path(next(f for f in res.files if f.endswith(".md"))).read_text()
+    for out, name in ((md, "md"), (html, "html")):
+        assert "某地" in out and "poiCategoryTips" in out, (
+            f"{name} 产物里没有位置块：{out[-200:]!r}")
+    # 坐标的**形态两边不同**：MD 侧走 `_esc_md`（`.` 被行首那一档转义成 `39\.9`），
+    # HTML 侧原样。断言写死一种形态会在另一半上假红（第一次就是这么红的）。
+    assert "39\\.9" in md and "39.9" in html
+    assert "\\[location\\]" not in md, "结构化块出现时占位行必须收掉"

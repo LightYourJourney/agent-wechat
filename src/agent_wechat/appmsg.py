@@ -197,8 +197,9 @@ def _is_opaque_blob(value: str) -> bool:
 # 跨模块复用点（`msgextra` 的字段表过同一道过滤）：判据只应有**一份**——「什么叫像密钥的
 # 名字」的规则全项目就是上面那个 `_SECRET_SEG`（那段注释写着为什么不能各写一份备选表）。
 # 给公开名而不是让别处 `import _is_secret`：私有名的跨模块使用在 grep 时读不出「这是契约」。
+# **只公开有消费者的那一个**：`_is_opaque_blob` 的公开别名加过又被删掉了——`msgextra`
+# 只用了 `is_secret`，那个别名零读者，而 T15 的门禁拿 vulture 候选数当基线（复审 T14 抓到）。
 is_secret = _is_secret
-is_opaque_blob = _is_opaque_blob
 
 
 @dataclass(frozen=True)

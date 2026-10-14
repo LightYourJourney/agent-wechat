@@ -385,6 +385,9 @@ def export_chat(contact: str, months: str | None = None, limit: int = 500,
     counts 是 kind → 条数；unparsed / rejected 分别是「解不开」与「主动拒绝（DTD/实体）」
     的 appmsg 条数；truncated=true 表示触及 limit（产物顶部也印着）。msg_parts 未回填时
     degraded 会点名 `agent-wechat appmsg rebuild`——那时 appmsg 会显示成 `[appmsg: 标题]`。
+    **位置（48）/ 名片（42）的结构化块另需 `agent-wechat extras rebuild`**（也是幂等）：
+    没跑过时产物里不出现那两个块，而**不会有任何降级提示**——这一族分不开「表是空的」与
+    「这些消息本来就没有位置/名片」（与 `msg_parts` 那条降级不同，别指望 degraded 报它）。
     """
     res = usecases.chat_export(
         contact,
@@ -410,6 +413,11 @@ def get_message_parts(contact: str, keys: str, account: str | None = None) -> di
     **需先运行 `agent-wechat appmsg rebuild`**（CLI）：内容读的是本地检索库的
     `msg_parts` 表。未回填时每个 key 都答不出东西，信封另带 `hint`（可操作的那一句）与
     `degraded`（结构化记录）。
+
+    信封另有一个与 `parts` **平行**的 `extras` 键：位置（48）/ 名片（42）的结构化字段
+    （`kind` / `kind_name` / `fields`），**由另一条命令回填**——`agent-wechat extras rebuild`
+    （同样幂等）。没跑过它时 `extras` 是空数组，而**它没有 `degraded` 位**：这一族分不开
+    「表是空的」与「这些消息本来就没有位置/名片」，所以信封装不出来（TOOLS.md §13 有全表）。
 
     **空答案有三种成因，信封只分得出其中两种**（别宣称「靠这几个键就能分清」）：
     ① **未回填**（账号级）→ `degraded` + `hint` 指出，重跑 `appmsg rebuild` 可补救；

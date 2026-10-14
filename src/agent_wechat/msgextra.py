@@ -35,7 +35,12 @@ _ATTR_OWNER = {KIND_LOCATION: "location", KIND_CARD: "msg"}
 # 黑名单是打地鼠（`appmsg` 的注释自己写过这条），而这里的方向正相反：**认不出来的属性一律
 # 不进产物**——少一个字段是看得见的缺失，多一个凭据不是。
 _KEEP = {
+    # 位置里的 `poi*` 四件套是**读者最想要的那几个**（分类 / 人均 / 电话 / 营业时间），真机
+    # 实测非空率 104/135、89/135、56/135、43/135——比清单里已有的 `buildingId` / `floorName`
+    # （各 9/135）常见得多。复审 T14 抓到我第一版漏了它们（漏掉的是「常见且非空」，比多收
+    # 一个字段更难发现）。
     KIND_LOCATION: ("x", "y", "scale", "label", "poiname", "maptype", "poiid",
+                    "poiCategoryTips", "poiPriceTips", "poiPhone", "poiBusinessHour",
                     "buildingId", "floorName", "adcode", "cityname", "fromusername"),
     KIND_CARD: ("username", "nickname", "alias", "sex", "province", "city", "sign",
                 "regionCode", "certflag", "certinfo", "imagestatus", "scene"),
