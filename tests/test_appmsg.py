@@ -54,11 +54,20 @@ def test_xml_decl_quantifier_is_capped_so_a_long_run_cannot_go_quadratic():
     """
     import time
 
-    payload = "<?xml" * 65536                     # 320 KB，最坏形态：一个 `>` 都没有
-    t0 = time.monotonic()
-    appmsg.normalize(payload)
-    elapsed = time.monotonic() - t0
-    assert elapsed < 2.0, f"二次回溯回来了：320 KB 用了 {elapsed:.1f}s（封顶后实测 0.38s）"
+    def _measure(n: int) -> float:
+        t0 = time.monotonic()
+        appmsg.normalize("<?xml" * n)
+        return time.monotonic() - t0
+
+    # **判据是比值，不是绝对秒数**：封顶后 `normalize` 与长度**线性**（8 倍长度 ≈ 8 倍时间），
+    # 二次回溯是 64 倍。绝对阈值在机器忙时会假红——review-code 的 Standards 轴 #18 实测：
+    # 并发跑测试时这条 320 KB 超过 2s，而单独跑是 1.1s。比值对机器快慢免疫，而它才是真正
+    # 要守的那件事（线性 vs 二次）。
+    small = _measure(8192)                        # 40 KB
+    big = _measure(65536)                         # 320 KB（最坏形态：一个 `>` 都没有）
+    assert big < small * 40 + 0.5, (
+        f"二次回溯回来了：40 KB {small:.2f}s / 320 KB {big:.2f}s（比值 {big / max(small, 1e-9):.1f}，"
+        f"线性应 ≈ 8、二次是 64；封顶后实测 0.047/0.38s）")
 
 
 def test_normalize_is_a_fixed_point():

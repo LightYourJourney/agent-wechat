@@ -269,7 +269,15 @@ def account_status(account: str | None = None) -> dict:
     # 文件——只闸 index.db 时，「index 在而排除清单缺」的手工态仍会被补建一个空清单。
     # 排除清单的位置跟着 `path_for(DB_PATH)` 走：那正是 `store.connect` ATTACH 的目标
     # （生产上等于 `exclusions.path()`，测试里两者会分叉——闸必须与 connect 用同一个推导）。
-    if (store.DB_PATH.exists()
+    if store.DB_PATH.exists() and not exclusions.path_for(store.DB_PATH).exists():
+        # 索引在、排除清单不在（手工删过它）：闸门覆盖**两个**文件（F9），所以这里不能
+        # `store.open()`——那会把空清单建回来。但**全零计数 + 空 schema_notes 读起来就是
+        # 「还没导出过」**——正是 EA-025 要消灭的那个假象（review-code 的 Spec 轴 #4）。
+        # 不建库的前提不变，这一句必须带上。
+        schema_notes = [
+            f"排除清单不在（{exclusions.path_for(store.DB_PATH)}）而索引库在——"
+            "index 计数按零呈现（只为不凭空建出那个文件）；跑一次导出会把它建回来"]
+    elif (store.DB_PATH.exists()
             and exclusions.path_for(store.DB_PATH).exists()):
         try:
             with store.open() as con:
@@ -1235,7 +1243,10 @@ def msgextra_rebuild(account: str | None = None,
             # `empty` 的判据是「**没有一个可读字段**」，不是「parse 返回 None」——两者不等价：
             # 载荷解得开、承载元素也在，但一个白名单属性都没命中时 `Extra.fields` 是**空元组**，
             # 那正是「这条没有可读内容」的常态（真机 42 里有只带 `percard` 的名片）。
-            extra = msgextra.parse(msg_type, zlib.decompress(payload).decode())
+            # **走共享的那一份解码**（`_decode_extra`）：自己再写一遍 `zlib.decompress(...).decode()`
+            # 已经漂过一次——那边是 `decode()`（严格），这边写成 `decode("utf-8", "ignore")`，
+            # 同一个坏载荷在两个入口一个抛一个不抛（review-code 的 Standards 轴 #6）。
+            extra = _decode_extra(msg_type, payload)
             if extra is None or not extra.fields:
                 empty += 1
             buf.append((key, msg_type, payload))

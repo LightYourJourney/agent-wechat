@@ -19,8 +19,13 @@ ACCT = "wxid_testacct01_ab12"
 
 
 @contextlib.contextmanager
-def _passthrough(db_path, passphrase, tmpdir=None):
-    """`decrypt.decrypted` 的直通桩（原样搬自四个文件，含 `tmpdir=` 形参——外部桩同签名）。"""
+def _passthrough(db_path, passphrase):
+    """`decrypt.decrypted` 的直通桩（原样搬自四个文件）。
+
+    **不带 `tmpdir=` 形参**（EA-048 已把那个形参从 `decrypt.decrypted` 删掉，全仓零调用方）：
+    review-code 的 Standards 轴 #11 指出，上一版留着它并给了一句「外部桩同签名」的理由——
+    而那是个**编出来的理由**（签名早就不一样了），死形参被新共享夹具「合法化」了。
+    """
     yield db_path
 
 

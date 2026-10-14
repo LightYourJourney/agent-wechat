@@ -231,7 +231,24 @@ def test_every_home_dir_path_owner_goes_through_the_gate():
     模块常量的新写者。判据只认「模块级常量」这个形态——它是本仓四种 owner 的**共同**形态，
     而按行为驱动每个写入口成本高得多（见 `内部审计记录` ⑦）。
     """
+    import ast
     import re
+
+    def _calls_the_gate(path: pathlib.Path) -> bool:
+        """**AST 判据，不是文本判据**：修前写的是 `"ensure_home_dirs()" not in f.read_text()`——
+        于是**注释里提到它就通过**，把调用删掉照样绿（review-code 的 Standards 轴 #10 抓到；
+        本仓记过 11 次的假护栏那一族）。本仓 `tests/test_errors.py` 同一批刚做过同样的
+        「文本扫描 → AST」迁移，两处口径现在一致。
+        """
+        for node in ast.walk(ast.parse(path.read_text())):
+            if isinstance(node, ast.Call):
+                f = node.func
+                name = (f.attr if isinstance(f, ast.Attribute)
+                        else f.id if isinstance(f, ast.Name) else None)
+                if name == "ensure_home_dirs":
+                    return True
+        return False
+
     root = pathlib.Path(paths.__file__).parent
     owners = {}
     for f in sorted(root.glob("*.py")):
@@ -241,5 +258,5 @@ def test_every_home_dir_path_owner_goes_through_the_gate():
     # `paths.py` 不在里面是对的：它**定义** `HOME_DIR`（`pathlib.Path(...)`），不是从它派生。
     assert set(owners) == {"keys.py", "store.py", "tasks.py", "vector.py"}, \
         f"owner 名单变了，先核一遍再改这条：{sorted(owners)}"
-    missing = [n for n, f in owners.items() if "ensure_home_dirs()" not in f.read_text()]
+    missing = [n for n, f in owners.items() if not _calls_the_gate(f)]
     assert not missing, f"这些 owner 没过闸（它们的产物会落到当前工作目录）：{missing}"

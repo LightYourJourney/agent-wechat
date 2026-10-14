@@ -599,3 +599,35 @@ def test_the_temp_file_name_carries_the_pid(tmp_path, monkeypatch):
     _wait_done(tid)
     assert seen, "至少发生过一次落盘"
     assert all(str(os.getpid()) in name for name in seen), seen
+
+
+def test_a_huge_pid_in_the_registry_does_not_escape_core(tmp_path, monkeypatch):
+    """review-code 的 Standards 轴 #4：**超大 pid 不能让 `OverflowError` 逃出 core**。
+
+    `os.kill(pid, 0)` 对超出 C long 的 pid 抛的是 `OverflowError`（`ArithmeticError` 子类，
+    **不是** `OSError`）——修前 `tasks._pid_alive` 只接 `ProcessLookupError` / `PermissionError`，
+    于是一份被手工改过（或写坏）的 `tasks.json` 里有个超大 pid，`status` / `start` 全都把它
+    抛到 CLI 的 `except AgentWeChatError` 之外（用户看到 traceback）。
+    `decrypt._pid_alive` 早为同一条修过（T10 复审 N1），两份实现**已经分叉**——判据现已合并到
+    `paths.pid_alive`，这条同时钉住合并后的那一份。
+    """
+    monkeypatch.setattr(tasks, "TASKS_FILE", tmp_path / "tasks.json")
+    tasks.TASKS_FILE.write_text(json.dumps({"t1": {
+        "kind": "k", "target": "x", "pid": 10 ** 20, "status": "running",
+        "started_at": int(time.time()), "updated_at": int(time.time())}}))
+    got = tasks.status("t1")                     # 不抛
+    assert got is not None
+    tasks.status(None)                           # 列表入口同样不抛
+
+
+def test_pid_alive_is_one_criterion_for_both_callers():
+    """判据只有一份（`paths.pid_alive`）：两份实现分叉过一次，不该再分叉。"""
+    import inspect
+    from agent_wechat import decrypt, paths
+    assert paths.pid_alive(10 ** 20) is True, "判不出来一律当活着（保守）"
+    assert paths.pid_alive(None) is False and paths.pid_alive(0) is False
+    assert paths.pid_alive(True) is False, "bool 是 int 的子类，但 pid 不该收它"
+    assert paths.pid_alive("123") is False
+    for mod in (tasks, decrypt):
+        assert not hasattr(mod, "_pid_alive"), f"{mod.__name__} 又长出第二份判据了"
+    assert "os.kill" in inspect.getsource(paths.pid_alive)

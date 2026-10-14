@@ -56,19 +56,6 @@ def lock_file() -> pathlib.Path:
     return TASKS_FILE.with_name(TASKS_FILE.name + ".lock")
 
 
-def _pid_alive(pid: object) -> bool:
-    """记录里的 pid 是否还活着（EA-015 的孤儿判据）。缺 pid / 非正整数 → 视为不活。"""
-    if not isinstance(pid, int) or pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True                     # 存在但无权限发信号：活着
-    return True
-
-
 def _harvest(rec: dict, now: int) -> dict:
     """载入时把「进程确实死了」或「陈旧到不可信」的 running 收割成 failed。
 
@@ -80,7 +67,7 @@ def _harvest(rec: dict, now: int) -> dict:
         return rec
     seen = rec.get("updated_at") or rec.get("started_at")   # 老记录没有心跳 → 回落开始时刻
     stale = isinstance(seen, int) and now - seen > STALE_RUNNING_SECONDS
-    if stale or not _pid_alive(rec.get("pid")):
+    if stale or not paths.pid_alive(rec.get("pid")):
         return {**rec, "status": "failed", "error": ORPHAN_ERROR}
     return rec
 
@@ -178,7 +165,7 @@ def start(kind: str, runner: Callable[[str], int | None], **fields) -> str:
         for tid, rec in _tasks.items():
             if (rec.get("status") == "running" and rec.get("kind") == kind
                     and all(rec.get(k) == fields.get(k) for k in _IDENTITY_KEYS)
-                    and _pid_alive(rec.get("pid"))):
+                    and paths.pid_alive(rec.get("pid"))):
                 return tid
         task_id = uuid.uuid4().hex[:12]
         now = int(time.time())

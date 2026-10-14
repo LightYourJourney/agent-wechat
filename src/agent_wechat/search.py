@@ -122,8 +122,11 @@ def search(query: str, chat_id: str | None = None, limit: int = 20,
             if (con.execute("SELECT 1 FROM messages_fts_docsize LIMIT 1").fetchone() is None
                     and con.execute("SELECT 1 FROM messages LIMIT 1").fetchone() is not None):
                 notes.append({"capability": "search_fts",
+                              # 措辞**中立**：这条 effect 随 MCP 信封出门，写死 CLI 的命令名就是
+                              # 让 agent 读到一个它敲不了的东西（EA-096 的裁定：core 中立 +
+                              # 入口补后缀——同一批已把 4 处同类文案改成「重跑一次导出即可重建」）。
                               "effect": "FTS 索引失同步：索引里一行都没有而消息表非空"
-                                        "（搜索会漏掉全部结果）——运行 `agent-wechat export --full` 重建"})
+                                        "（搜索会漏掉全部结果）——重跑一次全量导出即可重建"})
 
     hits = [dict(r) for r in rows]
     return {"hits": hits, "mode": mode, "total": len(hits), "degraded": notes}

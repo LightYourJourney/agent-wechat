@@ -7,6 +7,7 @@
 import os
 import pathlib
 import sqlite3
+import uuid
 
 import pytest
 import sqlite_vec
@@ -578,12 +579,16 @@ def test_tmp_leaks_probe_follows_the_writer(tmp_path, monkeypatch):
     monkeypatch.setenv("TMPDIR", str(bad))
     monkeypatch.setattr(_tf, "tempdir", None)
     real = _tf.gettempdir()
-    (pathlib.Path(real) / (bootstrap.TMP_PREFIX + "def456.lldb")).write_text("script")
+    # **名字必须唯一**：这一步落在**真实**的 `gettempdir()` 里（被测的就是那个目录），
+    # 固定名会让并发跑的两个 pytest 互删、被 kill 时留残留（review-code 的 Standards 轴 #15）。
+    tag = f"def456-{os.getpid()}-{uuid.uuid4().hex[:6]}"
+    probe = pathlib.Path(real) / (bootstrap.TMP_PREFIX + tag + ".lldb")
+    probe.write_text("script")
     try:
         rep2 = purge.verify(purge.plan(frozenset({"keys"})))
-        assert any("def456" in x for x in rep2.tmp_leaks), real
+        assert any(tag in x for x in rep2.tmp_leaks), real
     finally:
-        (pathlib.Path(real) / (bootstrap.TMP_PREFIX + "def456.lldb")).unlink()
+        probe.unlink(missing_ok=True)
 
 
 def test_verify_degrades_when_tmutil_missing(monkeypatch):

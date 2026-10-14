@@ -197,7 +197,10 @@ def test_the_sweep_runs_before_the_first_decryption(tmp_path, monkeypatch):
     monkeypatch.setattr(decrypt.subprocess, "run",
                         lambda argv, **kw: (_ for _ in ()).throw(
                             AssertionError("不该走到 sqlcipher")))
-    with pytest.raises(Exception):
+    # **精确到注入的那一句**：`pytest.raises(Exception)` 分不开「停在该停的地方」与
+    # 「更早炸了」（review-code 的 Standards 轴 #13）——而这里的桩抛的正是 AssertionError，
+    # 那个宽判据等于把两者当同一件事。
+    with pytest.raises(AssertionError, match="不该走到 sqlcipher"):
         with decrypt.decrypted(db, b"w" * 32):
             pass
     assert not stale.exists(), "第一次解密之前就该把陈旧明文清掉"

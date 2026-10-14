@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import datetime
 import os
+import re
 from typing import TYPE_CHECKING
 
 # EA-108：这两句此前在 HTML / MD 各留一份副本（实测分叉零红）。措辞归这里，
@@ -40,11 +41,10 @@ def whatwg_ipv4(host: str) -> bool:
     `192.168.1.1.` 是绝对域名形式，浏览器照样落到 192.168.1.1。二进制 `0b101` 不在判据内
     ——实测 node 的 `new URL("https://0b101/x").hostname` 就是 `0b101`，WHATWG 不认它。
     """
-    import re as _re
     label = host.rstrip(".").rsplit(".", 1)[-1]
     # 与 `moments_html` 原实现**逐字一致**（搬移不改行为）：`0[xX][0-9a-fA-F]*` 用 `*` 而非
     # `+`——裸 `0x` 也是命中（WHATWG 认它、原用例 `[0x]` 钉着这一点）。
-    return bool(_re.fullmatch(r"(?:[0-9]+|0[xX][0-9a-fA-F]*)", label))
+    return bool(re.fullmatch(r"(?:[0-9]+|0[xX][0-9a-fA-F]*)", label))
 
 
 def url_is_safe(url: str) -> bool:
@@ -61,6 +61,11 @@ def url_is_safe(url: str) -> bool:
     的 appmsg 链接块**完全没有**——同一个输入在两个产物里一个被拦、一个成为可点链接。
     搬到这里是因为 `chat_text` 已经是两模板共享的纯函数层。
     """
+    # **函数内导入是有意的、也是笔着账的**：`moments` 那条线（`moments.py` → `sns_media`）
+    # 是重的一支，而 `chat_text` 被两个模板 import——顶层拉进来会让「只想渲染一段文案」的
+    # 调用方也背上它。EA-090 的裁定写着「保留 `moments*` / `sns_media` 惰性」。
+    # （不是防 import 环：`scripts/check_import_cycles.py` 实测 `moments` 顶层不到达 `chat_text`，
+    # 提到顶层不会让门禁变红——review-code 的 Standards 轴 #9 替我验过这一条。）
     from . import moments                      # 复用它的 `split_url`（容错解析）
     s = moments.split_url(url)
     host = (s.hostname or "").lower() if s is not None else ""

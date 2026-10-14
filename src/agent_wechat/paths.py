@@ -154,6 +154,31 @@ def all_dbs(account: str) -> list[pathlib.Path]:
     return sorted(out)
 
 
+def pid_alive(pid: object) -> bool:
+    """这个 pid 还活着吗。**判不出来一律当活着**（保守：不收割、不清扫），缺 pid / 非正整数
+    → 视为不活。
+
+    一份判据，两处用（`tasks._harvest` 的孤儿判据、`decrypt.sweep_stale_tempdirs` 的清扫判据）。
+    此前两份**实现已经分叉**：`decrypt` 那份收了 `OverflowError`（T10 复审 N1 抓的），
+    `tasks` 那份没接——于是同一个 `tasks.json` 里一个超大 pid 会让 `status` / `start`
+    把 `OverflowError` 抛出 core（它是 `ArithmeticError` 子类，**不是** `OSError`），
+    而本文件所在层的契约是「core 只抛项目异常」。合并到一处，这类分叉不可能再发生。
+
+    `pid` 收 `object` 而不是 `int`：调用方读的是 JSON 里的值（可能是字符串 / null / 浮点）。
+    """
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except (OSError, OverflowError):
+        # PermissionError = 别人的进程 = 活着；OverflowError = pid 超出 C long（判不出来）；
+        # 其余 OSError 同理保守。三种都归「活着」。
+        return True
+    return True
+
+
 def time_machine_excluded() -> str | None:
     """备份排除的**真实状态**（只读查询 `tmutil isexcluded`）：`[Excluded]` / `[Included]`；
     判不出来（无 tmutil / 超时 / 非零退出 / HOME_DIR 还不存在）→ None。

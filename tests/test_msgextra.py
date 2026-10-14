@@ -106,9 +106,9 @@ def test_extras_round_trip(con):
 def test_upsert_extras_skips_excluded_keys(con):
     """**排除清单拦截**（spec §5.4 第 2 条）：回填命令直接回微信库重扫，不拦的话
     `purge --chat` 删掉的位置/名片载荷会重新长回来。与 `upsert_msg_parts` 同一条判据。"""
-    key = f"acct|{_CM}|message_0.db|1"
+    key = f"acct|{_CHAT_MD5}|message_0.db|1"
     from agent_wechat import exclusions
-    _said(con, key, 1)
+    _seed_message_row(con, key, 1)
     exclusions.add_from_messages(con, "acct", "c")
     n = store.upsert_extras(con, [(key, 48, b"<msg/>")])
     con.commit()
@@ -118,8 +118,8 @@ def test_upsert_extras_skips_excluded_keys(con):
 
 def test_extras_counted_and_deleted_by_msg_key_prefix(con):
     """`chat_row_counts` / `delete_chat` 对第八张表的接线（两处都是宽谓词，孤儿行照样盖得住）。"""
-    key = f"acct|{_CM}|message_0.db|1"
-    orphan = f"acct|{_CM}|message_0.db|90"      # 消息行不在，载荷在（回填只写这张表）
+    key = f"acct|{_CHAT_MD5}|message_0.db|1"
+    orphan = f"acct|{_CHAT_MD5}|message_0.db|90"      # 消息行不在，载荷在（回填只写这张表）
     store.upsert_extras(con, [(key, 48, b"<msg/>"), (orphan, 42, b"<msg/>")])
     con.commit()
     assert store.chat_row_counts(con, "acct", "c")["extras"] == 2
@@ -131,13 +131,13 @@ def test_extras_counted_and_deleted_by_msg_key_prefix(con):
 
 # ---------- 回填命令 ----------
 
-_CM = messages.chat_md5('c')
+_CHAT_MD5 = messages.chat_md5('c')
 
 
-def _said(con, msg_key: str, lid: int) -> None:
+def _seed_message_row(con, msg_key: str, lid: int) -> None:
     """种一行 messages（走 `upsert_batch`，不手写 INSERT——列的 NOT NULL 约束会跟着 schema 漂）。"""
     store.upsert_batch(con, [{"msg_key": msg_key, "account": "acct",
-                              "chat_md5": _CM, "chat_id": "c", "shard": "message_0.db",
+                              "chat_md5": _CHAT_MD5, "chat_id": "c", "shard": "message_0.db",
                               "local_id": lid, "server_id": lid, "ts": 1, "msg_type": 48,
                               "sender_id": None, "sender_name": None, "is_self": 0,
                               "content": "", "media_hint": None}])
@@ -183,8 +183,8 @@ def test_rebuild_is_idempotent(con, monkeypatch):
 def test_rebuild_reports_skipped_rows_through_the_callback(con, monkeypatch):
     """被排除清单挡下的行：`skipped` 计数 + `on_skipped` 回调（「成功但有保留」的出口，
     与 `appmsg rebuild` / `media rebuild-refs` 同款）。"""
-    key = f"acct|{_CM}|message_0.db|1"
-    _said(con, key, 1)
+    key = f"acct|{_CHAT_MD5}|message_0.db|1"
+    _seed_message_row(con, key, 1)
     from agent_wechat import exclusions
     exclusions.add_from_messages(con, "acct", "c")
     con.commit()
@@ -232,7 +232,6 @@ def test_a_corrupt_payload_in_the_table_does_not_raise(con, monkeypatch):
     `test_chat_export_counts_unparsed_and_rejected_separately`）。把 `_decode_extra` 的
     `try/except` 删掉，本用例红。
     """
-    from agent_wechat import usecases
     bad = [("acct|aaa|message_0.db|1", 48, b"\x00\x01 not-zlib"),
            ("acct|aaa|message_0.db|2", 48, zlib.compress(b"<msg><location x='&#'" + b"1" * 6000
                                                          + b";'/></msg>", 6)),

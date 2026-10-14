@@ -42,23 +42,6 @@ def tmp_dir() -> pathlib.Path:
 _swept_stale = False          # 每进程只扫一次（EA-019）
 
 
-def _pid_alive(pid: int) -> bool:
-    """`os.kill(pid, 0)` 判活。判不出来一律当**活着**（保守不删）。
-
-    `PermissionError` = 别人的进程 = 活着。`OverflowError` 也要接（复审 N1）：pid 超出 C long
-    时 `os.kill` 抛的是 `OverflowError`（`ArithmeticError` 子类，**不是** `OSError`）——不接
-    的话一个 `awdec-<超长数字>-*` 目录会让**每个新进程的第一次解密**都抛它逃出 core
-    （本文件自述的契约是「core 只抛项目异常」），CLI 的每条解密类命令全失败。
-    """
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except (OSError, OverflowError):
-        return True
-    return True
-
-
 def sweep_stale_tempdirs() -> int:
     """清扫 `tmp/` 下**没有活进程持有**的 `awdec-<pid>-*`，返回清掉的目录数（EA-019）。
 
@@ -77,7 +60,7 @@ def sweep_stale_tempdirs() -> int:
         return 0                       # tmp 读不了：清扫是尽力而为，绝不因此挡住解密
     for d in entries:
         m = _AWDEC_RE.match(d.name)
-        if not m or _pid_alive(int(m.group(1))):
+        if not m or paths.pid_alive(int(m.group(1))):
             continue
         shutil.rmtree(d, ignore_errors=True)
         # 判「真的没了」用 `lexists`：悬空符号链接与自指链接环下 `rmtree` 会拒绝执行、
