@@ -42,6 +42,9 @@ include = [
 dev = [
     "pytest>=9.1.1",
     "vulture>=2.16",
+    # 优化循环的探针要算圈复杂度（spec §4.1 的 complexity 块）。
+    # 只作 dev 依赖——**运行时依赖的增量为 0** 是 spec §5 的硬上限。
+    "radon>=6.0.1",
 ]
 
 [tool.pytest.ini_options]
