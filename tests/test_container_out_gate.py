@@ -131,6 +131,19 @@ def test_usecases_media_export_refuses_before_touching_anything():
 
 # ---------------------------------------------------------------- 反向：闸门不过宽
 
+def test_empty_out_is_not_gated_and_cwd_in_container_does_not_matter(monkeypatch, capsys):
+    """`--out ""` 的语义是「没给」（落点=默认根）⇒ **不该**被闸门拒——判据与写侧同为**真值**判断。
+
+    钉的是一个只在**两个条件同时成立**时才现形的差异：`--out ""` **且 CWD 恰在容器内**。
+    用 `is not None` 时 `in_wechat_container("")` 判的是 CWD（resolve("") = CWD）= 容器 ⇒ 误拒；
+    真值判断则跳过闸门、照常走默认根（`chat index` 在空产物根下零依赖返回）。
+    本用例只 `chdir`（读操作，不写容器），且默认根在 `~/.agent-wechat`。
+    """
+    monkeypatch.chdir(paths.CONTAINER)      # 只切 CWD：没有对容器的任何写入
+    assert _run_cli("chat", "index", "--out", "") == 0
+    assert "微信容器目录" not in capsys.readouterr().err
+
+
 def test_reverse_chat_index_in_plain_tmp_dir_is_not_refused(tmp_path, capsys):
     """普通目录仍然放行。空目录下 `chat index` 零依赖可跑（「还没导出过任何会话」那条路）。"""
     assert _run_cli("chat", "index", "--out", str(tmp_path / "out")) == 0
