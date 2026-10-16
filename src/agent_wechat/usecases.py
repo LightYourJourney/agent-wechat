@@ -396,7 +396,7 @@ def media_export(contact: str, *, kinds: list[str], months: list[str] | None = N
 
     `out_dir` 落在微信容器目录之内时**拒绝**（C-11）——在任何读取之前叫停。
     """
-    if out_dir is not None:
+    if out_dir:
         paths.refuse_container_out(out_dir)
     ctx = ChatContext(account)
     chat_id = ctx.resolve(contact)
@@ -764,7 +764,7 @@ def chat_export(contact: str, *, months: list[str] | None = None, limit: int = 5
 
     `out_dir` 落在微信容器目录之内时**拒绝**（C-11）——在任何读取之前叫停。
     """
-    if out_dir is not None:
+    if out_dir:
         paths.refuse_container_out(out_dir)
     ctx = ChatContext(account)
     chat_id = ctx.resolve(contact)
@@ -1061,7 +1061,7 @@ def chat_index(out_dir: str | None = None, account: str | None = None) -> ChatIn
 
     `out_dir` 落在微信容器目录之内时**拒绝**（C-11）——在任何读取之前叫停。
     """
-    if out_dir is not None:
+    if out_dir:
         paths.refuse_container_out(out_dir)
     # 与 `chat_export` 同款绝对化：`--out` 给相对路径时，`out_dir`/`file` 才是能直接打开、
     # 也能与 `chat export` 对齐的路径。
@@ -1494,7 +1494,7 @@ def moments_export(contact: str | None = None, *, months: list[str] | None = Non
 
     `out_dir` 落在微信容器目录之内时**拒绝**（C-11）——在任何读取之前叫停。
     """
-    if out_dir is not None:
+    if out_dir:
         paths.refuse_container_out(out_dir)
     # F1 的同族入口（review-T9 复验条件 3）：默认产物根在 HOME 下（`HOME_DIR/moments`），
     # 而本入口此前不过任何闸——相对 AGENT_WECHAT_HOME 下会经 `media.ensure_tree` 在 CWD 里

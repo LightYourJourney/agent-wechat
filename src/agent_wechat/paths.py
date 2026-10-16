@@ -75,6 +75,11 @@ def refuse_container_out(p: str | pathlib.Path) -> None:
 
     **在写之前叫停**：不静默改写路径、也不「警告后照写」——`--out` 是用户显式指定的
     落点，悄悄换地方会让「产物到底在哪」不可预期（判据见 `in_wechat_container`）。
+
+    调用方按**真值**判断「传没传 `--out`」（`if out_dir:`，与写侧的
+    `pathlib.Path(out_dir) if out_dir else <默认根>` 和 CLI 的 `if args.out:` 同一判据）：
+    空串的语义是「没给」（落点=默认根），本就不该被这道闸门拒——判据若用 `is not None`，
+    `--out ""` 且 CWD 恰在容器内时会误拒（fail-closed、无实害，但两边惯例不一致）。
     message 里带**容器路径本身**：换一种大小写拼写命中的时候，用户看到的那串 `--out`
     并不长成容器的样子，不印出容器就无从理解为什么被拒。
     """
