@@ -15,7 +15,7 @@ import re
 import shutil
 import subprocess
 
-from .errors import HomeUnavailable
+from .errors import ContainerWriteRefused, HomeUnavailable
 
 CONTAINER = pathlib.Path.home() / "Library/Containers/com.tencent.xinWeChat/Data/Documents"
 XWECHAT_FILES = CONTAINER / "xwechat_files"
@@ -33,6 +33,56 @@ HOME_DIR = pathlib.Path(
     os.environ.get("AGENT_WECHAT_HOME") or (pathlib.Path.home() / ".agent-wechat"))
 
 _tm_exclusion_checked = False
+
+
+def in_wechat_container(p: str | pathlib.Path) -> bool:
+    """`p` 解析后是否落在微信容器目录（`CONTAINER`）之内——**含 `CONTAINER` 本身**。
+
+    判据是**解析后**的路径：`Path.resolve(strict=False)` 展开 `..`、跟随符号链接，相对
+    路径按**进程 CWD** 展开（`resolve` 的默认语义）。四个 `--out` 入口的一个判据
+    （见 `refuse_container_out`），理由是 SECURITY.md §3 的只读宣称。
+
+    **大小写**：macOS 默认 APFS 不区分大小写——`~/library/containers/…` 与
+    `~/Library/Containers/…` 实测是同一个 inode，而 `resolve()` 不做大小写规范化
+    ⇒ 只比字符串的话，换一种拼写就绕过判据。故字符串判据之后再用 `samefile` 把它与
+    **既有祖先**逐个比 inode：只在「真的指同一目录」时为真，在区分大小写的卷上不会
+    误伤（那时两种拼写是两个目录，且容器通常根本不存在）。
+
+    **不含 `CONTAINER` 的祖先**（如 `~/Library/Containers`）：那写的是容器的同级/上级，
+    不是容器内部——刻意不收（spec 的判据只到「容器本身及其子路径」）。
+
+    判不出来（符号链接环 / 权限不足）返回 False：这种路径在随后的实际写入里会自己失败，
+    在这里谎报「在容器里」是错诊断。
+    """
+    try:
+        resolved = pathlib.Path(p).resolve(strict=False)
+        container = CONTAINER.resolve(strict=False)
+    except (OSError, RuntimeError):
+        return False
+    if resolved == container or resolved.is_relative_to(container):
+        return True
+    try:
+        if not container.exists():
+            return False                      # 容器不在 ⇒ 没有可写进去的东西
+        return any(anc.exists() and os.path.samefile(anc, container)
+                   for anc in (resolved, *resolved.parents))
+    except OSError:
+        return False
+
+
+def refuse_container_out(p: str | pathlib.Path) -> None:
+    """`p` 在微信容器内 → `ContainerWriteRefused`。四个 `--out` 入口的共享闸门。
+
+    **在写之前叫停**：不静默改写路径、也不「警告后照写」——`--out` 是用户显式指定的
+    落点，悄悄换地方会让「产物到底在哪」不可预期（判据见 `in_wechat_container`）。
+    message 里带**容器路径本身**：换一种大小写拼写命中的时候，用户看到的那串 `--out`
+    并不长成容器的样子，不印出容器就无从理解为什么被拒。
+    """
+    if in_wechat_container(p):
+        raise ContainerWriteRefused(
+            f"拒绝把输出写进微信容器目录（{CONTAINER}）：{p}",
+            hint="换一个容器之外的目录（CLI 的 --out / MCP 的 out_dir），"
+                 "例如 ~/Desktop/wechat-export")
 
 
 def ensure_home_dirs() -> None:

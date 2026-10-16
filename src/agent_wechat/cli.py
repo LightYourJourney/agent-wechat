@@ -77,6 +77,11 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
 
 
 def cmd_decrypt(args: argparse.Namespace) -> int:
+    if args.out:
+        # C-11：整库明文（SECURITY.md §1 标为极高敏感）**绝不**落进微信自己的容器目录。
+        # 判据在 paths（四个 `--out` 入口共用），且先于账号解析与解密——那才是真正贵的两步。
+        # 路径与下面写入时**逐字一致**（`HOME_DIR / args.out`：绝对路径时 pathlib 丢弃左操作数）。
+        paths.refuse_container_out(paths.HOME_DIR / args.out)
     acc = account.resolve_account(args.account)
     db = paths.db_storage(acc) / args.db
     if not db.exists():

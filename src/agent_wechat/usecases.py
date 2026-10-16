@@ -393,7 +393,11 @@ def media_export(contact: str, *, kinds: list[str], months: list[str] | None = N
 
     `with_cdn`（默认 False）：贴纸本机那份是加密的、解不开，故只有显式打开它才从微信 CDN
     取件。**不开则一次网络请求都不发**（`SECURITY.md` 的零网络承诺）。
+
+    `out_dir` 落在微信容器目录之内时**拒绝**（C-11）——在任何读取之前叫停。
     """
+    if out_dir is not None:
+        paths.refuse_container_out(out_dir)
     ctx = ChatContext(account)
     chat_id = ctx.resolve(contact)
     if isinstance(chat_id, NeedConfirm):
@@ -757,7 +761,11 @@ def chat_export(contact: str, *, months: list[str] | None = None, limit: int = 5
 
     标题（`view.title`）走既有的 `_display_or_id` —— 与 `recent` / `search` 同一个来源，
     contact 表漂移时回落 `chat_id`（漂移随 degraded 出去）。
+
+    `out_dir` 落在微信容器目录之内时**拒绝**（C-11）——在任何读取之前叫停。
     """
+    if out_dir is not None:
+        paths.refuse_container_out(out_dir)
     ctx = ChatContext(account)
     chat_id = ctx.resolve(contact)
     if isinstance(chat_id, NeedConfirm):
@@ -1050,7 +1058,11 @@ def chat_index(out_dir: str | None = None, account: str | None = None) -> ChatIn
     会话名**只用索引库里的 `chat_id`**，不取展示名：`reader._contacts_all_cached()` 是
     `contacts(limit=5000)` 的 5000 行窗口，窗口外的会话会静默回落裸 id（真机 772 个会话
     只有 18% 在窗口内）——那条已 park，别在这里顺手接上。
+
+    `out_dir` 落在微信容器目录之内时**拒绝**（C-11）——在任何读取之前叫停。
     """
+    if out_dir is not None:
+        paths.refuse_container_out(out_dir)
     # 与 `chat_export` 同款绝对化：`--out` 给相对路径时，`out_dir`/`file` 才是能直接打开、
     # 也能与 `chat export` 对齐的路径。
     out_root = (pathlib.Path(out_dir) if out_dir else media.export_root()).resolve()
@@ -1479,7 +1491,11 @@ def moments_export(contact: str | None = None, *, months: list[str] | None = Non
 
     `with_media=False`（默认）时**全程零网络**——这是零网络红线上本次新增的例外开关，
     默认必须关闭。`fetch` 仅作测试注入，生产调用方不传。
+
+    `out_dir` 落在微信容器目录之内时**拒绝**（C-11）——在任何读取之前叫停。
     """
+    if out_dir is not None:
+        paths.refuse_container_out(out_dir)
     # F1 的同族入口（review-T9 复验条件 3）：默认产物根在 HOME 下（`HOME_DIR/moments`），
     # 而本入口此前不过任何闸——相对 AGENT_WECHAT_HOME 下会经 `media.ensure_tree` 在 CWD 里
     # 建出整棵树（EA-003 的后果换了个入口）。同 `store.connect` / `keys.save_cached_hex` 的立场。
