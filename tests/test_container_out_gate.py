@@ -1,12 +1,14 @@
-"""C-11：四个 `--out` 入口的容器路径判据（`SECURITY.md` §3 的只读宣称）。
+"""C-11：`--out` 四个入口与 `AGENT_WECHAT_HOME` 的容器路径判据（`SECURITY.md` §3）。
 
-**本文件绝不往微信容器里写任何东西。** 被拒的调用全部用 `paths.CONTAINER` 的**子路径
-字符串**构造，而闸门在解析出产物根 / 翻开任何库之前就叫停——「写在拦之前」由这几条
-断言证明（探针路径额外断言它**不存在**）。反向用例只在 `tmp_path` 里写。
+**本文件绝不往微信容器里写任何东西。** 被拒的调用全部用容器可写范围（`CONTAINER_DATA`
+及其祖先链）的**子路径字符串**构造，而闸门在解析出产物根 / 建任何目录 / 翻开任何库之前
+就叫停——「写在拦之前」由这几条断言证明（探针路径额外断言它**不存在**）。反向用例只在
+`tmp_path` 里写。
 
 四个入口的拒绝都走 CLI 层（退出码 1 + 一行中文，不是 traceback）：MCP 的
 `export_chat_media` / `export_moments` / `export_chat` 走的是**同一批 `usecases` 函数**，
-故 core 层的闸门一处覆盖两个适配层。
+故 core 层的闸门一处覆盖两个适配层。`AGENT_WECHAT_HOME` 的闸门长在
+`paths.ensure_home_dirs`（所有写路径的收口处）。
 """
 import os
 import pathlib
@@ -33,16 +35,24 @@ def _run_cli(*argv: str) -> int:
 
 # ---------------------------------------------------------------- 判据本身
 
-def test_predicate_covers_container_and_children_only():
-    """范围：`CONTAINER` 本身与其**子路径**为真；容器之外（含容器的**祖先**、以及从
-    子路径用 `..` 爬出去）为假。容器里被判真的那两条都不被创建——判据是纯路径面的。"""
+def test_predicate_covers_container_data_and_its_ancestor_chain():
+    """范围：`CONTAINER_DATA`（整个 Data 目录）本身与其**子路径**、以及它的祖先链
+    下到 `~/Library/Containers`（含两端）为真；再往上（`~/Library`、`~`）与容器之外为假。
+    被判真的那几条都不被创建——判据是纯路径面的。"""
     child = paths.CONTAINER / "xwechat_files" / ACCT / "db_storage"
     assert paths.in_wechat_container(paths.CONTAINER) is True
     assert paths.in_wechat_container(child) is True
     assert paths.in_wechat_container(str(child)) is True              # str 与 Path 同判
     assert paths.in_wechat_container(child / "..") is True            # `..` 回到容器内 = 仍在
-    assert paths.in_wechat_container(paths.CONTAINER / "..") is False  # 爬出容器
-    assert paths.in_wechat_container(paths.CONTAINER.parent) is False  # 祖先不收
+    # 闸门的根是**整个 Data**，不再只是 Documents
+    assert paths.in_wechat_container(paths.CONTAINER_DATA) is True
+    assert paths.in_wechat_container(paths.CONTAINER_DATA / "Library") is True
+    # 祖先链：两级祖先都收，到 ~/Library/Containers 为止（含它本身）
+    assert paths.in_wechat_container(paths.CONTAINER_DATA.parent) is True   # …/com.tencent.xinWeChat
+    assert paths.in_wechat_container(paths.CONTAINER_FLOOR) is True        # ~/Library/Containers
+    # 再往上不收：那里写的不是容器
+    assert paths.in_wechat_container(paths.CONTAINER_FLOOR.parent) is False  # ~/Library
+    assert paths.in_wechat_container(paths.CONTAINER_DATA.parents[3]) is False  # ~
     assert paths.in_wechat_container(pathlib.Path("/tmp")) is False
     assert not pathlib.Path(PROBE).exists(), "判据本身不许建任何东西"
 
@@ -60,9 +70,13 @@ def test_predicate_resolves_relative_path_against_cwd_and_follows_symlinks(tmp_p
     assert paths.in_wechat_container("into/xwechat_files") is True
     assert paths.in_wechat_container("into/xwechat_files/../xwechat_files") is True
     # `..` 是**符号链接感知**的（resolve 的 POSIX 语义：先跟随软链、再对**真实**父目录
-    # 上溯）：`into/../` 是 CONTAINER 的真实父目录 —— 爬出容器，故为假。
-    assert paths.in_wechat_container("into/../xwechat_files") is False
-    assert paths.in_wechat_container("into/../elsewhere") is False
+    # 上溯）：`into/../` 是 CONTAINER 的真实父目录（= Data），仍在闸门内。
+    assert paths.in_wechat_container("into/../xwechat_files") is True
+    assert paths.in_wechat_container("into/../elsewhere") is True
+    # 爬过祖先链的下限（`~/Library/Containers`，第 3 个 `..`）才是外面
+    assert paths.in_wechat_container("into/../../..") is True             # → ~/Library/Containers
+    assert paths.in_wechat_container("into/../../../..") is False         # → ~/Library
+    assert paths.in_wechat_container("into/../../../elsewhere") is False
     assert paths.in_wechat_container("outside/sub") is False
     assert paths.in_wechat_container("elsewhere/x") is False
 
@@ -80,6 +94,11 @@ def test_predicate_case_variant_of_container():
         pytest.skip("本卷区分大小写：无同 inode 的大小写变体可测")
     assert variant != str(paths.CONTAINER), "变体必须真的换了拼写（否则测的不是那条回落）"
     assert paths.in_wechat_container(variant + "/xwechat_files") is True
+    # 祖先链那段的两种拼写各钉一条：floor 本身（② 分支）与 Data 的祖先（① 分支）
+    floor_variant = str(paths.CONTAINER_FLOOR).replace("/Library/", "/library/")
+    assert paths.in_wechat_container(floor_variant) is True
+    data_variant = str(paths.CONTAINER_DATA).replace("/Library/", "/library/")
+    assert paths.in_wechat_container(data_variant + "/xwechat_files") is True
 
 
 # ---------------------------------------------------------------- 四个入口（+ chat index）
@@ -88,7 +107,7 @@ def test_media_export_cli_refuses_container_out(capsys):
     """`media export --out`：终审实测能把明文媒体写进容器——现在在任何读取之前即拒。"""
     assert _run_cli("media", "export", "--chat", "谁", "--out", PROBE) == 1
     err = capsys.readouterr().err
-    assert "微信容器目录" in err and str(paths.CONTAINER) in err
+    assert "微信容器目录" in err and str(paths.CONTAINER_DATA) in err
     assert "Traceback" not in err
     assert not pathlib.Path(PROBE).exists(), "被拒的调用不许在容器里留下任何东西"
 
@@ -158,3 +177,42 @@ def test_reverse_moments_export_writes_into_plain_tmp_dir(env, tmp_path, capsys)
     capsys.readouterr()
     assert (out / "index.html").exists()
     assert (out.stat().st_mode & 0o777) == 0o700
+
+
+# ---------------------------------------------------------------- AGENT_WECHAT_HOME
+
+def test_home_dir_in_container_is_refused_before_creating(monkeypatch):
+    """`AGENT_WECHAT_HOME` 指进 Data ⇒ `ensure_home_dirs` 在 mkdir 之前拒绝，
+    容器里不留任何东西（判据是 `in_wechat_container`，与 `--out` 同一个）。"""
+    home = paths.CONTAINER_DATA / "__c11_home_probe__"
+    monkeypatch.setattr(paths, "HOME_DIR", home)
+    with pytest.raises(errors.ContainerWriteRefused) as ei:
+        paths.ensure_home_dirs()
+    assert "AGENT_WECHAT_HOME" in (ei.value.hint or "")
+    assert not home.exists(), "被拒的调用不许在容器里建出数据目录"
+
+
+def test_home_dir_on_container_ancestor_is_refused(monkeypatch):
+    """祖先链也收：`AGENT_WECHAT_HOME=~/Library/Containers` 同样拒绝（同一条判据）。"""
+    monkeypatch.setattr(paths, "HOME_DIR", paths.CONTAINER_FLOOR)
+    with pytest.raises(errors.ContainerWriteRefused):
+        paths.ensure_home_dirs()
+
+
+def test_home_dir_outside_container_still_creates(monkeypatch, tmp_path):
+    """反向：容器之外的 HOME_DIR 照常建目录（0700）——闸门不是「一律拒绝」。"""
+    home = tmp_path / "home_outside"
+    monkeypatch.setattr(paths, "HOME_DIR", home)
+    paths.ensure_home_dirs()
+    assert home.is_dir()
+    assert (home.stat().st_mode & 0o777) == 0o700
+
+
+def test_cli_refuses_home_in_container(monkeypatch, tmp_path, capsys):
+    """CLI 层：HOME 在容器里时，`moments export` 在解析账号/读盘之前就以一行中文退出
+    （错误文案带 AGENT_WECHAT_HOME 这个可执行的修复动作）。"""
+    monkeypatch.setattr(paths, "HOME_DIR", paths.CONTAINER_DATA / "__c11_cli_home__")
+    assert _run_cli("moments", "export", "--account", ACCT, "--out", str(tmp_path / "out")) == 1
+    err = capsys.readouterr().err
+    assert "微信容器目录" in err and "AGENT_WECHAT_HOME" in err
+    assert "Traceback" not in err

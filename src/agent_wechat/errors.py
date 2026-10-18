@@ -168,12 +168,13 @@ class IndexUnavailable(AgentWeChatError):
 
 
 class ContainerWriteRefused(AgentWeChatError):
-    """`--out` 落在微信容器目录（`paths.CONTAINER`）之内 → 拒绝写入。
+    """落点落在微信容器的可写范围（`paths.CONTAINER_DATA` 及其上级 `CONTAINER_FLOOR`）
+    → 拒绝写入。两处触发：`--out`（四个入口）与 `AGENT_WECHAT_HOME`（`ensure_home_dirs`）。
 
     与 MediaOutputError 的分界：那个是**真写不动**（只读目录 / 磁盘满）；这个是
     **策略拒绝**——目标目录往往完全可写，拒绝的理由是落点选在了微信自己的容器里
     （SECURITY.md §3 的只读宣称：四个 `--out` 例外都带容器路径判据）。故 message
-    已含容器路径本身，hint 只给可执行动作（换一个容器之外的目录）。
+    已含被拒范围本身，hint 只给可执行动作（换一个容器之外的目录）。
     """
 
 

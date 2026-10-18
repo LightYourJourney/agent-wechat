@@ -21,6 +21,14 @@ CONTAINER = pathlib.Path.home() / "Library/Containers/com.tencent.xinWeChat/Data
 XWECHAT_FILES = CONTAINER / "xwechat_files"
 APP_DATA = CONTAINER / "app_data"
 
+# 写闸门的范围（**不是**读路径的根，别与 `CONTAINER` 混用）：微信容器的整个 `Data`
+# 目录，以及它的两级祖先 `…/com.tencent.xinWeChat` 与 `~/Library/Containers`。
+# 理由：`--out`／`AGENT_WECHAT_HOME` 落在 `Data` 的任何一处（不只 `Documents`），产物
+# 都进了微信的数据区；落在它下面两级祖先上，写的则是数据区的同级/上级。再往上的祖先
+# （`~/Library`、`~`…）不收——那里写的不是容器，拒了是错诊断。
+CONTAINER_DATA = CONTAINER.parent                 # …/com.tencent.xinWeChat/Data
+CONTAINER_FLOOR = CONTAINER_DATA.parents[1]       # ~/Library/Containers（祖先链下限）
+
 # 账号目录形如 wxid_testacct01_ab12（尾部 _hex4 是实例后缀）
 ACCOUNT_RE = re.compile(r"^wxid_.+_[0-9a-f]{4}$")
 # 消息分片形如 message_0.db；不含 message_fts/message_resource 等非分片库
@@ -36,36 +44,49 @@ _tm_exclusion_checked = False
 
 
 def in_wechat_container(p: str | pathlib.Path) -> bool:
-    """`p` 解析后是否落在微信容器目录（`CONTAINER`）之内——**含 `CONTAINER` 本身**。
+    """`p` 解析后是否落在**微信容器的可写范围**之内。
+
+    范围是两段（常量 `CONTAINER_DATA`／`CONTAINER_FLOOR`）：
+    - `…/com.tencent.xinWeChat/Data` 本身及其**全部子路径**——不只是 `Documents`：
+      写在 `Data` 的任何一处都进了微信的数据区；
+    - 它的**祖先**，下到 `~/Library/Containers` 为止（即 `…/com.tencent.xinWeChat` 与
+      `~/Library/Containers` 本身）——写在那里等于写进数据区的同级/上级。
+      再往上（`~/Library`、`~`）不收：那里写的不是容器。
 
     判据是**解析后**的路径：`Path.resolve(strict=False)` 展开 `..`、跟随符号链接，相对
-    路径按**进程 CWD** 展开（`resolve` 的默认语义）。四个 `--out` 入口的一个判据
-    （见 `refuse_container_out`），理由是 SECURITY.md §3 的只读宣称。
+    路径按**进程 CWD** 展开（`resolve` 的默认语义）。`--out` 的四个入口（见
+    `refuse_container_out`）与 `AGENT_WECHAT_HOME`（见 `ensure_home_dirs`）共用，
+    理由是 SECURITY.md §3 的只读宣称。
 
     **大小写**：macOS 默认 APFS 不区分大小写——`~/library/containers/…` 与
     `~/Library/Containers/…` 实测是同一个 inode，而 `resolve()` 不做大小写规范化
-    ⇒ 只比字符串的话，换一种拼写就绕过判据。故字符串判据之后再用 `samefile` 把它与
-    **既有祖先**逐个比 inode：只在「真的指同一目录」时为真，在区分大小写的卷上不会
-    误伤（那时两种拼写是两个目录，且容器通常根本不存在）。
-
-    **不含 `CONTAINER` 的祖先**（如 `~/Library/Containers`）：那写的是容器的同级/上级，
-    不是容器内部——刻意不收（spec 的判据只到「容器本身及其子路径」）。
+    ⇒ 只比字符串的话，换一种拼写就绕过判据。故字符串判据之后再用 `samefile` 比 inode：
+    ① `resolved` 的某个**祖先**与 `CONTAINER_DATA` 同 inode（覆盖容器链上的换拼写）；
+    ② `resolved` 本身与 `CONTAINER_DATA` 或其两级祖先同 inode（覆盖 `Data` 以上那段）。
+    只在「真的指同一目录」时为真，在区分大小写的卷上不会误伤（那时两种拼写是两个目录，
+    且容器通常根本不存在）。
 
     判不出来（符号链接环 / 权限不足）返回 False：这种路径在随后的实际写入里会自己失败，
     在这里谎报「在容器里」是错诊断。
     """
     try:
         resolved = pathlib.Path(p).resolve(strict=False)
-        container = CONTAINER.resolve(strict=False)
+        guard = CONTAINER_DATA.resolve(strict=False)
+        floor = CONTAINER_FLOOR.resolve(strict=False)
     except (OSError, RuntimeError):
         return False
-    if resolved == container or resolved.is_relative_to(container):
+    if resolved == guard or resolved.is_relative_to(guard):
         return True
+    if resolved.is_relative_to(floor) and guard.is_relative_to(resolved):
+        return True                       # 祖先链：floor 与 Data 之间（含 floor 本身）
     try:
-        if not container.exists():
+        if not guard.exists():
             return False                      # 容器不在 ⇒ 没有可写进去的东西
-        return any(anc.exists() and os.path.samefile(anc, container)
-                   for anc in (resolved, *resolved.parents))
+        if any(anc.exists() and os.path.samefile(anc, guard)
+               for anc in (resolved, *resolved.parents)):
+            return True
+        return any(node.exists() and os.path.samefile(node, resolved)
+                   for node in (guard, *guard.parents[:2]))
     except OSError:
         return False
 
@@ -80,18 +101,23 @@ def refuse_container_out(p: str | pathlib.Path) -> None:
     `pathlib.Path(out_dir) if out_dir else <默认根>` 和 CLI 的 `if args.out:` 同一判据）：
     空串的语义是「没给」（落点=默认根），本就不该被这道闸门拒——判据若用 `is not None`，
     `--out ""` 且 CWD 恰在容器内时会误拒（fail-closed、无实害，但两边惯例不一致）。
-    message 里带**容器路径本身**：换一种大小写拼写命中的时候，用户看到的那串 `--out`
-    并不长成容器的样子，不印出容器就无从理解为什么被拒。
+    message 里带**被拒范围本身**（`CONTAINER_DATA` 与祖先链下限）：换一种大小写拼写
+    命中的时候，用户看到的那串 `--out` 并不长成容器的样子，不印出来就无从理解为什么被拒。
     """
     if in_wechat_container(p):
         raise ContainerWriteRefused(
-            f"拒绝把输出写进微信容器目录（{CONTAINER}）：{p}",
+            f"拒绝把输出写进微信容器目录（{CONTAINER_DATA}，含其上级 {CONTAINER_FLOOR}）：{p}",
             hint="换一个容器之外的目录（CLI 的 --out / MCP 的 out_dir），"
                  "例如 ~/Desktop/wechat-export")
 
 
 def ensure_home_dirs() -> None:
-    """确保数据目录存在（0700）并排除出 Time Machine（幂等，失败静默）。"""
+    """确保数据目录存在（0700）并排除出 Time Machine（幂等，失败静默）。
+
+    `AGENT_WECHAT_HOME` 指进微信容器的可写范围（`in_wechat_container`）时**拒绝**：
+    数据目录会整体落在容器里（`index.db`、密钥缓存、`tmp/`、默认产物根）——那是配置
+    选择，但不是一次「只读」的操作。判据在 mkdir 之前，被拒时容器里不留任何东西。
+    """
     global _tm_exclusion_checked
     if not HOME_DIR.is_absolute():
         # EA-003：相对路径（`.`、`""`、`foo/bar`）在本仓没有合法用例——它会让密钥缓存与
@@ -100,6 +126,12 @@ def ensure_home_dirs() -> None:
         raise HomeUnavailable(
             f"AGENT_WECHAT_HOME 必须是绝对路径：{HOME_DIR}",
             hint="设为绝对路径，或删掉该变量用默认 ~/.agent-wechat")
+    if in_wechat_container(HOME_DIR):
+        raise ContainerWriteRefused(
+            f"拒绝把数据目录指向微信容器目录（{CONTAINER_DATA}，含其上级 {CONTAINER_FLOOR}）："
+            f"{HOME_DIR}",
+            hint="把 AGENT_WECHAT_HOME 指到容器之外（例如 ~/.agent-wechat），"
+                 "或删掉该变量使用默认目录")
     try:
         HOME_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
     except OSError as exc:
