@@ -72,7 +72,7 @@ def in_wechat_container(p: str | pathlib.Path) -> bool:
         guard = CONTAINER_DATA.resolve(strict=False)
     except (OSError, RuntimeError):
         return False
-    if resolved == guard or resolved.is_relative_to(guard):
+    if resolved.is_relative_to(guard):         # 含 `resolved == guard`（is_relative_to 的语义）
         return True
     if guard.is_relative_to(resolved):
         return True                       # 祖先链：一路到 `/`（含 `/` 本身）
@@ -98,7 +98,7 @@ def refuse_container_out(p: str | pathlib.Path) -> None:
     `pathlib.Path(out_dir) if out_dir else <默认根>` 和 CLI 的 `if args.out:` 同一判据）：
     空串的语义是「没给」（落点=默认根），本就不该被这道闸门拒——判据若用 `is not None`，
     `--out ""` 且 CWD 恰在容器内时会误拒（fail-closed、无实害，但两边惯例不一致）。
-    message 里带**被拒范围本身**（`CONTAINER_DATA` 与祖先链下限）：换一种大小写拼写
+    message 里带**被拒范围本身**（`CONTAINER_DATA`）：换一种大小写拼写
     命中的时候，用户看到的那串 `--out` 并不长成容器的样子，不印出来就无从理解为什么被拒。
     """
     if in_wechat_container(p):

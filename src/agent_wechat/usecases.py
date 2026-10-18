@@ -395,9 +395,13 @@ def media_export(contact: str, *, kinds: list[str], months: list[str] | None = N
     取件。**不开则一次网络请求都不发**（`SECURITY.md` 的零网络承诺）。
 
     `out_dir` 落在微信容器目录之内时**拒绝**（C-11）——在任何读取之前叫停。
+    `AGENT_WECHAT_HOME` 落在同一范围时同样拒绝：本用例的默认产物根是 `HOME_DIR/media`，
+    而 `media.export_media` 在语音分支之前就先 `ensure_tree(export_root())`——不在这里
+    先过闸，`--kinds image`（默认根）就会把图片写进容器的 `media/`（整支复审实测）。
     """
     if out_dir:
         paths.refuse_container_out(out_dir)
+    paths.ensure_home_dirs()
     ctx = ChatContext(account)
     chat_id = ctx.resolve(contact)
     if isinstance(chat_id, NeedConfirm):

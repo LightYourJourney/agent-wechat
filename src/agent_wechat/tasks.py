@@ -132,7 +132,7 @@ def _persist_locked(changed: dict[str, dict]) -> None:
     固定名会让两个进程共用同一个临时文件，一方的 `os.replace` 撞上另一方刚搬走它的
     ENOENT 窗口。读不动时以内存视图为准照常写——下一次落盘就把坏文件修好。
     """
-    paths.HOME_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    paths.ensure_home_dirs()          # 收口闸：HOME 指进容器时在这里拒绝（复审补）
     disk = _read()
     merged = disk if disk is not None else dict(_tasks)
     merged.update(changed)

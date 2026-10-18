@@ -15,7 +15,7 @@ import pathlib
 
 import pytest
 
-from agent_wechat import cli, errors, paths, usecases
+from agent_wechat import cli, errors, paths, tasks, usecases
 from moments_fixtures import ACCT, env  # noqa: F401  (EA-117 共享夹具)
 
 XML = """<SnsDataItem><TimelineObject><id>P1</id><username>u</username>
@@ -36,8 +36,8 @@ def _run_cli(*argv: str) -> int:
 # ---------------------------------------------------------------- 判据本身
 
 def test_predicate_covers_container_data_and_its_ancestor_chain():
-    """范围：`CONTAINER_DATA`（整个 Data 目录）本身与其**子路径**、以及它的祖先链
-    下到 `~/Library/Containers`（含两端）为真；再往上（`~/Library`、`~`）与容器之外为假。
+    """范围：`CONTAINER_DATA`（整个 Data 目录）本身与其**子路径**，以及它的**全部祖先**
+    一路到 `/`（含 `/` 本身）为真；非祖先的容器外路径为假。
     被判真的那几条都不被创建——判据是纯路径面的。"""
     child = paths.CONTAINER / "xwechat_files" / ACCT / "db_storage"
     assert paths.in_wechat_container(paths.CONTAINER) is True
@@ -51,7 +51,7 @@ def test_predicate_covers_container_data_and_its_ancestor_chain():
     assert paths.in_wechat_container(paths.CONTAINER_DATA.parent) is True   # …/com.tencent.xinWeChat
     assert paths.in_wechat_container(paths.CONTAINER_DATA.parents[2]) is True  # ~/Library
     assert paths.in_wechat_container(paths.CONTAINER_DATA.parents[3]) is True  # ~
-    assert paths.in_wechat_container(pathlib.Path("/Users")) is True
+    assert paths.in_wechat_container(paths.CONTAINER_DATA.parents[4]) is True  # /Users（由 home 推导）
     assert paths.in_wechat_container(pathlib.Path("/")) is True
     # 不是祖先、也不在容器里的路径仍然放行
     assert paths.in_wechat_container(pathlib.Path("/tmp")) is False
@@ -220,3 +220,25 @@ def test_cli_refuses_home_in_container(monkeypatch, tmp_path, capsys):
     err = capsys.readouterr().err
     assert "微信容器目录" in err and "AGENT_WECHAT_HOME" in err
     assert "Traceback" not in err
+
+
+def test_media_export_default_root_refuses_container_home(monkeypatch):
+    """默认产物根（`HOME_DIR/media`）同样受闸：`media export` 不带 `--out` 时，
+    `media.export_media` 在语音分支之前就先 `ensure_tree(export_root())`——闸必须在
+    进入它之前叫停。整支复审实测过：不调 `ensure_home_dirs` 时 `--kinds image`
+    能把图片写进容器的 `media/`。"""
+    home = paths.CONTAINER_DATA / "__c11_media_home__"
+    monkeypatch.setattr(paths, "HOME_DIR", home)
+    with pytest.raises(errors.ContainerWriteRefused):
+        usecases.media_export("不存在的人", kinds=["image"])
+    assert not home.exists(), "被拒的调用不许建出 HOME，更不许写 media/"
+
+
+def test_tasks_persist_refuses_container_home(monkeypatch):
+    """`tasks._persist_locked` 的直写已收口到 `ensure_home_dirs`：HOME 在容器里时
+    连终态落盘都不许发生（此前是一条绕过闸门的 `HOME_DIR.mkdir`）。"""
+    home = paths.CONTAINER_DATA / "__c11_tasks_home__"
+    monkeypatch.setattr(paths, "HOME_DIR", home)
+    with pytest.raises(errors.ContainerWriteRefused):
+        tasks._persist_locked({})
+    assert not home.exists()
