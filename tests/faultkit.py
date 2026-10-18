@@ -40,18 +40,23 @@ class Injector:
     def undo(self):
         self.mp.undo()
 
+    @staticmethod
+    def _path_matches(f, path):
+        """路径判据：Fault.path 为 None＝不绑路径；调用方没有路径 getter 时也不绑。"""
+        if f.path is None or path is None:
+            return True
+        return os.path.abspath(os.fspath(path)) == os.path.abspath(f.path)
+
     def match(self, api, path=None):
-        key = api
-        n = self.seen.get(key, 0) + 1
-        self.seen[key] = n
-        for f in self.faults:
-            if f.api != api or f.nth != n:
+        # 序号按**每个故障各自**的命中次数计：非目标路径的调用既不命中、也不消耗序号。
+        for i, f in enumerate(self.faults):
+            if f.api != api or not self._path_matches(f, path):
                 continue
-            if f.path is not None and path is not None:
-                if os.path.abspath(os.fspath(path)) != os.path.abspath(f.path):
-                    continue
-            self.fired.append(f)
-            return f
+            n = self.seen.get(i, 0) + 1
+            self.seen[i] = n
+            if n == f.nth:
+                self.fired.append(f)
+                return f
         return None
 
     def assert_fired(self):
@@ -82,21 +87,54 @@ def _raise(kind):
     raise AssertionError(f"未知故障类 {kind}")
 
 
+def _self_arg(*a, **k):
+    """Path 方法：`self` 通常是位置 arg0，关键字形态也接住。"""
+    return a[0] if a else k.get("self")
+
+
+def _path_arg(*a, **k):
+    """单路径 API（os.unlink/mkdir/chmod、shutil.rmtree）：`path` 位置或关键字。"""
+    return a[0] if a else k.get("path")
+
+
+def _dst_arg(*a, **k):
+    """双路径 API（os.replace、shutil.copy2）：绑**目标**，缺 dst 时退回 src。
+
+    copy2 的真实写入发生在 dst（`decrypt.snapshot` 就是 `copy2(snap, dst)`）；
+    绑 src 会让「写目标失败」这类故障打偏。
+    """
+    if len(a) >= 2:
+        return a[1]
+    if k.get("dst") is not None:
+        return k["dst"]
+    return a[0] if a else k.get("src")
+
+
+def _cmd_arg(*a, **k):
+    """subprocess.run：命令是位置 arg0 或关键字 `args`。"""
+    return a[0] if a else k.get("args")
+
+
 def _wrap(orig, inj, api, get_path=None, payload_index=None):
     def inner(*a, **k):
-        f = inj.match(api, get_path(*a) if get_path else None)
+        f = inj.match(api, get_path(*a, **k) if get_path else None)
         if f is None:
             return orig(*a, **k)
         if f.kind == "SHORT_WRITE":
-            args = list(a)
-            p = args[payload_index]
-            args[payload_index] = p[: len(p) // 2]
-            orig(*args, **k)
+            args, kwargs = list(a), dict(k)
+            if payload_index < len(args):
+                payload = args[payload_index]
+                args[payload_index] = payload[: len(payload) // 2]
+            else:
+                payload = kwargs["data"]       # write_text/write_bytes 的关键字形态
+                kwargs["data"] = payload[: len(payload) // 2]
+            orig(*args, **kwargs)
             raise OSError(errno.EIO, "simulated short write")
         if f.kind == "EINTR":
             raise InterruptedError("simulated EINTR")
         if f.kind == "SUBPROCESS_NONZERO":
-            return subprocess.CompletedProcess(a[0], 1, "", "simulated failure")
+            cmd = a[0] if a else k.get("args")
+            return subprocess.CompletedProcess(cmd, 1, "", "simulated failure")
         _raise(f.kind)
     return inner
 
@@ -108,24 +146,20 @@ def install(faults):
     P = pathlib.Path
     for name in ("write_text", "write_bytes"):
         orig = getattr(P, name)
-        mp.setattr(P, name, _wrap(orig, inj, name, lambda self, *a, **k: self,
-                                  payload_index=1))
+        mp.setattr(P, name, _wrap(orig, inj, name, _self_arg, payload_index=1))
     for name in ("mkdir", "chmod", "unlink"):
         orig = getattr(P, name)
-        mp.setattr(P, name, _wrap(orig, inj, name, lambda self, *a, **k: self))
-    mp.setattr(P, "resolve", _wrap(P.resolve, inj, "resolve",
-                                   lambda self, *a, **k: self))
-    for name in ("replace", "unlink", "mkdir", "chmod"):
+        mp.setattr(P, name, _wrap(orig, inj, name, _self_arg))
+    mp.setattr(P, "resolve", _wrap(P.resolve, inj, "resolve", _self_arg))
+    mp.setattr(os, "replace", _wrap(os.replace, inj, "os.replace", _dst_arg))
+    for name in ("unlink", "mkdir", "chmod"):
         orig = getattr(os, name)
-        mp.setattr(os, name, _wrap(orig, inj, "os." + name,
-                                   lambda src, dst=None, **k: dst or src))
-    for name in ("rmtree", "copy2"):
-        orig = getattr(shutil, name)
-        mp.setattr(shutil, name, _wrap(orig, inj, "shutil." + name,
-                                       lambda src, *a, **k: src))
+        mp.setattr(os, name, _wrap(orig, inj, "os." + name, _path_arg))
+    mp.setattr(shutil, "rmtree",
+               _wrap(shutil.rmtree, inj, "shutil.rmtree", _path_arg))
+    mp.setattr(shutil, "copy2", _wrap(shutil.copy2, inj, "shutil.copy2", _dst_arg))
     mp.setattr(subprocess, "run",
-               _wrap(subprocess.run, inj, "subprocess.run",
-                     lambda cmd, *a, **k: cmd))
+               _wrap(subprocess.run, inj, "subprocess.run", _cmd_arg))
     orig_connect = sqlite3.connect
 
     class _FaultConnection(sqlite3.Connection):
@@ -149,7 +183,7 @@ def install(faults):
     from agent_wechat import sns_media
     mp.setattr(sns_media, "fetch",
                _wrap(sns_media.fetch, inj, "sns_media.fetch",
-                     lambda m, *a, **k: None))
+                     lambda *a, **k: None))
     return inj
 
 
@@ -200,7 +234,11 @@ def assert_retry_succeeds(inj, fn, root: pathlib.Path) -> None:
 
 
 def assert_no_partial(root: pathlib.Path, whitelist: set[str]):
-    """白名单内的文件必须完整可解析；白名单外不得出现文件。"""
+    """只做一件事：白名单**外**不得出现文件（半成品 / 临时残留）。
+
+    「白名单内的文件是否完整」不在这里判——没有内容类型契约，无法通用地定义
+    「可解析」。调用方对自己期望的产物自行解析（JSON / sqlite / …）。
+    """
     for p in pathlib.Path(root).rglob("*"):
         if not p.is_file():
             continue
