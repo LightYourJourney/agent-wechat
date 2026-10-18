@@ -140,6 +140,9 @@ def check(path: pathlib.Path, root: pathlib.Path = SRC) -> int:
     with path.open(newline="", encoding="utf-8") as f:
         table = list(csv.DictReader(f))
     enum = expand(iter_sites(root))
+    if not enum:
+        print("❌ 枚举结果为空：检查 SRC 路径与枚举规则", file=sys.stderr)
+        return 2
     derived = {(r["boundary_id"], r["fault_class"]): r for r in enum}
     keys = [(r["boundary_id"], r["fault_class"]) for r in table]
     dupes = sorted(k for k, n in collections.Counter(keys).items() if n > 1)

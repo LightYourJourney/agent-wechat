@@ -15,6 +15,7 @@ def save(p, data):
 # 每种可枚举边界各一次：删掉任一规则都会让下面的集合比对失败。
 ALL_KINDS_MEDIA = '''
 import os, pathlib, shutil, sqlite3, subprocess
+from urllib.request import urlopen
 
 def _fetch_cdn_bytes(url):
     return None
@@ -30,17 +31,23 @@ def everything(p, data, con, fd):
     pathlib.Path(p).mkdir()
     pathlib.Path(p).chmod(0o600)
     pathlib.Path(p).unlink()
+    os.mkdir(p)
+    os.chmod(p, 0o600)
     os.replace(p, p + ".new")
     os.unlink(p)
     os.fdopen(fd, "w")
     open(p, "w")
+    urlopen("https://example.invalid/x")
     shutil.rmtree(p, ignore_errors=True)
     shutil.copy2(p, p + ".bak")
+    subprocess.run(["tmutil"])
+    subprocess.Popen(["true"])
+    subprocess.call(["true"])
+    subprocess.check_output(["true"])
     con.commit()
     con.executescript("SELECT 1")
     con.execute("ATTACH DATABASE ? AS x", (p,))
     sqlite3.connect(p)
-    subprocess.run(["tmutil"])
 '''
 
 ALL_KINDS_SNS = '''
@@ -77,6 +84,16 @@ def test_iter_sites_follows_module_level_subprocess_alias(tmp_path):
     assert got == [("subprocess.run", "subprocess", "probe")]
 
 
+def test_iter_sites_follows_popen_alias(tmp_path):
+    (tmp_path / "m.py").write_text(
+        "import subprocess\n"
+        "_popen = subprocess.Popen\n"
+        "def probe():\n"
+        "    _popen(['true'])\n")
+    got = [(s.api, s.kind, s.qualname) for s in iter_sites(tmp_path)]
+    assert got == [("subprocess.Popen", "subprocess", "probe")]
+
+
 def test_iter_sites_finds_cdn_fetch_def_and_fdopen(tmp_path):
     (tmp_path / "media.py").write_text(
         "import os\n"
@@ -95,12 +112,15 @@ def test_iter_sites_covers_every_enumerable_kind(tmp_path):
     assert got == {
         ("write_text", "file_write"), ("write_bytes", "file_write"),
         ("mkdir", "meta"), ("chmod", "meta"), ("unlink", "meta"),
+        ("os.mkdir", "meta"), ("os.chmod", "meta"),
         ("os.replace", "replace"), ("os.unlink", "meta"),
         ("shutil.rmtree", "meta"), ("shutil.copy2", "copy"),
         ("sqlite3.connect", "sqlite"), ("commit", "sqlite"),
         ("executescript", "sqlite"), ("attach", "sqlite"),
-        ("subprocess.run", "subprocess"), ("os.fdopen", "file_write"),
-        ("open", "file_write"),
+        ("subprocess.run", "subprocess"), ("subprocess.Popen", "subprocess"),
+        ("subprocess.call", "subprocess"), ("subprocess.check_output", "subprocess"),
+        ("os.fdopen", "file_write"), ("open", "file_write"),
+        ("urlopen", "network"),
         ("fetch", "network"), ("_fetch_cdn_bytes", "network"),
         ("resolve", "gate"), ("samefile", "gate"), ("exists", "gate"),
     }
@@ -189,6 +209,18 @@ def test_check_rejects_empty_flow(tmp_path, capsys):
     _write_rows(p, rows)
     assert check(p, tmp_path) == 2
     assert "flow" in capsys.readouterr().err
+
+
+def test_check_rejects_empty_enumeration(tmp_path, capsys):
+    header = ["flow", "boundary_id", "file", "line", "fault_class",
+              "applicability", "reason", "expected_keyword", "case_id"]
+    p = tmp_path / "t.csv"
+    with p.open("w", newline="", encoding="utf-8") as f:
+        csv.DictWriter(f, fieldnames=header).writeheader()
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    assert check(p, empty) == 2
+    assert "枚举结果为空" in capsys.readouterr().err
 
 
 def test_main_exits_2_when_enumeration_is_empty(tmp_path, monkeypatch):
