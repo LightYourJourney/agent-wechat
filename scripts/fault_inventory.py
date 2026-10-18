@@ -39,14 +39,32 @@ KEYWORDS = {"ENOSPC": "空间|No space left", "EACCES": "权限|Permission denie
 _FS = {"write_text": "file_write", "write_bytes": "file_write",
        "mkdir": "meta", "chmod": "meta", "unlink": "meta"}
 _SHUTIL = {"rmtree": "meta", "copy2": "copy"}
-_OS = {"replace": "replace", "unlink": "meta", "mkdir": "meta", "chmod": "meta"}
+_OS = {"replace": "replace", "unlink": "meta", "mkdir": "meta", "chmod": "meta",
+       # 后续写入发生在 fd 上，AST 看不见；把 fdopen 调用点本身记为 file_write 边界。
+       "fdopen": "file_write"}
+_SUBPROC = ("run", "Popen", "call", "check_output")
 
 class _V(ast.NodeVisitor):
-    def __init__(self, rel): self.rel, self.stack, self.out = rel, [], []
+    def __init__(self, rel):
+        self.rel, self.stack, self.out = rel, [], []
+        # 模块级别名（如 `_run = subprocess.run`）：调用点按规范 API 名入表。
+        self.aliases = {}
+    def visit_Module(self, n):
+        for node in n.body:
+            if isinstance(node, ast.Assign) and len(node.targets) == 1:
+                t, v = node.targets[0], node.value
+                if (isinstance(t, ast.Name) and isinstance(v, ast.Attribute)
+                        and isinstance(v.value, ast.Name) and v.value.id == "subprocess"
+                        and v.attr in _SUBPROC):
+                    self.aliases[t.id] = "subprocess." + v.attr
+        self.generic_visit(n)
     def visit_FunctionDef(self, n):
         self.stack.append(n.name)
         if n.name == "fetch" and self.rel == "sns_media.py":
             self.out.append(Site(self.rel, n.lineno, "fetch", "network", "fetch"))
+        if n.name == "_fetch_cdn_bytes" and self.rel == "media.py":
+            self.out.append(Site(self.rel, n.lineno, "_fetch_cdn_bytes", "network",
+                                 "_fetch_cdn_bytes"))
         self.generic_visit(n)
         self.stack.pop()
     visit_AsyncFunctionDef = visit_FunctionDef
@@ -59,7 +77,7 @@ class _V(ast.NodeVisitor):
             if isinstance(f.value, ast.Name) and f.value.id == "os" and api in _OS:
                 self._add(n, "os." + api, _OS[api])
             elif isinstance(f.value, ast.Name) and f.value.id == "subprocess" \
-                    and api in ("run", "Popen", "call", "check_output"):
+                    and api in _SUBPROC:
                 self._add(n, "subprocess." + api, "subprocess")
             elif isinstance(f.value, ast.Name) and f.value.id == "sqlite3" \
                     and api == "connect":
@@ -76,7 +94,9 @@ class _V(ast.NodeVisitor):
             if any(isinstance(x, ast.Constant) and isinstance(x.value, str)
                    and "ATTACH DATABASE" in x.value for x in n.args):
                 self._add(n, "attach", "sqlite")
-        if isinstance(f, ast.Name) and f.id == "urlopen":
+        if isinstance(f, ast.Name) and f.id in self.aliases:
+            self._add(n, self.aliases[f.id], "subprocess")
+        elif isinstance(f, ast.Name) and f.id == "urlopen":
             self._add(n, "urlopen", "network")
         self.generic_visit(n)
 

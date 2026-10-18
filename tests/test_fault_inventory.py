@@ -26,3 +26,22 @@ def test_expand_marks_structural_na_not_dropped(tmp_path):
     kinds = {r["fault_class"] for r in write_rows}
     assert "ENOSPC" in kinds and "SQLITE_LOCKED" in kinds
     assert next(r for r in write_rows if r["fault_class"] == "SQLITE_LOCKED")["applicability"] == "n/a"
+
+def test_iter_sites_follows_module_level_subprocess_alias(tmp_path):
+    (tmp_path / "m.py").write_text(
+        "import subprocess\n"
+        "_run = subprocess.run\n"
+        "def probe():\n"
+        "    _run(['pgrep', '-x', 'WeChat'])\n")
+    got = [(s.api, s.kind, s.qualname) for s in iter_sites(tmp_path)]
+    assert got == [("subprocess.run", "subprocess", "probe")]
+
+def test_iter_sites_finds_cdn_fetch_def_and_fdopen(tmp_path):
+    (tmp_path / "media.py").write_text(
+        "import os\n"
+        "def _fetch_cdn_bytes(url):\n"
+        "    return None\n"
+        "def dump(fd):\n"
+        "    f = os.fdopen(fd, 'w')\n")
+    got = {(s.api, s.kind) for s in iter_sites(tmp_path)}
+    assert got == {("_fetch_cdn_bytes", "network"), ("os.fdopen", "file_write")}
