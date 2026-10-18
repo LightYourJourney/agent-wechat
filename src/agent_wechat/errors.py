@@ -168,7 +168,7 @@ class IndexUnavailable(AgentWeChatError):
 
 
 class ContainerWriteRefused(AgentWeChatError):
-    """落点落在微信容器的可写范围（`paths.CONTAINER_DATA` 及其上级 `CONTAINER_FLOOR`）
+    """落点落在微信容器的可写范围（`paths.CONTAINER_DATA` 及其所有祖先，含 `/`）
     → 拒绝写入。两处触发：`--out`（四个入口）与 `AGENT_WECHAT_HOME`（`ensure_home_dirs`）。
 
     与 MediaOutputError 的分界：那个是**真写不动**（只读目录 / 磁盘满）；这个是

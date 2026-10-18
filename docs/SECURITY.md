@@ -143,10 +143,10 @@
 
 - **只读**：**除下表列明、且各带判据的例外之外**，代码不存在对微信容器目录的写路径——
   **四个 `--out` 例外（见 §1 表）均带容器路径判据**：解析后的 `--out` 落在
-  `…/com.tencent.xinWeChat/Data`（整个 Data 目录，不只是 `Documents`）之内、**或落在它的
-  祖先链 `~/Library/Containers` 之内**（含 `…/com.tencent.xinWeChat` 与
-  `~/Library/Containers` 本身）即拒绝（`paths.in_wechat_container`，按解析后的路径判，
-  覆盖 `..`、符号链接与大小写变体；**不静默改写落点、也不警告后照写**）；
+  `…/com.tencent.xinWeChat/Data`（整个 Data 目录，不只是 `Documents`）之内、**或是它的
+  任何一级祖先目录**（一路到 `/`，含 `/` 本身）即拒绝（`paths.in_wechat_container`，
+  按解析后的路径判，覆盖 `..`、符号链接与大小写变体；
+  **不静默改写落点、也不警告后照写**）；
   **`AGENT_WECHAT_HOME` 指进同一范围时，`paths.ensure_home_dirs` 同样拒绝**（本工具的数据
   目录整体不落容器）；解密用 db+wal+shm **快照**进行，即使微信正在写入也不受影响
   （其余已知口子见下面的边界段）

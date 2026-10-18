@@ -22,12 +22,11 @@ XWECHAT_FILES = CONTAINER / "xwechat_files"
 APP_DATA = CONTAINER / "app_data"
 
 # 写闸门的范围（**不是**读路径的根，别与 `CONTAINER` 混用）：微信容器的整个 `Data`
-# 目录，以及它的两级祖先 `…/com.tencent.xinWeChat` 与 `~/Library/Containers`。
+# 目录，以及它的**全部祖先**（一路到 `/`，含 `/` 本身）。
 # 理由：`--out`／`AGENT_WECHAT_HOME` 落在 `Data` 的任何一处（不只 `Documents`），产物
-# 都进了微信的数据区；落在它下面两级祖先上，写的则是数据区的同级/上级。再往上的祖先
-# （`~/Library`、`~`…）不收——那里写的不是容器，拒了是错诊断。
+# 都进了微信的数据区；落在它的祖先上，写的是数据区的上级/更上级，一经 `..` 或拼接
+# 就能回到容器里——口径取「一律拒绝」，宁可错拒一个上级目录，也不留一条可达路径。
 CONTAINER_DATA = CONTAINER.parent                 # …/com.tencent.xinWeChat/Data
-CONTAINER_FLOOR = CONTAINER_DATA.parents[1]       # ~/Library/Containers（祖先链下限）
 
 # 账号目录形如 wxid_testacct01_ab12（尾部 _hex4 是实例后缀）
 ACCOUNT_RE = re.compile(r"^wxid_.+_[0-9a-f]{4}$")
@@ -46,12 +45,11 @@ _tm_exclusion_checked = False
 def in_wechat_container(p: str | pathlib.Path) -> bool:
     """`p` 解析后是否落在**微信容器的可写范围**之内。
 
-    范围是两段（常量 `CONTAINER_DATA`／`CONTAINER_FLOOR`）：
+    范围（两段，`CONTAINER_DATA` 为一端）：
     - `…/com.tencent.xinWeChat/Data` 本身及其**全部子路径**——不只是 `Documents`：
       写在 `Data` 的任何一处都进了微信的数据区；
-    - 它的**祖先**，下到 `~/Library/Containers` 为止（即 `…/com.tencent.xinWeChat` 与
-      `~/Library/Containers` 本身）——写在那里等于写进数据区的同级/上级。
-      再往上（`~/Library`、`~`）不收：那里写的不是容器。
+    - 它的**全部祖先**，一路到 `/`（含 `/` 本身）——写在祖先上等于写进数据区的上级，
+      再拼一段就能回到容器里；口径是「宁可错拒一个上级，也不留可达路径」。
 
     判据是**解析后**的路径：`Path.resolve(strict=False)` 展开 `..`、跟随符号链接，相对
     路径按**进程 CWD** 展开（`resolve` 的默认语义）。`--out` 的四个入口（见
@@ -62,7 +60,7 @@ def in_wechat_container(p: str | pathlib.Path) -> bool:
     `~/Library/Containers/…` 实测是同一个 inode，而 `resolve()` 不做大小写规范化
     ⇒ 只比字符串的话，换一种拼写就绕过判据。故字符串判据之后再用 `samefile` 比 inode：
     ① `resolved` 的某个**祖先**与 `CONTAINER_DATA` 同 inode（覆盖容器链上的换拼写）；
-    ② `resolved` 本身与 `CONTAINER_DATA` 或其两级祖先同 inode（覆盖 `Data` 以上那段）。
+    ② `resolved` 本身与 `CONTAINER_DATA` 或其**任一祖先**同 inode（覆盖祖先链的换拼写）。
     只在「真的指同一目录」时为真，在区分大小写的卷上不会误伤（那时两种拼写是两个目录，
     且容器通常根本不存在）。
 
@@ -72,13 +70,12 @@ def in_wechat_container(p: str | pathlib.Path) -> bool:
     try:
         resolved = pathlib.Path(p).resolve(strict=False)
         guard = CONTAINER_DATA.resolve(strict=False)
-        floor = CONTAINER_FLOOR.resolve(strict=False)
     except (OSError, RuntimeError):
         return False
     if resolved == guard or resolved.is_relative_to(guard):
         return True
-    if resolved.is_relative_to(floor) and guard.is_relative_to(resolved):
-        return True                       # 祖先链：floor 与 Data 之间（含 floor 本身）
+    if guard.is_relative_to(resolved):
+        return True                       # 祖先链：一路到 `/`（含 `/` 本身）
     try:
         if not guard.exists():
             return False                      # 容器不在 ⇒ 没有可写进去的东西
@@ -86,7 +83,7 @@ def in_wechat_container(p: str | pathlib.Path) -> bool:
                for anc in (resolved, *resolved.parents)):
             return True
         return any(node.exists() and os.path.samefile(node, resolved)
-                   for node in (guard, *guard.parents[:2]))
+                   for node in (guard, *guard.parents))
     except OSError:
         return False
 
@@ -106,7 +103,7 @@ def refuse_container_out(p: str | pathlib.Path) -> None:
     """
     if in_wechat_container(p):
         raise ContainerWriteRefused(
-            f"拒绝把输出写进微信容器目录（{CONTAINER_DATA}，含其上级 {CONTAINER_FLOOR}）：{p}",
+            f"拒绝把输出写进微信容器目录（{CONTAINER_DATA} 及其所有上级目录）：{p}",
             hint="换一个容器之外的目录（CLI 的 --out / MCP 的 out_dir），"
                  "例如 ~/Desktop/wechat-export")
 
@@ -128,7 +125,7 @@ def ensure_home_dirs() -> None:
             hint="设为绝对路径，或删掉该变量用默认 ~/.agent-wechat")
     if in_wechat_container(HOME_DIR):
         raise ContainerWriteRefused(
-            f"拒绝把数据目录指向微信容器目录（{CONTAINER_DATA}，含其上级 {CONTAINER_FLOOR}）："
+            f"拒绝把数据目录指向微信容器目录（{CONTAINER_DATA} 及其所有上级目录）："
             f"{HOME_DIR}",
             hint="把 AGENT_WECHAT_HOME 指到容器之外（例如 ~/.agent-wechat），"
                  "或删掉该变量使用默认目录")

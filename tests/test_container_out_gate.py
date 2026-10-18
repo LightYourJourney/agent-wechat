@@ -47,12 +47,13 @@ def test_predicate_covers_container_data_and_its_ancestor_chain():
     # 闸门的根是**整个 Data**，不再只是 Documents
     assert paths.in_wechat_container(paths.CONTAINER_DATA) is True
     assert paths.in_wechat_container(paths.CONTAINER_DATA / "Library") is True
-    # 祖先链：两级祖先都收，到 ~/Library/Containers 为止（含它本身）
+    # 祖先链：两级祖先 + 一路到 `/`（含 `/` 本身）全都收
     assert paths.in_wechat_container(paths.CONTAINER_DATA.parent) is True   # …/com.tencent.xinWeChat
-    assert paths.in_wechat_container(paths.CONTAINER_FLOOR) is True        # ~/Library/Containers
-    # 再往上不收：那里写的不是容器
-    assert paths.in_wechat_container(paths.CONTAINER_FLOOR.parent) is False  # ~/Library
-    assert paths.in_wechat_container(paths.CONTAINER_DATA.parents[3]) is False  # ~
+    assert paths.in_wechat_container(paths.CONTAINER_DATA.parents[2]) is True  # ~/Library
+    assert paths.in_wechat_container(paths.CONTAINER_DATA.parents[3]) is True  # ~
+    assert paths.in_wechat_container(pathlib.Path("/Users")) is True
+    assert paths.in_wechat_container(pathlib.Path("/")) is True
+    # 不是祖先、也不在容器里的路径仍然放行
     assert paths.in_wechat_container(pathlib.Path("/tmp")) is False
     assert not pathlib.Path(PROBE).exists(), "判据本身不许建任何东西"
 
@@ -73,9 +74,11 @@ def test_predicate_resolves_relative_path_against_cwd_and_follows_symlinks(tmp_p
     # 上溯）：`into/../` 是 CONTAINER 的真实父目录（= Data），仍在闸门内。
     assert paths.in_wechat_container("into/../xwechat_files") is True
     assert paths.in_wechat_container("into/../elsewhere") is True
-    # 爬过祖先链的下限（`~/Library/Containers`，第 3 个 `..`）才是外面
+    # 祖先链一路收到 `/`：第 3、4、5 个 `..` 都仍在祖先链上
     assert paths.in_wechat_container("into/../../..") is True             # → ~/Library/Containers
-    assert paths.in_wechat_container("into/../../../..") is False         # → ~/Library
+    assert paths.in_wechat_container("into/../../../..") is True          # → ~/Library
+    assert paths.in_wechat_container("into/../../../../..") is True       # → ~
+    # 祖先的**同级**不是祖先（`~/Library/Containers/elsewhere` 里没有容器），放行
     assert paths.in_wechat_container("into/../../../elsewhere") is False
     assert paths.in_wechat_container("outside/sub") is False
     assert paths.in_wechat_container("elsewhere/x") is False
@@ -94,9 +97,9 @@ def test_predicate_case_variant_of_container():
         pytest.skip("本卷区分大小写：无同 inode 的大小写变体可测")
     assert variant != str(paths.CONTAINER), "变体必须真的换了拼写（否则测的不是那条回落）"
     assert paths.in_wechat_container(variant + "/xwechat_files") is True
-    # 祖先链那段的两种拼写各钉一条：floor 本身（② 分支）与 Data 的祖先（① 分支）
-    floor_variant = str(paths.CONTAINER_FLOOR).replace("/Library/", "/library/")
-    assert paths.in_wechat_container(floor_variant) is True
+    # 祖先链的换拼写各钉一条：`~/Library` 本身（② 分支）与 Data 的一个祖先（① 分支）
+    lib_variant = str(paths.CONTAINER_DATA.parents[2]).replace("/Library", "/library")
+    assert paths.in_wechat_container(lib_variant) is True
     data_variant = str(paths.CONTAINER_DATA).replace("/Library/", "/library/")
     assert paths.in_wechat_container(data_variant + "/xwechat_files") is True
 
@@ -193,10 +196,11 @@ def test_home_dir_in_container_is_refused_before_creating(monkeypatch):
 
 
 def test_home_dir_on_container_ancestor_is_refused(monkeypatch):
-    """祖先链也收：`AGENT_WECHAT_HOME=~/Library/Containers` 同样拒绝（同一条判据）。"""
-    monkeypatch.setattr(paths, "HOME_DIR", paths.CONTAINER_FLOOR)
-    with pytest.raises(errors.ContainerWriteRefused):
-        paths.ensure_home_dirs()
+    """祖先链一路收到 `/`：`~/Library` 与 `/` 本身都被拒（同一条判据）。"""
+    for home in (paths.CONTAINER_DATA.parents[2], pathlib.Path("/")):
+        monkeypatch.setattr(paths, "HOME_DIR", home)
+        with pytest.raises(errors.ContainerWriteRefused):
+            paths.ensure_home_dirs()
 
 
 def test_home_dir_outside_container_still_creates(monkeypatch, tmp_path):
