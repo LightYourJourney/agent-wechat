@@ -1,5 +1,6 @@
-import pathlib
-from scripts.fault_inventory import iter_sites, expand
+import csv
+
+from scripts.fault_inventory import check, expand, iter_sites
 
 SRC = '''
 import os, pathlib, shutil, subprocess
@@ -11,6 +12,43 @@ def save(p, data):
     subprocess.run(["tmutil", "isexcluded", p])
 '''
 
+# 每种可枚举边界各一次：删掉任一规则都会让下面的集合比对失败。
+ALL_KINDS_MEDIA = '''
+import os, pathlib, shutil, sqlite3, subprocess
+
+def _fetch_cdn_bytes(url):
+    return None
+
+def in_wechat_container(p):
+    pathlib.Path(p).resolve()
+    p.exists()
+    os.path.samefile(p, p)
+
+def everything(p, data, con, fd):
+    pathlib.Path(p).write_text(data)
+    pathlib.Path(p).write_bytes(data)
+    pathlib.Path(p).mkdir()
+    pathlib.Path(p).chmod(0o600)
+    pathlib.Path(p).unlink()
+    os.replace(p, p + ".new")
+    os.unlink(p)
+    os.fdopen(fd, "w")
+    open(p, "w")
+    shutil.rmtree(p, ignore_errors=True)
+    shutil.copy2(p, p + ".bak")
+    con.commit()
+    con.executescript("SELECT 1")
+    con.execute("ATTACH DATABASE ? AS x", (p,))
+    sqlite3.connect(p)
+    subprocess.run(["tmutil"])
+'''
+
+ALL_KINDS_SNS = '''
+def fetch(m):
+    return None
+'''
+
+
 def test_iter_sites_finds_every_boundary_kind(tmp_path):
     f = tmp_path / "m.py"
     f.write_text(SRC)
@@ -19,6 +57,7 @@ def test_iter_sites_finds_every_boundary_kind(tmp_path):
     assert apis == ["os.replace", "shutil.rmtree", "subprocess.run", "write_text"]
     assert all(s.qualname == "save" for s in sites)
 
+
 def test_expand_marks_structural_na_not_dropped(tmp_path):
     (tmp_path / "m.py").write_text(SRC)
     rows = expand(iter_sites(tmp_path))
@@ -26,6 +65,7 @@ def test_expand_marks_structural_na_not_dropped(tmp_path):
     kinds = {r["fault_class"] for r in write_rows}
     assert "ENOSPC" in kinds and "SQLITE_LOCKED" in kinds
     assert next(r for r in write_rows if r["fault_class"] == "SQLITE_LOCKED")["applicability"] == "n/a"
+
 
 def test_iter_sites_follows_module_level_subprocess_alias(tmp_path):
     (tmp_path / "m.py").write_text(
@@ -36,6 +76,7 @@ def test_iter_sites_follows_module_level_subprocess_alias(tmp_path):
     got = [(s.api, s.kind, s.qualname) for s in iter_sites(tmp_path)]
     assert got == [("subprocess.run", "subprocess", "probe")]
 
+
 def test_iter_sites_finds_cdn_fetch_def_and_fdopen(tmp_path):
     (tmp_path / "media.py").write_text(
         "import os\n"
@@ -45,3 +86,113 @@ def test_iter_sites_finds_cdn_fetch_def_and_fdopen(tmp_path):
         "    f = os.fdopen(fd, 'w')\n")
     got = {(s.api, s.kind) for s in iter_sites(tmp_path)}
     assert got == {("_fetch_cdn_bytes", "network"), ("os.fdopen", "file_write")}
+
+
+def test_iter_sites_covers_every_enumerable_kind(tmp_path):
+    (tmp_path / "media.py").write_text(ALL_KINDS_MEDIA)
+    (tmp_path / "sns_media.py").write_text(ALL_KINDS_SNS)
+    got = {(s.api, s.kind) for s in iter_sites(tmp_path)}
+    assert got == {
+        ("write_text", "file_write"), ("write_bytes", "file_write"),
+        ("mkdir", "meta"), ("chmod", "meta"), ("unlink", "meta"),
+        ("os.replace", "replace"), ("os.unlink", "meta"),
+        ("shutil.rmtree", "meta"), ("shutil.copy2", "copy"),
+        ("sqlite3.connect", "sqlite"), ("commit", "sqlite"),
+        ("executescript", "sqlite"), ("attach", "sqlite"),
+        ("subprocess.run", "subprocess"), ("os.fdopen", "file_write"),
+        ("open", "file_write"),
+        ("fetch", "network"), ("_fetch_cdn_bytes", "network"),
+        ("resolve", "gate"), ("samefile", "gate"), ("exists", "gate"),
+    }
+
+
+def test_iter_sites_recurses_into_subpackages(tmp_path):
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    (sub / "m.py").write_text("def f(p):\n    p.mkdir()\n")
+    sites = iter_sites(tmp_path)
+    assert [(s.rel, s.api) for s in sites] == [("sub/m.py", "mkdir")]
+
+
+def test_boundary_id_disambiguates_same_line_sites(tmp_path):
+    (tmp_path / "m.py").write_text("def f(p):\n    p.unlink(); p.unlink()\n")
+    ids = sorted({r["boundary_id"] for r in expand(iter_sites(tmp_path))})
+    assert ids == ["m.py:2:unlink#1", "m.py:2:unlink#2"]
+
+
+def _write_rows(path, rows):
+    with path.open("w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=list(rows[0]))
+        w.writeheader()
+        w.writerows(rows)
+
+
+def _valid_rows(tmp_path):
+    (tmp_path / "m.py").write_text(SRC)
+    rows = expand(iter_sites(tmp_path))
+    for r in rows:
+        r["flow"] = "tasks"
+    return rows
+
+
+def test_check_accepts_valid_table(tmp_path):
+    rows = _valid_rows(tmp_path)
+    p = tmp_path / "t.csv"
+    _write_rows(p, rows)
+    assert check(p, tmp_path) == 0
+
+
+def test_check_rejects_applicability_mismatch(tmp_path, capsys):
+    rows = _valid_rows(tmp_path)
+    r = rows[0]
+    r["applicability"] = "applicable" if r["applicability"] == "n/a" else "n/a"
+    p = tmp_path / "t.csv"
+    _write_rows(p, rows)
+    assert check(p, tmp_path) == 2
+    err = capsys.readouterr().err
+    assert r["boundary_id"] in err and "applicability" in err
+
+
+def test_check_rejects_keyword_mismatch(tmp_path, capsys):
+    rows = _valid_rows(tmp_path)
+    r = next(x for x in rows if x["applicability"] == "applicable")
+    r["expected_keyword"] = "不存在"
+    p = tmp_path / "t.csv"
+    _write_rows(p, rows)
+    assert check(p, tmp_path) == 2
+    assert "expected_keyword" in capsys.readouterr().err
+
+
+def test_check_rejects_na_reason_mismatch(tmp_path, capsys):
+    rows = _valid_rows(tmp_path)
+    r = next(x for x in rows if x["applicability"] == "n/a")
+    r["reason"] = "随便"
+    p = tmp_path / "t.csv"
+    _write_rows(p, rows)
+    assert check(p, tmp_path) == 2
+    assert "reason" in capsys.readouterr().err
+
+
+def test_check_rejects_duplicate_keys(tmp_path, capsys):
+    rows = _valid_rows(tmp_path)
+    rows.append(dict(rows[0]))
+    p = tmp_path / "t.csv"
+    _write_rows(p, rows)
+    assert check(p, tmp_path) == 2
+    assert "重复" in capsys.readouterr().err
+
+
+def test_check_rejects_empty_flow(tmp_path, capsys):
+    rows = _valid_rows(tmp_path)
+    rows[0]["flow"] = ""
+    p = tmp_path / "t.csv"
+    _write_rows(p, rows)
+    assert check(p, tmp_path) == 2
+    assert "flow" in capsys.readouterr().err
+
+
+def test_main_exits_2_when_enumeration_is_empty(tmp_path, monkeypatch):
+    import scripts.fault_inventory as fi
+    monkeypatch.setattr(fi, "iter_sites", lambda *a, **k: [])
+    assert fi.main(["--write", str(tmp_path / "x.csv")]) == 2
+    assert not (tmp_path / "x.csv").exists()

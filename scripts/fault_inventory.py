@@ -98,22 +98,37 @@ class _V(ast.NodeVisitor):
             self._add(n, self.aliases[f.id], "subprocess")
         elif isinstance(f, ast.Name) and f.id == "urlopen":
             self._add(n, "urlopen", "network")
+        elif isinstance(f, ast.Name) and f.id == "open":
+            mode = n.args[1] if len(n.args) >= 2 else None
+            for kw in n.keywords:
+                if kw.arg == "mode":
+                    mode = kw.value
+            if isinstance(mode, ast.Constant) and isinstance(mode.value, str) \
+                    and any(c in mode.value for c in "wax"):
+                self._add(n, "open", "file_write")
         self.generic_visit(n)
 
 def iter_sites(root: pathlib.Path = SRC) -> list[Site]:
     sites = []
-    for p in sorted(root.glob("*.py")):
-        v = _V(p.name)
+    for p in sorted(root.rglob("*.py")):
+        v = _V(p.relative_to(root).as_posix())
         v.visit(ast.parse(p.read_text(encoding="utf-8")))
         sites += v.out
     return sites
 
 def expand(sites) -> list[dict]:
     rows = []
+    counts = collections.Counter((s.rel, s.line, s.api) for s in sites)
+    seen = collections.Counter()
     for s in sites:
+        key = (s.rel, s.line, s.api)
+        seen[key] += 1
+        base = f"{s.rel}:{s.line}:{s.api}"
+        # 同一行同一 API 有多个调用点时按出现顺序加序号，保证 boundary_id 唯一。
+        boundary_id = f"{base}#{seen[key]}" if counts[key] > 1 else base
         for fc in FAULTS:
             ok = fc in APPLICABLE[s.kind]
-            rows.append({"flow": "", "boundary_id": f"{s.rel}:{s.line}:{s.api}",
+            rows.append({"flow": "", "boundary_id": boundary_id,
                          "file": s.rel, "line": s.line, "fault_class": fc,
                          "applicability": "applicable" if ok else "n/a",
                          "reason": "" if ok else f"{s.kind} 边界不执行 {fc}",
@@ -125,15 +140,39 @@ def check(path: pathlib.Path, root: pathlib.Path = SRC) -> int:
     with path.open(newline="", encoding="utf-8") as f:
         table = list(csv.DictReader(f))
     enum = expand(iter_sites(root))
-    a = {(r["boundary_id"], r["fault_class"]) for r in enum}
-    b = {(r["boundary_id"], r["fault_class"]) for r in table}
-    missing, extra = a - b, b - a
+    derived = {(r["boundary_id"], r["fault_class"]): r for r in enum}
+    keys = [(r["boundary_id"], r["fault_class"]) for r in table]
+    dupes = sorted(k for k, n in collections.Counter(keys).items() if n > 1)
+    if dupes:
+        print(f"❌ 冻结表有重复键：{len(dupes)} 条", file=sys.stderr)
+        for k in dupes[:10]: print("  重:", k, file=sys.stderr)
+        return 2
+    table_map = dict(zip(keys, table))
+    missing, extra = set(derived) - set(table_map), set(table_map) - set(derived)
     if missing or extra:
         print(f"❌ 冻结表与枚举不一致：缺 {len(missing)} 条 / 多 {len(extra)} 条", file=sys.stderr)
         for x in sorted(missing)[:10]: print("  缺:", x, file=sys.stderr)
         for x in sorted(extra)[:10]: print("  多:", x, file=sys.stderr)
         return 2
-    print(f"✅ 边界表一致：枚举 {len(a)} / 表 {len(b)} / 差集 {len(missing) + len(extra)}")
+    bad = []
+    for k, er in derived.items():
+        tr = table_map[k]
+        for field in ("applicability", "expected_keyword"):
+            if tr[field] != er[field]:
+                bad.append((k, field, er[field], tr[field]))
+        if er["applicability"] == "n/a" and tr["reason"] != er["reason"]:
+            bad.append((k, "reason", er["reason"], tr["reason"]))
+    if bad:
+        print(f"❌ 冻结表字段与枚举不一致：{len(bad)} 条", file=sys.stderr)
+        for k, field, want, got in bad[:10]:
+            print(f"  {k} {field}: 应为 {want!r} / 实际 {got!r}", file=sys.stderr)
+        return 2
+    empty = sorted({r["boundary_id"] for r in table if not r["flow"]})
+    if empty:
+        print(f"❌ 冻结表有 {len(empty)} 个边界的 flow 为空（表未完成）", file=sys.stderr)
+        for b in empty[:10]: print("  空 flow:", b, file=sys.stderr)
+        return 2
+    print(f"✅ 边界表一致：枚举 {len(derived)} / 表 {len(table_map)} / 差集 0")
     return 0
 
 def main(argv=None):
@@ -144,6 +183,9 @@ def main(argv=None):
     a = ap.parse_args(argv)
     if a.check: return check(a.check)
     rows = expand(iter_sites())
+    if not rows:
+        print("❌ 枚举结果为空：检查 SRC 路径与枚举规则", file=sys.stderr)
+        return 2
     buf = io.StringIO(); w = csv.DictWriter(buf, fieldnames=list(rows[0])); w.writeheader(); w.writerows(rows)
     if a.write: a.write.write_text(buf.getvalue(), encoding="utf-8")
     else: print(buf.getvalue(), end="")
