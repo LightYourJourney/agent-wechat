@@ -66,14 +66,23 @@ def iter_sites(src: str) -> list[dict]:
     tree = ast.parse(src)
     v = _V()
     v.visit(tree)
-    return [{"index": i, "qualname": q, "op": op, "segment": seg, "line": line,
-             "col": col}
-            for i, (q, op, seg, line, col) in enumerate(v.sites)]
+    seen: dict[tuple, int] = {}
+    out = []
+    for i, (q, op, seg, line, col) in enumerate(v.sites):
+        # 同一函数里同形的位点很常见（两处 `return None`、两个 `0`）。没有序号，
+        # 它们的指纹会**塌缩成一个**——kill 矩阵的集合对等断言随之失效（实测
+        # 1235 个位点会塌成 1081 个）。序号按遍历序编号，与行号无关。
+        n = seen.get((q, op, seg), 0)
+        seen[(q, op, seg)] = n + 1
+        out.append({"index": i, "qualname": q, "op": op, "segment": seg,
+                    "ordinal": n, "line": line, "col": col})
+    return out
 
 
 def fingerprint(module: str, site: dict) -> str:
     """位点指纹。**不含行号/列号**：同一个逻辑位点在源码挪行之后仍是同一个变异体。"""
-    raw = "|".join([module, site["qualname"], site["op"], site["segment"]])
+    raw = "|".join([module, site["qualname"], site["op"], site["segment"],
+                    str(site["ordinal"])])
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 
@@ -228,6 +237,7 @@ def run_sweep(module: str, mapping: dict, copy_root: pathlib.Path, timeout: floa
             src.write_text(original, encoding="utf-8")
     got = {r["fp"] for r in out_rows}
     assert got == set(manifest), "kill 矩阵键集合与 dry-run 集合不等"
+    assert len(out_rows) == len(manifest), "有指纹重复——集合对等断言的判据就不成立了"
     return out_rows
 
 

@@ -63,6 +63,27 @@ def test_fingerprint_differs_for_different_sites():
     assert len(fps) == len(sites), "不同位点的指纹必须不同（否则 dry-run 集合会塌缩）"
 
 
+def test_identical_segments_in_one_function_get_distinct_fingerprints():
+    """同形的两个位点（两处 `return None`）不许塌缩——实测真仓库 1235 个位点会塌成 1081 个。
+
+    没有这条，kill 矩阵的「集合对等」断言就是在数一个已经合并过的集合。
+    """
+    src = "def f(a):\n    if a:\n        return None\n    return None\n"
+    sites = iter_sites(src)
+    fps = [fingerprint("m", s) for s in sites]
+    assert len(set(fps)) == len(sites), {
+        (s["qualname"], s["op"], s["segment"], fingerprint("m", s)) for s in sites}
+
+
+def test_real_modules_have_no_fingerprint_collisions():
+    """B 阶段的前提：模块清单里每个位点都有唯一指纹。"""
+    from scripts.mutation_sweep import DEFAULT_MODULES, _src_root
+    for m in DEFAULT_MODULES:
+        sites = iter_sites((_src_root() / f"{m}.py").read_text(encoding="utf-8"))
+        fps = [fingerprint(m, s) for s in sites]
+        assert len(set(fps)) == len(fps), f"{m}: 指纹碰撞 {len(fps) - len(set(fps))} 处"
+
+
 def test_classify_five_states():
     """五态互斥：超时单列（不并进 killed），收集/导入错误一律 invalid。"""
     from scripts.mutation_sweep import classify
