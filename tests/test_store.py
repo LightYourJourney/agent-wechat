@@ -381,3 +381,31 @@ def test_the_fts_update_trigger_covers_chat_id(con):
         "SELECT sql FROM sqlite_master WHERE type='trigger' AND name='msg_fts_au'"
     ).fetchone()[0]
     assert "UPDATE OF content, chat_id" in sql, sql
+
+
+def test_messages_in_range_applies_both_time_bounds(con, monkeypatch):
+    """B 阶段（T14）：`messages_in_range` 的 `after_ts` / `before_ts` 两个过滤**零断言**——
+    删掉 `where.append(...)` 或 `args.append(...)` 四行里的任何一行，既有用例全绿。
+
+    区间语义与 `search` / `media.month_bounds` 一致：`after_ts` 含下界、`before_ts` 不含上界。
+    """
+    from agent_wechat import messages, search
+
+    chat = "wxid_testacct01_ab12"
+    md5v = messages.md5_of(chat)
+    store.upsert_batch(con, [messages.make_row(
+        account="acct", chat_md5=md5v, chat_id=chat, shard="message_0.db",
+        local_id=i, ts=1_700_000_000 + i, msg_type=1, sender_id=chat, sender_name=None,
+        is_self=0, content=f"m{i}", media_hint=None) for i in range(1, 6)])
+    monkeypatch.setattr(store, "open", lambda: _Ctx(con))
+
+    got, truncated = search.messages_in_range(
+        chat, account="acct", after_ts=1_700_000_002, before_ts=1_700_000_004)
+    assert [r["ts"] for r in got] == [1_700_000_002, 1_700_000_003]
+    assert truncated is False
+
+    # 只给下界 / 只给上界，各自单独生效
+    assert [r["ts"] for r in search.messages_in_range(
+        chat, account="acct", after_ts=1_700_000_004)[0]] == [1_700_000_004, 1_700_000_005]
+    assert [r["ts"] for r in search.messages_in_range(
+        chat, account="acct", before_ts=1_700_000_002)[0]] == [1_700_000_001]

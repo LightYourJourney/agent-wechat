@@ -276,3 +276,45 @@ def test_the_tmpdir_the_pipeline_creates_is_recognizable_by_the_sweeper(tmp_path
     m = decrypt._AWDEC_RE.match(names[0])
     assert m, f"清扫认不出这个形态：{names[0]}"
     assert int(m.group(1)) == os.getpid(), names
+
+
+def test_the_plaintext_workspace_is_gone_after_success(fake_wechat_db, tmp_path, monkeypatch):
+    """B 阶段（T14）：正常走完一次解密后，`tmp/awdec-<pid>-*` 里那份**明文**必须随之消失。
+
+    EA-019 的清扫只兜「崩溃残留」；优雅路径的删除此前零断言——把 `finally` 里的
+    `shutil.rmtree(td, ...)` 删掉，`test_decrypt_pipeline.py` 全绿，而用户的明文会一直
+    躺在 HOME/tmp 下。
+    """
+    enc, passphrase = fake_wechat_db
+    home = tmp_path / "home"
+    (home / "tmp").mkdir(parents=True)
+    monkeypatch.setattr(paths, "HOME_DIR", home)
+
+    with decrypt.decrypted(enc, passphrase) as plain:
+        ws = plain.parent
+        assert ws.exists() and plain.exists(), "解密期间明文副本必须在"
+    assert not ws.exists(), "退出上下文后临时目录（含明文）必须被删掉"
+    assert list((home / "tmp").iterdir()) == [], "tmp 下不该留下任何东西"
+
+
+def test_a_zero_exit_that_produced_no_file_is_still_a_failure(tmp_path, monkeypatch):
+    """B 阶段（T14）：`returncode != 0 **or** not out.exists()` 里的两个判据此前只覆盖了
+    前者——把 `or` 改成 `and`，既有用例全绿，而「sqlcipher 静默返回 0 却没写出文件」会让
+    `decrypted()` 交出一个**不存在的**明文路径，错误推迟到调用方（症状离现场很远）。
+    """
+    db = tmp_path / "message_0.db"
+    db.write_bytes(b"x" * 8192)                     # ≥1 页，过「不足一页」判据
+    home = tmp_path / "home"
+    (home / "tmp").mkdir(parents=True)
+    monkeypatch.setattr(paths, "HOME_DIR", home)
+
+    class _R:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    monkeypatch.setattr(decrypt.subprocess, "run", lambda *a, **kw: _R())
+    from agent_wechat import errors
+    with pytest.raises(errors.DecryptError, match="sqlcipher 解密失败"):
+        with decrypt.decrypted(db, b"w" * 32):
+            pass

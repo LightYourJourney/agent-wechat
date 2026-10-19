@@ -2679,3 +2679,32 @@ def test_scan_dats_reads_only_the_tail(tmp_path, monkeypatch):
     xor_key, v2_sample = m._scan_dats(dats)          # EA-020：同一次扫描顺带挑 V2 样本
     assert xor_key == 0x5A
     assert v2_sample is None                          # 这批是 V0（无 V2 魔数）
+
+
+def test_a_damaged_v2_dat_is_rejected_instead_of_half_decrypted():
+    """B 阶段（T14）：`decrypt_dat` 的三条长度守卫**一条用例都没有**——
+    `len(data) < 15`、`aligned > len(payload)`、以及「恰好对齐」的边界，把任一条改成
+    `<=`/`>=`，`test_media.py` 全绿。
+
+    三条各钉一头：
+    ① 头不完整 → 报「不足 15 字节头」；
+    ② 头恰好 15 字节（没有载荷）→ 走的是**长度字段**那条（不是「头不足」）；
+    ③ 长度字段比文件大（截断）→ 报「长度字段与文件大小不符」；
+    ④ 恰好对齐（xorSize=0，aligned == len(payload)）是**合法**的，不许被当成损坏。
+    """
+    keys = media.MediaKeys(xor_key=FAKE_XOR, aes_key_ascii=FAKE_KEY, code="test",
+                           aes_verified=True)
+    good = build_v2_dat(jpeg_like(32), b"", FAKE_KEY, FAKE_XOR)
+
+    with pytest.raises(errors.DecryptError, match="不足 15 字节"):
+        media.decrypt_dat(good[:14], keys)
+
+    with pytest.raises(errors.DecryptError, match="长度字段与文件大小不符"):
+        media.decrypt_dat(good[:15], keys)
+
+    lying = (media.V2_SIG + (1024).to_bytes(4, "little") + (0).to_bytes(4, "little")
+             + b"\x01" + b"\x00" * 64)
+    with pytest.raises(errors.DecryptError, match="长度字段与文件大小不符"):
+        media.decrypt_dat(lying, keys)
+
+    assert media.decrypt_dat(good, keys) == jpeg_like(32)
