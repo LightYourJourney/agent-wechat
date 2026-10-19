@@ -9,6 +9,7 @@ import argparse
 import ast
 import hashlib
 import json
+import os
 import pathlib
 import sys
 
@@ -171,8 +172,87 @@ def main(argv=None):
     return 0
 
 
+def classify(rc: int, out: str) -> str:
+    """runner 的五态（spec §6.3）。
+
+    `timeout` 单列：被杀不算「断言杀死」，否则把超时调短就能伪造全杀。
+    `invalid` 覆盖「收集失败 / 导入错误 / 用例体之外的崩溃」——它们不是被断言打死的。
+    """
+    if rc == -9:
+        return "timeout"
+    if rc == 0:
+        return "survived"
+    if "ERROR collecting" in out or "ERROR " in out or rc in (2, 5):
+        return "invalid"
+    if "FAILED" in out:
+        return "killed"
+    return "invalid"
+
+
+def run_sweep(module: str, mapping: dict, copy_root: pathlib.Path, timeout: float,
+              manifest: set[str]) -> list[dict]:
+    """在 `copy_root`（git archive 解出的副本）里逐个变异并跑映射用例。
+
+    每次变异后**立刻还原源文件**：一个变异体的失败不该污染下一个。
+    结束时断言「跑过的指纹集合 == dry-run 集合」——这是「集合自报」那条风险的唯一防线。
+    """
+    import subprocess
+
+    src = copy_root / "src" / "agent_wechat" / f"{module}.py"
+    original = src.read_text(encoding="utf-8")
+    tests = mapping[module]
+    out_rows = []
+    for site in iter_sites(original):
+        fp = fingerprint(module, site)
+        if fp not in manifest:
+            continue
+        try:
+            mutated = mutate(original, site)
+        except AssertionError:
+            out_rows.append({"fp": fp, "status": "invalid", "why": "位点定位失败"})
+            continue
+        src.write_text(mutated, encoding="utf-8")
+        env = dict(os.environ, PYTHONPATH=str(copy_root / "src"),
+                   PYTHONPYCACHEPREFIX=str(copy_root / ".pycache"),
+                   PYTHONDONTWRITEBYTECODE="1")
+        try:
+            r = subprocess.run([sys.executable, "-m", "pytest", "-x", "-q", *tests],
+                               cwd=copy_root, env=env, capture_output=True, text=True,
+                               timeout=timeout)
+            status = classify(r.returncode, r.stdout + r.stderr)
+            out_rows.append({"fp": fp, "status": status,
+                             "out": (r.stdout + r.stderr)[-400:]})
+        except subprocess.TimeoutExpired:
+            out_rows.append({"fp": fp, "status": "timeout"})
+        finally:
+            src.write_text(original, encoding="utf-8")
+    got = {r["fp"] for r in out_rows}
+    assert got == set(manifest), "kill 矩阵键集合与 dry-run 集合不等"
+    return out_rows
+
+
+def main_run(argv):
+    """--run MODULE --manifest FILE [--only-fps f1,f2] --timeout S"""
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--run", required=True)
+    ap.add_argument("--manifest", required=True)
+    ap.add_argument("--only-fps", default="")
+    ap.add_argument("--timeout", type=float, default=300)
+    a = ap.parse_args(argv)
+    manifest = {json.loads(line)["fp"] for line in
+                pathlib.Path(a.manifest).read_text().splitlines() if line.strip()}
+    if a.only_fps:
+        manifest &= set(a.only_fps.split(","))
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "tests"))
+    from b_mapping import MAPPING
+    copy_root = pathlib.Path(os.environ["AW_COPY"])
+    rows = run_sweep(a.run, MAPPING, copy_root, a.timeout, manifest)
+    for r in rows:
+        print(json.dumps(r, ensure_ascii=False))
+    return 0
+
+
 if __name__ == "__main__":
     if "--run" in sys.argv[1:]:
-        print("--run 在 Task 12 实现", file=sys.stderr)
-        sys.exit(2)
+        sys.exit(main_run(sys.argv[1:]))
     sys.exit(main())

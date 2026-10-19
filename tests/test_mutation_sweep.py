@@ -61,3 +61,51 @@ def test_fingerprint_differs_for_different_sites():
     sites = iter_sites(SRC)
     fps = {fingerprint("m", s) for s in sites}
     assert len(fps) == len(sites), "不同位点的指纹必须不同（否则 dry-run 集合会塌缩）"
+
+
+def test_classify_five_states():
+    """五态互斥：超时单列（不并进 killed），收集/导入错误一律 invalid。"""
+    from scripts.mutation_sweep import classify
+    assert classify(1, "FAILED tests/x.py::t - AssertionError") == "killed"
+    assert classify(1, "ERROR tests/x.py - ImportError") == "invalid"
+    assert classify(2, "ERROR collecting tests/x.py") == "invalid"
+    assert classify(0, "") == "survived"
+    assert classify(-9, "") == "timeout"
+    # 判据的边界：只提到 ERROR collecting 而非 FAILED 时不得算 killed
+    assert classify(1, "ERROR collecting tests/x.py\nFAILED") == "invalid"
+
+
+def test_runner_end_to_end_kills_and_restores(tmp_path):
+    """真跑一次：变异被用例打死 = killed；源文件必须被还原；集合对等断言生效。
+
+    用小模块 + 小用例，不碰真仓库——但走的是 `run_sweep` 的**同一条**路径
+    （copy_root / PYTHONPATH / 还原 / 集合断言）。
+    """
+    import subprocess
+    import sys
+
+    from scripts.mutation_sweep import run_sweep
+
+    pkg = tmp_path / "src" / "agent_wechat"
+    pkg.mkdir(parents=True)
+    (pkg / "__init__.py").write_text("")
+    mod_src = "def f(a):\n    return a + 1\n"
+    (pkg / "tiny.py").write_text(mod_src)
+    t = tmp_path / "tests"
+    t.mkdir()
+    (t / "test_tiny.py").write_text(
+        "from agent_wechat.tiny import f\n\n"
+        "def test_f():\n    assert f(1) == 2\n")
+    # 先确认基线绿（否则分类器的判据没有意义）
+    env = dict(__import__("os").environ, PYTHONPATH=str(tmp_path / "src"),
+               PYTHONPATH_EXTRA="")
+    base = subprocess.run([sys.executable, "-m", "pytest", "-x", "-q", "tests"],
+                          cwd=tmp_path, env=env, capture_output=True, text=True)
+    assert base.returncode == 0, base.stdout + base.stderr
+
+    from scripts.mutation_sweep import fingerprint, iter_sites
+    fps = {fingerprint("tiny", s) for s in iter_sites(mod_src)}
+    rows = run_sweep("tiny", {"tiny": ["tests"]}, tmp_path, 120, fps)
+    assert {r["fp"] for r in rows} == fps, "集合对等"
+    assert any(r["status"] == "killed" for r in rows), "把 +1 变成 +2 必须被用例打死"
+    assert (pkg / "tiny.py").read_text() == mod_src, "变异源必须被还原"
