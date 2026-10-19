@@ -13,9 +13,12 @@ import pytest
 from agent_wechat import decrypt, keys, paths
 
 
-@pytest.fixture()
-def fake_wechat_db(tmp_path):
-    """造一个带消息表的库，再用 32 字节 passphrase 加密成微信式库。"""
+def build_fake_wechat_db(tmp_path):
+    """造一个带消息表的库，再用 32 字节 passphrase 加密成微信式库。
+
+    抽成普通函数（而非只留夹具）：矩阵驱动也要造同一形态的库——见 `tests/test_media.py`
+    的 `make_media_tree`，同一理由（夹具与驱动各写一份会漂移）。
+    """
     plain = tmp_path / "plain.db"
     con = sqlite3.connect(plain)
     con.execute("CREATE TABLE Chat_Msg(ChatName TEXT, MesLocalID INTEGER, Message TEXT, CreateTime INTEGER)")
@@ -36,6 +39,11 @@ def fake_wechat_db(tmp_path):
     enc_key = keys.derive_key(passphrase, p1[:keys.SALT_SZ])
     assert keys.page1_hmac_ok(enc_key, p1), "HMAC 公式应认可该密钥"
     return enc, passphrase
+
+
+@pytest.fixture()
+def fake_wechat_db(tmp_path):
+    return build_fake_wechat_db(tmp_path)
 
 
 def test_decrypt_pipeline(fake_wechat_db, tmp_path, monkeypatch):
