@@ -42,8 +42,8 @@ def build_env(tmp_path, monkeypatch, xml):
 
     wx, home = tmp_path / "wx", tmp_path / "home"
     d = wx / ACCT / "db_storage" / "sns"
-    d.mkdir(parents=True)
-    home.mkdir()
+    d.mkdir(parents=True, exist_ok=True)
+    home.mkdir(exist_ok=True)
     # `iter_posts` 经 `keys.get_passphrase` 取钥；不隔离就会读到**真实机器的**
     # passphrase.json。
     (home / "passphrase.json").write_text(json.dumps(
@@ -56,9 +56,11 @@ def build_env(tmp_path, monkeypatch, xml):
     for mod in ("agent_wechat.moments", "agent_wechat.usecases"):
         monkeypatch.setattr(f"{mod}.decrypt", dec_mod, raising=False)
     con = sqlite3.connect(d / "sns.db")
-    con.execute("CREATE TABLE SnsTimeLine(tid INTEGER PRIMARY KEY DESC, user_name TEXT,"
-                " content TEXT, pack_info_buf TEXT)")
-    con.execute("INSERT INTO SnsTimeLine(tid, user_name, content) VALUES (1,'u',?)", (xml,))
+    # 幂等：崩溃一致性用例会在同一状态上重跑（spec §4.5）。
+    con.execute("CREATE TABLE IF NOT EXISTS SnsTimeLine(tid INTEGER PRIMARY KEY DESC,"
+                " user_name TEXT, content TEXT, pack_info_buf TEXT)")
+    con.execute("INSERT OR REPLACE INTO SnsTimeLine(tid, user_name, content) VALUES (1,'u',?)",
+                (xml,))
     con.commit()
     con.close()
     return home

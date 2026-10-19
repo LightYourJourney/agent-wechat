@@ -95,6 +95,19 @@ def _raise(kind):
         raise OSError(errno.EACCES, "simulated gate failure")
     if kind == "ELOOP":
         raise OSError(errno.ELOOP, "simulated symlink loop")
+    if kind == "SIGKILL":
+        # 崩溃协议（spec §4.5）：写 marker 后**杀自己**。复用 callsite 绑定，于是「杀在哪
+        # 一个调用点」与矩阵的其余故障类完全同源；且钩子跑在 `orig(...)` **之前**——
+        # 这正好对应「效果发生之前被杀」那条判据（挪到之后，崩溃用例会红）。
+        marker = os.environ.get("AW_KILL_MARKER")
+        if marker:
+            fd = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            try:
+                os.write(fd, kind.encode())
+            finally:
+                os.close(fd)
+        os.kill(os.getpid(), signal.SIGKILL)
+        raise AssertionError("SIGKILL 之后不该继续执行")
     raise AssertionError(f"未知故障类 {kind}")
 
 

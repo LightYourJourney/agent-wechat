@@ -20,6 +20,12 @@ def build_fake_wechat_db(tmp_path):
     的 `make_media_tree`，同一理由（夹具与驱动各写一份会漂移）。
     """
     plain = tmp_path / "plain.db"
+    enc = tmp_path / "message_9.db"
+    passphrase = b"wechat-like-passphrase-0123456789ab"
+    if enc.exists():
+        # 幂等：崩溃一致性用例会在**同一状态**上重跑整个场景（spec §4.5），第二次进来时
+        # 库已经在了——重建会撞 `table Chat_Msg already exists`。
+        return enc, passphrase
     con = sqlite3.connect(plain)
     con.execute("CREATE TABLE Chat_Msg(ChatName TEXT, MesLocalID INTEGER, Message TEXT, CreateTime INTEGER)")
     con.executemany("INSERT INTO Chat_Msg VALUES (?,?,?,?)",
@@ -27,8 +33,6 @@ def build_fake_wechat_db(tmp_path):
     con.commit()
     con.close()
 
-    passphrase = b"wechat-like-passphrase-0123456789ab"   # 文本形式 → sqlcipher 走 PBKDF2，与微信一致
-    enc = tmp_path / "message_9.db"
     subprocess.run(["sqlcipher", str(plain),
                     f"ATTACH DATABASE '{enc}' AS e KEY '{passphrase.decode()}';",
                     "SELECT sqlcipher_export('e');", "DETACH DATABASE e;"],
