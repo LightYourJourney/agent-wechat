@@ -260,3 +260,41 @@ def test_every_home_dir_path_owner_goes_through_the_gate():
         f"owner 名单变了，先核一遍再改这条：{sorted(owners)}"
     missing = [n for n, f in owners.items() if not _calls_the_gate(f)]
     assert not missing, f"这些 owner 没过闸（它们的产物会落到当前工作目录）：{missing}"
+
+
+def test_pid_alive_covers_every_verdict(monkeypatch):
+    """B 阶段（T14）：`pid_alive` 是「孤儿任务收割」的判据（`tasks._harvest`）与解密清扫
+    的判活判据，但**没有一条直接用例**——13 个变异体（含「删掉 `os.kill` 让一切 pid 都算活着」）
+    在 `test_paths.py` 下全绿。
+
+    五种输入各钉一头：非 int / 非正数 → False；活进程 → True；已死 → False；
+    权限不足（别人的进程）→ True；pid 溢出 C long → True（判不出来 ⇒ 保守算活着）。
+    """
+    import os
+    import subprocess
+    import sys
+
+    for bad in ("123", None, 0, -1, True, 3.5):
+        assert paths.pid_alive(bad) is False, bad
+
+    alive = subprocess.Popen([sys.executable, "-c", "pass"])
+    try:
+        assert paths.pid_alive(alive.pid) is True
+    finally:
+        alive.wait()
+    assert paths.pid_alive(alive.pid) is False, "已退出的进程必须判死"
+
+    monkeypatch.setattr(paths.os, "kill",
+                        lambda *a: (_ for _ in ()).throw(PermissionError(1, "not mine")))
+    assert paths.pid_alive(4242) is True, "PermissionError = 别人的进程 = 活着"
+
+    monkeypatch.setattr(paths.os, "kill",
+                        lambda *a: (_ for _ in ()).throw(OverflowError("too big")))
+    assert paths.pid_alive(10 ** 20) is True, "OverflowError = 判不出来 = 保守算活着"
+
+    monkeypatch.setattr(paths.os, "kill",
+                        lambda *a: (_ for _ in ()).throw(ProcessLookupError()))
+    assert paths.pid_alive(4242) is False
+
+    monkeypatch.setattr(paths.os, "kill", lambda *a: None)
+    assert paths.pid_alive(os.getpid()) is True
