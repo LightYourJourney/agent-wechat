@@ -39,9 +39,15 @@ class Injector:
     def __init__(self, faults):
         self.faults, self.seen, self.fired = list(faults), {}, []
         self.mp = pytest.MonkeyPatch()      # 独立于 conftest 的隔离 patch
+        self.aliases = []                   # 自己记、自己还（见 undo 的注释）
 
     def undo(self):
         self.mp.undo()
+        # 模块级别名（`purge._run = subprocess.run`）**由我们自己还原**：实测把别名交给
+        # `MonkeyPatch` 记录时，pytest 下 undo **不生效**（脚本里正常），于是同一进程里
+        # 后一格拿到的是前一格留下的**死桩**——它的 injector 早撤了，故障永远打不中。
+        for obj, name, old in reversed(self.aliases):
+            setattr(obj, name, old)
 
     @staticmethod
     def _path_matches(f, path):
@@ -214,8 +220,26 @@ def _fake_popen(cmd):
     return _Fake()
 
 
+def _import_all():
+    """把 `agent_wechat` 包内**全部**子模块先导入。
+
+    模块级别名（`purge._run = subprocess.run`）是 **import 期绑定**：若某个子模块首次被
+    导入的时机恰好落在某次注入期间，它就把**那个桩**永久绑进了模块属性——撤注入也拿不回来
+    （`purge._run` 从此是死桩，同一进程里后一格永远「故障未命中」）。先把包导全，别名就都
+    绑在真函数上；`install()` 的别名扫描才有东西可换、也才能还原。
+    """
+    import importlib
+    import pkgutil
+
+    from agent_wechat import __name__ as pkg_name
+    from agent_wechat import __path__ as pkg_path
+    for m in pkgutil.iter_modules(pkg_path):
+        importlib.import_module(f"{pkg_name}.{m.name}")
+
+
 def install(faults):
     """装故障；**自带独立 MonkeyPatch**，`inj.undo()` 只撤故障，不动 conftest 的隔离 patch。"""
+    _import_all()
     inj = Injector(faults)
     mp = inj.mp
     P = pathlib.Path
@@ -241,10 +265,23 @@ def install(faults):
     mp.setattr(shutil, "rmtree",
                _wrap(shutil.rmtree, inj, "shutil.rmtree", _path_arg))
     mp.setattr(shutil, "copy2", _wrap(shutil.copy2, inj, "shutil.copy2", _dst_arg))
-    mp.setattr(subprocess, "run",
-               _wrap(subprocess.run, inj, "subprocess.run", _cmd_arg))
-    mp.setattr(subprocess, "Popen",
-               _wrap(subprocess.Popen, inj, "subprocess.Popen", _cmd_arg))
+    sub_wrappers = {}
+    for name in ("run", "Popen"):
+        orig = getattr(subprocess, name)
+        w = _wrap(orig, inj, "subprocess." + name, _cmd_arg)
+        mp.setattr(subprocess, name, w)
+        sub_wrappers[orig] = w
+    # **模块级别名**（`_run = subprocess.run`，见 account.py:17 / purge.py:31）：import 期
+    # 就把**原函数**存进了模块属性，patch `subprocess.run` 拦不住它——而 AST 枚举器认这个
+    # 别名（按 `subprocess.run` 记边界）。不把别名一起换掉，那些边界永远「故障未命中」。
+    for mod in list(sys.modules.values()):
+        if not getattr(mod, "__name__", "").startswith("agent_wechat"):
+            continue
+        for attr, val in list(vars(mod).items()):
+            for orig, w in sub_wrappers.items():
+                if val is orig:
+                    inj.aliases.append((mod, attr, val))
+                    setattr(mod, attr, w)
     _install_sqlite(inj, mp)
     from agent_wechat import sns_media
     mp.setattr(sns_media, "fetch",

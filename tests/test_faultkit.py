@@ -121,3 +121,43 @@ def test_callsite_binding_fires_only_at_that_line(tmp_path):
         inj.assert_fired()
     finally:
         inj.undo()
+
+
+def test_install_undo_leaves_no_trace():
+    """装→撤之后，包内**每一个**子模块属性都必须回到装之前的值。
+
+    守的是两类**静默失效**（本周期各踩过一次）：
+    ① 模块级别名（`purge._run = subprocess.run`）没被还原 ⇒ 同一进程里后一格拿到死桩，
+       故障永远打不中，矩阵把真缺陷报成「未命中」；
+    ② 子模块**惰性导入**发生在注入期间 ⇒ `X = subprocess.run` 把当时的桩永久绑进模块属性，
+       撤注入也拿不回来。
+    """
+    import importlib
+    import pkgutil
+    import subprocess
+
+    import faultkit as _fk
+
+    from agent_wechat import __name__ as pkg_name
+    from agent_wechat import __path__ as pkg_path
+
+    mods = []
+    for m in pkgutil.iter_modules(pkg_path):
+        mods.append(importlib.import_module(f"{pkg_name}.{m.name}"))
+
+    def snapshot():
+        out = {}
+        for mod in mods:
+            for attr, val in vars(mod).items():
+                if callable(val) and getattr(val, "__module__", None) in (
+                        "subprocess", "shutil", "os", "pathlib", "sqlite3"):
+                    out[(mod.__name__, attr)] = val
+        return out
+
+    before = snapshot()
+    inj = _fk.install([_fk.Fault("subprocess.run", "SUBPROCESS_START_FAIL")])
+    inj.undo()
+    after = snapshot()
+    changed = [k for k in before if before[k] is not after.get(k)]
+    assert not changed, f"撤注入后这些模块属性没还原（后一格会拿到死桩）：{changed}"
+    assert subprocess.run is not None
