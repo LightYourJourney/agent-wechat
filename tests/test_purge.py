@@ -1759,3 +1759,22 @@ def test_escapes_home_refuses_everything_it_cannot_prove_is_inside(tmp_path):
     # home 自己不存在时也不许裸异常（`strict=False` 那处）
     missing_home = tmp_path / "not-yet"
     assert purge._escapes_home(in_tree, missing_home) is True   # 树外 ⇒ 拒绝
+
+
+def test_escapes_home_refuses_when_existence_cannot_be_probed(tmp_path, monkeypatch):
+    """B 阶段（T14）：`_escapes_home` 的 `except OSError: return True`（探测存在性失败
+    ⇒ 判为逃逸）没有用例——删掉或改成 False，删除边界会在「读不到」时放行。
+
+    EACCES 是真实形态（`Path.exists()` 只吞 ENOENT/ENOTDIR/EBADF/ELOOP）。
+    """
+    link = tmp_path / "x"
+    link.write_bytes(b"x")
+    real = pathlib.Path.exists
+
+    def boom(self):
+        raise PermissionError(13, "Permission denied")
+    monkeypatch.setattr(pathlib.Path, "exists", boom)
+    try:
+        assert purge._escapes_home(link, tmp_path) is True
+    finally:
+        monkeypatch.setattr(pathlib.Path, "exists", real)
