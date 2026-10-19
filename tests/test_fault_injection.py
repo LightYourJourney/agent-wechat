@@ -132,3 +132,29 @@ def test_store_failure_preserves_existing_rows(tmp_path, monkeypatch):
     with store.open() as con:
         n = con.execute("SELECT count(*) FROM messages").fetchone()[0]
     assert n == 1, "失败后既有数据必须原样保留（不得出现第二条，也不得丢第一条）"
+
+
+def test_store_exit_commit_failure_is_project_error(tmp_path, monkeypatch):
+    """不变量 4/错误契约：`with store.open()` 的**退出提交**失败必须是项目异常。
+
+    不走 `upsert_batch`（它在 330 自己 commit，故障会先在那里命中）：直接插一行、
+    不显式 commit，让 234 的退出提交成为第一次提交。
+    """
+    home = _home(tmp_path)
+    monkeypatch.setattr(paths, "HOME_DIR", home)
+    monkeypatch.setattr(store, "DB_PATH", home / "index.db")
+    from agent_wechat import messages
+    row = messages.make_row(account="wxid_testacct01_ab12", chat_md5="m" * 32,
+                            chat_id="c", shard="message_0.db", local_id=1, ts=1,
+                            msg_type=1, sender_id="u", sender_name=None, is_self=0,
+                            content="seed", media_hint=None)
+    inj = install([Fault("commit", "EIO", nth=1)])
+    try:
+        with pytest.raises(errors.AgentWeChatError):
+            with store.open() as con:
+                con.execute(store._INSERT_SQL, {**row, "exported_at": 0})
+    finally:
+        inj.undo()
+    with store.open() as con:
+        n = con.execute("SELECT count(*) FROM messages").fetchone()[0]
+    assert n == 0, "退出提交失败不得落库"
