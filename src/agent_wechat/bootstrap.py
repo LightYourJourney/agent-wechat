@@ -156,8 +156,8 @@ def capture_passphrase_lldb(timeout: int = DEFAULT_TIMEOUT) -> str:
             ["bash", "-c", f"( cat {sp}; sleep {timeout} ) | TERM=dumb lldb"],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
             start_new_session=True)
-    except OSError as exc:
-        # A 矩阵 141：起不了 lldb 此前裸穿（找不到 bash / ENOSPC / EACCES）。
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        # A 矩阵 141/155：起不了 lldb 此前裸穿（找不到 bash / ENOSPC / EACCES / 超时）。
         try:
             os.unlink(sp)
         except OSError:

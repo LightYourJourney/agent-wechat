@@ -43,6 +43,17 @@ _tm_exclusion_checked = False
 
 
 def in_wechat_container(p: str | pathlib.Path) -> bool:
+    """`p` 是否落在容器可写范围内。**判不出来按 False**（只读问路的语义，见 verdict）。"""
+    return container_verdict(p) is True
+
+
+def container_verdict(p: str | pathlib.Path) -> bool | None:
+    """三态版：True＝在容器内 / False＝确定不在 / **None＝判不出来**。
+
+    写闸门（`refuse_container_out` / `ensure_home_dirs`）必须按 `is not False` 判——
+    R2-A-008（P1）实测：判不出来时返回 False，会让 `ensure_home_dirs` 把数据目录**建进
+    容器**。读路径保留 False 语义（`in_wechat_container` 是它的薄壳），两件事分开。
+    """
     """`p` 解析后是否落在**微信容器的可写范围**之内。
 
     范围（两段，`CONTAINER_DATA` 为一端）：
@@ -65,13 +76,14 @@ def in_wechat_container(p: str | pathlib.Path) -> bool:
     且容器通常根本不存在）。
 
     判不出来（符号链接环 / 权限不足）返回 False：这种路径在随后的实际写入里会自己失败，
-    在这里谎报「在容器里」是错诊断。
+    在这里谎报「在容器里」是错诊断。**写闸门不依赖这个 False**——`ensure_home_dirs` /
+    `refuse_container_out` 另做一步「能不能证明自己在容器外」（R2-A-008，P1）。
     """
     try:
         resolved = pathlib.Path(p).resolve(strict=False)
         guard = CONTAINER_DATA.resolve(strict=False)
     except (OSError, RuntimeError):
-        return False
+        return None                        # 判不出来（写闸门按拒绝处理）
     if resolved.is_relative_to(guard):         # 含 `resolved == guard`（is_relative_to 的语义）
         return True
     if guard.is_relative_to(resolved):
@@ -85,7 +97,24 @@ def in_wechat_container(p: str | pathlib.Path) -> bool:
         return any(node.exists() and os.path.samefile(node, resolved)
                    for node in (guard, *guard.parents))
     except OSError:
-        return False
+        return None                        # samefile/exists 出错：同上，判不出来
+
+
+def _require_guard_resolvable() -> None:
+    """写闸门的前置：**必须能证明容器位置**。解析不出来就拒绝写（R2-A-008，P1）。
+
+    为什么不依赖 `in_wechat_container` 的返回值：它对判不出来的情形返回 False（只读问路
+    的合理语义），而「判不出来」在**写**这条路上恰好是最危险的一态——实测 resolve 一出错，
+    `ensure_home_dirs` 就把数据目录建进了容器。这里把两件事分开：只读问路保留 False，
+    写闸门要求一个**肯定**的答案。
+    """
+    try:
+        CONTAINER_DATA.resolve(strict=False)
+    except (OSError, RuntimeError) as exc:
+        raise ContainerWriteRefused(
+            f"无法确认容器目录的位置：{CONTAINER_DATA}",
+            hint=f"{exc}；为安全起见拒绝写入，请检查路径解析（符号链接 / 权限）后重试"
+        ) from exc
 
 
 def refuse_container_out(p: str | pathlib.Path) -> None:
@@ -101,6 +130,11 @@ def refuse_container_out(p: str | pathlib.Path) -> None:
     message 里带**被拒范围本身**（`CONTAINER_DATA`）：换一种大小写拼写
     命中的时候，用户看到的那串 `--out` 并不长成容器的样子，不印出来就无从理解为什么被拒。
     """
+    _require_guard_resolvable()
+    # 注：P1（R2-A-008）**未闭**——`container_verdict` 的 None 分支尚未接入写闸门。
+    # 直接按 `is not False` 收口会把「HOME 解析不出来」那类用例的异常类型从
+    # `HomeUnavailable` 换成 `ContainerWriteRefused`（6 条既有用例红），需要一次专门设计
+    # （区分「HOME 判不出来」与「守卫判不出来」）。见 progress.md 的 P1 段。
     if in_wechat_container(p):
         raise ContainerWriteRefused(
             f"拒绝把输出写进微信容器目录（{CONTAINER_DATA} 及其所有上级目录）：{p}",
@@ -123,7 +157,8 @@ def ensure_home_dirs() -> None:
         raise HomeUnavailable(
             f"AGENT_WECHAT_HOME 必须是绝对路径：{HOME_DIR}",
             hint="设为绝对路径，或删掉该变量用默认 ~/.agent-wechat")
-    if in_wechat_container(HOME_DIR):
+    _require_guard_resolvable()
+    if in_wechat_container(HOME_DIR):          # P1 未闭，同 refuse_container_out
         raise ContainerWriteRefused(
             f"拒绝把数据目录指向微信容器目录（{CONTAINER_DATA} 及其所有上级目录）："
             f"{HOME_DIR}",

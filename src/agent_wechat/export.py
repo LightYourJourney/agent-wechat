@@ -1,6 +1,7 @@
 """导出管道：流式、幂等、断点续传。任务登记在 usecases 层，这里只有管道。"""
 from __future__ import annotations
 
+import sqlite3
 from collections.abc import Callable
 
 from . import reader, store

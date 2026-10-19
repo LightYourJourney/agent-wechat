@@ -88,7 +88,11 @@ class _V(ast.NodeVisitor):
             elif api in ("commit", "executescript"):
                 self._add(n, api, "sqlite")
             elif api in ("resolve", "samefile", "exists") \
-                    and "in_wechat_container" in self.stack:
+                    and ({"in_wechat_container", "container_verdict"} & set(self.stack)):
+                # 闸门的实现函数可能被拆名（`in_wechat_container` 现在只是
+                # `container_verdict` 的薄壳）。**按函数名白名单枚举时，改名就等于丢边界**
+                # ——实测：只认前者会让 paths.py 的 resolve/exists/samefile 共 43 格从表里
+                # 消失，矩阵「全绿」其实是把被测对象删掉了。两个名字都收。
                 self._add(n, api, "gate")
             elif api in _FS:
                 self._add(n, api, _FS[api])
