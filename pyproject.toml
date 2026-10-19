@@ -45,6 +45,7 @@ dev = [
     # 优化循环的探针要算圈复杂度（spec §4.1 的 complexity 块）。
     # 只作 dev 依赖——**运行时依赖的增量为 0** 是 spec §5 的硬上限。
     "radon>=6.0.1",
+    "hypothesis>=6.170.2",
 ]
 
 [tool.pytest.ini_options]

@@ -32,3 +32,7 @@ build/
 *.db-shm
 *.db-journal
 .worktrees/
+
+# C 阶段（review-r2）：hypothesis 的示例库与工作区
+.hypothesis/
+.superpowers/review-r2/
