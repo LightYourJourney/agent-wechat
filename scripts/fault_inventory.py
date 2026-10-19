@@ -17,7 +17,10 @@ APPLICABLE = {
     "meta": {"ENOSPC", "EACCES", "EIO", "SIGKILL"},
     "replace": {"EACCES", "EIO", "ENOSPC", "REPLACE_FAIL", "SIGKILL"},
     "copy": {"ENOSPC", "EACCES", "EIO", "SIGKILL"},
-    "sqlite": {"SQLITE_CORRUPT", "SQLITE_LOCKED", "ENOSPC", "EACCES", "SIGKILL"},
+    # EIO（裁决 R2-A/控制器）：SQLite 的提交/连接失败可以以真实磁盘 I/O 错误的形态
+    # 冒出来（tests/test_fault_injection.py::test_store_failure_preserves_existing_rows
+    # 注入 commit EIO 并证明了这一点），原表把它标 n/a 低估了矩阵。
+    "sqlite": {"SQLITE_CORRUPT", "SQLITE_LOCKED", "ENOSPC", "EACCES", "EIO", "SIGKILL"},
     "subprocess": {"SUBPROCESS_START_FAIL", "SUBPROCESS_NONZERO",
                    "SUBPROCESS_TIMEOUT", "SIGKILL"},
     "network": {"NETWORK_CONNECT_FAIL", "NETWORK_TIMEOUT", "NETWORK_TRUNCATED"},
