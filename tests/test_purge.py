@@ -1723,3 +1723,39 @@ def test_the_refusal_message_survives_redaction_when_there_are_many_entries(tmp_
     shown = errors.to_text(ei.value)
     assert "共 8 处" in shown, f"总数被 redact 剪掉了：{shown!r}"
     assert outside.read_bytes() == b"P" * 64
+
+
+def test_escapes_home_refuses_everything_it_cannot_prove_is_inside(tmp_path):
+    """B 阶段（T14）：`_escapes_home` 是**删除**边界的判据（`execute`/`undo_chat` 都靠它），
+    而它的三个非平凡分支此前**零用例**——把 `return True`（树外）、`return False`（树内）
+    或 `strict=False` 任一处改掉，`test_purge.py` 全绿。删错一个文件是不可逆的。
+
+    四条各钉一头：
+    ① 树内目标 → False；② 解析到树外 → True；③ 断链 → False（删链接不留东西）；
+    ④ 符号链接环 → True（判不出来就拒绝，且不许裸异常穿出）。
+    """
+    home = tmp_path / "home"
+    inside = home / "media"
+    inside.mkdir(parents=True)
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+
+    in_tree = inside / "a.bin"
+    in_tree.write_bytes(b"x")
+    assert purge._escapes_home(in_tree, home) is False
+
+    escape = inside / "escape"
+    escape.symlink_to(outside)
+    assert purge._escapes_home(escape, home) is True
+
+    broken = inside / "broken"
+    broken.symlink_to(tmp_path / "does-not-exist")
+    assert purge._escapes_home(broken, home) is False
+
+    loop = inside / "loop"
+    loop.symlink_to(loop)
+    assert purge._escapes_home(loop, home) is True
+
+    # home 自己不存在时也不许裸异常（`strict=False` 那处）
+    missing_home = tmp_path / "not-yet"
+    assert purge._escapes_home(in_tree, missing_home) is True   # 树外 ⇒ 拒绝
