@@ -106,3 +106,18 @@ def test_copy2_binds_destination(tmp_path):
         assert not bound.exists()
     finally:
         inj.undo()
+
+
+def test_callsite_binding_fires_only_at_that_line(tmp_path):
+    """callsite 绑定：同一 API 的两个调用点，只有一个命中（矩阵逐格注入的基础）。"""
+    from _callsite_probe import hit, miss
+    inj = install([Fault("write_text", "EACCES",
+                         callsite=("_callsite_probe.py", 5))])
+    try:
+        miss(tmp_path / "m")                 # 另一行：不得命中
+        assert not inj.fired, "非目标调用点不得命中"
+        with pytest.raises(OSError):
+            hit(tmp_path / "h")              # 目标行：必须命中
+        inj.assert_fired()
+    finally:
+        inj.undo()

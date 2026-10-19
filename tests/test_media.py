@@ -193,7 +193,8 @@ def test_resolve_video_mp4_then_thumb(tmp_path, monkeypatch):
     assert media.resolve_video(account, ts, "nope") is None
 
 
-def test_export_media_images_and_videos(tmp_path, monkeypatch):
+def make_media_tree(tmp_path, monkeypatch):
+    """返回 (root, account, cm)；行为与抽取前逐字一致。"""
     import hashlib
     root, account = make_tree(tmp_path, monkeypatch)
     # kvcomm 写一个 code；attach 放一张可解密的图 + 一个 wxgf；video 放 mp4 + 孤 thumb
@@ -223,6 +224,11 @@ def test_export_media_images_and_videos(tmp_path, monkeypatch):
     vdir = paths.XWECHAT_FILES / account / "msg/video/2026-09"
     (vdir / "abcd.mp4").write_bytes(b"m" * 32)
     (vdir / "ef01_thumb.jpg").write_bytes(b"t" * 16)
+    return root, account, cm
+
+
+def test_export_media_images_and_videos(tmp_path, monkeypatch):
+    root, account, cm = make_media_tree(tmp_path, monkeypatch)
 
     out = root / "home" / "media"
     rep = media.export_media(account, ["chatA@chatroom"], kinds=["image", "video"],
@@ -883,19 +889,30 @@ def _passthrough_decrypted(monkeypatch) -> None:
     monkeypatch.setattr("agent_wechat.media.decrypt", dec_mod)
 
 
+def make_voice_tree(tmp_path, monkeypatch):
+    """返回 (root, account, chat_name)；行为与抽取前逐字一致。
+
+    `chat_name` 是 `export_media` 要的会话名（`_voice_fixture` 的 Name2Id 只收这一行，
+    rowid 恒为 1）；不是 VoiceInfo 里那个数字 `chat_name_id`。
+    """
+    root, account = make_tree(tmp_path, monkeypatch)
+    ts = int(datetime.datetime(2026, 9, 15, 12, 0).timestamp())   # 月由 ts 现算
+    _voice_fixture(account, [(1, ts, 7, _silk_blob())])
+    _passthrough_decrypted(monkeypatch)
+    return root, account, "chatA@chatroom"
+
+
 def test_export_media_voice_silk_to_wav(tmp_path, monkeypatch):
     """VoiceInfo 命中 → pilk 解码 24kHz WAV；目录 0700、文件 0600。
 
     夹具不用 kvcomm code：语音走 VoiceInfo，不依赖图片密钥——没有 code 也必须能导出。
     """
-    root, account = make_tree(tmp_path, monkeypatch)
+    root, account, chat_name = make_voice_tree(tmp_path, monkeypatch)
     ts = int(datetime.datetime(2026, 9, 15, 12, 0).timestamp())   # 月由 ts 现算
     mon = media.month_of(ts)
-    _voice_fixture(account, [(1, ts, 7, _silk_blob())])
-    _passthrough_decrypted(monkeypatch)
 
     out = root / "home" / "media"
-    rep = media.export_media(account, ["chatA@chatroom"], kinds=["voice"],
+    rep = media.export_media(account, [chat_name], kinds=["voice"],
                              months=[mon], out_dir=out)
     assert rep.voice.ok == 1 and rep.voice.raw_only == 0
     assert rep.degraded == []                         # 成功路径不得出现「语音分片打不开」
