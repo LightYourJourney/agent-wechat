@@ -97,7 +97,31 @@ def container_verdict(p: str | pathlib.Path) -> bool | None:
         return any(node.exists() and os.path.samefile(node, resolved)
                    for node in (guard, *guard.parents))
     except OSError:
-        return None                        # samefile/exists 出错：同上，判不出来
+        return False                       # samefile/exists 出错：维持既有语义（只读问路同样是 False）
+
+
+def _write_gate_refuses(p: str | pathlib.Path) -> bool:
+    """写闸门要不要拒绝。**True ＝ 拒绝**。
+
+    · 候选路径**自己**解析不出来 ⇒ 不在这里拒：交给随后的 `mkdir` 走既有的
+      `HomeUnavailable` 文案（符号链接环就是这条，不能改成「在容器里」的误诊断）；
+    · 候选能解析、但三态判定是 `True` 或 `None` ⇒ 拒绝。`None` 只来自 resolve 阶段的
+      失败（R2-A-008 的注入点），那正是「判不出来就别写」要挡的形态。
+    """
+    try:
+        pathlib.Path(p).resolve(strict=False)
+    except RuntimeError:
+        # 符号链接环：路径**形态**就不可用，mkdir 会给既有的 `HomeUnavailable` 文案
+        # （`is_dir()` 对环返回 False，exist_ok 挡不住）——不在这里改成「在容器里」。
+        return False
+    except OSError:
+        # 解析失败但形态本身没毛病（权限、EIO…）：**判不出来就别写**（R2-A-008）。
+        return True
+    # **只求值一次**：`container_verdict` 内部会 resolve。求值两次（先前经
+    # `in_wechat_container` 再直接调一次）会让按「第 1 次命中」注入的桩在第二次调用时
+    # 已经消耗掉，判据随之落回 False —— 闸门又放行（实测就是这条让 P1 的 8 格反复红）。
+    verdict = container_verdict(p)
+    return verdict is True or verdict is None
 
 
 def _require_guard_resolvable() -> None:
@@ -131,11 +155,8 @@ def refuse_container_out(p: str | pathlib.Path) -> None:
     命中的时候，用户看到的那串 `--out` 并不长成容器的样子，不印出来就无从理解为什么被拒。
     """
     _require_guard_resolvable()
-    # 注：P1（R2-A-008）**未闭**——`container_verdict` 的 None 分支尚未接入写闸门。
-    # 直接按 `is not False` 收口会把「HOME 解析不出来」那类用例的异常类型从
-    # `HomeUnavailable` 换成 `ContainerWriteRefused`（6 条既有用例红），需要一次专门设计
-    # （区分「HOME 判不出来」与「守卫判不出来」）。见 progress.md 的 P1 段。
-    if in_wechat_container(p):
+
+    if _write_gate_refuses(p):
         raise ContainerWriteRefused(
             f"拒绝把输出写进微信容器目录（{CONTAINER_DATA} 及其所有上级目录）：{p}",
             hint="换一个容器之外的目录（CLI 的 --out / MCP 的 out_dir），"
@@ -158,7 +179,7 @@ def ensure_home_dirs() -> None:
             f"AGENT_WECHAT_HOME 必须是绝对路径：{HOME_DIR}",
             hint="设为绝对路径，或删掉该变量用默认 ~/.agent-wechat")
     _require_guard_resolvable()
-    if in_wechat_container(HOME_DIR):          # P1 未闭，同 refuse_container_out
+    if _write_gate_refuses(HOME_DIR):
         raise ContainerWriteRefused(
             f"拒绝把数据目录指向微信容器目录（{CONTAINER_DATA} 及其所有上级目录）："
             f"{HOME_DIR}",

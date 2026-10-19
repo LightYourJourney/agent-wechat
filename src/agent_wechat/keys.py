@@ -104,15 +104,34 @@ def save_cached_hex(bare: str, passphrase_hex: str) -> str | None:
     paths.ensure_home_dirs()
     try:
         CACHE_FILE.write_text(json.dumps(cache, indent=2))
+    except OSError as exc:
+        # R2-A-005（P2）：**写这一步失败**时，盘上通常还是那份**既有有效缓存**
+        # （ENOSPC/EACCES/EINTR 都在落盘前失败）。此前无条件 unlink 会把它删掉——用户
+        # 丢掉一份本来可用的密钥缓存，只为了一次没写成功的更新。只有「已经被写成半截」
+        # （SHORT_WRITE 那类，读回来不是合法 JSON）才抹掉。
+        intact = True
+        try:
+            json.loads(CACHE_FILE.read_text())
+        except (OSError, ValueError):
+            intact = False
+        if not intact:
+            try:
+                CACHE_FILE.unlink(missing_ok=True)
+            except OSError:
+                pass                 # 抹不掉也不掩盖原始错误（下面照抛）
+        raise HomeUnavailable(
+            f"无法写入密钥缓存：{CACHE_FILE}",
+            hint=f"{exc}；请检查 AGENT_WECHAT_HOME 指向的位置是否可用") from exc
+    try:
         os.chmod(CACHE_FILE, 0o600)          # 与 mkdir 的 0700 同属**安全**步骤：失败即不可用
     except OSError as exc:
-        # F4（T9 复审）：`write_text` 可能已经成功——「写了但 chmod 失败」不许留下文件：
+        # F4（T9 复审）：`write_text` 已经成功——「写了但 chmod 失败」不许留下文件：
         # 那时它带着本机默认权限（0644）躺在盘上，下一条命令会把它当有效缓存读，而文案
         # 说的是「无法写入」。抹掉它，让用户重跑引导（比留一份权限不明的密钥缓存好）。
         try:
             CACHE_FILE.unlink(missing_ok=True)
         except OSError:
-            pass                     # 抹不掉也不掩盖原始错误（下面照抛）
+            pass
         raise HomeUnavailable(
             f"无法写入密钥缓存：{CACHE_FILE}",
             hint=f"{exc}；请检查 AGENT_WECHAT_HOME 指向的位置是否可用") from exc

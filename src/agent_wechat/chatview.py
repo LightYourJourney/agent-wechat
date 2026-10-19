@@ -195,6 +195,13 @@ def write(view: ChatView, *, formats: Sequence[str] = FORMATS) -> list[pathlib.P
         try:
             p.write_text(_RENDERERS[fmt](view), encoding="utf-8")
         except OSError:
+            # R2-A-009：短写/中途失败会在盘上留半截 `index.html`（实测 739 B），而本函数
+            # 又把它从返回列表里剔掉——调用方以为「没有这个产物」，浏览器却能打开一个残缺页。
+            # 「没写成」必须同时意味着**盘上也没有它**。
+            try:
+                p.unlink(missing_ok=True)
+            except OSError:
+                pass
             continue
         # EA-109：`chmod` **不在**上面那个 try 里——它排在写入之后，同一个 try 会让「chmod
         # 失败」被当成「没写成」：文件已在盘上（0644），而函数不把它进返回列表，调用方以为
