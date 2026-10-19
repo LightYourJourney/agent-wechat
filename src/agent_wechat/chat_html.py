@@ -71,7 +71,7 @@ def _b(head: str, tail: str) -> str:
 
 
 def _esc(v: str | None) -> str:
-    return html.escape(v or "", quote=True)
+    return html.escape(chat_text.scrub_controls(v), quote=True)
 
 
 def _media_block(m: MediaRefState, prefix: str, out_dir: str) -> str:

@@ -32,6 +32,17 @@ INCONSISTENT_EXPORTED = "已导出，但拿不到产物路径 —— 状态与�
 EXTRA_NO_FIELDS = "（没有可读字段）"
 
 
+# R2-C-001：C0 控制字符（除 `\\n` / `\\t`）在 Markdown 与 HTML 里都是不可见垃圾——
+# `\\x0c` 会打断渲染、`\\x1b` 是终端转义序列、其余在 HTML 里是**非法字符**。
+# 放在两侧**共用的**转义入口之前，两个渲染器的口径才不会分叉（见本模块开篇）。
+_CTRL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def scrub_controls(v: str | None) -> str:
+    """把裸控制字符换成 U+FFFD（保留换行与制表）。"""
+    return _CTRL.sub("\ufffd", v or "")
+
+
 def whatwg_ipv4(host: str) -> bool:
     """这个 host 会被 WHATWG 当 IPv4 解析吗（而页面上的徽章会把它原样显示出来）。
 

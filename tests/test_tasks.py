@@ -634,3 +634,28 @@ def test_pid_alive_is_one_criterion_for_both_callers():
     for mod in (tasks, decrypt):
         assert not hasattr(mod, "_pid_alive"), f"{mod.__name__} 又长出第二份判据了"
     assert "os.kill" in inspect.getsource(paths.pid_alive)
+
+
+def test_stale_tmp_from_a_crash_is_swept(tmp_path, monkeypatch):
+    """R2-A-001：崩溃遗留的 `tasks.json.<死pid>.tmp` 必须被清掉；活 pid 的绝不许碰。
+
+    判别性：删掉 `_sweep_stale_tmp` 的调用，第一条断言当场红；把判据写成「无条件下删」，
+    第二条会红（活进程的 tmp 被误删）。
+    """
+    target = tmp_path / "tasks.json"
+    monkeypatch.setattr(tasks, "TASKS_FILE", target)
+    # 「活 pid」必须是一个**真的活着、且不是本进程**的 pid：本进程的 pid 会与
+    # `_persist_locked` 自己写的 tmp 同名，测出来的是它自己那份，与被清扫逻辑无关。
+    import subprocess
+    sleeper = subprocess.Popen(["/bin/sleep", "5"])
+    try:
+        dead = tmp_path / "tasks.json.999999.tmp"
+        live = tmp_path / f"tasks.json.{sleeper.pid}.tmp"
+        dead.write_text("{}")
+        live.write_text("{}")
+        tid = tasks.start("noop", lambda _t: 0)
+        assert _wait_done(tid)["status"] == "done"
+        assert not dead.exists(), "死 pid 的 tmp 必须被清扫"
+        assert live.exists(), "活进程的 tmp 绝不许碰"
+    finally:
+        sleeper.kill(); sleeper.wait(timeout=10)

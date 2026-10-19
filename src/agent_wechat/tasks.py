@@ -118,6 +118,32 @@ def _file_lock() -> Iterator[None]:
             fcntl.flock(f, fcntl.LOCK_UN)
 
 
+def _sweep_stale_tmp() -> None:
+    """清掉崩溃遗留的 `tasks.json.<pid>.tmp`（R2-A-001，P3）。
+
+    tmp 名带 pid（F5 的并发要求）：进程被 SIGKILL 时 `_persist_locked` 的 except 跑不到，
+    于是那份**完整的合并快照**会一直躺在数据目录里。它不会被读路径当成注册表，但会无限堆积
+    （每次崩溃留一份）。判据与 `decrypt.sweep_stale_tempdirs` 同一条立场：**只清死 pid 的**
+    ——活进程的 tmp 可能正在被写，绝不碰。
+    """
+    parent, prefix = TASKS_FILE.parent, TASKS_FILE.name + "."
+    try:
+        entries = list(parent.iterdir())
+    except OSError:
+        return                        # 读不了目录：清扫是尽力而为
+    for p in entries:
+        n = p.name
+        if not n.startswith(prefix) or not n.endswith(".tmp"):
+            continue
+        pid = n[len(prefix):-len(".tmp")]
+        if not pid.isdigit() or paths.pid_alive(int(pid)):
+            continue
+        try:
+            p.unlink()
+        except OSError:
+            pass                      # 删不掉也不该挡住读盘
+
+
 def _load_locked() -> None:
     """把磁盘现状读进 `_tasks`（调用方必须已持 `_lock`）。
 
@@ -127,6 +153,7 @@ def _load_locked() -> None:
     内存表（F4），`start` 刚返回的 id 下一次调用就成「未知任务」，runner 收尾还会 KeyError。
     """
     global _tasks
+    _sweep_stale_tmp()
     disk = _read()
     if disk is not None:
         _tasks = disk

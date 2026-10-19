@@ -82,8 +82,11 @@ def container_verdict(p: str | pathlib.Path) -> bool | None:
     try:
         resolved = pathlib.Path(p).resolve(strict=False)
         guard = CONTAINER_DATA.resolve(strict=False)
-    except (OSError, RuntimeError):
-        return None                        # 判不出来（写闸门按拒绝处理）
+    except (OSError, RuntimeError, ValueError):
+        # `ValueError` 也要接：`Path.resolve()` 对含**代理对**的路径会抛
+        # `UnicodeEncodeError`（它是 ValueError 子类），而代理对被 `os.fsdecode` 解出来的
+        # 文件名是**真实存在**的形态（R2-C-002，C-4 属性撞出来的）。判不出来 ⇒ None。
+        return None
     if resolved.is_relative_to(guard):         # 含 `resolved == guard`（is_relative_to 的语义）
         return True
     if guard.is_relative_to(resolved):
@@ -114,8 +117,9 @@ def _write_gate_refuses(p: str | pathlib.Path) -> bool:
         # 符号链接环：路径**形态**就不可用，mkdir 会给既有的 `HomeUnavailable` 文案
         # （`is_dir()` 对环返回 False，exist_ok 挡不住）——不在这里改成「在容器里」。
         return False
-    except OSError:
-        # 解析失败但形态本身没毛病（权限、EIO…）：**判不出来就别写**（R2-A-008）。
+    except (OSError, ValueError):
+        # 解析失败但形态本身没毛病（权限、EIO、代理对编码失败…）：**判不出来就别写**
+        # （R2-A-008；代理对那条见 R2-C-002）。
         return True
     # **只求值一次**：`container_verdict` 内部会 resolve。求值两次（先前经
     # `in_wechat_container` 再直接调一次）会让按「第 1 次命中」注入的桩在第二次调用时

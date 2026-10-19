@@ -133,8 +133,10 @@ def _esc_md(v: str | None) -> str:
     行结束按规范只认 `\\n` / `\\r` / `\\r\\n`，并且**统一成 `\\n`**：只按 `\\n` 切行时
     `"abc\\r# 假标题"` 是一行、行首是 `abc`，而按规范切行的渲染器会看到一个真的 ATX 标题。
     """
+    # R2-C-001：先把裸控制字符抹成 U+FFFD，再做行切分与全部转义——否则 `\x0c` 之类会
+    # 混进「行首空白」的列宽计算，某些渲染器还会当场断行。
     out = []
-    for line in _LINE_BREAK.split(_t(v)):
+    for line in _LINE_BREAK.split(_t(chat_text.scrub_controls(v))):
         lead = len(line) - len(line.lstrip(" \t"))     # 缩进=空白前缀（`_indent_width` 再折算列数）
         ol = _OL_START.match(line[lead:])              # `1` 与 `.` 都不在行内集合，转义不位移
         # 缩进代码块：**列数** ≥ 4（制表符按 4 列制表位推进）**且行内有内容**。空白行不算
