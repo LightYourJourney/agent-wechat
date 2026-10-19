@@ -31,9 +31,15 @@ def _passthrough(db_path, passphrase):
 
 @pytest.fixture()
 def env(tmp_path, monkeypatch, request):
+    # `request.module.XML`：各文件自己的 XML（形态不同，刻意不统一）。
+    return build_env(tmp_path, monkeypatch, request.module.XML)
+
+
+def build_env(tmp_path, monkeypatch, xml):
+    """抽成普通函数（同 `test_media.make_media_tree` / `build_fake_wechat_db`）：
+    矩阵驱动也要同一形态的环境，两份会漂移。"""
     from agent_wechat import decrypt as dec_mod
 
-    xml = request.module.XML          # 各文件自己的 XML（形态不同，刻意不统一）
     wx, home = tmp_path / "wx", tmp_path / "home"
     d = wx / ACCT / "db_storage" / "sns"
     d.mkdir(parents=True)
