@@ -28,7 +28,9 @@ def _home(tmp_path):
     return h
 
 
-@pytest.mark.parametrize("flow,api,fault,keyword", CASES, ids=lambda v: str(v))
+# id 只取前三列：关键词列含中文，拼进去会被 pytest 转义成 \uXXXX，nodeid 就不可选中了。
+@pytest.mark.parametrize("flow,api,fault,keyword", CASES,
+                         ids=["-".join(str(v) for v in case[:3]) for case in CASES])
 def test_fault_matrix(tmp_path, monkeypatch, flow, api, fault, keyword):
     home = _home(tmp_path)
     monkeypatch.setattr(paths, "HOME_DIR", home)
@@ -48,6 +50,9 @@ def test_fault_matrix(tmp_path, monkeypatch, flow, api, fault, keyword):
     try:
         expect_project_error(op, keyword=keyword)
         inj.assert_fired()
+        if flow == "store":
+            # 不变量 2：连接失败不得留下半成品 index.db（否则 touch 式回归会静默通过）。
+            assert not store.DB_PATH.exists(), "连接失败不得留下半成品 index.db"
         # 不变量 2：不得留下临时文件；密钥缓存若存在必须可解析（不得半截 JSON）。
         # 扫 tmp_path 而非 home：tasks 的 tmp 落在 TASKS_FILE 同级（conftest 把它钉在
         # tmp_path/tasks.json），只扫 home 的话这条断言对 tasks 流程永远不可能红。
@@ -73,10 +78,32 @@ def test_purge_delete_failure_is_reentrant(tmp_path, monkeypatch):
         purge.execute(plan)
         inj.assert_fired()
         assert db.exists(), "删除失败时目标不得消失（不得半删）"
+        assert db.read_text() == "seed", "删除失败时既有内容不得被截断"
     finally:
         inj.undo()
     purge.execute(purge.plan(frozenset({"index"})))
     assert not db.exists(), "重试必须删干净"
+
+
+def test_keys_write_failure_preserves_existing_cache(tmp_path, monkeypatch):
+    """不变量 4：既有密钥缓存必须在写入失败后原样可解析——不得被删掉或截断。"""
+    home = _home(tmp_path)
+    monkeypatch.setattr(paths, "HOME_DIR", home)
+    monkeypatch.setattr(keys, "CACHE_FILE", home / "passphrase.json")
+    seeded = {"accounts": {"old": {"passphrase_hex": "aa" * 32, "captured_at": 0}}}
+    (home / "passphrase.json").write_text(json.dumps(seeded))   # 必须在 install 之前种
+    inj = install([Fault("write_text", "ENOSPC", nth=1)])
+    try:
+        expect_project_error(
+            lambda: keys.save_cached_hex("wxid_testacct01_ab12", "00" * 32),
+            keyword="无法写入|No space left")
+        inj.assert_fired()
+    finally:
+        inj.undo()
+    assert (home / "passphrase.json").exists(), "写入失败不得删掉既有缓存"
+    data = json.loads((home / "passphrase.json").read_text())
+    assert "old" in data["accounts"], "既有缓存条目不得丢失"
+    assert data["accounts"]["old"] == seeded["accounts"]["old"], "既有条目必须原样保留"
 
 
 def test_store_failure_preserves_existing_rows(tmp_path, monkeypatch):
