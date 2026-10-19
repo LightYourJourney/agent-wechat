@@ -606,8 +606,14 @@ def execute(plan: PurgePlan) -> PurgeReport:
                      + [e.path for e in plan.loose])
             # onexc 收集而非抛出：与「部分失败继续删完」同一语义。
             # 用 onexc 不用 onerror——后者在 3.12 已弃用，本仓库 requires-python >=3.12。
-            shutil.rmtree(paths.HOME_DIR,
-                          onexc=lambda fn, p, exc: failed.append((pathlib.Path(p), str(exc))))
+            try:
+                shutil.rmtree(
+                    paths.HOME_DIR,
+                    onexc=lambda fn, p, exc: failed.append((pathlib.Path(p), str(exc))))
+            except OSError as exc:
+                # A 矩阵 609：`rmtree` 自身起不来（ENOSPC/EACCES/EIO）此前裸穿。语义与
+                # `onexc` 收集到的部分失败一致——记成失败项，命令照常给出汇总。
+                failed.append((paths.HOME_DIR, str(exc)))
             if paths.HOME_DIR.exists():
                 # 部分失败：把没删掉的那部分从 freed 里扣回去，否则报出的体积大于实际释放的
                 freed -= _tree_size(paths.HOME_DIR)
@@ -1016,14 +1022,20 @@ def execute_chat(plan: ChatPlan) -> tuple[ChatReport, ...]:
                 # 删除落了、墓碑没落，被删内容的 msg_key 随行消失，墓碑再也补不回来。
                 con.execute("BEGIN IMMEDIATE")
                 written = _write_tombstone(con, e.account, e.chat_id)
-                con.commit()
+                try:
+                    con.commit()
+                except (sqlite3.Error, OSError) as exc:
+                    raise store.index_unavailable(exc) from exc
                 # ---- ② 再派生一次 + 删除，同一事务 ----
                 # 重派生是为了盖住「① 提交之后、② 删除之前别人写进来的行」：那些行会被下面的
                 # 谓词 DELETE 删掉，必须同时被墓碑挡住。INSERT OR IGNORE，幂等。
                 con.execute("BEGIN IMMEDIATE")
                 written += _write_tombstone(con, e.account, e.chat_id)
                 deleted = store.delete_chat(con, account=e.account, chat_id=e.chat_id)
-                con.commit()
+                try:
+                    con.commit()
+                except (sqlite3.Error, OSError) as exc:
+                    raise store.index_unavailable(exc) from exc
                 # 删除提交后再显式 checkpoint 一次（**best-effort**，失败不管）：被删的正文
                 # 是在这条连接上删的，`-wal` 里可能还留着含它的旧帧，本来要等下一次 checkpoint
                 # （或碰巧关连接时）才落盘/截断。另一个进程（MCP server）持着库时这一步会失败
@@ -1174,11 +1186,15 @@ def undo_chat(targets: list[dict], *, apply: bool = False) -> tuple[UndoEntry, .
             if apply:
                 for e in per:
                     exclusions.remove_chat(con, e.account, e.chat_md5)
-                con.commit()      # remove_chat 不 commit（它的契约）：由调用方收口
-    except (sqlite3.Error, OSError) as exc:
+                try:
+                    con.commit()      # remove_chat 不 commit（它的契约）：由调用方收口
+                except (sqlite3.Error, OSError) as exc:
+                    raise store.index_unavailable(exc) from exc
+    except (sqlite3.Error, OSError, errors.AgentWeChatError) as exc:
         # 读不出来就一行拒绝，不许裸异常穿到 CLI 的漏斗之外（core 层只抛项目异常）。
-        # F10（T6 复审）：本路径走 `exclusions.standalone()`，**不经** `store.connect`——
-        # 不存在可命中的 IndexUnavailable（EA-074 的翻译到不了这里），元组里不留死项。
+        # Task 6 更正：`exclusions.standalone()` 现在**自己**把读失败收成 `IndexUnavailable`
+        # （不再裸穿 sqlite3），所以这里必须把项目异常也接住——否则本函数自己的
+        # 「撤销未执行」这一行跑不到，CLI 契约（一条 PurgeRefused）当场破。
         raise errors.PurgeRefused(
             f"撤销未执行：{exc}",
             hint=f"检查 {exclusions.path()} 是否可读、是否损坏"

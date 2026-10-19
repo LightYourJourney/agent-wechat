@@ -19,7 +19,7 @@ import sqlite3
 import subprocess
 import tempfile
 
-from . import keys, paths
+from . import errors, keys, paths
 from .errors import DecryptError, HomeUnavailable
 
 
@@ -62,7 +62,10 @@ def sweep_stale_tempdirs() -> int:
         m = _AWDEC_RE.match(d.name)
         if not m or paths.pid_alive(int(m.group(1))):
             continue
-        shutil.rmtree(d, ignore_errors=True)
+        try:
+            shutil.rmtree(d, ignore_errors=True)
+        except OSError:
+            continue                   # 清扫是尽力而为：删不掉一个陈旧临时目录不该挡住解密
         # 判「真的没了」用 `lexists`：悬空符号链接与自指链接环下 `rmtree` 会拒绝执行、
         # 而 `exists()` 对它们返回 False——用它计数会把「没清掉」记成「清掉了」
         # （复验实测这两种形态各虚增 1）。`lexists` 对它们返回 True。
@@ -93,10 +96,18 @@ def ensure_home_dirs() -> None:
 def snapshot(db: pathlib.Path, td: pathlib.Path) -> pathlib.Path:
     """db+wal+shm 三元组快照到私有目录。微信目录零写入（只读打开+复制）。"""
     dst = td / db.name
-    for suf in ("", "-wal", "-shm"):
-        src = pathlib.Path(str(db) + suf)
-        if src.exists():
-            shutil.copy2(src, pathlib.Path(str(dst) + suf))
+    try:
+        for suf in ("", "-wal", "-shm"):
+            src = pathlib.Path(str(db) + suf)
+            if src.exists():
+                shutil.copy2(src, pathlib.Path(str(dst) + suf))
+    except OSError as exc:
+        # A 矩阵：快照那一步此前裸穿 PermissionError/ENOSPC（R2-A-007）。快照是解密的
+        # 第一步，失败就整条走不通——按 core 契约只能是项目异常。
+        raise DecryptError(
+            f"无法快照微信数据库（只读复制失败）：{db.name}",
+            hint=f"{exc}；请确认数据目录与 AGENT_WECHAT_HOME 都有空间、且可写"
+        ) from exc
     return dst
 
 
@@ -124,8 +135,18 @@ def decrypted(db: pathlib.Path, passphrase: bytes):
         # 的窗口消失）。/tmp 实测（合成库三态）：stdin 与 argv 的 rc/产物一致；错误文案从
         # 「Parse error in 3rd command line argument」变成「Parse error near line N」，
         # 而「回显出错语句 + 插入符」的机制两形态都在——errors.redact 仍是必需的安全网。
-        r = subprocess.run(["sqlcipher", str(snap)], input="\n".join(cmds) + "\n",
-                           capture_output=True, text=True)
+        try:
+            r = subprocess.run(["sqlcipher", str(snap)], input="\n".join(cmds) + "\n",
+                               capture_output=True, text=True)
+        except FileNotFoundError as exc:
+            raise errors.DependencyMissing(
+                "找不到 sqlcipher 命令",
+                hint="安装 sqlcipher 后重试（macOS: brew install sqlcipher）") from exc
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise DecryptError(
+                f"调用 sqlcipher 失败：{exc}",
+                hint="确认 sqlcipher 可执行、磁盘与内存有空间后重试"
+            ) from exc
         if r.returncode != 0 or not out.exists():
             # EA-047：**不在这里截断**——`[:300]` 曾把跨过截断点的密钥切成「前半段」，
             # 而 redact 需要完整 64 位才认得出（截断必须发生在脱敏**之后**，由
@@ -137,9 +158,19 @@ def decrypted(db: pathlib.Path, passphrase: bytes):
             raise DecryptError(f"sqlcipher 解密失败: {_first_line(r.stderr)}")
         yield out
     finally:
-        shutil.rmtree(td, ignore_errors=True)
+        try:
+            shutil.rmtree(td, ignore_errors=True)
+        except OSError:
+            pass                       # 临时目录清不掉不该盖过真正的失败，也不该自己冒出去
 
 
 def open_plain(plain: pathlib.Path) -> sqlite3.Connection:
     """打开明文副本（只读模式）。"""
-    return sqlite3.connect(f"file:{plain}?mode=ro", uri=True)
+    try:
+        return sqlite3.connect(f"file:{plain}?mode=ro", uri=True)
+    except (sqlite3.Error, OSError) as exc:
+        # A 矩阵 145：这处此前裸穿 OperationalError/DatabaseError/OSError。
+        raise DecryptError(
+            f"明文副本打不开：{plain.name}",
+            hint=f"{exc}；解密产物可能不完整，重跑一次解密命令"
+        ) from exc

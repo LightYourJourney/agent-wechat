@@ -70,7 +70,10 @@ def _terminate_capture(proc) -> None:
             return
         except Exception:                          # noqa: BLE001 — 兜底路径要吞遍所有失败
             continue
-    subprocess.run(["pkill", "-9", "-x", "lldb"], capture_output=True)
+    try:
+        subprocess.run(["pkill", "-9", "-x", "lldb"], capture_output=True)
+    except (OSError, subprocess.TimeoutExpired):
+        pass          # 最后兜底也失败：清理是尽力而为，不因它把引导打挂（A 矩阵 73）
 
 
 def _read_capture(proc, deadline: float) -> str:
@@ -131,17 +134,37 @@ def capture_passphrase_lldb(timeout: int = DEFAULT_TIMEOUT) -> str:
         "process continue\n"
     )
     fd, sp = tempfile.mkstemp(suffix=".lldb", prefix=TMP_PREFIX)
-    with os.fdopen(fd, "w") as f:
-        f.write(script)
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(script)
+    except OSError as exc:
+        # A 矩阵 134：写 lldb 脚本失败此前裸穿（ENOSPC/EACCES/EINTR）。
+        try:
+            os.unlink(sp)
+        except OSError:
+            pass
+        raise CaptureError(
+            f"无法写入 lldb 脚本：{sp}",
+            hint=f"{exc}；请确认临时目录可写、磁盘有空间") from exc
 
     # cat 脚本后用 sleep 保活 stdin：lldb continue 是异步的，stdin EOF 会提前退出，
     # 等不到用户重新登录触发断点。
     # EA-004：起**独立进程组**（start_new_session）——收尾靠 killpg 精确命中本次的
     # bash→lldb 进程树，而不是按名字杀（见 _terminate_capture）。
-    proc = subprocess.Popen(
-        ["bash", "-c", f"( cat {sp}; sleep {timeout} ) | TERM=dumb lldb"],
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-        start_new_session=True)
+    try:
+        proc = subprocess.Popen(
+            ["bash", "-c", f"( cat {sp}; sleep {timeout} ) | TERM=dumb lldb"],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+            start_new_session=True)
+    except OSError as exc:
+        # A 矩阵 141：起不了 lldb 此前裸穿（找不到 bash / ENOSPC / EACCES）。
+        try:
+            os.unlink(sp)
+        except OSError:
+            pass
+        raise CaptureError(
+            f"无法启动 lldb 捕获进程：{exc}",
+            hint="确认已安装 Xcode 命令行工具、且磁盘有空间后重试") from exc
     deadline = time.time() + timeout
     try:
         buf = _read_capture(proc, deadline)

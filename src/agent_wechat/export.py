@@ -40,7 +40,12 @@ def run_export(acct: str, chat_id: str | None = None, full: bool = False,
             # 只重置本账号：run_export 只重导 acct，连带清掉别的账号的水位线会让
             # 它们白跑一次全量（upsert 幂等，不丢数据，但纯属浪费）
             store.clear_export_watermarks(con, acct)
-            con.commit()
+            try:
+                con.commit()
+            except (sqlite3.Error, OSError) as exc:
+                # A 矩阵 43：全量导出的水位线复位提交此前裸穿（ENOSPC/EACCES/EIO/
+                # locked/corrupt）。出口共享构造器，**调用点留在原地**——冻结表按调用点记账。
+                raise store.index_unavailable(exc) from exc
         resume = {} if full else None
         if resume is None:
             resume = store.load_export_watermarks(con, acct)

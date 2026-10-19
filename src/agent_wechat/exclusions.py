@@ -18,7 +18,7 @@ import sqlite3
 import time
 from collections.abc import Iterator
 
-from . import messages, paths
+from . import errors, messages, paths
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS exclusions.excluded (
@@ -62,13 +62,21 @@ def standalone() -> Iterator[sqlite3.Connection]:
     建出来——一条只读的查询不该在用户磁盘上落新文件。
     """
     p = path()
-    con = sqlite3.connect(":memory:")
     try:
+        con = sqlite3.connect(":memory:")
         if p.exists():
             con.execute("ATTACH DATABASE ? AS exclusions", (str(p),))
         else:
             con.execute("ATTACH DATABASE ':memory:' AS exclusions")
             con.executescript(SCHEMA)
+    except (sqlite3.Error, OSError) as exc:
+        # A 矩阵：连接 / ATTACH / executescript 三处此前裸穿（磁盘满、权限、库损坏都实测到）。
+        # 排除清单是本地状态库，进不去就没有降级可言——按 core 契约只能是项目异常。
+        raise errors.IndexUnavailable(
+            f"排除清单不可用：{errors.redact(str(exc))}",
+            hint="确认数据目录可写、磁盘有空间；仍失败可删掉排除清单后重跑一次"
+        ) from exc
+    try:
         yield con
     finally:
         con.close()

@@ -42,7 +42,9 @@ def wechat_pid() -> int | None:
     """
     try:
         r = _run(["pgrep", "-x", "WeChat"], capture_output=True, text=True, timeout=15)
-    except subprocess.TimeoutExpired:
+    except (subprocess.TimeoutExpired, OSError):
+        # A 矩阵：起不了子进程（ENOSPC/EACCES）与超时同义——判不出来就是 None，
+        # 这是只读探测，不该让「微信在不在跑」这个问题把命令打挂。
         return None
     pids = _parse_pids(r.stdout)
     return pids[0] if pids else None
@@ -66,8 +68,8 @@ def current_account(pid: int) -> str | None:
     try:
         r = _run(["lsof", "-n", "-P", "-p", str(pid)],
                  capture_output=True, text=True, timeout=15)
-    except subprocess.TimeoutExpired:
-        return None
+    except (subprocess.TimeoutExpired, OSError):
+        return None                    # 同上：探测失败=不确定，不是错误
     return _parse_account_from_lsof(r.stdout)
 
 

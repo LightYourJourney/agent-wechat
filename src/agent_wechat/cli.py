@@ -91,9 +91,21 @@ def cmd_decrypt(args: argparse.Namespace) -> int:
     with decrypt.decrypted(db, passphrase) as plain:
         if args.out:
             out = paths.HOME_DIR / args.out
-            out.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-            out.write_bytes(plain.read_bytes())
-            out.chmod(0o600)      # EA-050：整库明文，权限与目录侧承诺对齐
+            try:
+                out.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                out.write_bytes(plain.read_bytes())
+                out.chmod(0o600)  # EA-050：整库明文，权限与目录侧承诺对齐
+            except OSError as exc:
+                # A 矩阵：这三步此前裸穿（`PermissionError`/`OSError` 直接 traceback）。
+                # 整库明文是高敏产物——写不成必须说清，且不许留权限未收紧的半成品。
+                try:
+                    out.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                raise errors.MediaOutputError(
+                    f"写明文副本失败：{out}",
+                    hint=f"{exc}；请检查磁盘空间与 AGENT_WECHAT_HOME 的目录权限"
+                ) from exc
             print(f"已导出明文: {out}")
         else:
             con = decrypt.open_plain(plain)
@@ -816,9 +828,11 @@ def _cmd_purge_excluded() -> int:
     try:
         with exclusions.standalone() as con:
             rows = exclusions.by_chat(con)
-    except (sqlite3.Error, OSError) as exc:
+    except (sqlite3.Error, OSError, errors.AgentWeChatError) as exc:
         # 读不出来**不能**报「0 条」：那是「一条都没被挡」的意思，与事实相反，而用户正是
         # 据这句话判断重导会不会把已删内容带回来。
+        # Task 6：`exclusions.standalone()` 现在自己把读失败收成项目异常，故一并接住——
+        # 否则这句用户唯一能读懂的话会被通用处理器的文案顶掉。
         raise errors.PurgeRefused(
             f"排除清单读不出来：{exc}",
             hint=f"检查 {exclusions.path()} 是否可读、是否损坏"

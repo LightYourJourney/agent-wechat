@@ -14,7 +14,7 @@ from typing import Callable, Sequence
 import sqlite_vec
 
 from . import messages, paths, store
-from .errors import SearchInputError, VectorError, VectorIndexEmpty
+from .errors import SearchInputError, VectorError, VectorIndexEmpty, redact
 
 MODEL_NAME = "BAAI/bge-small-zh-v1.5"
 DIM = store.VECTOR_DIM                      # 单一真值在 store；本模块只做短别名
@@ -46,8 +46,17 @@ def connect() -> sqlite3.Connection:
             f"{e}. uv 管理的 Python 3.12 已验证可用；换 python.org/conda 发行版需重新验证。"
         ) from e
     con.enable_load_extension(False)
-    con.execute("SELECT vec_version()").fetchone()      # 探活：真正验证扩展可用
-    con.executescript(store.VECTOR_SCHEMA)
+    try:
+        con.execute("SELECT vec_version()").fetchone()  # 探活：真正验证扩展可用
+        con.executescript(store.VECTOR_SCHEMA)
+    except (sqlite3.Error, OSError) as exc:
+        # A 矩阵：这两步此前裸穿（磁盘满 / 权限 / 库损坏都实测到过）。core 的契约是
+        # 只抛项目异常——向量库进不去就没有降级可言，必须让调用方看见原因。
+        con.close()
+        raise VectorError(
+            f"向量索引库不可用：{redact(str(exc))}",
+            hint="确认数据目录可写、且有足够空间；仍失败可删除 index.db 后重建向量索引"
+        ) from exc
     return con
 
 
@@ -159,7 +168,12 @@ class FastEmbedEmbedder:
             # 拦住，但那是传递性保证：换一条不碰索引的入口（或将来把模型缓存挪到别处）就没了，
             # 而这里一 `mkdir` 就会把模型落到进程的当前工作目录。
             paths.ensure_home_dirs()
-            MODEL_CACHE_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+            try:
+                MODEL_CACHE_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+            except OSError as exc:
+                raise VectorError(
+                    f"模型缓存目录不可用：{MODEL_CACHE_DIR}",
+                    hint=f"{exc}；请检查 AGENT_WECHAT_HOME 指向的位置是否可写") from exc
             kwargs = dict(model_name=MODEL_NAME, cache_dir=str(MODEL_CACHE_DIR))
             if not self._local_only:
                 try:
@@ -239,13 +253,19 @@ def _ensure_model_ok(con: sqlite3.Connection) -> None:
 def _ensure_meta(con: sqlite3.Connection) -> None:
     con.execute("INSERT OR IGNORE INTO vector_meta(model_id, dim, built_at, embedded, skipped) "
                 "VALUES (?,?,?,0,0)", (MODEL_ID, DIM, int(time.time())))
-    con.commit()
+    try:
+        con.commit()
+    except (sqlite3.Error, OSError) as exc:
+        raise store.index_unavailable(exc) from exc
 
 
 def _write_meta(con: sqlite3.Connection, *, embedded: int, skipped: int) -> None:
     con.execute("UPDATE vector_meta SET embedded=?, skipped=?, built_at=? WHERE model_id=?",
                 (embedded, skipped, int(time.time()), MODEL_ID))
-    con.commit()
+    try:
+        con.commit()
+    except (sqlite3.Error, OSError) as exc:
+        raise store.index_unavailable(exc) from exc
 
 
 def _vector_watermark(con: sqlite3.Connection, account: str) -> int:
@@ -347,7 +367,10 @@ def _build_account(con: sqlite3.Connection, acct: str, embedder: FastEmbedEmbedd
                     since_commit += batch
                     if since_commit >= commit_rows:
                         _set_vector_watermark(con, acct, last_id)
-                        con.commit()
+                        try:
+                            con.commit()
+                        except (sqlite3.Error, OSError) as exc:
+                            raise store.index_unavailable(exc) from exc
                         since_commit = 0
                         if progress:
                             progress(embedded)
@@ -355,7 +378,10 @@ def _build_account(con: sqlite3.Connection, acct: str, embedder: FastEmbedEmbedd
                 skipped += 1
     flush()
     _set_vector_watermark(con, acct, last_id)
-    con.commit()
+    try:
+        con.commit()
+    except (sqlite3.Error, OSError) as exc:
+        raise store.index_unavailable(exc) from exc
     if progress:
         progress(embedded)
     return embedded, skipped
@@ -390,13 +416,21 @@ def build_index(accounts: Sequence[str] | None = None, rebuild: bool = False,
             # **不原子**（脚本中段出错时前面的 DROP 已落库；「放进同一个脚本」并不能解决），
             # 只有显式 `BEGIN; … COMMIT;` 才是一笔。`MODEL_ID` 是模块常量
             # （`fastembed:<模型>:<维度>`，无引号）⇒ 拼进脚本无注入面。
-            con.executescript(
-                "BEGIN;\n"
-                + store.VECTOR_DROP
-                + f"\nDELETE FROM vector_watermark WHERE model_id='{MODEL_ID}';\n"
-                + "COMMIT;")
-            con.executescript(store.VECTOR_SCHEMA)
-            con.commit()
+            try:
+                con.executescript(
+                    "BEGIN;\n"
+                    + store.VECTOR_DROP
+                    + f"\nDELETE FROM vector_watermark WHERE model_id='{MODEL_ID}';\n"
+                    + "COMMIT;")
+                con.executescript(store.VECTOR_SCHEMA)
+                con.commit()
+            except (sqlite3.Error, OSError) as exc:
+                # 重建段是 DROP + 建表 + 提交三连：任一失败都必须以项目异常浮出，
+                # 否则 CLI 直接 traceback（A 矩阵在 393/398/399 三处都实测到裸异常）。
+                raise VectorError(
+                    f"重建向量索引失败：{redact(str(exc))}",
+                    hint="确认数据目录可写、磁盘有空间，且没有别的向量构建在跑"
+                ) from exc
         # 换模型必须重建。不重建的两种真实失败形态（实测）：
         #   1) 模型常量变了 → 新模型的水位线从 0 起 → 重嵌 → 撞 vec_messages 主键（裸 OperationalError）
         #   2) 只改了 meta 行 → 水位线仍在 → 静默返回 {"embedded_this_run": 0}，索引停摆

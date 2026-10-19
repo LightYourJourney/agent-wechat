@@ -100,8 +100,17 @@ def _file_lock() -> Iterator[None]:
     的读者要么看到旧全量、要么看到新全量，加锁只会让查询等在写者后面。
     """
     lock = lock_file()
-    lock.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    with open(lock, "a") as f:
+    try:
+        lock.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        f = open(lock, "a")
+    except OSError as exc:
+        # A 矩阵：建锁目录 / 开锁文件此前裸穿（R2-A-002/003 的同类；ENOSPC / EACCES / EINTR
+        # 都实测到）。任务注册表与锁都在数据目录里——不可用就是 HomeUnavailable。
+        raise errors.HomeUnavailable(
+            f"任务锁不可用：{lock}",
+            hint=f"{exc}；请检查 AGENT_WECHAT_HOME 指向的位置是否可写、磁盘是否有空间"
+        ) from exc
+    with f:
         fcntl.flock(f, fcntl.LOCK_EX)
         try:
             yield
@@ -140,9 +149,17 @@ def _persist_locked(changed: dict[str, dict]) -> None:
     try:
         tmp.write_text(json.dumps(merged, ensure_ascii=False, indent=1))
         os.replace(tmp, TASKS_FILE)      # 读者要么看到旧全量、要么看到新全量
-    except OSError:
-        tmp.unlink(missing_ok=True)      # 失败不留 tmp 残骸
-        raise
+    except OSError as exc:
+        try:
+            tmp.unlink(missing_ok=True)  # 失败不留 tmp 残骸
+        except OSError:
+            pass                         # 清理本身失败不该盖过「这次没写成功」
+        # 不变量 4 / core 契约：落盘失败此前裸穿（R2-A-002/003）。既有注册表内容**原样
+        # 留在盘上**（tmp+replace 的语义保证），这里只把它变成项目异常。
+        raise errors.HomeUnavailable(
+            f"任务注册表不可用：{TASKS_FILE}",
+            hint=f"{exc}；请检查 AGENT_WECHAT_HOME 指向的位置是否可写、磁盘是否有空间"
+        ) from exc
 
 
 def start(kind: str, runner: Callable[[str], int | None], **fields) -> str:
@@ -175,8 +192,10 @@ def start(kind: str, runner: Callable[[str], int | None], **fields) -> str:
         _tasks[task_id] = rec
         try:
             _persist_locked({task_id: rec})
-        except OSError:
-            _tasks.pop(task_id, None)    # F5：落盘失败不留一条 runner 永不执行的幽灵
+        except (OSError, errors.AgentWeChatError):
+            # F5：落盘失败不留一条 runner 永不执行的幽灵。`_persist_locked` 现在把裸 OSError
+            # 收成了 `HomeUnavailable`（Task 6 的根因收口），只捕 OSError 会让回滚失效。
+            _tasks.pop(task_id, None)
             raise
     threading.Thread(target=_run, args=(task_id, runner), daemon=True).start()
     return task_id

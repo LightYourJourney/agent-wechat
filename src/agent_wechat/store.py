@@ -201,17 +201,32 @@ def connect(db_path: pathlib.Path | None = None) -> sqlite3.Connection:
         con.executescript(SCHEMA)
         con.executescript(exclusions.SCHEMA)
         con.execute("PRAGMA synchronous=NORMAL")
-    except sqlite3.Error as exc:
-        # EA-074：core 层只抛项目异常——建立段此前裸抛 sqlite3（实测：损坏的 index.db 会在
-        # ATTACH 处冒 `DatabaseError: file is not a database`，CLI 直接 traceback）。
-        msg = str(exc)
-        hint = ("索引库可能损坏或正被另一个进程写锁住；"
-                "确认没有其它导出在跑，仍失败则可删除 index.db 后重跑一次导出")
-        if isinstance(exc, sqlite3.OperationalError) and "locked" in msg:
-            hint = "数据库被锁住——稍后重试，或确认没有其它导出 / 向量构建在跑"
-        raise errors.IndexUnavailable(
-            f"本地检索库不可用：{errors.redact(msg)}", hint=hint) from exc
+    except (sqlite3.Error, OSError) as exc:
+        # EA-074 扩：core 层只抛项目异常。此前只捕 `sqlite3.Error`，于是**建立段的磁盘错误**
+        # （ENOSPC/EACCES/EIO，实测由 `mkdir`/`ATTACH`/`connect` 冒出来）与提交段的 sqlite
+        # 错误都会裸穿到 CLI（A 矩阵 26 格实测：`PermissionError`/`OSError`/`DatabaseError`）。
+        raise index_unavailable(exc) from exc
     return con
+
+
+def index_unavailable(exc: BaseException) -> errors.IndexUnavailable:
+    """建立段 / 提交段的裸异常 → 项目异常（同一个出口，三处共用）。
+
+    各模块散落的 `con.commit()` 是本根因类的高发点（A 矩阵实测 export / purge / vector 共 9 处
+    ENOSPC / EACCES / EIO / locked / corrupt 裸异常）。**不要把它包成 `store.commit(con)` 之类
+    的间接层**：那会把调用点挪进本模块，而冻结表按调用点记账——间接层会让 9 个格全部变成
+    「故障未命中」。出口只共享这个构造函数，`con.commit()` 必须留在原地。
+
+    文案里嵌 `str(exc)`：磁盘故障的英文 strerror（`No space left on device` /
+    `Permission denied`）与 project 文案一起进信封，用户与门禁都认得出是哪一类。
+    """
+    msg = str(exc)
+    hint = ("索引库可能损坏、数据目录不可写或正被另一个进程写锁住；"
+            "确认磁盘空间与目录权限、且没有其它导出在跑，"
+            "仍失败则可删除 index.db 后重跑一次导出")
+    if isinstance(exc, sqlite3.OperationalError) and "locked" in msg:
+        hint = "数据库被锁住——稍后重试，或确认没有其它导出 / 向量构建在跑"
+    return errors.IndexUnavailable(f"本地检索库不可用：{errors.redact(msg)}", hint=hint)
 
 
 @contextlib.contextmanager
@@ -231,7 +246,12 @@ def open(db_path: pathlib.Path | None = None) -> Iterator[sqlite3.Connection]:
         con.rollback()
         raise
     else:
-        con.commit()
+        try:
+            con.commit()
+        except (sqlite3.Error, OSError) as exc:
+            # 退出提交是唯一让 `with` 里的写入落盘的时机：它失败必须让调用方看见，
+            # 且按 core 的契约只能是项目异常（R2-A-006：此前裸 OSError 穿到 CLI）。
+            raise index_unavailable(exc) from exc
     finally:
         con.close()
 
@@ -327,7 +347,11 @@ def upsert_batch(con: sqlite3.Connection, rows: list[messages.MessageRow]) -> in
              max_local_id=max(max_local_id, excluded.max_local_id),
              updated_at=excluded.updated_at""",
         [(a, s, m, mx, now) for (a, s, m), mx in wm.items()])
-    con.commit()
+    try:
+        con.commit()
+    except (sqlite3.Error, OSError) as exc:
+        # R2-A-004：提交失败此前裸穿（实测 EIO）。这里与 `open()` 的出口同一口径。
+        raise index_unavailable(exc) from exc
     return len(rows) - len(keep)
 
 

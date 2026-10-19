@@ -266,7 +266,9 @@ def test_a_failed_write_keeps_the_old_file_and_leaves_no_tmp(tmp_path, monkeypat
         raise OSError("ENOSPC")
 
     monkeypatch.setattr(tasks.os, "replace", boom)
-    with pytest.raises(OSError):
+    # Task 6：core 只抛项目异常（原断言把裸 OSError 当成了契约）。判据不变——目标文件
+    # 未被改动、不留 tmp 残骸、恢复后照常写。
+    with pytest.raises(errors.AgentWeChatError):
         tasks.update(tid, rows=123)
     assert target.read_text() == before, "失败的那次写不许动到目标文件"
     assert list(tmp_path.glob("*.tmp")) == [], "失败不留 tmp 残骸"
@@ -503,7 +505,8 @@ def test_start_rolls_back_when_the_registry_cannot_be_written(tmp_path, monkeypa
         raise OSError("ENOSPC")
 
     monkeypatch.setattr(tasks.os, "replace", boom)
-    with pytest.raises(OSError):                  # 异常照旧上抛（调用方看得见）
+    # Task 6：异常照旧上抛，但已是项目异常（core 只抛项目异常的契约）。
+    with pytest.raises(errors.AgentWeChatError):
         tasks.start("export", lambda _t: 1, account="acct")
 
     monkeypatch.setattr(tasks.os, "replace", real_replace)

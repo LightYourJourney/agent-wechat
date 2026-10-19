@@ -4,7 +4,7 @@ import sqlite3
 
 import pytest
 
-from agent_wechat import paths, store, vector
+from agent_wechat import errors, paths, store, vector
 
 
 @pytest.fixture(autouse=True)
@@ -293,7 +293,10 @@ def test_rebuild_wipes_tables_and_pointer_in_one_transaction(env, monkeypatch):
     vector.build_index(embedder=FakeEmbedder())
     monkeypatch.setattr(vector, "MODEL_ID", "fastembed:bad'id:512")
 
-    with pytest.raises(sqlite3.OperationalError):
+    # 异常类型由裸 `sqlite3.OperationalError` 改为项目异常（Task 6：core 只抛项目异常的
+    # 契约；原断言把「裸异常穿到 CLI」当成了契约）。判别力不变——去掉显式事务后 DROP 会
+    # 落库，下面那条 `vec_messages in names` 照样红。
+    with pytest.raises(errors.AgentWeChatError, match="重建向量索引失败"):
         vector.build_index(rebuild=True, embedder=FakeEmbedder())
 
     con2 = sqlite3.connect(store.DB_PATH)          # 新连接：只看已提交的状态
