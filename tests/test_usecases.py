@@ -587,3 +587,28 @@ def test_search_hits_carry_msg_key(tmp_path, monkeypatch):
     res = search.search("你好", account=acct)
     assert res["hits"], "夹具没建出命中，下面的断言将恒真"
     assert res["hits"][0]["msg_key"] == messages.row_key(acct, cm, "message_0.db", 7)
+
+
+@pytest.mark.parametrize("name", ["Candidate", "NeedConfirm", "RecentMessages",
+                                  "ExportPlan", "Degradation"])
+def test_result_types_are_frozen(name):
+    """B 阶段（T14）：5 个结果类型的 `@dataclass(frozen=True)` 一共**零用例**——
+    把任一处改回默认（可变），`test_usecases.py` 全绿。
+
+    这是对外契约（docstring 原话：「它是对外契约的一部分」）：入口把对象交给 CLI/MCP
+    之后，调用方拿到的是**快照**，不是可被人反手改掉的活引用。
+    """
+    import dataclasses
+
+    cls = getattr(usecases, name)
+    assert cls.__dataclass_params__.frozen is True, f"{name} 必须 frozen"
+    # 判据落到行为上：frozen 的类型，任何一次 setattr 都抛 FrozenInstanceError
+    assert dataclasses.fields(cls), f"{name} 应有字段（否则下面那条测试是空转）"
+
+
+def test_a_degradation_defaults_to_drift():
+    """B 阶段（T14）：`drift: bool = True` 的默认值没有用例——改成 False 时 CLI 就不再给
+    「结构不符」后缀，而 `test_usecases.py` 全绿。"""
+    d = usecases.Degradation("stickers", "contact.db", "contact", (), "少一部分")
+    assert d.drift is True
+    assert usecases.Degradation("stickers", "c.db", "t", (), "e", drift=False).drift is False
