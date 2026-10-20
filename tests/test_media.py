@@ -2708,3 +2708,27 @@ def test_a_damaged_v2_dat_is_rejected_instead_of_half_decrypted():
         media.decrypt_dat(lying, keys)
 
     assert media.decrypt_dat(good, keys) == jpeg_like(32)
+
+
+def test_pkcs7_strip_rejects_every_out_of_range_padding():
+    """B 阶段复核后仍存活的位点：`_pkcs7_strip` 的边界（`0 < pad <= 16`、`16`、`0`、
+    `Or`）此前没有直接断言——只有「错钥 ⇒ 抛」那一条，它走的是「尾字节不重复」分支，
+    碰不到范围边界。
+
+    四条：pad=0（空块尾非法）、pad=17（>块长）、pad=16（合法上限）、
+    尾字节与 pad 不符（错钥形态）。
+    """
+    strip = media._pkcs7_strip
+    assert strip(b"\x00" * 15 + b"\x01") == b"\x00" * 15          # pad=1
+    # pad=16：输入 15 个 0 + 17 个 0x10，末 16 字节全 0x10 ⇒ 合法，剥掉后剩 15 个 0 + 1 个 0x10
+    assert strip(b"\x00" * 15 + b"\x10" * 17) == b"\x00" * 15 + b"\x10"
+    with pytest.raises(errors.DecryptError, match="PKCS#7"):
+        strip(b"\x00" * 15 + b"\x00")                              # pad=0
+    with pytest.raises(errors.DecryptError, match="PKCS#7"):
+        strip(b"\x00" * 15 + b"\x11")                              # pad=17 > 16（后接不足）
+    with pytest.raises(errors.DecryptError, match="PKCS#7"):
+        strip(b"\x11" * 17)          # pad=17 且「17 个 0x11」本身自洽——只有上界判据能拒
+    with pytest.raises(errors.DecryptError, match="PKCS#7"):
+        strip(b"\x00" * 15 + b"\x02")                              # 尾字节 2 但前一位不是 2
+    with pytest.raises(errors.DecryptError, match="为空"):
+        strip(b"")
