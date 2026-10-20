@@ -13,67 +13,78 @@ import os
 import pathlib
 import sys
 
-SKIP = (ast.Import, ast.ImportFrom)
+class _Walker(ast.NodeVisitor):
+    """**唯一的**位点枚举。`iter_sites` 与 `mutate` 都从这里取位点。
 
+    此前是两份（`_V` 供 census、`mutate` 里再写一个 `C`），已经分叉过：边界算子判据
+    只在 `_V` 那侧。分叉的后果不报错、只让两边悄悄看不同的位点集合。
+    """
 
-class _V(ast.NodeVisitor):
-    def __init__(self):
-        self.stack, self.sites = [], []
+    def __init__(self) -> None:
+        self.stack: list[str] = []
+        self.sites: list[tuple[str, str, str, ast.AST]] = []
 
-    def visit_FunctionDef(self, n):
-        self.stack.append(n.name)
-        self.generic_visit(n)
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self.stack.append(node.name)
+        self.generic_visit(node)
         self.stack.pop()
 
     visit_AsyncFunctionDef = visit_FunctionDef
 
-    def _q(self):
+    def _q(self) -> str:
         return ".".join(self.stack) or "<module>"
 
     @staticmethod
-    def _doc(n):
-        return (isinstance(n, ast.Expr) and isinstance(n.value, ast.Constant)
-                and isinstance(n.value.value, str))
+    def _doc(node: ast.Expr) -> bool:
+        return (isinstance(node.value, ast.Constant)
+                and isinstance(node.value.value, str))
 
-    def visit_Compare(self, n):
-        if len(n.ops) == 1 and isinstance(n.ops[0], (ast.Lt, ast.LtE, ast.Gt, ast.GtE)):
-            self.sites.append((self._q(), "cmp_boundary", ast.unparse(n), n.lineno,
-                               n.col_offset))
-        self.generic_visit(n)
+    def visit_Compare(self, node: ast.Compare) -> None:
+        if len(node.ops) == 1 and isinstance(node.ops[0],
+                                             (ast.Lt, ast.LtE, ast.Gt, ast.GtE)):
+            self.sites.append((self._q(), "cmp_boundary", ast.unparse(node), node))
+        self.generic_visit(node)
 
-    def visit_BoolOp(self, n):
-        self.sites.append((self._q(), "bool_op", type(n.op).__name__, n.lineno,
-                           n.col_offset))
-        self.generic_visit(n)
+    def visit_BoolOp(self, node: ast.BoolOp) -> None:
+        self.sites.append((self._q(), "bool_op", type(node.op).__name__, node))
+        self.generic_visit(node)
 
-    def visit_Constant(self, n):
-        if isinstance(n.value, (int, bool)) and not isinstance(n.value, str):
-            self.sites.append((self._q(), "const", repr(n.value), n.lineno, n.col_offset))
+    def visit_Constant(self, node: ast.Constant) -> None:
+        if isinstance(node.value, (int, bool)) and not isinstance(node.value, str):
+            self.sites.append((self._q(), "const", repr(node.value), node))
 
-    def visit_Expr(self, n):
-        if not self._doc(n):
-            self.sites.append((self._q(), "delete_stmt", ast.unparse(n), n.lineno,
-                               n.col_offset))
-            self.generic_visit(n)
+    def visit_Expr(self, node: ast.Expr) -> None:
+        if not self._doc(node):
+            self.sites.append((self._q(), "delete_stmt", ast.unparse(node), node))
+            self.generic_visit(node)
 
-    def visit_Return(self, n):
-        self.sites.append((self._q(), "delete_stmt", ast.unparse(n), n.lineno,
-                           n.col_offset))
-        self.generic_visit(n)
+    def visit_Return(self, node: ast.Return) -> None:
+        self.sites.append((self._q(), "delete_stmt", ast.unparse(node), node))
+        self.generic_visit(node)
+
+
+def _pos(node: ast.AST) -> tuple[int, int]:
+    """位点的 (行, 列)。四种算子都落在带位置的节点上，但 `ast.AST` 泛型上没有这两个属性。"""
+    return getattr(node, "lineno", 0), getattr(node, "col_offset", 0)
+
+
+def _walk(src: str) -> tuple[ast.Module, list[tuple[str, str, str, ast.AST]]]:
+    tree = ast.parse(src)
+    w = _Walker()
+    w.visit(tree)
+    return tree, w.sites
 
 
 def iter_sites(src: str) -> list[dict]:
-    tree = ast.parse(src)
-    v = _V()
-    v.visit(tree)
-    seen: dict[tuple, int] = {}
-    out = []
-    for i, (q, op, seg, line, col) in enumerate(v.sites):
+    seen: dict[tuple[str, str, str], int] = {}
+    out: list[dict] = []
+    for i, (q, op, seg, node) in enumerate(_walk(src)[1]):
         # 同一函数里同形的位点很常见（两处 `return None`、两个 `0`）。没有序号，
         # 它们的指纹会**塌缩成一个**——kill 矩阵的集合对等断言随之失效（实测
         # 1235 个位点会塌成 1081 个）。序号按遍历序编号，与行号无关。
         n = seen.get((q, op, seg), 0)
         seen[(q, op, seg)] = n + 1
+        line, col = _pos(node)
         out.append({"index": i, "qualname": q, "op": op, "segment": seg,
                     "ordinal": n, "line": line, "col": col})
     return out
@@ -86,60 +97,32 @@ def fingerprint(module: str, site: dict) -> str:
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 
+def _to_pass(tree: ast.Module, target: ast.AST) -> None:
+    """把 `target` 这条语句换成 `pass`（**按对象身份**，不按行列再找一遍）。"""
+
+    class _Replace(ast.NodeTransformer):
+        def generic_visit(self, node: ast.AST) -> ast.AST:
+            for field, value in ast.iter_fields(node):
+                if (isinstance(value, list) and value
+                        and isinstance(value[0], ast.stmt)):
+                    setattr(node, field,
+                            [ast.Pass() if st is target else st for st in value])
+            return super().generic_visit(node)
+
+    _Replace().visit(tree)
+
+
 def mutate(src: str, site: dict) -> str:
     """按位点产出一个变异体（返回变异后的源码文本）。"""
-    tree = ast.parse(src)
-    nodes = []
-
-    class C(ast.NodeVisitor):
-        def visit_Compare(self, n):
-            if len(n.ops) == 1:
-                nodes.append(("cmp_boundary", n))
-            self.generic_visit(n)
-
-        def visit_BoolOp(self, n):
-            nodes.append(("bool_op", n))
-            self.generic_visit(n)
-
-        def visit_Constant(self, n):
-            if isinstance(n.value, (int, bool)) and not isinstance(n.value, str):
-                nodes.append(("const", n))
-
-        def visit_Expr(self, n):
-            if not (isinstance(n.value, ast.Constant)
-                    and isinstance(n.value.value, str)):
-                nodes.append(("delete_stmt", n))
-            self.generic_visit(n)
-
-        def visit_Return(self, n):
-            nodes.append(("delete_stmt", n))
-            self.generic_visit(n)
-
-    C().visit(tree)
-
-    if site["op"] == "delete_stmt":
-        class Del(ast.NodeTransformer):
-            def generic_visit(self, node):
-                for field, value in ast.iter_fields(node):
-                    if (isinstance(value, list) and value
-                            and isinstance(value[0], ast.stmt)):
-                        new = []
-                        for st in value:
-                            if (getattr(st, "lineno", 0) == site["line"]
-                                    and getattr(st, "col_offset", 0) == site["col"]):
-                                new.append(ast.Pass())
-                            else:
-                                new.append(st)
-                        setattr(node, field, new)
-                return super().generic_visit(node)
-
-        return ast.unparse(Del().visit(tree))
-
-    target = [n for op, n in nodes if op == site["op"]
-              and getattr(n, "lineno", 0) == site["line"]
-              and getattr(n, "col_offset", 0) == site["col"]]
+    tree, sites = _walk(src)
+    target = [n for _q, op, _seg, n in sites
+              if op == site["op"] and _pos(n) == (site["line"], site["col"])]
     assert len(target) == 1, f"位点定位失败：{site}"
     node = target[0]
+
+    if site["op"] == "delete_stmt":
+        _to_pass(tree, node)
+        return ast.unparse(tree)
     if site["op"] == "cmp_boundary":
         flip = {ast.Lt: ast.LtE, ast.LtE: ast.Lt, ast.Gt: ast.GtE, ast.GtE: ast.Gt}
         node.ops[0] = flip[type(node.ops[0])]()
@@ -158,7 +141,7 @@ def _src_root() -> pathlib.Path:
     return pathlib.Path(__file__).resolve().parents[1] / "src" / "agent_wechat"
 
 
-def main(argv=None):
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--census", action="store_true")
     ap.add_argument("--dry-run", nargs="*")
@@ -182,20 +165,45 @@ def main(argv=None):
 
 
 def classify(rc: int, out: str) -> str:
-    """runner 的五态（spec §6.3）。
+    """runner 的五态（spec §6.3）：killed / survived / timeout / invalid / infra。
 
     `timeout` 单列：被杀不算「断言杀死」，否则把超时调短就能伪造全杀。
     `invalid` 覆盖「收集失败 / 导入错误 / 用例体之外的崩溃」——它们不是被断言打死的。
+    `infra`（基建错误）是**跑不起来**：pytest 自身退出码 3（内部错误）或进程起不来。
+    它与 `invalid` 分开，因为前者说明**工具/环境**坏了，后者说明**变异体**坏了——
+    混成一类会让「工具静默失效」看起来像「变异体被拦下」。
     """
     if rc == -9:
         return "timeout"
     if rc == 0:
         return "survived"
-    if "ERROR collecting" in out or "ERROR " in out or rc in (2, 5):
+    if rc == 3:                              # pytest 内部错误：与变异体无关
+        return "infra"
+    if "ERROR " in out or rc in (2, 5):      # 收集/夹具错误：不是被断言打死的
         return "invalid"
     if "FAILED" in out:
         return "killed"
     return "invalid"
+
+
+def failure_kind(status: str, out: str) -> str:
+    """spec §6.3 的词表：assert / body-error / setup-error / collection-error /
+    import-error / timeout。未杀死（survived）记 `-`。"""
+    if status == "survived":
+        return "-"
+    if status == "timeout":
+        return "timeout"
+    if status == "infra":
+        return "body-error"                  # 进程级失败，不是断言
+    if "ERROR collecting" in out:
+        return "collection-error"
+    if "ImportError" in out or "ModuleNotFoundError" in out:
+        return "import-error"
+    if "ERROR at setup" in out or "error at setup" in out:
+        return "setup-error"
+    if status == "killed" and ("AssertionError" in out or "assert " in out):
+        return "assert"
+    return "body-error"
 
 
 def run_sweep(module: str, mapping: dict, copy_root: pathlib.Path, timeout: float,
@@ -228,9 +236,11 @@ def run_sweep(module: str, mapping: dict, copy_root: pathlib.Path, timeout: floa
             r = subprocess.run([sys.executable, "-m", "pytest", "-x", "-q", *tests],
                                cwd=copy_root, env=env, capture_output=True, text=True,
                                timeout=timeout)
-            status = classify(r.returncode, r.stdout + r.stderr)
+            both = r.stdout + r.stderr
+            status = classify(r.returncode, both)
             out_rows.append({"fp": fp, "status": status,
-                             "out": (r.stdout + r.stderr)[-400:]})
+                             "failure_kind": failure_kind(status, both),
+                             "out": both[-400:]})
         except subprocess.TimeoutExpired:
             out_rows.append({"fp": fp, "status": "timeout"})
         finally:
@@ -241,7 +251,7 @@ def run_sweep(module: str, mapping: dict, copy_root: pathlib.Path, timeout: floa
     return out_rows
 
 
-def main_run(argv):
+def main_run(argv: list[str]) -> int:
     """--run MODULE --manifest FILE [--only-fps f1,f2] --timeout S"""
     ap = argparse.ArgumentParser()
     ap.add_argument("--run", required=True)

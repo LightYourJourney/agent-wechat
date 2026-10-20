@@ -29,7 +29,11 @@ MAPPING: dict[str, list[str]] = {
 
 def verify_mapping(module: str, mapping: dict | None = None,
                    timeout: float = 180) -> list[str]:
-    """逐个在子进程里带 settrace 跑；返回**没有执行到该模块任何一行**的 nodeid。"""
+    """逐个在子进程里带 settrace 跑；返回**没通过探针**的 nodeid。
+
+    探针返回非零有两种成因：没执行到该模块任何一行（MISS），或该用例自身失败——
+    后一种是映射表要重挑的信号，不是「漏覆盖」，两者都算「这一格没被证明」。
+    """
     mapping = MAPPING if mapping is None else mapping
     probe = pathlib.Path(__file__).with_name("_trace_probe.py")
     missed: list[str] = []
@@ -40,3 +44,18 @@ def verify_mapping(module: str, mapping: dict | None = None,
         if r.returncode != 0:
             missed.append(nodeid)
     return missed
+
+
+def hit_lines(module: str, mapping: dict | None = None, timeout: float = 180) -> int:
+    """映射用例**一共执行到该模块多少行**（§6.3 要求落台账的那一列）。"""
+    mapping = MAPPING if mapping is None else mapping
+    probe = pathlib.Path(__file__).with_name("_trace_probe.py")
+    total = 0
+    for nodeid in mapping[module]:
+        env = dict(os.environ, AW_TRACE_MODULE=module)
+        r = subprocess.run([sys.executable, str(probe), nodeid], env=env,
+                           capture_output=True, text=True, timeout=timeout)
+        last = (r.stdout.strip().splitlines() or [""])[-1]
+        if last.startswith("HIT "):
+            total += int(last.split()[1])
+    return total

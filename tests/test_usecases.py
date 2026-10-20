@@ -602,8 +602,10 @@ def test_result_types_are_frozen(name):
 
     cls = getattr(usecases, name)
     assert cls.__dataclass_params__.frozen is True, f"{name} 必须 frozen"
-    # 判据落到行为上：frozen 的类型，任何一次 setattr 都抛 FrozenInstanceError
-    assert dataclasses.fields(cls), f"{name} 应有字段（否则下面那条测试是空转）"
+    # 判据落到**行为**上：frozen 的类型，任何一次 setattr 都抛 FrozenInstanceError。
+    # 用 `__new__` 造实例是为了不依赖各类型自己的构造签名。
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        setattr(cls.__new__(cls), "_frozen_probe", 1)
 
 
 def test_a_degradation_defaults_to_drift():

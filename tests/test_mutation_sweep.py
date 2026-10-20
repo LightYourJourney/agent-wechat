@@ -4,6 +4,9 @@
 在变异器把位点找错时照样绿（本仓已被这一类坑过多次）。
 """
 import ast
+import os
+import subprocess
+import sys
 
 from scripts.mutation_sweep import fingerprint, iter_sites, mutate
 
@@ -94,6 +97,30 @@ def test_classify_five_states():
     assert classify(-9, "") == "timeout"
     # 判据的边界：只提到 ERROR collecting 而非 FAILED 时不得算 killed
     assert classify(1, "ERROR collecting tests/x.py\nFAILED") == "invalid"
+    # 第五态：pytest 内部错误（退出码 3）是**基建错误**，与「变异体被拦下」分开
+    assert classify(3, "INTERNALERROR>") == "infra"
+
+
+def test_failure_kind_uses_the_spec_vocabulary():
+    """spec §6.3 的词表是封闭的六个值；台账里不许出现自造词（此前实有 `error`/
+    `other-error` 两个不在词表里的值，共 263 行）。"""
+    from scripts.mutation_sweep import failure_kind
+    vocab = {"assert", "body-error", "setup-error", "collection-error",
+             "import-error", "timeout", "-"}
+    got = {
+        failure_kind("killed", "FAILED tests/x.py::t - AssertionError"),
+        failure_kind("killed", "FAILED tests/x.py::t - ValueError: boom"),
+        failure_kind("invalid", "ERROR collecting tests/x.py"),
+        failure_kind("invalid", "ERROR at setup of test_x"),
+        failure_kind("invalid", "ModuleNotFoundError: No module named 'x'"),
+        failure_kind("timeout", ""),
+        failure_kind("survived", ""),
+        failure_kind("infra", "INTERNALERROR>"),
+    }
+    assert got <= vocab, got - vocab
+    assert failure_kind("killed", "FAILED t - AssertionError") == "assert"
+    assert failure_kind("invalid", "ERROR collecting tests/x.py") == "collection-error"
+    assert failure_kind("survived", "") == "-"
 
 
 def test_runner_end_to_end_kills_and_restores(tmp_path):
@@ -102,9 +129,6 @@ def test_runner_end_to_end_kills_and_restores(tmp_path):
     用小模块 + 小用例，不碰真仓库——但走的是 `run_sweep` 的**同一条**路径
     （copy_root / PYTHONPATH / 还原 / 集合断言）。
     """
-    import subprocess
-    import sys
-
     from scripts.mutation_sweep import run_sweep
 
     pkg = tmp_path / "src" / "agent_wechat"
@@ -118,8 +142,7 @@ def test_runner_end_to_end_kills_and_restores(tmp_path):
         "from agent_wechat.tiny import f\n\n"
         "def test_f():\n    assert f(1) == 2\n")
     # 先确认基线绿（否则分类器的判据没有意义）
-    env = dict(__import__("os").environ, PYTHONPATH=str(tmp_path / "src"),
-               PYTHONPATH_EXTRA="")
+    env = dict(os.environ, PYTHONPATH=str(tmp_path / "src"))
     base = subprocess.run([sys.executable, "-m", "pytest", "-x", "-q", "tests"],
                           cwd=tmp_path, env=env, capture_output=True, text=True)
     assert base.returncode == 0, base.stdout + base.stderr

@@ -10,6 +10,7 @@
 import importlib
 import os
 import sys
+import types
 
 import pytest
 
@@ -20,7 +21,7 @@ _names = {_mod.__file__, os.path.realpath(_mod.__file__)}
 hits: set[int] = set()
 
 
-def _tracer(frame, event, arg):
+def _tracer(frame: types.FrameType, event: str, _arg: object) -> object:
     if frame.f_code.co_filename not in _names:
         return None                      # 别的文件不进逐行模式（否则慢一个数量级）
     if event == "line":
@@ -33,5 +34,5 @@ try:
     rc = pytest.main(["-q", "-p", "no:cacheprovider", *sys.argv[1:]])
 finally:
     sys.settrace(None)
-print("HIT" if hits else "MISS")
+print(f"HIT {len(hits)}" if hits else "MISS")
 sys.exit(0 if (hits and rc == 0) else 1)
