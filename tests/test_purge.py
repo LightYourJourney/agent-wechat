@@ -2004,3 +2004,43 @@ def test_undo_chat_defaults_to_preview(tmp_path, monkeypatch):
     with exclusions.standalone() as con:
         assert exclusions.count_chat(con, "acct",
                                      messages.chat_md5("wxid_testacct01_ab12")) >= 1
+
+
+def test_link_target_says_so_when_it_cannot_read_the_link(tmp_path):
+    """错误消息里「读不出指向」是**如实**而不是猜：`readlink` 失败就照实印原因。"""
+    link = tmp_path / "l"
+    link.symlink_to(tmp_path / "nowhere")
+    assert purge._link_target(link) == str(tmp_path / "nowhere")
+    got = purge._link_target(tmp_path)          # 不是链接：readlink 抛 OSError
+    assert "读不出指向" in got, got
+
+
+def test_escaping_links_reports_a_root_link_that_escapes(tmp_path):
+    """根是符号链接时不再往下走，只报它自己（`os.walk` 会跟随它）。"""
+    home = tmp_path / "home"
+    home.mkdir()
+    out = tmp_path / "outside"
+    out.mkdir()
+    d = tmp_path / "home" / "media" / "chat1"
+    d.parent.mkdir(parents=True)
+    d.symlink_to(out)
+    entry = purge.ChatEntry("acct", "wxid_testacct01_ab12", "md5", {}, 0, d, True, 0)
+    plan = purge.ChatPlan(entries=(entry,))
+    assert purge._escaping_links(plan, paths.HOME_DIR) == [d]
+
+
+def test_plan_chat_does_not_measure_through_a_symlinked_export_dir(tmp_path, monkeypatch):
+    """导出目录是符号链接时体积记 0（跟随它会把**目标**的整树算成本次要删的字节）。"""
+    home = tmp_path / "home"
+    home.mkdir(parents=True)
+    monkeypatch.setattr(paths, "HOME_DIR", home)
+    real = tmp_path / "real"
+    real.mkdir()
+    (real / "big.bin").write_bytes(b"x" * 4096)
+    d = purge.chat_export_dir("wxid_testacct01_ab12")
+    d.parent.mkdir(parents=True, exist_ok=True)
+    d.symlink_to(real)
+    with purge._open_index() as con:
+        pass
+    plan = purge.plan_chat([{"account": "acct", "chat_id": "wxid_testacct01_ab12"}])
+    assert plan.entries[0].export_size == 0, plan.entries[0]
