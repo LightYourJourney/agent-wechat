@@ -5,6 +5,8 @@ C8 修正：`key_info_db` 的 docstring 写的是 `key_info.db`（明文 SQLite�
 单个 blob，.db 是带 -wal/-shm 的明文 SQLite）。以 docstring 为准修正为 `.db`。
 """
 import pathlib
+import subprocess
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -298,3 +300,111 @@ def test_pid_alive_covers_every_verdict(monkeypatch):
 
     monkeypatch.setattr(paths.os, "kill", lambda *a: None)
     assert paths.pid_alive(os.getpid()) is True
+
+
+# ---------- B 复核后的真缺口（§5.4）：paths ----------
+
+def test_container_verdict_returns_none_when_it_cannot_resolve(tmp_path, monkeypatch):
+    """容器路径解析不出来 ⇒ None（不是抛、也不是 False）——写闸门靠这个 None 判「别写」。"""
+    loop = tmp_path / "loop"
+    loop.symlink_to(loop)
+    monkeypatch.setattr(paths, "CONTAINER_DATA", loop)
+    assert paths.container_verdict(tmp_path / "x") is None
+
+
+def test_container_verdict_treats_an_ancestor_as_inside(tmp_path, monkeypatch):
+    """祖先链：`/` 这种「容器在它下面」的路径同样算「会写进容器」。"""
+    monkeypatch.setattr(paths, "CONTAINER_DATA", tmp_path / "Data")
+    (tmp_path / "Data").mkdir()
+    assert paths.container_verdict(tmp_path) is True
+    assert paths.container_verdict("/") is True
+
+
+def test_container_verdict_is_false_when_the_container_does_not_exist(
+        tmp_path, monkeypatch):
+    """容器不在 ⇒ 没有可写进去的东西（不是「判不出来」，是确定的 False）。"""
+    monkeypatch.setattr(paths, "CONTAINER_DATA", tmp_path / "nope" / "Data")
+    assert paths.container_verdict(tmp_path / "out") is False
+    # 但**祖先**仍然是「会写进容器」——容器此刻不在不代表将来也不在
+    assert paths.container_verdict(tmp_path) is True
+
+
+def test_ensure_home_dirs_works_when_the_container_is_absent(tmp_path, monkeypatch):
+    """容器目录不存在时不许把它当成「解析失败」而拒绝写（`strict=False` 那处）。"""
+    monkeypatch.setattr(paths, "CONTAINER_DATA", tmp_path / "nope" / "Data")
+    monkeypatch.setattr(paths, "HOME_DIR", tmp_path / "home")
+    paths.ensure_home_dirs()
+    assert (tmp_path / "home").is_dir()
+
+
+def test_ensure_home_dirs_names_the_unresolvable_guard(tmp_path, monkeypatch):
+    """`_require_guard_resolvable()` 的那条文案是**误诊断防线**：符号链接环时要报
+    「无法确认容器目录的位置」（不是「你把数据目录指进了容器」）。"""
+    loop = tmp_path / "loop"
+    loop.symlink_to(loop)
+    monkeypatch.setattr(paths, "CONTAINER_DATA", loop)
+    monkeypatch.setattr(paths, "HOME_DIR", tmp_path / "home")
+    with pytest.raises(errors.ContainerWriteRefused, match="无法确认容器目录的位置"):
+        paths.ensure_home_dirs()
+
+
+def test_the_time_machine_exclusion_is_attempted_once_per_process(tmp_path, monkeypatch):
+    """`_tm_exclusion_checked` 的默认值必须是 False，且置位后不再重复调用 tmutil。"""
+    calls = []
+    # 默认值本身也是契约：每进程一次（`_tm_exclusion_checked` 初值 False）
+    probe = subprocess.run([sys.executable, "-c",
+                            "import agent_wechat.paths as p; print(p._tm_exclusion_checked)"],
+                           capture_output=True, text=True)
+    assert probe.stdout.strip() == "False", probe.stdout
+    monkeypatch.setattr(paths, "_tm_exclusion_checked", False)
+    monkeypatch.setattr(paths, "HOME_DIR", tmp_path / "home")
+    monkeypatch.setattr(paths.shutil, "which", lambda _n: "/usr/bin/tmutil")
+    monkeypatch.setattr(paths.subprocess, "run", lambda *a, **k: calls.append(a))
+    paths.ensure_home_dirs()
+    paths.ensure_home_dirs()
+    assert len(calls) == 1, calls
+
+
+def test_account_dirs_ignores_entries_that_are_not_accounts(tmp_path, monkeypatch):
+    monkeypatch.setattr(paths, "XWECHAT_FILES", tmp_path)
+    (tmp_path / "wxid_testacct01_ab12").mkdir()
+    (tmp_path / "not-an-account").mkdir()
+    (tmp_path / "wxid_x").write_bytes(b"")          # 名字像但不是目录
+    assert paths.account_dirs() == ["wxid_testacct01_ab12"]
+
+
+def test_pid_one_is_alive(tmp_path):
+    """`pid <= 0` 的边界：1 是 init，必须是「活着」（`<= 1` 会把它判死）。"""
+    assert paths.pid_alive(1) is True
+
+
+def test_time_machine_excluded_reports_none_when_it_cannot_tell(tmp_path, monkeypatch):
+    monkeypatch.setattr(paths, "HOME_DIR", tmp_path / "missing")
+    assert paths.time_machine_excluded() is None      # 目录还不存在
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(paths, "HOME_DIR", home)
+    monkeypatch.setattr(paths.shutil, "which", lambda _n: "/usr/bin/tmutil")
+
+    class _R:
+        returncode = 1
+        stdout = "[Excluded] /x\n"
+
+    monkeypatch.setattr(paths.subprocess, "run", lambda *a, **k: _R())
+    assert paths.time_machine_excluded() is None, "非零退出 ⇒ 判不出来"
+
+    class _OK:
+        returncode = 0
+        stdout = "  [Excluded] /x  \n"
+
+    seen = {}
+
+    def _run(*a, **k):
+        seen.update(k)
+        return _OK()
+
+    monkeypatch.setattr(paths.subprocess, "run", _run)
+    got = paths.time_machine_excluded()
+    assert got == "[Excluded] /x", got
+    assert seen.get("text") is True, "`text=True` 被关掉会返回 bytes"

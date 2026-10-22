@@ -1778,3 +1778,229 @@ def test_escapes_home_refuses_when_existence_cannot_be_probed(tmp_path, monkeypa
         assert purge._escapes_home(link, tmp_path) is True
     finally:
         monkeypatch.setattr(pathlib.Path, "exists", real)
+
+
+# ---------- B 复核后的真缺口（§5.4）：purge ----------
+
+@pytest.mark.parametrize("name", ["Artifact", "PlanItem", "LooseEntry", "PurgePlan",
+                                  "PurgeReport", "ResidueReport", "ChatEntry", "ChatPlan",
+                                  "ChatReport", "ChatResidue", "UndoEntry"])
+def test_purge_result_types_are_frozen(name):
+    """删除计划/报告是**传给执行前**的契约：拿到之后不该还能被改写（spec §6.4 那类
+    「对外是快照」）。11 个 `@dataclass(frozen=True)` 此前零断言。"""
+    import dataclasses
+    cls = getattr(purge, name)
+    assert cls.__dataclass_params__.frozen is True
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        setattr(cls.__new__(cls), "_probe", 1)
+
+
+def test_known_artifacts_keeps_the_sensitivity_and_rebuild_flags():
+    """产物表的 `sensitive` / `rebuildable` 两列直接决定计划表印什么、`--all` 删什么。"""
+    import dataclasses as dc
+    rows = {a.scope: a for a in purge.known_artifacts() if a.scope}
+    for scope in ("keys", "index", "media", "moments", "tmp"):
+        assert rows[scope].sensitive is True, scope
+    loose = {a.path.name: a for a in purge.known_artifacts() if a.scope is None}
+    # models/ 与 tasks.json(+lock) 是可重建的派生品，不算敏感；
+    # exclusions.db 反之——它是唯一的「删了就回不来」。
+    assert loose and all(loose[n].sensitive is False
+                         for n in ("tasks.json", "tasks.json.lock")), \
+        [(n, a.sensitive) for n, a in loose.items()]
+    assert loose["exclusions.db"].sensitive is True
+    ex = [a for a in purge.known_artifacts() if a.unrebuildable]
+    assert len(ex) == 1 and ex[0].path == exclusions.path()
+    assert dc.is_dataclass(rows["keys"])
+
+
+def test_loose_entry_sizes_directories_by_the_tree_and_links_by_the_link(tmp_path):
+    """`--all` 的散落行体积：目录量整树（inode 大小是几十字节的假数字），
+    指向目录的**符号链接**只算链接本身（rmtree 只 unlink 它，目标是留存的）。"""
+    d = tmp_path / "big"
+    d.mkdir()
+    (d / "f").write_bytes(b"x" * 5000)
+    assert purge._loose_entry(d).size == purge._tree_size(d) > 4000
+
+    link = tmp_path / "link"
+    link.symlink_to(d)
+    assert purge._loose_entry(link).size == link.lstat().st_size
+
+    f = tmp_path / "f"
+    f.write_bytes(b"y" * 7)
+    assert purge._loose_entry(f).size == 7
+
+
+def test_loose_entry_reports_zero_when_the_size_cannot_be_read(tmp_path, monkeypatch):
+    p = tmp_path / "x"
+    p.write_bytes(b"z")
+    monkeypatch.setattr(purge, "_tree_size", lambda _p: (_ for _ in ()).throw(OSError("e")))
+    d = tmp_path / "dir"
+    d.mkdir()
+    assert purge._loose_entry(d).size == 0
+
+
+def test_item_marks_missing_paths_and_symlinks(tmp_path):
+    missing = purge._item(purge.Artifact("x", tmp_path / "nope", "file", True, "无"))
+    assert missing.exists is False and missing.size == 0
+
+    f = tmp_path / "f"
+    f.write_bytes(b"abc")
+    got = purge._item(purge.Artifact("x", f, "file", True, "无"))
+    assert got.exists is True and got.size == 3 and got.is_symlink is False
+
+    link = tmp_path / "l"
+    link.symlink_to(f)
+    assert purge._item(purge.Artifact("x", link, "file", True, "无")).is_symlink is True
+
+
+def test_holders_parses_lsof_output_and_degrades_quietly(tmp_path, monkeypatch):
+    d = tmp_path / "d"
+    d.mkdir()
+
+    class _R:
+        returncode = 0
+        stdout = ("COMMAND   PID USER\n"
+                  "python  1234 leo\n"
+                  "python  99 leo\n"
+                  "weird  notanumber leo\n")
+
+    monkeypatch.setattr(purge, "_run", lambda *a, **k: _R())
+    assert purge._holders(d) == [99, 1234]
+
+    monkeypatch.setattr(purge, "_run", lambda *a, **k: (_ for _ in ()).throw(OSError("no lsof")))
+    assert purge._holders(d) == []
+    assert purge._holders(tmp_path / "missing") == []
+
+
+def test_root_cause_unwraps_at_most_four_levels():
+    """`seen < 4` 是**深度上限**：链条再长也只扒四层（防病态环）。"""
+    from agent_wechat import errors
+    base = sqlite3.OperationalError("disk I/O error")
+    cur = base
+    for _ in range(6):
+        nxt = errors.IndexUnavailable("wrapped")
+        nxt.__cause__ = cur
+        cur = nxt
+    got = purge._root_cause(cur)
+    # 从最外层往回数 4 层
+    back = cur
+    for _ in range(4):
+        back = back.__cause__
+    assert got is back
+
+
+def test_tmutil_says_cannot_tell_instead_of_empty(monkeypatch):
+    """非零退出要印「无法判定（退出码 N：…）」，不能印成「无输出」（两者含义相反）。"""
+
+    class _Bad:
+        returncode = 64
+        stdout = ""
+        stderr = "usage: tmutil\n"
+
+    monkeypatch.setattr(purge, "_run", lambda *a, **k: _Bad())
+    assert "无法判定" in purge._tmutil(["isexcluded", "/x"])
+    assert "64" in purge._tmutil(["isexcluded", "/x"])
+
+    class _Empty:
+        returncode = 0
+        stdout = "   "
+        stderr = ""
+
+    monkeypatch.setattr(purge, "_run", lambda *a, **k: _Empty())
+    assert purge._tmutil(["isexcluded", "/x"]) == "无输出"
+
+    monkeypatch.setattr(purge, "_run", lambda *a, **k: (_ for _ in ()).throw(OSError("x")))
+    assert "无法判定" in purge._tmutil(["isexcluded", "/x"])
+
+
+def test_residue_render_shows_leftovers_and_the_tombstone_verdict(tmp_path):
+    left = purge.ChatResidue(
+        leftover=(str(tmp_path / "left"),), tombstone_written=0, tombstone_expected=2,
+        export_dirs=(tmp_path / "exp",))
+    text = left.render()
+    assert "计划内仍未删除" in text and str(tmp_path / "left") in text
+    assert "导出目录仍在" in text and str(tmp_path / "exp") in text
+    assert "不可逆性未建立" in text
+    ok = purge.ChatResidue(leftover=(), tombstone_written=2, tombstone_expected=2,
+                           export_dirs=())
+    assert "不可逆性已建立" in ok.render()
+
+
+def test_execute_refuses_a_symlinked_file_artifact_even_when_the_target_is_inside(
+        tmp_path):
+    """`kind="file" or _escapes_home(...)`：文件型产物**只要是符号链接就拒**——
+    unlink 删的是链接，目标（哪怕在 home 内）原样留存，报「已清空」就是假象。"""
+    home = tmp_path / "home"
+    home.mkdir(parents=True)
+    (home / "real.bin").write_bytes(b"x")
+    (home / "passphrase.json").symlink_to(home / "real.bin")
+    with pytest.raises(errors.PurgeRefused, match="符号链接"):
+        purge.execute(purge.plan(frozenset({"keys"})))
+    assert (home / "real.bin").exists()
+
+
+def test_has_another_name_says_yes_when_it_cannot_tell(tmp_path, monkeypatch):
+    """判不出来就别删：`lstat` 抛 OSError 时必须返回 True（当「有第二个名字」处理）。"""
+    p = tmp_path / "f"
+    p.write_bytes(b"x")
+    monkeypatch.setattr(pathlib.Path, "lstat",
+                        lambda self: (_ for _ in ()).throw(PermissionError(13, "denied")))
+    assert purge._has_another_name(p) is True
+    monkeypatch.undo()
+    assert purge._has_another_name(tmp_path / "nope") is False
+    assert purge._has_another_name(p) is False
+
+
+def test_user_homes_includes_the_sudo_invokers_home(monkeypatch):
+    """`SUDO_UID` 是 sudo 给出的**发起者** uid：不拿它查 passwd，`sudo` 下
+    （HOME=/var/root）就拦不住「少打 /.agent-wechat」的手滑。"""
+    monkeypatch.setenv("SUDO_UID", str(os.getuid() + 100000))   # 一个几乎必然查不到的 uid
+    assert purge._user_homes()          # 查不到也不炸
+    import pwd
+    monkeypatch.setenv("SUDO_UID", "0")
+    root_home = pathlib.Path(pwd.getpwuid(0).pw_dir).resolve(strict=False)
+    monkeypatch.setattr(purge, "_home_of_uid",
+                        lambda uid: pathlib.Path("/nonexistent-root-home"))
+    assert pathlib.Path("/nonexistent-root-home") in purge._user_homes(), \
+        "不存在的家目录也要收（resolve(strict=False)）"
+
+
+def test_plan_chat_refuses_an_insane_home(tmp_path, monkeypatch):
+    """`HOME_DIR` 是 `/` 时不许出计划（会删整机）。"""
+    monkeypatch.setattr(paths, "HOME_DIR", pathlib.Path("/"))
+    with pytest.raises(errors.PurgeRefused):
+        purge.plan_chat([{"account": "a", "chat_id": "c"}])
+
+
+def test_remove_reports_whether_anything_was_removed(tmp_path):
+    f = tmp_path / "f"
+    f.write_bytes(b"x")
+    item = purge._item(purge.Artifact("x", f, "file", True, "无"))
+    assert purge._remove(item) is True
+    assert not f.exists()
+    assert purge._remove(item) is False        # 第二次：没了
+
+
+def test_undo_chat_defaults_to_preview(tmp_path, monkeypatch):
+    """`apply` 默认 False：不带 `--undo --yes` 时只数、不改（误删救援路径最怕默认动手）。"""
+    home = tmp_path / "home"
+    home.mkdir(parents=True)
+    monkeypatch.setattr(paths, "HOME_DIR", home)
+    from agent_wechat import exclusions
+    import sqlite3 as _sq
+    md5 = messages.chat_md5("wxid_testacct01_ab12")
+    f = exclusions.path()
+    f.parent.mkdir(parents=True, exist_ok=True)
+    raw = _sq.connect(":memory:")            # 先落盘（standalone 对不存在的文件用内存表）
+    raw.execute("ATTACH DATABASE ? AS exclusions", (str(f),))
+    raw.executescript(exclusions.SCHEMA)
+    raw.commit()
+    raw.close()
+    with exclusions.standalone() as con:
+        exclusions.add(con, [(f"acct|{md5}|message_0.db|1", "acct", md5)])
+        con.commit()
+    got = purge.undo_chat([{"account": "acct", "chat_id": "wxid_testacct01_ab12"}])
+    assert got and got[0].count >= 1
+    with exclusions.standalone() as con:
+        assert exclusions.count_chat(con, "acct",
+                                     messages.chat_md5("wxid_testacct01_ab12")) >= 1

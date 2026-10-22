@@ -2732,3 +2732,65 @@ def test_pkcs7_strip_rejects_every_out_of_range_padding():
         strip(b"\x00" * 15 + b"\x02")                              # 尾字节 2 但前一位不是 2
     with pytest.raises(errors.DecryptError, match="为空"):
         strip(b"")
+
+
+# ---------- B 复核后的真缺口（§5.4）：media ----------
+
+def test_media_keys_repr_hides_the_material():
+    """`repr=False` 被改成默认（True）时，frozen dataclass 会生成含 `aes_key_ascii`
+    的 repr——密钥就进了日志。类里手写的 `__repr__` 遮住了它，但**别处若用
+    `dataclasses.fields`/`asdict` 渲染**仍会带出。这条钉住「默认 repr 不用」。"""
+    keys = media.MediaKeys(xor_key=FAKE_XOR, aes_key_ascii=FAKE_KEY, code="test",
+                           aes_verified=True)
+    assert repr(keys) == "MediaKeys(***)"
+    assert FAKE_KEY.decode() not in repr(keys)
+
+
+def test_media_keys_is_frozen():
+    """`frozen=True` 是契约：解密材料的载体不该被事后改写（也在 `__hash__` 上）。"""
+    import dataclasses
+    keys = media.MediaKeys(xor_key=FAKE_XOR, aes_key_ascii=FAKE_KEY, code="t",
+                           aes_verified=True)
+    assert media.MediaKeys.__dataclass_params__.frozen is True
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        keys.xor_key = 1
+
+
+def test_kvcomm_codes_dedups_across_the_two_levels(tmp_path, monkeypatch):
+    """同一个 code 在 Documents 与 Data 两级各有一份时只保留一条（`and` 变 `or`
+    会让第二条在 `m` 为真时无条件追加）。"""
+    monkeypatch.setattr(paths, "CONTAINER", tmp_path / "Data")
+    # `_kvcomm_codes` 探的是 CONTAINER 与 CONTAINER.parent 两级下的同一个子路径
+    for base in ("Data", ""):
+        d = tmp_path / base / "app_data/net/kvcomm"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "key_123_abc").write_bytes(b"")
+    assert media._kvcomm_codes() == ["123"]
+
+
+def test_scan_dats_picks_the_majority_xor_key_and_the_first_v2_sample(tmp_path):
+    """`_scan_dats` 的四个常/边界此前零断言：
+    扫描上限（`scanned >= limit`）、小于 8 字节的样本、尾两字节判据、`+1` 的计数阈值。"""
+    def dat(name, body):
+        p = tmp_path / name
+        p.write_bytes(body)
+        return p
+
+    tail = bytes([0x31 ^ 0xFF, 0x31 ^ 0xD9])          # xor_key=0x31 的 JPEG EOI
+    good = [dat(f"g{i}.dat", media.V2_SIG + b"\x00" * 20 + tail) for i in range(4)]
+    other = [dat(f"o{i}.dat", b"\x00" * 8 + bytes([0x55 ^ 0xFF, 0x55 ^ 0xD9]))
+             for i in range(2)]
+    tiny = dat("tiny.dat", b"\x00" * 7)              # < 8：跳过，不参与计数
+
+    key, sample = media._scan_dats(good + other + [tiny])
+    assert key == 0x31, "4 个一致才算数（2 个 0x55 不够）"
+    assert sample == good[0], "首个 V2 样本"
+
+    # 只有 2 个一致 ⇒ 达不到阈值（`+1` 变 `+2` 时这里会误判为 0x31）
+    assert media._scan_dats(good[:2])[0] is None
+    # 8 字节整的文件**要**被扫（`< 8` 变 `<= 8` 时会跳过它，样本因此丢掉）
+    eight = [dat(f"e{i}.dat", media.V2_SIG + tail) for i in range(4)]
+    assert media._scan_dats(eight) == (0x31, eight[0])
+    # 扫描上限：limit=4 时**恰好**够凑满 4 个一致 ⇒ 少扫一个就掉到阈值下
+    assert media._scan_dats(good, limit=4) == (0x31, good[0])
+    assert media._scan_dats(good + other, limit=1)[0] is None

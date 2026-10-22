@@ -382,3 +382,89 @@ def test_the_fts_update_trigger_covers_chat_id(con):
     ).fetchone()[0]
     assert "UPDATE OF content, chat_id" in sql, sql
 
+
+
+# ---------- B 复核后的真缺口（§5.4）：store ----------
+
+def _fresh(con):
+    """确保连接不在事务里（前面的用例可能留了未提交的写）。"""
+    con.commit()
+    assert con.in_transaction is False
+    return con
+
+
+def test_empty_upserts_return_zero_and_open_no_transaction(con):
+    """三个 upsert 的「空批提前返回」是**契约**（docstring 明写「不开事务」）：
+    删掉早退会先 `BEGIN IMMEDIATE` 再空跑，返回 0 却留下一个打开的事务。"""
+    for fn, rows in ((store.upsert_media_refs, []), (store.upsert_msg_parts, []),
+                     (store.upsert_extras, [])):
+        _fresh(con)
+        assert fn(con, rows) == 0
+        assert con.in_transaction is False, fn.__name__
+
+
+def test_upsert_extras_opens_an_explicit_transaction(con):
+    """有行时必须自己开 `BEGIN IMMEDIATE`（写锁先拿，再判据 + 写）。"""
+    _fresh(con)
+    assert store.upsert_extras(con, [("acct|aaa|message_0.db|1", 48, b"<x/>")]) == 0
+    assert con.in_transaction is True
+
+
+def test_count_media_refs_with_an_empty_chat_filter_is_zero(con):
+    """`chat_ids=[]` 走早退：拼出 `IN ()` / 空 `OR` 是语法错，不许真的去查。"""
+    assert store.count_media_refs(con, "acct", chat_ids=[]) == 0
+
+
+def test_get_watermark_defaults_to_zero_for_an_unknown_chat(con):
+    assert store.get_watermark(con, "acct", "message_0.db", "deadbeef") == 0
+
+
+def test_roster_skip_chat_md5_is_empty_without_a_roster(con):
+    """没重建过名册 ⇒ 没有「被排除且已无消息」的会话，返回空集（不是 None）。"""
+    assert store.roster_skip_chat_md5(con, "acct") == set()
+
+
+def test_connect_sets_synchronous_normal(tmp_path, monkeypatch):
+    """`PRAGMA synchronous=NORMAL` 是性能设定也是崩溃语义的一部分——
+    WAL 下 NORMAL 才不至于每条提交都 fsync（删掉它退化成 FULL）。"""
+    monkeypatch.setattr(paths, "HOME_DIR", tmp_path / "home")
+    c = store.connect(tmp_path / "index.db")
+    try:
+        assert c.execute("PRAGMA synchronous").fetchone()[0] == 1   # 1 = NORMAL
+    finally:
+        c.close()
+
+
+def test_index_unavailable_only_names_the_lock_for_actual_locks():
+    """`operational and "locked"` → `or` 会让**任何** OperationalError 都建议「等写者」，
+    而 `disk I/O error` 的下一步是查磁盘，不是等。"""
+    import sqlite3
+    from agent_wechat import errors
+    locked = store.index_unavailable(sqlite3.OperationalError("database is locked"))
+    io = store.index_unavailable(sqlite3.OperationalError("disk I/O error"))
+    assert isinstance(locked, errors.IndexUnavailable) and "稍后重试" in locked.hint
+    assert "稍后重试" not in io.hint, io.hint
+
+
+def test_open_rolls_back_on_an_exception_inside_the_block(tmp_path, monkeypatch):
+    """`with store.open()` 里抛异常必须回滚：不回滚的话半截写入会随下一次 commit 落盘。"""
+    monkeypatch.setattr(paths, "HOME_DIR", tmp_path / "home")
+    db = tmp_path / "index.db"
+    with pytest.raises(RuntimeError):
+        with store.open(db) as c:
+            c.execute("INSERT INTO messages (msg_key, account, chat_md5, chat_id, shard,"
+                      " local_id, ts, msg_type, is_self, content, exported_at)"
+                      " VALUES ('k1','a','m','c','message_0.db',1,1,1,0,'x',0)")
+            raise RuntimeError("boom")
+    with store.open(db) as c:
+        assert c.execute("SELECT count(*) FROM messages").fetchone()[0] == 0
+
+
+def test_schema_drift_notes_reports_a_missing_trigger(con):
+    """老库/手工建库少了触发器时必须报出来（`CREATE TRIGGER IF NOT EXISTS` 不会补）。"""
+    name = con.execute("SELECT name FROM sqlite_master WHERE type='trigger'"
+                       " ORDER BY name LIMIT 1").fetchone()[0]
+    con.execute(f"DROP TRIGGER {name}")
+    con.commit()
+    notes = store.schema_drift_notes(con)
+    assert any(name in n and "不存在" in n for n in notes), notes
