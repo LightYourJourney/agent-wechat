@@ -4,6 +4,7 @@ import hashlib
 import os
 import pathlib
 import stat
+import urllib.request
 
 import pytest
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
@@ -2794,3 +2795,117 @@ def test_scan_dats_picks_the_majority_xor_key_and_the_first_v2_sample(tmp_path):
     # 扫描上限：limit=4 时**恰好**够凑满 4 个一致 ⇒ 少扫一个就掉到阈值下
     assert media._scan_dats(good, limit=4) == (0x31, good[0])
     assert media._scan_dats(good + other, limit=1)[0] is None
+
+
+# ---------- §5.5：行从未被执行过的分支（纯函数，零网络） ----------
+
+
+def test_sticker_name_returns_none_without_a_payload():
+    """没有 desc/emojiattr 的贴纸直接 None——不能带着空串去 b64decode（会解出空 blob，
+    然后一路走到「没有中文」的兜底，白跑一遍）。"""
+    assert media._sticker_name(None) is None
+    assert media._sticker_name("") is None
+
+
+def test_wxgf_transcode_returns_false_without_ffmpeg_or_magic(tmp_path, monkeypatch):
+    """转码是**可选**能力：没有 ffmpeg、或流里找不到 HEVC 起始码，一律 False
+    （调用方退回存 .wxgf 原容器），绝不抛。"""
+    dest = tmp_path / "x.jpg"
+    monkeypatch.setattr(media, "_find_ffmpeg", lambda: None)
+    assert media._wxgf_to_jpeg(b"\x00\x00\x00\x01rest", dest) is False
+
+    calls = []
+    monkeypatch.setattr(media, "_find_ffmpeg", lambda: "/bin/true")
+    monkeypatch.setattr(media.subprocess, "run", lambda *a, **k: calls.append(a))
+    assert media._wxgf_to_jpeg(b"no start code here", dest) is False
+    assert calls == [], "没有 HEVC 起始码时不该起 ffmpeg"
+
+
+def test_wxgf_transcode_reports_success_and_writes_dest(tmp_path, monkeypatch):
+    """成功路径必须返回 True（否则调用方会再存一份 .wxgf，同一张图两份产物）。"""
+    dest = tmp_path / "x.jpg"
+
+    def fake_run(argv, **kw):
+        dest.write_bytes(b"\xff\xd8\xffjpeg")
+        return type("R", (), {"returncode": 0})()
+
+    monkeypatch.setattr(media, "_find_ffmpeg", lambda: "/usr/bin/ffmpeg")
+    monkeypatch.setattr(media.subprocess, "run", fake_run)
+    assert media._wxgf_to_jpeg(b"\x00\x00\x00\x01rest", dest) is True
+    assert dest.exists() and stat.S_IMODE(dest.stat().st_mode) == 0o600
+
+
+def test_exported_path_video_without_file_key_and_unknown_kind_are_none(tmp_path):
+    """video 分支的 `file_key is None` 与「未知 kind」两个 None：去掉任一条，函数会拿着
+    `None` 去拼路径、探测永不存在的文件，把「参数不全」伪装成「没导出过」。"""
+    root = tmp_path / "out"
+    cm = "d" * 32
+    ts = int(datetime.datetime(2026, 9, 15, 12, 0).timestamp())
+    # 诱饵：去掉 guard 后函数会去匹配 `None.mp4` 并命中，所以这条断言真在测 guard
+    (root / cm / "video" / "2026-09").mkdir(parents=True)
+    (root / cm / "video" / "2026-09" / "None.mp4").write_bytes(b"x")
+    assert media.exported_path(root, chat_md5=cm, kind="video", ts=ts) is None
+    assert media.exported_path(root, chat_md5=cm, kind="nope", ts=ts,
+                               file_key="k") is None
+
+
+def test_voice_body_keys_is_none_when_the_passphrase_is_unavailable(monkeypatch):
+    """拿不到口令 → None（读不到），不是空集合（确定没有）——两者对调用方的含义相反。"""
+    def boom(_account):
+        raise errors.AgentWeChatError("no passphrase（桩）")
+
+    monkeypatch.setattr(media.keys_mod, "get_passphrase", boom)
+    assert media.voice_body_keys("acct") is None
+
+
+def test_cdn_redirect_is_refused_for_a_missing_or_foreign_host():
+    """跳转目标必须也在白名单内。`hostname or ""` 的兜底不可省：无主机的 URL
+    （`http:///x`）在 `and` 写法下会把 None 交给 `endswith`，抛 AttributeError。"""
+    handler = media._AllowlistedRedirect()
+    req = urllib.request.Request("http://vweixinf.tc.qq.com/a")
+    assert handler.redirect_request(req, None, 302, "", {}, "http:///x") is None
+    assert handler.redirect_request(req, None, 302, "", {},
+                                    "http://evil.example/b") is None
+
+
+def test_cdn_redirect_follows_an_allowlisted_target():
+    """白名单内的跳转要真的交给父类（返回一个新 Request）；删掉 `super()` 那行会变成
+    拒绝一切跳转——CDN 上常见的 302 会直接失败。"""
+    handler = media._AllowlistedRedirect()
+    req = urllib.request.Request("http://vweixinf.tc.qq.com/a")
+    got = handler.redirect_request(req, None, 302, "", {},
+                                   "http://vweixinf.tc.qq.com/b")
+    assert got is not None and got.full_url == "http://vweixinf.tc.qq.com/b"
+
+
+def test_cdn_opener_forces_a_direct_connection():
+    """必须是 OpenerDirector（自带直连 ProxyHandler）：换成裸 urlopen 会被系统代理吃掉
+    ——2026-09-22 的「CDN 不通」假结论就是那次代理造成的。本用例不发任何请求。"""
+    assert isinstance(media._cdn_opener(), urllib.request.OpenerDirector)
+
+
+def test_fetch_cdn_bytes_refuses_a_malformed_url_and_a_non_200(monkeypatch):
+    """`urlsplit` 的 ValueError 也要落在「返回 None、不抛」这道网里；非 200 同理。"""
+    assert media._fetch_cdn_bytes("http://[", "0" * 32) is None
+
+    class _Resp:
+        status = 500
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return body                                  # md5 对得上，唯余 status 拦着
+
+    body = b"payload"
+    good_md5 = hashlib.md5(body).hexdigest()
+
+    class _Opener:
+        def open(self, url, timeout=None):
+            return _Resp()
+
+    monkeypatch.setattr(media, "_cdn_opener", lambda: _Opener())
+    assert media._fetch_cdn_bytes("http://vweixinf.tc.qq.com/x", good_md5) is None

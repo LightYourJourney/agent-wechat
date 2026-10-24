@@ -614,3 +614,87 @@ def test_a_degradation_defaults_to_drift():
     d = usecases.Degradation("stickers", "contact.db", "contact", (), "少一部分")
     assert d.drift is True
     assert usecases.Degradation("stickers", "c.db", "t", (), "e", drift=False).drift is False
+
+
+def test_sniff_ext_reads_the_magic_bytes():
+    """`_sniff_ext` 的每条魔数分支都要钉住：删掉某个 `return` 会一路落到函数末尾的
+    `return None`，于是内容明明是 PNG/GIF/WebP 却被判成「不是图片」，导出侧把它记成
+    `media_garbage` 并丢掉（`test_moments_usecases` 只覆盖了乱码那一边）。"""
+    assert usecases._sniff_ext(b"\x89PNG\r\n\x1a\n" + b"x") == "png"
+    assert usecases._sniff_ext(b"GIF87a" + b"x") == "gif"
+    assert usecases._sniff_ext(b"GIF89a" + b"x") == "gif"
+    assert usecases._sniff_ext(b"RIFF" + b"\x00" * 4 + b"WEBP" + b"x") == "webp"
+    assert usecases._sniff_ext(b"\xff\xd8\xff" + b"x") == "jpg"
+    assert usecases._sniff_ext(b"\x00" * 4 + b"ftyp" + b"x") == "mp4"
+    assert usecases._sniff_ext(b"not an image") is None
+
+
+def test_index_ready_reports_false_when_the_index_cannot_be_opened(monkeypatch):
+    """判不出来时必须是 `False`（而不是 None / 抛出）：调用方拿它决定要不要印
+    「索引为空」的提示。删掉 `except` 里的 `return False` 会返回 None——真值判断下
+    看起来一样，类型契约上不是 bool。"""
+    def boom(*a, **k):
+        raise sqlite3.DatabaseError("disk I/O error（桩）")
+
+    monkeypatch.setattr(store, "open", boom)
+    assert usecases.index_ready() is False
+
+
+def test_every_entry_point_hands_back_the_ambiguity_instead_of_guessing(stub):
+    """五个解析入口遇到歧义都必须把 `NeedConfirm` **原样交回**：删掉那行早退，
+    函数会带着 NeedConfirm 对象继续跑（拼 chat_md5、开库、渲染），报出来的是下游的
+    AttributeError / KeyError，而不是「请从这些候选里选一个」。"""
+    _ambiguous(stub)
+    assert isinstance(usecases.media_export("张三", kinds=["image"]), usecases.NeedConfirm)
+    assert isinstance(usecases.message_media("张三"), usecases.NeedConfirm)
+    assert isinstance(usecases.chat_export("张三"), usecases.NeedConfirm)
+    assert isinstance(usecases.purge_chat_targets("张三"), usecases.NeedConfirm)
+    assert isinstance(usecases.moments_export("张三"), usecases.NeedConfirm)
+
+
+def test_voice_keys_for_is_the_documented_seam(monkeypatch):
+    """`_voice_keys_for` 是**测试接缝**：写成函数而不是模块级别名，替换它才能生效。
+    删掉 `return` 会让它变成 None（= 「读不到」），调用方随之降级。"""
+    sentinel = frozenset({("chat-md5", 1)})
+    monkeypatch.setattr(usecases.media, "voice_body_keys", lambda a: sentinel)
+    assert usecases._voice_keys_for("acct") is sentinel
+
+
+def test_start_vector_build_only_names_a_single_account(monkeypatch):
+    """任务元数据沿用单数 `account` 字段：**恰好一个**账号才写它，多账号与空列表都写
+    None。把 `and`/`== 1`/`accounts[0]` 中任何一处改掉，多账号任务会被挂到某个账号名下
+    （或单账号因为索引 1 越界而崩）。"""
+    seen = {}
+
+    def fake_start(kind, fn, **kw):
+        seen.update(kind=kind, **kw)
+        return "tid"
+
+    monkeypatch.setattr(tasks, "start", fake_start)
+    assert usecases.start_vector_build(["a"], False) == "tid"
+    assert seen["account"] == "a"
+    assert usecases.start_vector_build(["a", "b"], False) == "tid"
+    assert seen["account"] is None
+    assert usecases.start_vector_build([], False) == "tid"
+    assert seen["account"] is None
+
+
+def test_start_vector_build_reports_skipped_and_final_rows(monkeypatch):
+    """结束时必须补 `skipped` 并把返回值（终值）交出去：删掉任一行，任务记录会停在
+    中间进度，或让 `tasks.start` 拿到 None。"""
+    updates = []
+
+    def fake_build(accounts=None, rebuild=False, progress=None):
+        if progress:
+            progress(7)
+        return {"skipped_this_run": 3, "embedded_this_run": 9}
+
+    monkeypatch.setattr(usecases.vector, "build_index", fake_build)
+    monkeypatch.setattr(tasks, "update", lambda tid, **kw: updates.append((tid, kw)))
+    holders = []
+    monkeypatch.setattr(tasks, "start",
+                        lambda kind, fn, **kw: (holders.append(fn), "tid")[1])
+
+    usecases.start_vector_build(["a"], False)
+    assert holders[0]("tid") == 9
+    assert updates[-1] == ("tid", {"skipped": 3})

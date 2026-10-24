@@ -318,3 +318,22 @@ def test_a_zero_exit_that_produced_no_file_is_still_a_failure(tmp_path, monkeypa
     with pytest.raises(errors.DecryptError, match="sqlcipher 解密失败"):
         with decrypt.decrypted(db, b"w" * 32):
             pass
+
+
+def test_first_line_returns_an_empty_string_when_there_is_none():
+    """没有可用行时返回空串（不是 None）：消息模板直接插值它，`None` 会印成字面量
+    「None」。首行还要去掉两侧空白。"""
+    assert decrypt._first_line("") == ""
+    assert decrypt._first_line("\n  \n") == ""
+    assert decrypt._first_line("  boom  \nsecond") == "boom"
+
+
+def test_sweep_stale_tempdirs_tolerates_an_unreadable_tmp(tmp_path, monkeypatch):
+    """`tmp/` 读不了时返回 0：清扫绝不因此挡住解密，且返回值是 int（调用方会累加/上报），
+    不是 None。"""
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "tmp").write_bytes(b"x")            # tmp 是文件：iterdir 抛 NotADirectoryError
+    monkeypatch.setattr(paths, "HOME_DIR", home)
+    monkeypatch.setattr(decrypt, "_swept_stale", False)
+    assert decrypt.sweep_stale_tempdirs() == 0

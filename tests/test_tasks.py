@@ -659,3 +659,13 @@ def test_stale_tmp_from_a_crash_is_swept(tmp_path, monkeypatch):
         assert live.exists(), "活进程的 tmp 绝不许碰"
     finally:
         sleeper.kill(); sleeper.wait(timeout=10)
+
+
+def test_sweep_stale_tmp_tolerates_an_unreadable_directory(tmp_path, monkeypatch):
+    """清扫是尽力而为：`TASKS_FILE.parent` 读不了时直接收手，不许把
+    `UnboundLocalError` 抛给读路径（删掉 `except OSError: return` 就会——`entries`
+    此刻还没绑定）。"""
+    not_a_dir = tmp_path / "file"
+    not_a_dir.write_bytes(b"x")                 # 让 parent.iterdir() 抛 NotADirectoryError
+    monkeypatch.setattr(tasks, "TASKS_FILE", not_a_dir / "tasks.json")
+    tasks._sweep_stale_tmp()                    # 不抛
