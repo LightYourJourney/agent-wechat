@@ -2909,3 +2909,128 @@ def test_fetch_cdn_bytes_refuses_a_malformed_url_and_a_non_200(monkeypatch):
 
     monkeypatch.setattr(media, "_cdn_opener", lambda: _Opener())
     assert media._fetch_cdn_bytes("http://vweixinf.tc.qq.com/x", good_md5) is None
+
+
+# ---------- §5.5 第二批：export_media 的降级/进度/上限分支 ----------
+
+def test_export_media_reports_when_the_out_dir_cannot_be_stat_ed(tmp_path, monkeypatch):
+    """`stat` 失败也要报「权限未能收紧」：报不出来时用户以为 0700 已经生效，
+    而明文媒体可能被同机其他用户读到。"""
+    root, account = make_tree(tmp_path, monkeypatch)
+    gone = tmp_path / "gone"
+    monkeypatch.setattr(media, "ensure_tree", lambda p: gone)     # 不存在 ⇒ stat 抛 OSError
+    rep = media.export_media(account, ["c@chatroom"], kinds=[], out_dir=gone)
+    assert any("权限未能收紧" in d for d in rep.degraded), rep.degraded
+
+
+def test_export_media_counts_an_unknown_image_format_as_failed(tmp_path, monkeypatch):
+    """解开了但魔数不认识 → failed（不是 ok、也不是静默跳过）：用户要看到「这张没导出来」。
+
+    把该月的两张 dat 换成**未知魔数**的合法 V2 容器（不桩 `decrypt_dat`/`detect_ext`：
+    那两个都是 `derive_keys` 的样本校验路径，桩掉就退化成「图片解密不可用」而不是这条分支）。
+    2026-03 的样本仍可解出 JPEG，所以密钥依旧验证通过。"""
+    import hashlib
+    root, account, cm = make_media_tree(tmp_path, monkeypatch)
+    aes = hashlib.md5(("999999" + paths.bare_wxid(account)).encode()).hexdigest()[:16].encode()
+    img = paths.XWECHAT_FILES / account / "msg/attach" / cm / "2026-09" / "Img"
+    for name in ("beef.dat", "c0de.dat"):
+        (img / name).write_bytes(build_v2_dat(b"not-an-image!", b"\x11" * 8 + b"\xff\xd9",
+                                              aes, FAKE_XOR))
+    rep = media.export_media(account, ["chatA@chatroom"], kinds=["image"],
+                             months=["2026-09"], out_dir=root / "home" / "media")
+    assert rep.image.failed == 2 and rep.image.ok == 0, (rep.image, rep.degraded)
+
+
+def test_export_media_reports_image_progress(tmp_path, monkeypatch):
+    """图片分支的 `progress(produced)`：删掉它，长导出在 CLI 上就是全程无输出。"""
+    root, account, cm = make_media_tree(tmp_path, monkeypatch)
+    seen = []
+    media.export_media(account, ["chatA@chatroom"], kinds=["image"], months=["2026-09"],
+                       out_dir=root / "home" / "media", progress=seen.append)
+    assert seen == [1, 2], seen                    # 一张 jpg + 一个 wxgf
+
+
+def test_export_media_reports_video_progress(tmp_path, monkeypatch):
+    """账号级视频那条路的 `progress(produced)` 与图片侧同一口径。"""
+    root, account = make_tree(tmp_path, monkeypatch)
+    (paths.CONTAINER / "app_data/net/kvcomm/key_1_a.statistic").write_bytes(b"")
+    mon = _video_fixture(account, int(datetime.datetime(2026, 9, 15, 12, 0).timestamp()))
+    seen = []
+    media.export_media(account, ["c@chatroom"], kinds=["video"], months=[mon],
+                       out_dir=root / "home" / "media", progress=seen.append)
+    assert seen == [1], seen
+
+
+def test_export_media_truncated_thumb_without_body_is_counted(tmp_path, monkeypatch):
+    """只有缩略图、没有本体、上限已到时，缩略图必须计入 truncated/remaining：
+    漏了它，用户看到「达到上限」却数不出来还差几个文件。"""
+    root, account = make_tree(tmp_path, monkeypatch)
+    (paths.CONTAINER / "app_data/net/kvcomm/key_1_a.statistic").write_bytes(b"")
+    mon = media.month_of(int(datetime.datetime(2026, 9, 15, 12, 0).timestamp()))
+    vdir = paths.XWECHAT_FILES / account / "msg/video" / mon
+    vdir.mkdir(parents=True)
+    (vdir / "abcd_thumb.jpg").write_bytes(b"t" * 8)      # 没有对应 mp4
+    rep = media.export_media(account, ["c@chatroom"], kinds=["video"], months=[mon],
+                             out_dir=root / "home" / "media", max_files=0)
+    assert rep.truncated is True and rep.video.remaining == 1, rep.video
+
+
+def test_refs_absence_note_says_the_index_could_not_be_read():
+    """索引读不了要说「读不了」：三个正常文案都在描述「查过了、确实没有」，
+    把异常吞成 None 会让上层以为「无需提示」。"""
+    class _Bad:
+        def execute(self, *a, **k):
+            raise media.sqlite3.Error("disk I/O error（桩）")
+
+    note = media._refs_absence_note("video", _Bad(), "acct", ["c@chatroom"])
+    assert note is not None and "索引读不了" in note
+
+
+def test_video_refs_path_counts_truncated_and_missing(tmp_path, monkeypatch):
+    """refs 驱动那条路的四个归口：上限挡下（truncated/remaining）、本体不在（missing）、
+    本体读不了（missing）、落盘失败（missing），以及 `progress(done)`。
+    这四项都只在这条路上存在——账号级枚举有另一套同名列，覆盖不到这里。"""
+    ts = int(datetime.datetime(2026, 9, 15, 12, 0).timestamp())
+    mon = media.month_of(ts)
+    fk = "aa" * 16
+
+    # ① 上限：max_files=0，一条 ref 直接被挡下
+    for n in "abcde":                       # 每段一个独立索引库（_video_index 会往里播种）
+        (tmp_path / n).mkdir()
+    root, account = make_tree(tmp_path, monkeypatch)
+    vdir = paths.XWECHAT_FILES / account / "msg/video" / mon
+    vdir.mkdir(parents=True)
+    (vdir / f"{fk}.mp4").write_bytes(b"video-bytes")
+    con = _video_index(tmp_path / "a", account, [("wxid_a", 1, ts, fk)])
+    rep = media.export_media(account, ["wxid_a"], kinds=["video"], con=con, max_files=0)
+    assert (rep.truncated, rep.video.remaining) == (True, 1), rep.video
+
+    # ② 本体不在磁盘
+    con = _video_index(tmp_path / "b", account, [("wxid_a", 2, ts, "bb" * 16)])
+    rep = media.export_media(account, ["wxid_a"], kinds=["video"], con=con)
+    assert (rep.video.missing, rep.video.ok) == (1, 0), rep.video
+    con.close()
+
+    # ③ 本体读不了：让 resolve_video 交回一个目录（read_bytes 抛 IsADirectoryError）
+    con = _video_index(tmp_path / "c", account, [("wxid_a", 3, ts, "cc" * 16)])
+    real_resolve = media.resolve_video
+    monkeypatch.setattr(media, "resolve_video", lambda *a: (tmp_path, False))
+    rep = media.export_media(account, ["wxid_a"], kinds=["video"], con=con)
+    assert rep.video.missing == 1, rep.video
+    monkeypatch.setattr(media, "resolve_video", real_resolve)
+
+    # ④ 落盘失败 + ⑤ progress(done)
+    (vdir / f"{'dd' * 16}.mp4").write_bytes(b"video-bytes")   # 本体在，卡在落盘那一步
+    con = _video_index(tmp_path / "d", account, [("wxid_a", 4, ts, "dd" * 16)])
+    real_save = media.save_artifact
+    monkeypatch.setattr(media, "save_artifact", lambda *a: None)
+    rep = media.export_media(account, ["wxid_a"], kinds=["video"], con=con)
+    assert rep.video.missing == 1, rep.video
+    monkeypatch.setattr(media, "save_artifact", real_save)
+
+    con = _video_index(tmp_path / "e", account, [("wxid_a", 5, ts, fk)])
+    out = root / "home" / "media"
+    seen = []
+    rep = media.export_media(account, ["wxid_a"], kinds=["video"], con=con, out_dir=out,
+                             progress=seen.append)
+    assert rep.video.ok == 1 and seen == [1], (rep.video, seen)
