@@ -403,8 +403,12 @@ def test_empty_upserts_return_zero_and_open_no_transaction(con):
         assert con.in_transaction is False, fn.__name__
 
 
-def test_upsert_extras_opens_an_explicit_transaction(con):
-    """有行时必须自己开 `BEGIN IMMEDIATE`（写锁先拿，再判据 + 写）。"""
+def test_upsert_extras_leaves_the_write_in_an_open_transaction(con):
+    """有行时，写必须留在**未提交**的事务里（不许被自动提交掉）。
+
+    本用例**分不出**显式 `BEGIN IMMEDIATE` 与 sqlite3 的隐式事务——两者都让
+    `in_transaction` 为真，那一位点 §5.4 已判等价。此处只钉「写之后事务仍开着」，
+    不再声称钉住写锁时机。"""
     _fresh(con)
     assert store.upsert_extras(con, [("acct|aaa|message_0.db|1", 48, b"<x/>")]) == 0
     assert con.in_transaction is True
@@ -447,7 +451,10 @@ def test_index_unavailable_only_names_the_lock_for_actual_locks():
 
 
 def test_open_rolls_back_on_an_exception_inside_the_block(tmp_path, monkeypatch):
-    """`with store.open()` 里抛异常必须回滚：不回滚的话半截写入会随下一次 commit 落盘。"""
+    """`with store.open()` 里抛异常，半截写入**不得**随下一次 commit 落盘。
+
+    本用例钉的是这个可观测契约，**不是** `con.rollback()` 那一行：删掉它仍然绿，
+    因为 `close()` 对未提交事务同样回滚（§5.4 已判等价）。"""
     monkeypatch.setattr(paths, "HOME_DIR", tmp_path / "home")
     db = tmp_path / "index.db"
     with pytest.raises(RuntimeError):

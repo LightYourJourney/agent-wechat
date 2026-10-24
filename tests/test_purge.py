@@ -617,6 +617,24 @@ def test_tmutil_maps_nonzero_exit_to_undecidable(monkeypatch):
             and "boom" in rep.tm_excluded)
 
 
+def test_tmutil_probe_captures_text_output(monkeypatch):
+    """`capture_output` / `text` 关掉都是**真变化**，只是被桩掉的 `_run` 遮住了：
+    关 `capture_output` 后 `stdout` 是 None，「已排除」会被印成「无输出」；关 `text`
+    拿到 bytes，返回值不再是 str（进 f-string 会变成 `b'[Excluded] …'`）。
+    两处都靠调用契约钉住；`timeout` 不可观测，不钉。"""
+    seen = {}
+
+    def fake_run(argv, **kw):
+        seen.update(kw)
+        return type("R", (), {"stdout": "[Excluded] /x", "stderr": "",
+                              "returncode": 0})()
+
+    monkeypatch.setattr(purge, "_run", fake_run)
+    got = purge._tmutil(["isexcluded", "/x"])
+    assert got == "[Excluded] /x" and isinstance(got, str)
+    assert seen["capture_output"] is True and seen["text"] is True
+
+
 def test_execute_refuses_when_home_is_root(monkeypatch):
     """闸门在 execute 里也要有一道，且是第一句：CLI 是「先 plan → 再 execute」，plan 到
     execute 之间 paths.HOME_DIR 可能已被改指（或首次 plan 走的不是这条路径），到那时就只剩
@@ -1844,8 +1862,10 @@ def test_loose_entry_reports_zero_when_the_size_cannot_be_read(tmp_path, monkeyp
 
 def test_item_marks_missing_paths_and_symlinks(tmp_path):
     """三条早退分支的 `is_symlink` 都要钉住：缺失路径与**普通目录**都不是链接。
-    该字段当前没有生产读取点（`execute` 在删除时刻重算，见 purge.py:459 的注释），
-    但它是 `PlanItem` 的契约值；翻成 True 会让计划表把普通产物描述成链接。
+
+    如实说：该字段当前**没有生产读取点**（`execute` 在删除时刻重算，见 purge.py:459），
+    所以这两条钉的是 `PlanItem` 的**契约值**，不是任何用户可见行为。仍然钉它，是因为
+    `PlanItem` 是计划层的输出类型，取值翻错会让下一个读它的人拿到假话。
     目录那条尤其容易漏：整树体积分支（`kind == "dir" and not is_link`）与它同源。"""
     missing = purge._item(purge.Artifact("x", tmp_path / "nope", "file", True, "无"))
     assert missing.exists is False and missing.size == 0 and missing.is_symlink is False
@@ -1872,14 +1892,24 @@ def test_holders_parses_lsof_output_and_degrades_quietly(tmp_path, monkeypatch):
     class _R:
         returncode = 0
         stdout = ("COMMAND   PID USER\n"
-                  "python  1234 leo\n"
-                  "python  99 leo\n"
-                  "weird  notanumber leo\n"
+                  "python  1234 tester\n"
+                  "python  99 tester\n"
+                  "weird  notanumber tester\n"
                   "python 42\n"                  # 两列：PID 就在第 2 列，必须收
                   "solo\n")                      # 一列：跳过，不能因为下标越界崩掉
 
-    monkeypatch.setattr(purge, "_run", lambda *a, **k: _R())
+    seen = {}
+
+    def fake_run(argv, **kw):
+        seen.update(kw)
+        return _R()
+
+    monkeypatch.setattr(purge, "_run", fake_run)
     assert purge._holders(d) == [42, 99, 1234]
+    # `capture_output` 关掉时 `stdout` 是 None，持有者检查会**静默恒为空**（真变化，
+    # 桩掉的 `_run` 看不出来，所以在这里钉住调用契约）。`text` 关掉拿到 bytes，
+    # 本函数照样能解析（`b"42".isdigit()` 为真）——那一位点判等价，不钉。
+    assert seen["capture_output"] is True
 
     monkeypatch.setattr(purge, "_run", lambda *a, **k: (_ for _ in ()).throw(OSError("no lsof")))
     assert purge._holders(d) == []
@@ -1965,18 +1995,14 @@ def test_has_another_name_says_yes_when_it_cannot_tell(tmp_path, monkeypatch):
     assert purge._has_another_name(p) is False
 
 
-def test_user_homes_includes_the_sudo_invokers_home(monkeypatch):
-    """`SUDO_UID` 是 sudo 给出的**发起者** uid：不拿它查 passwd，`sudo` 下
-    （HOME=/var/root）就拦不住「少打 /.agent-wechat」的手滑。"""
-    monkeypatch.setenv("SUDO_UID", str(os.getuid() + 100000))   # 一个几乎必然查不到的 uid
+def test_user_homes_survives_a_sudo_uid_that_cannot_be_resolved(monkeypatch):
+    """`SUDO_UID` 是 sudo 给出的**发起者** uid，但它可能在 passwd 里查不到
+    （容器、已删除的用户）——查不到就不收，不许因此让整条判据炸掉。
+
+    「uid 映射到哪个目录」那一半由 `test_user_homes_includes_the_sudo_users_home_by_uid`
+    负责（它让不同 uid 指向不同目录，才分得出 `uids.append` 在不在）；这里只测查不到。"""
+    monkeypatch.setenv("SUDO_UID", str(os.getuid() + 100000))   # 几乎必然查不到的 uid
     assert purge._user_homes()          # 查不到也不炸
-    import pwd
-    monkeypatch.setenv("SUDO_UID", "0")
-    root_home = pathlib.Path(pwd.getpwuid(0).pw_dir).resolve(strict=False)
-    monkeypatch.setattr(purge, "_home_of_uid",
-                        lambda uid: pathlib.Path("/nonexistent-root-home"))
-    assert pathlib.Path("/nonexistent-root-home") in purge._user_homes(), \
-        "不存在的家目录也要收（resolve(strict=False)）"
 
 
 def test_plan_chat_refuses_an_insane_home(tmp_path, monkeypatch):

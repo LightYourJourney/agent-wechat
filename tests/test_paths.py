@@ -378,6 +378,40 @@ def test_pid_one_is_alive(tmp_path):
     assert paths.pid_alive(1) is True
 
 
+def test_pid_alive_sends_signal_zero_not_sighup(tmp_path):
+    """`os.kill(pid, 0)` 的 `0` 是**探活**：只问「这个 pid 可达吗」，不投递任何信号。
+    改成 `1` 就是 SIGHUP（终端断开）——一次「看它还活着吗」会真的挂断那个进程。
+    返回值与原来一样恒为 True，所以只看返回值的用例**永远分不出**；这里让子进程装一个
+    SIGHUP 处理器写标记文件：原版不该出现标记，变异版必然出现。"""
+    import subprocess
+    import sys
+    import time
+
+    marker = tmp_path / "hup"
+    child = subprocess.Popen(
+        [sys.executable, "-c",
+         "import signal, sys, time\n"
+         "def _hup(*a):\n"
+         "    open(sys.argv[1], 'w').write('hup')\n"
+         "    raise SystemExit(0)\n"
+         "signal.signal(signal.SIGHUP, _hup)\n"
+         "print('ready', flush=True)\n"
+         "time.sleep(30)\n",
+         str(marker)],
+        stdout=subprocess.PIPE, text=True)
+    stdout = child.stdout
+    assert stdout is not None                 # PIPE 一定给，只为类型检查收窄
+    try:
+        assert stdout.readline().strip() == "ready"
+        assert paths.pid_alive(child.pid) is True
+        time.sleep(0.2)                       # 投递是异步的：留一点时间
+        assert not marker.exists(), "探活不许投递 SIGHUP"
+    finally:
+        child.kill()
+        child.wait()
+        stdout.close()
+
+
 def test_time_machine_excluded_reports_none_when_it_cannot_tell(tmp_path, monkeypatch):
     monkeypatch.setattr(paths, "HOME_DIR", tmp_path / "missing")
     assert paths.time_machine_excluded() is None      # 目录还不存在
