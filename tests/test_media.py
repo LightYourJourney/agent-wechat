@@ -3034,3 +3034,195 @@ def test_video_refs_path_counts_truncated_and_missing(tmp_path, monkeypatch):
     rep = media.export_media(account, ["wxid_a"], kinds=["video"], con=con, out_dir=out,
                              progress=seen.append)
     assert rep.video.ok == 1 and seen == [1], (rep.video, seen)
+
+
+# ---------- §5.5 第三批：贴纸导出的九条分支 ----------
+
+def _sticker_with_bad_key(ts: int, md5: str, msg_key: str, chat_id="wxid_y"):
+    """一条 ref，但 messages 行的 msg_key 是**畸形**的（用于 EA-022 的两道形状闸）。"""
+    con = _one_sticker_index(ts, md5, chat_id=chat_id)
+    con.execute("DELETE FROM media_refs")
+    con.commit()
+    row = messages.make_row(
+        account="wxid_testacct01_ab12", chat_md5=messages.md5_of(chat_id),
+        chat_id=chat_id, shard="message_0.db", local_id=8, ts=ts,
+        msg_type=messages.TYPE_STICKER, sender_id=chat_id, sender_name=None,
+        is_self=0, content=messages.sticker_display(md5, None), media_hint="[sticker]")
+    row["msg_key"] = msg_key
+    store.upsert_batch(con, [row])
+    store.upsert_media_refs(con, [(msg_key, "sticker", md5, None)])
+    con.commit()
+    return con
+
+
+def test_sticker_export_without_an_index_degrades_in_one_line(tmp_path, monkeypatch):
+    """`con=None` 必须一条都不导并**只公告一次**：删掉那头两行，要么静默产出 0 条，
+    要么带着 None 去查库（AttributeError）。"""
+    _, account = make_tree(tmp_path, monkeypatch)
+    rep = media.export_media(account, ["wxid_x"], kinds=["sticker"], con=None)
+    assert rep.sticker.ok == 0 and rep.sticker.missing == 0
+    assert rep.degraded == ["贴纸导出需要索引库（归属按 media_refs 判定）：本次未导出任何贴纸"]
+
+
+def test_sticker_rerun_counts_skipped(tmp_path, monkeypatch):
+    """已在盘上的贴纸重跑要计 skipped（不重复取件）：删掉 already 那两行，
+    第二次会重新取一次并计 ok。"""
+    _, account = make_tree(tmp_path, monkeypatch)
+    ts = int(datetime.datetime(2026, 9, 15, 12, 0).timestamp())
+    md5 = "d0f46ed3" + "0" * 24
+    monkeypatch.setattr(media, "sticker_cdn_urls",
+                        lambda *a, **k: ({(messages.md5_of("wxid_x"), "message_0.db", 7):
+                                          ("http://wxapp.tc.qq.com/x", md5)}, None))
+    monkeypatch.setattr(media, "_fetch_cdn_bytes",
+                        lambda *a, **k: b"\x89PNG\r\n\x1a\n" + b"x" * 8)
+    out = tmp_path / "media"
+    con = _one_sticker_index(ts, md5)
+    try:
+        first = media.export_media(account, ["wxid_x"], kinds=["sticker"], out_dir=out,
+                                   con=con, with_cdn=True)
+        second = media.export_media(account, ["wxid_x"], kinds=["sticker"], out_dir=out,
+                                    con=con, with_cdn=True)
+    finally:
+        con.close()
+    assert (first.sticker.ok, first.sticker.skipped) == (1, 0)
+    assert (second.sticker.ok, second.sticker.skipped) == (0, 1)
+
+
+def test_sticker_malformed_msg_key_counts_missing(tmp_path, monkeypatch):
+    """msg_key 不是四段 → 定位不了那一行，计 missing（一次请求都不发）。
+    两道闸各一条：`count("|") != 3` 与 `_loc_of_msg_key` 的非数字段。"""
+    _, account = make_tree(tmp_path, monkeypatch)
+    ts = int(datetime.datetime(2026, 9, 15, 12, 0).timestamp())
+    called = []
+    monkeypatch.setattr(media, "sticker_cdn_urls",
+                        lambda *a, **k: called.append(1) or ({}, None))
+    con = _sticker_with_bad_key(ts, "d0f46ed3" + "0" * 24, "bad-key")
+    try:
+        rep = media.export_media(account, ["wxid_y"], kinds=["sticker"],
+                                 out_dir=tmp_path / "media", con=con, with_cdn=True)
+    finally:
+        con.close()
+    assert rep.sticker.missing == 1 and called == [], rep.sticker
+
+    # 第二道形状闸：四段都在，但 local_id 不是数字 → `_loc_of_msg_key` 返回 None。
+    # 它在 `_locs` 里计一次 missing，而 `_locs` 在一次导出里被调两趟（摊平 + 取件前），
+    # 加上「got is None」那一笔，合计 3。
+    con = _sticker_with_bad_key(ts, "d0f46ed3" + "0" * 24,
+                                "acct|cm|message_0.db|notanumber")
+    try:
+        rep = media.export_media(account, ["wxid_y"], kinds=["sticker"],
+                                 out_dir=tmp_path / "media", con=con, with_cdn=True)
+    finally:
+        con.close()
+    assert rep.sticker.missing == 3, rep.sticker   # 一次取件都不会发：all_locs 是空的
+
+
+def test_sticker_nothing_in_window_degrades_nothing(tmp_path, monkeypatch):
+    """月份窗口把全部条目筛掉时直接收手：删掉 `if not order: return`，
+    会印出「0 个贴纸未导出」的假降级。"""
+    _, account = make_tree(tmp_path, monkeypatch)
+    ts = int(datetime.datetime(2026, 3, 15, 12, 0).timestamp())      # 2026-03
+    con = _one_sticker_index(ts, "d0f46ed3" + "0" * 24)
+    try:
+        rep = media.export_media(account, ["wxid_x"], kinds=["sticker"],
+                                 months=["2026-09"], out_dir=tmp_path / "media", con=con)
+    finally:
+        con.close()
+    assert rep.degraded == [] and rep.sticker.missing == 0
+
+
+def test_sticker_truncated_failed_and_progress(tmp_path, monkeypatch):
+    """with_cdn 那条路的四个归口：上限、取件失败、未知格式、落盘失败，以及 progress。"""
+    _, account = make_tree(tmp_path, monkeypatch)
+    ts = int(datetime.datetime(2026, 9, 15, 12, 0).timestamp())
+    md5 = "d0f46ed3" + "0" * 24
+    cm = messages.md5_of("wxid_x")
+    urls = {(cm, "message_0.db", 7): ("http://wxapp.tc.qq.com/x", md5)}
+    monkeypatch.setattr(media, "sticker_cdn_urls", lambda *a, **k: (urls, None))
+
+    # ① 上限：max_files=0 → truncated/remaining
+    con = _one_sticker_index(ts, md5)
+    monkeypatch.setattr(media, "_fetch_cdn_bytes", lambda *a, **k: b"\x89PNG\r\n\x1a\n")
+    try:
+        rep = media.export_media(account, ["wxid_x"], kinds=["sticker"],
+                                 out_dir=tmp_path / "m1", con=con, with_cdn=True, max_files=0)
+    finally:
+        con.close()
+    assert (rep.truncated, rep.sticker.remaining) == (True, 1), rep.sticker
+
+    # ② 取件失败 → failed
+    con = _one_sticker_index(ts, md5)
+    monkeypatch.setattr(media, "_fetch_cdn_bytes", lambda *a, **k: None)
+    try:
+        rep = media.export_media(account, ["wxid_x"], kinds=["sticker"],
+                                 out_dir=tmp_path / "m2", con=con, with_cdn=True)
+    finally:
+        con.close()
+    assert rep.sticker.failed == 1
+
+    # ③ 未知格式 → failed
+    con = _one_sticker_index(ts, md5)
+    monkeypatch.setattr(media, "_fetch_cdn_bytes", lambda *a, **k: b"garbage")
+    try:
+        rep = media.export_media(account, ["wxid_x"], kinds=["sticker"],
+                                 out_dir=tmp_path / "m3", con=con, with_cdn=True)
+    finally:
+        con.close()
+    assert rep.sticker.failed == 1
+
+    # ④ 落盘失败 → failed
+    con = _one_sticker_index(ts, md5)
+    real_save = media.save_artifact
+    monkeypatch.setattr(media, "_fetch_cdn_bytes", lambda *a, **k: b"\x89PNG\r\n\x1a\n")
+    monkeypatch.setattr(media, "save_artifact", lambda *a: None)
+    try:
+        rep = media.export_media(account, ["wxid_x"], kinds=["sticker"],
+                                 out_dir=tmp_path / "m4", con=con, with_cdn=True)
+    finally:
+        con.close()
+    monkeypatch.setattr(media, "save_artifact", real_save)
+    assert rep.sticker.failed == 1
+
+    # ⑤ progress(done)
+    con = _one_sticker_index(ts, md5)
+    seen = []
+    try:
+        rep = media.export_media(account, ["wxid_x"], kinds=["sticker"],
+                                 out_dir=tmp_path / "m5", con=con, with_cdn=True,
+                                 progress=seen.append)
+    finally:
+        con.close()
+    assert rep.sticker.ok == 1 and seen == [1], (rep.sticker, seen)
+
+
+def test_voice_export_counts_null_body_and_failed_save(tmp_path, monkeypatch):
+    """语音的两条失败归口：`voice_data IS NULL`（有行没本体）与 .slk 落盘失败。
+    两者在报表上都必须是 failed，不能静默跳过。"""
+    root, account = make_tree(tmp_path, monkeypatch)
+    ts = int(datetime.datetime(2026, 9, 15, 12, 0).timestamp())
+    _voice_fixture(account, [(1, ts, 7, None)])          # 有行、无本体
+    _passthrough_decrypted(monkeypatch)
+    rep = media.export_media(account, ["chatA@chatroom"], kinds=["voice"],
+                             months=[media.month_of(ts)], out_dir=root / "home" / "media")
+    assert rep.voice.failed == 1 and rep.voice.ok == 0, rep.voice
+
+
+def test_voice_export_counts_a_failed_slk_save(tmp_path, monkeypatch):
+    """解码不可用 → 退回 .slk；落盘再失败 → 同一归口（failed，不伪装成 raw_only）。"""
+    root, account, chat_name = make_voice_tree(tmp_path, monkeypatch)
+    mon = media.month_of(int(datetime.datetime(2026, 9, 15, 12, 0).timestamp()))
+    monkeypatch.setattr(media, "_PILK", None)          # 强制走 .slk 回退
+    monkeypatch.setattr(media, "save_artifact", lambda *a: None)
+    rep = media.export_media(account, [chat_name], kinds=["voice"], months=[mon],
+                             out_dir=root / "home" / "media")
+    assert rep.voice.failed == 1 and rep.voice.raw_only == 0, rep.voice
+
+
+def test_voice_export_reports_progress(tmp_path, monkeypatch):
+    """语音分支的 `progress(done)`：删掉它，长语音导出全程无进度。"""
+    root, account, chat_name = make_voice_tree(tmp_path, monkeypatch)
+    mon = media.month_of(int(datetime.datetime(2026, 9, 15, 12, 0).timestamp()))
+    seen = []
+    rep = media.export_media(account, [chat_name], kinds=["voice"], months=[mon],
+                             out_dir=root / "home" / "media", progress=seen.append)
+    assert rep.voice.ok == 1 and seen == [1], (rep.voice, seen)
