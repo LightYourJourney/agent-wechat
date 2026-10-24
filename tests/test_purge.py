@@ -611,7 +611,10 @@ def test_tmutil_maps_nonzero_exit_to_undecidable(monkeypatch):
 
     monkeypatch.setattr(purge, "_run", exit64)
     rep = purge.verify(purge.plan(frozenset({"keys"})))
-    assert "无法判定" in rep.tm_excluded and "64" in rep.tm_excluded
+    # stderr 那一行必须**带进**结论：把 `(r.stderr or "")` 写成 `and` 会让非空 stderr
+    # 反而被抹成「无 stderr」——判据从「有线索」退回「没线索」，正是这一点要能变红。
+    assert ("无法判定" in rep.tm_excluded and "64" in rep.tm_excluded
+            and "boom" in rep.tm_excluded)
 
 
 def test_execute_refuses_when_home_is_root(monkeypatch):
@@ -1840,13 +1843,22 @@ def test_loose_entry_reports_zero_when_the_size_cannot_be_read(tmp_path, monkeyp
 
 
 def test_item_marks_missing_paths_and_symlinks(tmp_path):
+    """三条早退分支的 `is_symlink` 都要钉住：缺失路径与**普通目录**都不是链接。
+    该字段当前没有生产读取点（`execute` 在删除时刻重算，见 purge.py:459 的注释），
+    但它是 `PlanItem` 的契约值；翻成 True 会让计划表把普通产物描述成链接。
+    目录那条尤其容易漏：整树体积分支（`kind == "dir" and not is_link`）与它同源。"""
     missing = purge._item(purge.Artifact("x", tmp_path / "nope", "file", True, "无"))
-    assert missing.exists is False and missing.size == 0
+    assert missing.exists is False and missing.size == 0 and missing.is_symlink is False
 
     f = tmp_path / "f"
     f.write_bytes(b"abc")
     got = purge._item(purge.Artifact("x", f, "file", True, "无"))
     assert got.exists is True and got.size == 3 and got.is_symlink is False
+
+    d = tmp_path / "d"
+    d.mkdir()
+    real_dir = purge._item(purge.Artifact("x", d, "dir", True, "无"))
+    assert real_dir.exists is True and real_dir.size == 0 and real_dir.is_symlink is False
 
     link = tmp_path / "l"
     link.symlink_to(f)
@@ -1862,10 +1874,12 @@ def test_holders_parses_lsof_output_and_degrades_quietly(tmp_path, monkeypatch):
         stdout = ("COMMAND   PID USER\n"
                   "python  1234 leo\n"
                   "python  99 leo\n"
-                  "weird  notanumber leo\n")
+                  "weird  notanumber leo\n"
+                  "python 42\n"                  # 两列：PID 就在第 2 列，必须收
+                  "solo\n")                      # 一列：跳过，不能因为下标越界崩掉
 
     monkeypatch.setattr(purge, "_run", lambda *a, **k: _R())
-    assert purge._holders(d) == [99, 1234]
+    assert purge._holders(d) == [42, 99, 1234]
 
     monkeypatch.setattr(purge, "_run", lambda *a, **k: (_ for _ in ()).throw(OSError("no lsof")))
     assert purge._holders(d) == []
@@ -2044,3 +2058,94 @@ def test_plan_chat_does_not_measure_through_a_symlinked_export_dir(tmp_path, mon
         pass
     plan = purge.plan_chat([{"account": "acct", "chat_id": "wxid_testacct01_ab12"}])
     assert plan.entries[0].export_size == 0, plan.entries[0]
+
+
+def test_remove_treats_a_vanish_between_check_and_unlink_as_success(tmp_path, monkeypatch):
+    """CLI 是「先 plan（默认 dry-run）→ 用户确认 → 再 execute」，两步之间文件可能已被删掉；
+    spec §5.1 第 5 步要求这算**成功**。`unlink(missing_ok=True)` 就是为此——改成 False
+    会把一次良性的竞态变成 FileNotFoundError，用户看到的是失败、退 1。"""
+    gone = tmp_path / "gone.db"
+    monkeypatch.setattr(purge, "name_there", lambda p: True)     # 检查时还在，unlink 时已没
+    item = purge.PlanItem(purge.Artifact("x", gone, "file", True, "无"), True, 0, False)
+    assert purge._remove(item) is True
+
+
+def test_user_homes_includes_the_sudo_users_home_by_uid(tmp_path, monkeypatch):
+    """`SUDO_UID` 必须真的进候选：项目为 bootstrap 文档化了 `sudo`，而 `sudo` 下
+    `HOME=/var/root`，发起者的主目录只能靠这个 uid 查回来。
+    此前用例把 `_home_of_uid` 桩成常量，两条路返回同一个目录，删掉 append 也看不出来
+    ——这里让不同 uid 映射到不同目录。"""
+    me, sudo = tmp_path / "me", tmp_path / "sudo-home"
+    monkeypatch.setenv("SUDO_UID", "4242")
+    monkeypatch.setattr(purge, "_home_of_uid",
+                        lambda uid: {4242: sudo}.get(uid, me))
+    assert sudo.resolve() in purge._user_homes()
+
+
+def test_execute_does_not_walk_a_symlinked_dir_artifact(tmp_path):
+    """闸门只该扫**真正会被 rmtree 遍历的树**：`kind="dir"` 但路径本身是链接的产物不在其列。
+    它的目标不会被这次删除跟随，扫过去只会把目标内部无关的逃逸链接算到本次账上，整片误拒。"""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.db").write_bytes(b"p" * 10)
+    home = tmp_path / "home"
+    real = home / "real-tmp"
+    real.mkdir(parents=True)
+    (real / "evil.db").symlink_to(outside / "secret.db")          # 链接目标内部有逃逸链接
+    (home / "tmp").symlink_to(real)                               # 但 tmp 本身只指向树内
+    try:
+        purge.execute(purge.plan(frozenset({"tmp"})))
+    except errors.PurgeRefused as exc:                            # 原版不该在这道闸拒绝
+        assert "符号链接" not in str(exc), f"不该因目标内部的链接而拒绝：{exc}"
+    assert (outside / "secret.db").exists()
+
+
+def test_execute_refuses_hardlink_inside_a_named_dir(tmp_path):
+    """EA-030：硬链接的另一个名字不受 unlink 影响——删名字不删字节。
+    具名目录型产物（`tmp/`、`media/`）同样是整树 rmtree，所以里面也要查；
+    只留「文件型」与 `--all` 两处，`purge --tmp --yes` 就会把树外那份明文留下来。"""
+    outside = tmp_path / "keep.db"
+    outside.write_bytes(b"P" * 64)
+    home = tmp_path / "home"
+    (home / "tmp").mkdir(parents=True)
+    os.link(outside, home / "tmp" / "w.bin")
+    with pytest.raises(errors.PurgeRefused) as ei:
+        purge.execute(purge.plan(frozenset({"tmp"})))
+    assert "硬链接" in str(ei.value)
+    assert outside.read_bytes() == b"P" * 64
+
+
+def test_execute_all_records_an_rmtree_that_cannot_start(tmp_path, monkeypatch):
+    """`--all` 的整树 rmtree 自身起不来（ENOSPC/EACCES/EIO）时要记成失败项，
+    与 `onexc` 收集的部分失败同一语义：命令照常给出汇总，而不是裸 traceback。"""
+    home = tmp_path / "home"
+    home.mkdir(parents=True)
+    (home / "index.db").write_bytes(b"x" * 10)
+    p = purge.plan(frozenset(), all_=True)
+
+    def boom(*a, **k):
+        raise OSError(28, "No space left（桩）")
+
+    monkeypatch.setattr(purge.shutil, "rmtree", boom)
+    r = purge.execute(p)
+    assert any(x == home and "No space" in s for x, s in r.failed), r.failed
+
+
+def test_execute_chat_reports_export_not_removed_when_rmtree_fails(tmp_path, monkeypatch):
+    """导出目录 rmtree 抛非 FileNotFound 的 OSError 时必须报 `export_removed=False`。
+    翻成 True 会在一个字节都没删掉时宣称「已删除」——正是这门命令专门要消灭的假象，
+    随后核查还会顺着它说干净。"""
+    home = tmp_path / "home"
+    home.mkdir(parents=True)
+    with store.open() as con:
+        store.upsert_batch(con, [_victim_row(1)])
+    d = home / "media" / VICTIM_MD5
+    d.mkdir(parents=True)
+    (d / "a.html").write_text("x")
+    plan = purge.plan_chat([{"account": "a", "chat_id": VICTIM, "chat_md5": VICTIM_MD5}])
+
+    def boom(*a, **k):
+        raise PermissionError(13, "denied（桩）")
+
+    monkeypatch.setattr(purge.shutil, "rmtree", boom)
+    assert purge.execute_chat(plan)[0].export_removed is False
