@@ -2878,10 +2878,23 @@ def test_cdn_redirect_follows_an_allowlisted_target():
     assert got is not None and got.full_url == "http://vweixinf.tc.qq.com/b"
 
 
-def test_cdn_opener_forces_a_direct_connection():
-    """必须是 OpenerDirector（自带直连 ProxyHandler）：换成裸 urlopen 会被系统代理吃掉
-    ——2026-09-22 的「CDN 不通」假结论就是那次代理造成的。本用例不发任何请求。"""
+def test_cdn_opener_forces_a_direct_connection(monkeypatch):
+    """必须带一个**空的** ProxyHandler（强制直连）：换成裸 urlopen 会被系统代理吃掉
+    ——2026-09-22 的「CDN 不通」假结论就是那次代理造成的。只断言 isinstance 拦不住
+    「去掉 ProxyHandler」这个回归（那时仍是 OpenerDirector）。本用例不发任何请求。"""
+    seen = {}
+    real = urllib.request.build_opener
+
+    def fake(*handlers):
+        seen["handlers"] = handlers
+        return real(*handlers)
+
+    monkeypatch.setattr(urllib.request, "build_opener", fake)
     assert isinstance(media._cdn_opener(), urllib.request.OpenerDirector)
+    # `build_opener` 不会把 ProxyHandler 留在 `.handlers` 里（实测），所以钉**入参**：
+    # 去掉 `ProxyHandler({})` 时这里必然红，而那正是 2026-09-22 的回归形态。
+    assert any(isinstance(h, urllib.request.ProxyHandler) and h.proxies == {}
+               for h in seen["handlers"]), "opener 没有强制直连"
 
 
 def test_fetch_cdn_bytes_refuses_a_malformed_url_and_a_non_200(monkeypatch):
@@ -3195,9 +3208,9 @@ def test_sticker_truncated_failed_and_progress(tmp_path, monkeypatch):
     assert rep.sticker.ok == 1 and seen == [1], (rep.sticker, seen)
 
 
-def test_voice_export_counts_null_body_and_failed_save(tmp_path, monkeypatch):
-    """语音的两条失败归口：`voice_data IS NULL`（有行没本体）与 .slk 落盘失败。
-    两者在报表上都必须是 failed，不能静默跳过。"""
+def test_voice_export_counts_a_null_body(tmp_path, monkeypatch):
+    """`voice_data IS NULL`（有行没本体）计 failed，不静默跳过。
+    .slk 落盘失败是另一条用例（`..._counts_a_failed_slk_save`）。"""
     root, account = make_tree(tmp_path, monkeypatch)
     ts = int(datetime.datetime(2026, 9, 15, 12, 0).timestamp())
     _voice_fixture(account, [(1, ts, 7, None)])          # 有行、无本体

@@ -2175,3 +2175,19 @@ def test_execute_chat_reports_export_not_removed_when_rmtree_fails(tmp_path, mon
 
     monkeypatch.setattr(purge.shutil, "rmtree", boom)
     assert purge.execute_chat(plan)[0].export_removed is False
+
+
+def test_home_of_uid_returns_none_when_pwd_cannot_be_imported(monkeypatch):
+    """`pwd` 不可用（非 POSIX）时返回 None。删掉 `except ImportError: return None`
+    会落到下一段 `pwd.getpwuid(...)`——`pwd` 此刻还没绑定，抛的是 NameError，
+    而调用方只预期「查不到 = None」。"""
+    import builtins
+    real = builtins.__import__
+
+    def fake(name, *a, **k):
+        if name == "pwd":
+            raise ImportError("no pwd on this platform")
+        return real(name, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", fake)
+    assert purge._home_of_uid(0) is None

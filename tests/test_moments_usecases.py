@@ -614,12 +614,10 @@ def test_cover_garbage_counts_both_failed_and_garbage(env):
 
 def test_cover_save_failure_counts_failed(env, monkeypatch):
     """封面格式对、但落盘失败：计 `media_failed`，本体不受影响。"""
-    from agent_wechat import media as media_mod
-
     _add_post(VIDEO15_XML)
-    real = media_mod.save_artifact
+    real = media.save_artifact
     monkeypatch.setattr(
-        media_mod, "save_artifact",
+        media, "save_artifact",
         lambda out, cm, kind, mon, stem, ext, data: (
             None if stem.endswith("_thumb") else real(out, cm, kind, mon, stem, ext, data)))
     res = usecases.moments_export(account=ACCT, with_media=True,
