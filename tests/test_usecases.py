@@ -52,6 +52,16 @@ def stub(monkeypatch, tmp_path):
         def roster(self):
             return []            # 检索前的懒刷新会调它；空名册 → 不写库
 
+        # 三个 rebuild 的回填入口：默认空，用例按需塞 `seen["iter_*"]`
+        def iter_all(self, *a, **k):
+            yield from seen.get("iter_all", ())
+
+        def iter_extras_input(self):
+            yield from seen.get("iter_extras", ())
+
+        def iter_parts_input(self):
+            yield from seen.get("iter_parts", ())
+
     monkeypatch.setattr(account, "resolve_account", lambda a: "acct")
     monkeypatch.setattr(reader, "MessageReader", _StubReader)
     # 检索用例现在会先 _refresh_roster → store.open()：不隔离 DB_PATH 就会碰真实索引库
@@ -698,3 +708,37 @@ def test_start_vector_build_reports_skipped_and_final_rows(monkeypatch):
     usecases.start_vector_build(["a"], False)
     assert holders[0]("tid") == 9
     assert updates[-1] == ("tid", {"skipped": 3})
+
+
+def test_media_rebuild_refs_reports_progress(stub):
+    """回填全量重扫时要报进度（n 每满一批的那一段）：删掉 `progress(n)`，分钟级命令
+    在 CLI 上全程无输出。"""
+    refs = [(messages.row_key("acct", "md5", "message_0.db", 1), "image", "fk", None)]
+    stub["iter_all"] = [([], refs)]
+    seen = []
+    n = usecases.media_rebuild_refs(progress=seen.append)
+    assert n == 1 and seen == [1], (n, seen)
+
+
+def test_msgextra_rebuild_flushes_in_batches_and_reports_progress(stub):
+    """缓冲满 BATCH 时就地 flush，收尾再 flush 剩下的：只有 2001 行才分得出
+    「循环内 flush」与「只靠收尾 flush」——前者的进度是 [2000, 2001]，后者只有 [2001]。"""
+    key = messages.row_key("acct", "md5", "message_0.db", 0)
+    stub["iter_extras"] = [(f"{key}{i}", 48, b"<x/>") for i in range(2001)]
+    seen = []
+    res = usecases.msgextra_rebuild(progress=seen.append)
+    assert res["extras"] == 2001
+    assert seen == [2000, 2001], seen
+
+
+def test_appmsg_rebuild_parts_reports_skipped_rows(stub, monkeypatch):
+    """有行被排除清单挡下时回调一次 `on_skipped(行数)`——「成功但有保留」的出口，
+    静默吞掉会让用户以为全量回填干净了。"""
+    import types as _types
+    stub["iter_parts"] = [(1, "acct|md5|message_0.db|1", b"<msg/>")]
+    monkeypatch.setattr(usecases.appmsg, "parse", lambda raw: _types.SimpleNamespace(
+        reason=None, appmsg=_types.SimpleNamespace(kind=1, quote=None), normalized="x"))
+    monkeypatch.setattr(store, "upsert_msg_parts", lambda con, rows: len(rows))
+    seen = []
+    usecases.appmsg_rebuild_parts(on_skipped=seen.append)
+    assert seen == [1], seen

@@ -578,3 +578,52 @@ def test_media_outside_allowlist_is_not_downloaded_not_failed(env):
     assert res.report.media_failed == 0
     assert [m for m in calls if "y.music.163.com" in m.url] == []   # 站外那条一个请求都不发
     assert res.report.media_not_downloaded == 1
+
+
+# ---------- §5.5：小视频封面的三个计数 ----------
+
+def test_cover_with_non_jpeg_magic_is_failed_but_not_garbage(env):
+    """封面解出来不是 JPEG（这里是 PNG）：计 `media_failed`，但**不**计 `media_garbage`
+    ——后者专指「嗅探不出格式」，两者对用户的含义不同。"""
+    _add_post(VIDEO15_XML)
+
+    def fetch(m, **kw):
+        if "150/20250" in m.url:
+            return b"\x89PNG\r\n\x1a\n" + b"x" * 8
+        return _jpeg()
+
+    res = usecases.moments_export(account=ACCT, with_media=True, fetch=fetch)
+    assert res.report.media_failed == 1, res.report
+    assert res.report.media_garbage == 0, res.report
+    assert not list(pathlib.Path(res.out_dir).rglob("*_thumb.jpg"))
+
+
+def test_cover_garbage_counts_both_failed_and_garbage(env):
+    """封面是乱码（`_sniff_ext` 返回 None）：failed 与 garbage 各 +1。"""
+    _add_post(VIDEO15_XML)
+
+    def fetch(m, **kw):
+        if "150/20250" in m.url:
+            return b"\x00" * 64
+        return _jpeg()
+
+    res = usecases.moments_export(account=ACCT, with_media=True, fetch=fetch)
+    assert res.report.media_failed == 1 and res.report.media_garbage == 1, res.report
+    assert not list(pathlib.Path(res.out_dir).rglob("*_thumb.jpg"))
+
+
+def test_cover_save_failure_counts_failed(env, monkeypatch):
+    """封面格式对、但落盘失败：计 `media_failed`，本体不受影响。"""
+    from agent_wechat import media as media_mod
+
+    _add_post(VIDEO15_XML)
+    real = media_mod.save_artifact
+    monkeypatch.setattr(
+        media_mod, "save_artifact",
+        lambda out, cm, kind, mon, stem, ext, data: (
+            None if stem.endswith("_thumb") else real(out, cm, kind, mon, stem, ext, data)))
+    res = usecases.moments_export(account=ACCT, with_media=True,
+                                  fetch=lambda m, **k: _jpeg())
+    assert res.report.media_failed == 1, res.report
+    assert res.report.media_downloaded == 2      # 基线 + 本体
+    assert not list(pathlib.Path(res.out_dir).rglob("*_thumb.jpg"))
