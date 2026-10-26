@@ -3,7 +3,8 @@
 #
 # 用法：scripts/check.sh [--fast]
 #   --fast  只跑快速检查（import 环 + `import mcp` 泄漏），给 pre-commit 用（实测 ~0.07 s）；
-#   不带参数跑全部五步，给 pre-push 用（实测 ~70 s，其中绝大部分是 pytest）。
+#   不带参数跑全部五步，给 pre-push 用（实测 166–275 s，冷热差 1.66×，绝大部分是 pytest）。
+#   **计时时不要并跑其它 pytest**：SQLite 的 fsync 争用会把墙钟放大到 3 倍以上（实测）。
 #
 # 五步与 spec §7 的对应：
 #   ① 运行时 import 环（scripts/check_import_cycles.py）

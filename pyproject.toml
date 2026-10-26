@@ -54,4 +54,6 @@ markers = [
     "slow: 需要真实 fastembed 模型（默认不跑；用 -m slow 运行）",
     "real: 需要本机真实数据/模型（默认不跑；用 -m real 运行）",
 ]
-addopts = "-m 'not slow'"
+# `real` 也排除：它此前只靠「每个 real 测试都同时标了 slow」被连带 deselect，
+# 新增一条只标 real 的用例就会在默认门禁里真读本机数据 / 发 CDN 请求（Phase 00 R-00-4）。
+addopts = "-m 'not slow and not real'"

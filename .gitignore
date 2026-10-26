@@ -36,3 +36,6 @@ build/
 # C 阶段（review-r2）：hypothesis 的示例库与工作区
 .hypothesis/
 .superpowers/review-r2/
+
+# /graphify 的知识图产物（17 MB，可随时重建：cache/ 是纯缓存，graph.* 由抽取生成）
+graphify-out/

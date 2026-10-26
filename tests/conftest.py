@@ -40,7 +40,7 @@
 """
 import pytest
 
-from agent_wechat import exclusions, paths, store, tasks
+from agent_wechat import exclusions, paths, purge, store, tasks
 
 
 @pytest.fixture(autouse=True)
@@ -48,6 +48,25 @@ def _forbid_real_tmutil(monkeypatch):
     """见模块 docstring「第四个闸」：测试期不起真实 tmutil。"""
     from types import SimpleNamespace
     monkeypatch.setattr(paths, "shutil", SimpleNamespace(which=lambda name: None))
+
+
+@pytest.fixture(autouse=True)
+def _forbid_real_external_commands(monkeypatch):
+    """**第五个闸**（Phase 00 基线实测补）：测试期不许起任何真实外部命令。
+
+    上一个闸只钉 `paths.shutil`，而 `purge._tmutil` / `purge._holders` 走的是本模块自己的
+    模块级别名 `purge._run = subprocess.run`——那条路绕过了它。实测 `test_fault_matrix`
+    的 purge 格真的执行了 `tmutil isexcluded` / `tmutil listlocalsnapshots`（进程路径里带
+    `test_cell_purge__purge_py_*`），与「测试期不许起真实 tmutil」的明文承诺相反，也让
+    测试依赖 macOS 系统状态。
+
+    要测外部命令**本身**的用例自己 `monkeypatch.setattr(purge, "_run", …)`：它的 patch
+    在本夹具之后生效、覆盖本夹具；本夹具只在「没人桩」时把失败做成响亮的。
+    """
+    def _refuse(*args, **kwargs):
+        raise AssertionError(
+            "测试期不得起真实外部命令（purge._run）；要测外部命令请显式桩 purge._run")
+    monkeypatch.setattr(purge, "_run", _refuse)
 
 
 @pytest.fixture(autouse=True)
