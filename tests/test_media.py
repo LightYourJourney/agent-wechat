@@ -3015,7 +3015,10 @@ def test_video_refs_path_counts_truncated_and_missing(tmp_path, monkeypatch):
     vdir.mkdir(parents=True)
     (vdir / f"{fk}.mp4").write_bytes(b"video-bytes")
     con = _video_index(tmp_path / "a", account, [("wxid_a", 1, ts, fk)])
-    rep = media.export_media(account, ["wxid_a"], kinds=["video"], con=con, max_files=0)
+    try:
+        rep = media.export_media(account, ["wxid_a"], kinds=["video"], con=con, max_files=0)
+    finally:
+        con.close()
     assert (rep.truncated, rep.video.remaining) == (True, 1), rep.video
 
     # ② 本体不在磁盘
@@ -3028,7 +3031,10 @@ def test_video_refs_path_counts_truncated_and_missing(tmp_path, monkeypatch):
     con = _video_index(tmp_path / "c", account, [("wxid_a", 3, ts, "cc" * 16)])
     real_resolve = media.resolve_video
     monkeypatch.setattr(media, "resolve_video", lambda *a: (tmp_path, False))
-    rep = media.export_media(account, ["wxid_a"], kinds=["video"], con=con)
+    try:
+        rep = media.export_media(account, ["wxid_a"], kinds=["video"], con=con)
+    finally:
+        con.close()
     assert rep.video.missing == 1, rep.video
     monkeypatch.setattr(media, "resolve_video", real_resolve)
 
@@ -3037,15 +3043,21 @@ def test_video_refs_path_counts_truncated_and_missing(tmp_path, monkeypatch):
     con = _video_index(tmp_path / "d", account, [("wxid_a", 4, ts, "dd" * 16)])
     real_save = media.save_artifact
     monkeypatch.setattr(media, "save_artifact", lambda *a: None)
-    rep = media.export_media(account, ["wxid_a"], kinds=["video"], con=con)
+    try:
+        rep = media.export_media(account, ["wxid_a"], kinds=["video"], con=con)
+    finally:
+        con.close()
     assert rep.video.missing == 1, rep.video
     monkeypatch.setattr(media, "save_artifact", real_save)
 
     con = _video_index(tmp_path / "e", account, [("wxid_a", 5, ts, fk)])
     out = root / "home" / "media"
     seen = []
-    rep = media.export_media(account, ["wxid_a"], kinds=["video"], con=con, out_dir=out,
-                             progress=seen.append)
+    try:
+        rep = media.export_media(account, ["wxid_a"], kinds=["video"], con=con, out_dir=out,
+                                 progress=seen.append)
+    finally:
+        con.close()
     assert rep.video.ok == 1 and seen == [1], (rep.video, seen)
 
 

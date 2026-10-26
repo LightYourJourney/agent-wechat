@@ -722,7 +722,10 @@ def test_media_rebuild_refs_reports_progress(stub):
 
 def test_msgextra_rebuild_flushes_in_batches_and_reports_progress(stub):
     """缓冲满 BATCH 时就地 flush，收尾再 flush 剩下的：只有 2001 行才分得出
-    「循环内 flush」与「只靠收尾 flush」——前者的进度是 [2000, 2001]，后者只有 [2001]。"""
+    「循环内 flush」与「只靠收尾 flush」——前者的进度是 [2000, 2001]，后者只有 [2001]。
+    这两个数同时把 `store.BATCH`（2000）钉住了：改成 1000 或 2001，序列立刻变
+    （本用例因此也是那个「等价」改判为杀死的证据，见台账 §5.4）。条数取 BATCH+1 是
+    故意的，不是魔数。"""
     key = messages.row_key("acct", "md5", "message_0.db", 0)
     stub["iter_extras"] = [(f"{key}{i}", 48, b"<x/>") for i in range(2001)]
     seen = []
