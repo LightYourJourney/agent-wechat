@@ -50,8 +50,8 @@ def test_all_project_errors_share_one_base():
         "AccountNotFound", "CaptureError", "ContainerWriteRefused", "ContactNotFound",
         "DataNotFound", "DecryptError", "DependencyMissing", "HomeUnavailable",
         "IndexUnavailable", "KeyNotFound", "MediaKeyError", "MediaOutputError",
-        "PurgeRefused", "SchemaDrift", "SearchInputError", "SnsMediaError", "TaskNotFound",
-        "VectorError", "VectorIndexEmpty",
+        "PurgeRefused", "SchemaDrift", "SchemaMigrationError", "SearchInputError",
+        "SnsMediaError", "TaskNotFound", "VectorError", "VectorIndexEmpty",
     }
     assert derived == expected, {
         "丢了基类": sorted(expected - derived), "新增未登记": sorted(derived - expected)}

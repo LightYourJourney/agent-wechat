@@ -136,6 +136,15 @@ class SchemaDrift(AgentWeChatError):
             hint=hint or "微信升级可能改变了库结构；可用 `agent-wechat inspect` 对比结构")
 
 
+class SchemaMigrationError(AgentWeChatError):
+    """本地索引库的 schema 迁移失败，或库的版本**高于**本程序已知的最新版。
+
+    与 SchemaDrift 的分界：那个说的是**微信的库**与声明不符（降级后仍有别的路可走）；
+    这个是**本工具自己的库**升不上去 / 太新——继续写会把未知结构改坏，所以**不降级**，
+    整条命令失败并给可执行动作（重试 / 升级程序 / 从备份恢复）。
+    """
+
+
 class TaskNotFound(AgentWeChatError):
     """查询的任务 id 不在注册表里（含重启后记录仍在、但 id 写错的情形）。"""
 

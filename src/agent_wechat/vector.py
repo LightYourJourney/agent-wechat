@@ -13,7 +13,7 @@ from typing import Callable, Sequence
 
 import sqlite_vec
 
-from . import messages, paths, store
+from . import errors, messages, migrations, paths, store
 from .errors import SearchInputError, VectorError, VectorIndexEmpty, redact
 
 MODEL_NAME = "BAAI/bge-small-zh-v1.5"
@@ -48,7 +48,14 @@ def connect() -> sqlite3.Connection:
     con.enable_load_extension(False)
     try:
         con.execute("SELECT vec_version()").fetchone()  # 探活：真正验证扩展可用
+        # ensure：向量表每次连接都建（vec0 需要扩展在场，所以归属本模块而不是 store）。
         con.executescript(store.VECTOR_SCHEMA)
+        # migrate：向量 schema 与主库**分开版本化**——没装扩展的机器上 main 迁移照常，
+        # 这条只在真的加载了 sqlite-vec 时才有版本行。
+        migrations.apply(con, scope=migrations.SCOPE_VECTOR, migrations=())
+    except errors.SchemaMigrationError:
+        con.close()
+        raise
     except (sqlite3.Error, OSError) as exc:
         # A 矩阵：这两步此前裸穿（磁盘满 / 权限 / 库损坏都实测到过）。core 的契约是
         # 只抛项目异常——向量库进不去就没有降级可言，必须让调用方看见原因。
@@ -421,8 +428,12 @@ def build_index(accounts: Sequence[str] | None = None, rebuild: bool = False,
                     "BEGIN;\n"
                     + store.VECTOR_DROP
                     + f"\nDELETE FROM vector_watermark WHERE model_id='{MODEL_ID}';\n"
+                    # 整表重建 = 回到未初始化态：版本行必须一起清掉，否则下一次
+                    # `apply` 会认为 vector scope 已就绪、将来的迁移被跳过。
+                    + f"\nDELETE FROM schema_version WHERE scope='{migrations.SCOPE_VECTOR}';\n"
                     + "COMMIT;")
                 con.executescript(store.VECTOR_SCHEMA)
+                migrations.apply(con, scope=migrations.SCOPE_VECTOR, migrations=())
                 con.commit()
             except (sqlite3.Error, OSError) as exc:
                 # 重建段是 DROP + 建表 + 提交三连：任一失败都必须以项目异常浮出，

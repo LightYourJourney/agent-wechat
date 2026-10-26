@@ -16,7 +16,7 @@ import sqlite3
 import time
 from collections.abc import Iterator, Sequence
 
-from . import errors, exclusions, messages, paths
+from . import errors, exclusions, messages, migrations, paths
 
 DB_PATH = paths.HOME_DIR / "index.db"
 
@@ -39,7 +39,7 @@ BATCH = 2000
 # （`msg_key` 的规模可以到几千），不该让一次调用生成一条几千占位符的语句。
 KEYS_BATCH = 500
 
-SCHEMA = """
+_SCHEMA_BODY = """
 PRAGMA journal_mode=WAL;
 CREATE TABLE IF NOT EXISTS messages (
     id          INTEGER PRIMARY KEY,
@@ -70,18 +70,9 @@ CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
     content='messages', content_rowid='id',
     tokenize='trigram'
 );
-CREATE TRIGGER IF NOT EXISTS msg_fts_ai AFTER INSERT ON messages BEGIN
-    INSERT INTO messages_fts(rowid, content, chat_id) VALUES (new.id, new.content, new.chat_id);
-END;
-CREATE TRIGGER IF NOT EXISTS msg_fts_ad AFTER DELETE ON messages BEGIN
-    INSERT INTO messages_fts(messages_fts, rowid, content, chat_id)
-        VALUES ('delete', old.id, old.content, old.chat_id);
-END;
-CREATE TRIGGER IF NOT EXISTS msg_fts_au AFTER UPDATE OF content, chat_id ON messages BEGIN
-    INSERT INTO messages_fts(messages_fts, rowid, content, chat_id)
-        VALUES ('delete', old.id, old.content, old.chat_id);
-    INSERT INTO messages_fts(rowid, content, chat_id) VALUES (new.id, new.content, new.chat_id);
-END;
+
+-- FTS 的三条触发器**不在这里**：它们被抽成 `FTS_TRIGGERS` 单一来源，既拼进本 SCHEMA，
+-- 也被迁移 v2 用来对齐老库的触发器体（`CREATE TRIGGER IF NOT EXISTS` 不会升级已存在的体）。
 
 -- 向量表不在本 SCHEMA：sqlite-vec 需运行时加载扩展后建表，owner 是 vector.py（见 VECTOR_SCHEMA）
 CREATE TABLE IF NOT EXISTS watermark (
@@ -127,6 +118,43 @@ CREATE TABLE IF NOT EXISTS msg_extras (
     payload  BLOB NOT NULL          -- 规范化后的 XML，zlib 压缩（与 msg_parts.raw_xml 同款）
 ) WITHOUT ROWID;
 """
+
+# FTS 触发器：**单一来源**。`SCHEMA` 用它拼出全量建库脚本；迁移 v2 用同一批字符串
+# 重建触发器（EA-077 的旧体漂移）。名字单独列出，是为了 DROP 时不必解析 SQL。
+FTS_TRIGGER_NAMES: tuple[str, ...] = ("msg_fts_ai", "msg_fts_ad", "msg_fts_au")
+
+FTS_TRIGGERS: tuple[str, ...] = (
+    """CREATE TRIGGER IF NOT EXISTS msg_fts_ai AFTER INSERT ON messages BEGIN
+    INSERT INTO messages_fts(rowid, content, chat_id) VALUES (new.id, new.content, new.chat_id);
+END;""",
+    """CREATE TRIGGER IF NOT EXISTS msg_fts_ad AFTER DELETE ON messages BEGIN
+    INSERT INTO messages_fts(messages_fts, rowid, content, chat_id)
+        VALUES ('delete', old.id, old.content, old.chat_id);
+END;""",
+    """CREATE TRIGGER IF NOT EXISTS msg_fts_au AFTER UPDATE OF content, chat_id ON messages BEGIN
+    INSERT INTO messages_fts(messages_fts, rowid, content, chat_id)
+        VALUES ('delete', old.id, old.content, old.chat_id);
+    INSERT INTO messages_fts(rowid, content, chat_id) VALUES (new.id, new.content, new.chat_id);
+END;""",
+)
+
+SCHEMA = _SCHEMA_BODY + "\n" + "\n".join(FTS_TRIGGERS)
+
+# 本程序已知的 main scope 最新版本。迁移只列**IF NOT EXISTS 表达不了**的变更；
+# 基线（v1）由 `migrations.apply` 隐式 stamp——那代表「整套 DDL 已由 ensure 建好」。
+SCHEMA_VERSION = 2
+
+MIGRATIONS: tuple[migrations.Migration, ...] = (
+    migrations.Migration(
+        version=SCHEMA_VERSION,
+        name="对齐 FTS 触发器体（EA-077）",
+        # 只重建触发器：DROP 后立刻按当前定义创建。数据与 FTS 内容都不动——
+        # 触发器体漂移影响的是**后续写入**的镜像，不是存量行；存量失同步由 search 的
+        # 探针单独报告（重跑导出可重建）。
+        script="\n".join(f"DROP TRIGGER IF EXISTS {n};" for n in FTS_TRIGGER_NAMES)
+        + "\n" + "\n".join(FTS_TRIGGERS),
+    ),
+)
 
 # ---------- 向量索引（sqlite-vec；由 vector.py 在加载扩展后建表） ----------
 
@@ -192,19 +220,35 @@ def connect(db_path: pathlib.Path | None = None) -> sqlite3.Connection:
     """
     paths.ensure_home_dirs()
     db = db_path or DB_PATH
+    con = None
     try:
         con = sqlite3.connect(db)
         con.row_factory = sqlite3.Row
         ex_path = exclusions.path_for(pathlib.Path(db))
         ex_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         con.execute("ATTACH DATABASE ? AS exclusions", (str(ex_path),))
+        # ensure：整套 DDL 每次连接都跑（自愈：缺表/缺索引就补建）。`CREATE … IF NOT EXISTS`
+        # 的重建能力是既有行为，不能挪进「只跑一次」的迁移里。
         con.executescript(SCHEMA)
         con.executescript(exclusions.SCHEMA)
+        # migrate：只做 ensure 表达不了的变更。两个 scope 各自事务、各自版本；
+        # **不假设跨库原子**（index.db 与 exclusions.db 是两个文件，主库还是 WAL）。
+        migrations.apply(con, scope=migrations.SCOPE_MAIN, migrations=MIGRATIONS)
+        migrations.apply(con, scope=migrations.SCOPE_EXCLUSIONS, migrations=(),
+                         table=migrations.EXCLUSIONS_TABLE)
         con.execute("PRAGMA synchronous=NORMAL")
+    except errors.SchemaMigrationError:
+        # 迁移失败/库太新：**原样抛出**（它的文案已带 scope/version 与可执行动作），
+        # 不翻成 IndexUnavailable——「库坏了」与「库太新/迁移没跑完」是两种病。
+        if con is not None:
+            con.close()
+        raise
     except (sqlite3.Error, OSError) as exc:
         # EA-074 扩：core 层只抛项目异常。此前只捕 `sqlite3.Error`，于是**建立段的磁盘错误**
         # （ENOSPC/EACCES/EIO，实测由 `mkdir`/`ATTACH`/`connect` 冒出来）与提交段的 sqlite
         # 错误都会裸穿到 CLI（A 矩阵 26 格实测：`PermissionError`/`OSError`/`DatabaseError`）。
+        if con is not None:
+            con.close()
         raise index_unavailable(exc) from exc
     return con
 
@@ -276,8 +320,10 @@ def schema_drift_notes(con: sqlite3.Connection) -> list[str]:
     """库里已存在的**触发器体**与代码里 SCHEMA 文本不一致时的说明（EA-077）。
 
     `CREATE TRIGGER IF NOT EXISTS` 只挡创建、不挡演进：老库里留着旧触发器体，代码改了 DDL
-    也**不会**生效——而 FTS 镜像与 EA-012 的修正集全靠它。这里只**报告**（挂进 status 自检），
-    不改库：重建触发器要评估多进程争用，留给显式的维护动作。
+    也**不会**生效——而 FTS 镜像与 EA-012 的修正集全靠它。
+
+    迁移 v2 会在**升级那一刻**对齐一次（见 `MIGRATIONS`）；此后本函数只**报告**（挂进
+    status 自检），不改库：再出现漂移多半是手工改动，自动重写会掩盖它。
     """
     expected: dict[str, str] = {}
     for m in re.finditer(r"CREATE TRIGGER IF NOT EXISTS (\w+)(.*?\bEND);", SCHEMA, re.S):
