@@ -43,6 +43,8 @@ src/agent_wechat/
 ├── export.py       导出管道：流式批处理 + 水位线续跑（任务登记归 usecases 层）
 ├── msgextra.py     位置（48）/ 名片（42）载荷的解析（与 appmsg 同一套规范化与守卫）
 ├── store.py        本地检索库：DDL、幂等 upsert、水位线、FTS 触发器
+├── migrations.py   版本化 schema 迁移：版本表、按 scope 顺序执行、未来版本拒绝、失败回滚
+│                   （只认 scope 与版本，不认识任何业务表——DDL 仍归各 owner）
 ├── search.py       检索路由：trigram FTS / LIKE 兜底
 ├── vector.py       向量索引与语义检索（唯一接触 fastembed 与 sqlite-vec 的隔离带）
 ├── tasks.py        长任务注册表：后台线程 + 进度落盘 + 中断回收（不认识任何具体任务）
@@ -175,6 +177,23 @@ moments.iter_posts(account, report=…)       # 复用 passphrase 解密 sns/sns
 微信滚动缓存的窗口。单条媒体失败只计入**计数行**（解密后不是已知图片格式的那一类另进
 降级区），不中断整次导出；单条动态解析失败同理（计入 `failed`），因为「XML 一条都读不懂」
 与「这个账号没有朋友圈」必须分得开。
+
+### 3.9 索引库 schema 升级（Phase 01）
+
+`store.connect()` / `vector.connect()` 在**每次连接**上分两步：先跑整套
+`CREATE … IF NOT EXISTS`（缺对象就补建的自愈），再按 scope 跑版本化迁移——后者只处理
+`IF NOT EXISTS` **表达不了**的变更（改触发器体、加列、重建表），每条只执行一次。
+
+版本表 `schema_version(scope, version, applied_at)`，scope = `main` / `vector` /
+`exclusions`。一条迁移 = 一笔 `BEGIN IMMEDIATE … COMMIT`（DDL 与版本行同事务）：失败整条
+回滚、版本停在上一版、下次连接重试；库的版本**高于**程序已知最新版时拒绝打开。
+
+**向量单独一个 scope**：`vec_messages` 依赖 sqlite-vec 扩展，没装扩展的机器上 `main` /
+`exclusions` 必须照常、基础检索必须可用。三个 scope 各自版本化，**不假设跨库原子**
+（`index.db` 与 `exclusions.db` 是两个文件、主库是 WAL）。
+
+细节见 [内部阶段审计记录](内部阶段审计记录) 与
+[DATA_MODEL.md](DATA_MODEL.md) §10。
 
 ## 4. 关键设计决策与取舍
 

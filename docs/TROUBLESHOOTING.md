@@ -141,3 +141,19 @@ uv run pytest tests/ -q                       # 核心逻辑回归（不依赖�
 agent-wechat inspect session/session.db       # 解密层 + schema 探测
 agent-wechat recent filehelper -n 3           # 端到端读取
 ```
+
+## 7. 本地索引库 schema 迁移（`SchemaMigrationError`）
+
+本地库带版本表（`schema_version`），首次连接旧库时会自动升级一次（当前为 `main v2`：
+对齐 FTS 触发器体）。迁移在**同一个库内的一笔事务**里完成，失败即整条回滚、版本停在上一版。
+
+| 现象 | 原因 | 处置 |
+|---|---|---|
+| `迁移失败：main v2（…）：database is locked` | 另一个进程正持写锁（导出 / 向量构建 / 另一个 MCP server） | 等它结束再重试；`status` 可看长任务 |
+| `迁移失败：…：disk I/O error` / `No space left` | 磁盘满、只读卷、权限 | 修好磁盘/权限后重跑同一命令即可续 |
+| `索引库版本过新：main 已到 vN，本程序只认到 vM` | 你降级运行了旧版程序 | 升级 `agent-wechat` 到匹配版本；或从备份恢复旧库。**不要**用旧版继续写 |
+| 升级后 `status` 的 `schema_notes` 提示触发器不一致 | 迁移之后再被手工改动过 | 只报不改库；重跑一次 `export` 或手工重建触发器 |
+
+**备份**：迁移前想留退路就拷 `index.db`（+`-wal`/`-shm`）与 `exclusions.db`。
+本阶段的迁移**不删列、不改表结构**，所以通常不需要回退；最坏情况是
+`purge --index` 后重跑 `export`（2.5–3 h，含向量）。

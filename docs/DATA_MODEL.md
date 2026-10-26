@@ -382,3 +382,31 @@ for chat, in con.execute("SELECT DISTINCT chat_id FROM messages"):
   被销毁的会话会在下次 `export --full` 时**整批复活**——索引里没有墓碑可拦，而文件系统上看
   不出任何异常
 - 销毁：`agent-wechat purge --all --yes`（密钥缓存与全部索引一并清除；微信源数据不受影响）。默认 dry-run，手工 `rm -rf ~/.agent-wechat` 仍是等价后备
+
+## 10. Schema 版本与迁移
+
+本地库带一张版本表（Phase 01 起）：
+
+```sql
+CREATE TABLE IF NOT EXISTS schema_version (
+    scope      TEXT PRIMARY KEY,   -- 'main' | 'vector' | 'exclusions'
+    version    INTEGER NOT NULL,
+    applied_at INTEGER NOT NULL
+) WITHOUT ROWID;
+```
+
+- **三个 scope**：`main`（`index.db` 主表，当前 **2**）、`vector`（vec0 三表，当前 **1**）、
+  `exclusions`（在 `exclusions.db` 里，SQL 写作 `exclusions.schema_version`，当前 **1**）。
+- **ensure 与 migrate 分工**：`CREATE … IF NOT EXISTS` 每次连接照跑（缺对象就补建的自愈）；
+  迁移只处理 `IF NOT EXISTS` **表达不了**的变更（改触发器体、加列、重建表），每条只跑一次。
+  当前唯一的版本迁移是 `main v2`：把 FTS 三条触发器重建为代码里的最新定义（EA-077 的
+  旧体漂移）。
+- **一条迁移 = 一笔事务**：`BEGIN IMMEDIATE; <DDL>; <写版本行>; COMMIT`。失败整条回滚，
+  版本停在上一版，抛 `SchemaMigrationError`；下次连接重试同一条。重复执行是 no-op
+  （`applied_at` 都不变）。
+- **不假设跨库原子**：`index.db` 与 `exclusions.db` 是两个文件、主库是 WAL，跨文件 COMMIT
+  不保证崩溃原子；两个 scope 各自版本化，一个成功一个失败时下次连接接着做。
+- **版本过新**：库的版本高于程序已知最新版时**拒绝打开**（不写库），提示升级程序或恢复备份
+  ——降级运行新库会把未知结构改坏。
+- **备份**：`schema_version` 随 `index.db` 一起备份；`exclusions.db` 里那张随排除清单备份。
+- **`purge --index`** 删掉整个 `index.db`，版本表随之消失；重跑 `export` 时按新库初始化。
