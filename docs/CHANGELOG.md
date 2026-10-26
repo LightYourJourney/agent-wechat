@@ -3,6 +3,20 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 风格，
 版本号语义为 0.x 阶段（API 可能变动）。
 
+### 工程基线 P00（进行中）
+
+2026-10-26 起。取证与首批收口见 `内部阶段审计记录`。
+
+- **容器写闸门再收口**（P00 R-00-1）：拒绝范围从 `…/com.tencent.xinWeChat/Data` 及其祖先
+  扩为**整个容器 bundle** `…/com.tencent.xinWeChat`（含 `Data` 的兄弟目录）及其祖先。
+  **用户可见**：`--out ~/Library/Containers/com.tencent.xinWeChat/<任意子目录>` 现在被拒
+  （此前落在 `Data` 之外时放行，`Data/../x` 这类含 `..` 的写法同样放行）；`--out ~`、
+  `--out ~/Library`、`--out /` 等祖先路径的行为不变。`AGENT_WECHAT_HOME` 同判据。
+  `docs/SECURITY.md §3` 已同步为 bundle 口径。
+- **测试层**（非用户可见）：`tests/conftest.py` 新增第五闸，测试期禁止起真实外部命令
+  （此前矩阵格会真的执行 `tmutil`/`lsof`）；`real` 标记进入 `addopts` 排除，不再依赖
+  「每个 real 测试都同时标了 slow」的约定。
+
 ### 代码审查 R2（进行中）
 
 第二轮系统性审查（故障注入 A / 属性与差分 C / AST 变异 B），设计与计划见
@@ -33,6 +47,7 @@
   密钥缓存、`tmp/` 与默认产物根整体落进微信容器）；`media export` 的默认产物根与
   任务注册表的终态落盘一并过闸。**用户可见**：`--out ~`、`--out ~/Library`、`--out /`
   等祖先路径现在被拒（按解析后的路径判，覆盖 `..`、符号链接与大小写变体）。
+  **2026-10-26 起再扩为整个容器 bundle**（含 `Data` 的兄弟目录），见上方「工程基线 P00」。
 
 ### 工程质量审计修复期（进行中）
 

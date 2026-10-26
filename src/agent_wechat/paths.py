@@ -21,11 +21,11 @@ CONTAINER = pathlib.Path.home() / "Library/Containers/com.tencent.xinWeChat/Data
 XWECHAT_FILES = CONTAINER / "xwechat_files"
 APP_DATA = CONTAINER / "app_data"
 
-# 写闸门的范围（**不是**读路径的根，别与 `CONTAINER` 混用）：微信容器的整个 `Data`
-# 目录，以及它的**全部祖先**（一路到 `/`，含 `/` 本身）。
-# 理由：`--out`／`AGENT_WECHAT_HOME` 落在 `Data` 的任何一处（不只 `Documents`），产物
-# 都进了微信的数据区；落在它的祖先上，写的是数据区的上级/更上级，一经 `..` 或拼接
-# 就能回到容器里——口径取「一律拒绝」，宁可错拒一个上级目录，也不留一条可达路径。
+# 写闸门的判据根（**不是**读路径的根，别与 `CONTAINER` 混用）：微信容器 bundle
+# `…/com.tencent.xinWeChat` 及它的**全部祖先**（一路到 `/`，含 `/` 本身）。
+# `CONTAINER_DATA` 只是 bundle 的 `Data` 子树；根上移到 bundle，因为「容器内 ⇒ 子路径
+# 也在内」只在 bundle 口径下闭合（`Data/../x` 是兄弟目录，只认 Data 会漏，见
+# 内部阶段审计记录）。派生见文件末尾的 `container_bundle()`。
 CONTAINER_DATA = CONTAINER.parent                 # …/com.tencent.xinWeChat/Data
 
 # 账号目录形如 wxid_testacct01_ab12（尾部 _hex4 是实例后缀）
@@ -56,10 +56,10 @@ def container_verdict(p: str | pathlib.Path) -> bool | None:
     """
     """`p` 解析后是否落在**微信容器的可写范围**之内。
 
-    范围（两段，`CONTAINER_DATA` 为一端）：
-    - `…/com.tencent.xinWeChat/Data` 本身及其**全部子路径**——不只是 `Documents`：
-      写在 `Data` 的任何一处都进了微信的数据区；
-    - 它的**全部祖先**，一路到 `/`（含 `/` 本身）——写在祖先上等于写进数据区的上级，
+    范围（两段，`container_bundle()` 为一端）：
+    - `…/com.tencent.xinWeChat` 本身及其**全部子路径**——不只是 `Data` / `Documents`：
+      写在 bundle 的任何一处都进了微信的版本目录（`Data` 只是它的一个子目录）；
+    - 它的**全部祖先**，一路到 `/`（含 `/` 本身）——写在祖先上等于写进 bundle 的上级，
       再拼一段就能回到容器里；口径是「宁可错拒一个上级，也不留可达路径」。
 
     判据是**解析后**的路径：`Path.resolve(strict=False)` 展开 `..`、跟随符号链接，相对
@@ -70,8 +70,8 @@ def container_verdict(p: str | pathlib.Path) -> bool | None:
     **大小写**：macOS 默认 APFS 不区分大小写——`~/library/containers/…` 与
     `~/Library/Containers/…` 实测是同一个 inode，而 `resolve()` 不做大小写规范化
     ⇒ 只比字符串的话，换一种拼写就绕过判据。故字符串判据之后再用 `samefile` 比 inode：
-    ① `resolved` 的某个**祖先**与 `CONTAINER_DATA` 同 inode（覆盖容器链上的换拼写）；
-    ② `resolved` 本身与 `CONTAINER_DATA` 或其**任一祖先**同 inode（覆盖祖先链的换拼写）。
+    ① `resolved` 的某个**祖先**与 `container_bundle()` 同 inode（覆盖容器链上的换拼写）；
+    ② `resolved` 本身与 bundle 或其**任一祖先**同 inode（覆盖祖先链的换拼写）。
     只在「真的指同一目录」时为真，在区分大小写的卷上不会误伤（那时两种拼写是两个目录，
     且容器通常根本不存在）。
 
@@ -81,7 +81,7 @@ def container_verdict(p: str | pathlib.Path) -> bool | None:
     """
     try:
         resolved = pathlib.Path(p).resolve(strict=False)
-        guard = CONTAINER_DATA.resolve(strict=False)
+        guard = container_bundle().resolve(strict=False)
     except (OSError, RuntimeError, ValueError):
         # `ValueError` 也要接：`Path.resolve()` 对含**代理对**的路径会抛
         # `UnicodeEncodeError`（它是 ValueError 子类），而代理对被 `os.fsdecode` 解出来的
@@ -137,10 +137,10 @@ def _require_guard_resolvable() -> None:
     写闸门要求一个**肯定**的答案。
     """
     try:
-        CONTAINER_DATA.resolve(strict=False)
+        container_bundle().resolve(strict=False)
     except (OSError, RuntimeError) as exc:
         raise ContainerWriteRefused(
-            f"无法确认容器目录的位置：{CONTAINER_DATA}",
+            f"无法确认容器目录的位置：{container_bundle()}",
             hint=f"{exc}；为安全起见拒绝写入，请检查路径解析（符号链接 / 权限）后重试"
         ) from exc
 
@@ -155,14 +155,14 @@ def refuse_container_out(p: str | pathlib.Path) -> None:
     `pathlib.Path(out_dir) if out_dir else <默认根>` 和 CLI 的 `if args.out:` 同一判据）：
     空串的语义是「没给」（落点=默认根），本就不该被这道闸门拒——判据若用 `is not None`，
     `--out ""` 且 CWD 恰在容器内时会误拒（fail-closed、无实害，但两边惯例不一致）。
-    message 里带**被拒范围本身**（`CONTAINER_DATA`）：换一种大小写拼写
+    message 里带**被拒范围本身**（`container_bundle()`）：换一种大小写拼写
     命中的时候，用户看到的那串 `--out` 并不长成容器的样子，不印出来就无从理解为什么被拒。
     """
     _require_guard_resolvable()
 
     if _write_gate_refuses(p):
         raise ContainerWriteRefused(
-            f"拒绝把输出写进微信容器目录（{CONTAINER_DATA} 及其所有上级目录）：{p}",
+            f"拒绝把输出写进微信容器目录（{container_bundle()} 及其所有上级目录）：{p}",
             hint="换一个容器之外的目录（CLI 的 --out / MCP 的 out_dir），"
                  "例如 ~/Desktop/wechat-export")
 
@@ -185,7 +185,7 @@ def ensure_home_dirs() -> None:
     _require_guard_resolvable()
     if _write_gate_refuses(HOME_DIR):
         raise ContainerWriteRefused(
-            f"拒绝把数据目录指向微信容器目录（{CONTAINER_DATA} 及其所有上级目录）："
+            f"拒绝把数据目录指向微信容器目录（{container_bundle()} 及其所有上级目录）："
             f"{HOME_DIR}",
             hint="把 AGENT_WECHAT_HOME 指到容器之外（例如 ~/.agent-wechat），"
                  "或删掉该变量使用默认目录")
@@ -342,3 +342,17 @@ def time_machine_excluded() -> str | None:
     if r.returncode != 0:
         return None
     return (r.stdout or "").strip() or None          # tmutil 原文（含路径），与 purge 同口径
+
+
+def container_bundle() -> pathlib.Path:
+    """写闸门的判据根：`…/com.tencent.xinWeChat`（整个容器 bundle）。
+
+    **调用时由 `CONTAINER_DATA.parent` 派生，不做模块常量**：测试会 monkeypatch
+    `paths.CONTAINER_DATA` 把判据重定向到 tmp（`test_fault_injection` /
+    `test_fault_matrix`），import 期绑定的副本会让那条重定向静默失效。
+
+    定义在文件末尾是**刻意的**：`内部审计台账` 的故障矩阵按
+    **行号**冻结（`paths.py:65:resolve` 这类），在文件前部插函数会把所有行号推移，
+    整批格子随之「故障未命中」。追加在末尾，行号零位移。
+    """
+    return CONTAINER_DATA.parent

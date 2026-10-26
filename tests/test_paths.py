@@ -308,7 +308,9 @@ def test_container_verdict_returns_none_when_it_cannot_resolve(tmp_path, monkeyp
     """容器路径解析不出来 ⇒ None（不是抛、也不是 False）——写闸门靠这个 None 判「别写」。"""
     loop = tmp_path / "loop"
     loop.symlink_to(loop)
-    monkeypatch.setattr(paths, "CONTAINER_DATA", loop)
+    # 判据根是 bundle（`CONTAINER_DATA.parent`）：把它整体放进环里，
+    # `container_bundle()` 才会解析失败。
+    monkeypatch.setattr(paths, "CONTAINER_DATA", loop / "Data")
     assert paths.container_verdict(tmp_path / "x") is None
 
 
@@ -342,7 +344,8 @@ def test_ensure_home_dirs_names_the_unresolvable_guard(tmp_path, monkeypatch):
     「无法确认容器目录的位置」（不是「你把数据目录指进了容器」）。"""
     loop = tmp_path / "loop"
     loop.symlink_to(loop)
-    monkeypatch.setattr(paths, "CONTAINER_DATA", loop)
+    # 同上：判据根是 bundle，环要套在 `CONTAINER_DATA.parent` 上。
+    monkeypatch.setattr(paths, "CONTAINER_DATA", loop / "Data")
     monkeypatch.setattr(paths, "HOME_DIR", tmp_path / "home")
     with pytest.raises(errors.ContainerWriteRefused, match="无法确认容器目录的位置"):
         paths.ensure_home_dirs()

@@ -36,17 +36,21 @@ def _run_cli(*argv: str) -> int:
 # ---------------------------------------------------------------- 判据本身
 
 def test_predicate_covers_container_data_and_its_ancestor_chain():
-    """范围：`CONTAINER_DATA`（整个 Data 目录）本身与其**子路径**，以及它的**全部祖先**
-    一路到 `/`（含 `/` 本身）为真；非祖先的容器外路径为假。
+    """范围：`container_bundle()`（整个容器 bundle，含 `Data`）本身与其**子路径**，以及它的
+    **全部祖先**一路到 `/`（含 `/` 本身）为真；非祖先的容器外路径为假。
     被判真的那几条都不被创建——判据是纯路径面的。"""
     child = paths.CONTAINER / "xwechat_files" / ACCT / "db_storage"
     assert paths.in_wechat_container(paths.CONTAINER) is True
     assert paths.in_wechat_container(child) is True
     assert paths.in_wechat_container(str(child)) is True              # str 与 Path 同判
     assert paths.in_wechat_container(child / "..") is True            # `..` 回到容器内 = 仍在
-    # 闸门的根是**整个 Data**，不再只是 Documents
+    # 闸门的根是**整个容器 bundle**：Data 与 Documents 都只是它的子目录
     assert paths.in_wechat_container(paths.CONTAINER_DATA) is True
     assert paths.in_wechat_container(paths.CONTAINER_DATA / "Library") is True
+    # Data 的**兄弟目录**同样收——Phase 00 的单调性缺口：
+    # `Data/..` 是 bundle（判真），而 `Data/..` 的子目录此前落到「祖先的子目录」判假。
+    assert paths.in_wechat_container(paths.CONTAINER_DATA.parent / "x") is True
+    assert paths.in_wechat_container(paths.CONTAINER_DATA / ".." / "x") is True
     # 祖先链：两级祖先 + 一路到 `/`（含 `/` 本身）全都收
     assert paths.in_wechat_container(paths.CONTAINER_DATA.parent) is True   # …/com.tencent.xinWeChat
     assert paths.in_wechat_container(paths.CONTAINER_DATA.parents[2]) is True  # ~/Library
@@ -110,7 +114,10 @@ def test_media_export_cli_refuses_container_out(capsys):
     """`media export --out`：终审实测能把明文媒体写进容器——现在在任何读取之前即拒。"""
     assert _run_cli("media", "export", "--chat", "谁", "--out", PROBE) == 1
     err = capsys.readouterr().err
-    assert "微信容器目录" in err and str(paths.CONTAINER_DATA) in err
+    # 钉两样**不同**的东西：被拒范围（bundle 根）与用户给的落点（PROBE，在 Data 下）。
+    # 只断言后者是空转——PROBE 自己就会被回显，把文案里的根删掉也照样绿（review 抓到的）。
+    assert "微信容器目录" in err and str(paths.container_bundle()) in err
+    assert str(PROBE) in err
     assert "Traceback" not in err
     assert not pathlib.Path(PROBE).exists(), "被拒的调用不许在容器里留下任何东西"
 
