@@ -24,6 +24,8 @@ MODEL_CACHE_DIR = paths.HOME_DIR / "models"   # 固定目录：不用 $TMPDIR（
 BATCH = 256                                  # fastembed 实测最优批大小
 COMMIT_ROWS = 5120                           # 每 ~20 批一个事务：频繁 commit 会让插入掉 ~43%
 K_MAX = 4096                                 # sqlite-vec 硬上限
+DIRTY_BATCH = 64                             # 一轮最多消费多少条脏行
+DIRTY_PREV_SCAN = 500                        # 回查「上一条可嵌入消息」的扫描上限
 # 哪些类型值得嵌入是**本模块的策略**（不是行的事实），故常量留在这里；
 # 类型本身仍从 messages 的词汇表取，不出现裸数字。
 EMBED_TYPES = (messages.TYPE_TEXT, messages.TYPE_APPMSG)   # appmsg 提示形如 "[appmsg: 标题]"
@@ -434,6 +436,10 @@ def build_index(accounts: Sequence[str] | None = None, rebuild: bool = False,
                     # `apply` 会认为 vector scope 已就绪、将来的迁移被跳过。
                     + f"\nDELETE FROM {migrations.VERSION_TABLE}"
                       f" WHERE scope='{migrations.SCOPE_VECTOR}';\n"
+                    # 整表重建 = 所有消息都按当前内容重嵌一遍；旧队列与失败账本
+                    # 随之作废（留着只会让下一轮重复嵌入）。
+                    + "\nDELETE FROM pending_reembed;"
+                      "\nDELETE FROM reembed_failures;\n"
                     + "COMMIT;")
                 con.executescript(store.VECTOR_SCHEMA)
                 migrations.apply(con, scope=migrations.SCOPE_VECTOR, migrations=())
@@ -464,12 +470,214 @@ def build_index(accounts: Sequence[str] | None = None, rebuild: bool = False,
                                   batch=batch, commit_rows=commit_rows)
             embedded += e
             skipped += s
+        # 消费 Phase 02 投递的脏队列：历史改写只重嵌**改动的那几条**（外加后继一条
+        # 因前缀依赖而过时的）。有界：一轮最多 4 批，剩下的留给下一次构建。
+        if targets:
+            for _ in range(4):
+                dirty = apply_dirty(con, accounts=targets, embedder=embedder)
+                embedded += dirty["embedded"]
+                if dirty["embedded"] == 0 and dirty["dropped"] == 0 \
+                        and dirty["deferred"] == 0:
+                    break          # 队列已空（或只剩失败，留给下一轮/诊断）
         prev_skipped = _meta(con)["skipped"]
         total = con.execute("SELECT count(*) FROM vec_messages").fetchone()[0]
         _write_meta(con, embedded=total, skipped=prev_skipped + skipped)
         return {"embedded_this_run": embedded, "skipped_this_run": skipped}
     finally:
         con.close()
+
+
+# ---------- 脏队列消费（Phase 03） ----------
+
+def _commit(con: sqlite3.Connection) -> None:
+    """apply_dirty 的唯一提交出口：提交失败也要翻成项目异常（与 store 的出口同口径）。"""
+    try:
+        con.commit()
+    except (sqlite3.Error, OSError) as exc:
+        if con.in_transaction:
+            con.rollback()
+        raise store.index_unavailable(exc) from exc
+
+
+def _is_excluded(con: sqlite3.Connection, msg_key: str) -> bool:
+    """该消息是否已被 `purge --chat` 立碑（排除清单里有一条即算）。"""
+    return con.execute("SELECT 1 FROM exclusions.excluded WHERE msg_key=? LIMIT 1",
+                       (msg_key,)).fetchone() is not None
+
+
+def _delete_vec(con: sqlite3.Connection, rowid: int) -> None:
+    con.execute("DELETE FROM vec_messages WHERE msg_rowid=?", (rowid,))
+
+
+def _write_vec(con: sqlite3.Connection, row, vec, *, preview: str) -> None:
+    """单行向量写入：先删后插（vec0 的 UPDATE 语义不在我们依赖的契约里）。
+
+    `preview` 与全量构建一致——存的是**上文前缀**（`_build_account` 的 `(prev or "")[:80]`），
+    不是正文。两处不一致会让调试列给出两种含义。
+    """
+    _delete_vec(con, row["id"])
+    con.execute(_INSERT_VEC, (
+        row["id"], sqlite_vec.serialize_float32(list(vec)),
+        messages.acct_chat(row["account"], row["chat_md5"]),
+        row["account"], row["ts"], preview[:80]))
+
+
+def _prev_text(con: sqlite3.Connection, row) -> str | None:
+    """当前数据里，该消息之前最近一条**可嵌入**消息的正文（`doc_text` 的上文来源）。
+
+    全量构建在内存里累积 prev；队列消费只有零散几条，必须回查。上限 `DIRTY_PREV_SCAN`：
+    只有连续 500 条不可嵌入（媒体/系统）的会话才会取到 None——那时前缀本来也是空的。
+    """
+    cand = con.execute(
+        "SELECT msg_type, content, ts, local_id FROM messages "
+        "WHERE account=? AND chat_md5=? AND (ts < ? OR (ts = ? AND local_id < ?)) "
+        "ORDER BY ts DESC, local_id DESC LIMIT ?",
+        (row["account"], row["chat_md5"], row["ts"], row["ts"], row["local_id"],
+         DIRTY_PREV_SCAN)).fetchall()
+    for r in cand:
+        if should_embed(r):
+            return display_text(r)
+    return None
+
+
+def _next_embed_key(con: sqlite3.Connection, row) -> str | None:
+    """同一会话里**紧随其后**的第一条可嵌入消息。
+
+    它的 `doc_text` 前缀来自这一条——所以本条被改写时，下一条的向量也过时了。
+    级联只在消费时做一次（由下一条自己的队列行继续推进），不做递归。
+    """
+    cand = con.execute(
+        "SELECT msg_key, msg_type, content, ts, local_id FROM messages "
+        "WHERE account=? AND chat_md5=? AND (ts > ? OR (ts = ? AND local_id > ?)) "
+        "ORDER BY ts, local_id LIMIT ?",
+        (row["account"], row["chat_md5"], row["ts"], row["ts"], row["local_id"],
+         DIRTY_PREV_SCAN)).fetchall()
+    for r in cand:
+        if should_embed(r):
+            return r["msg_key"]
+    return None
+
+
+def _queued_keys(con: sqlite3.Connection, accounts, limit: int) -> list[str]:
+    if accounts is None:
+        return store.queued_reembed(con, None, limit)
+    keys: list[str] = []
+    for acct in accounts:
+        keys.extend(store.queued_reembed(con, acct, limit))
+    return keys[:limit]
+
+
+def apply_dirty(con: sqlite3.Connection, *, accounts: Sequence[str] | None = None,
+                limit: int | None = None,
+                embedder: FastEmbedEmbedder | None = None) -> dict:
+    """消费最多 `limit` 条重嵌队列，返回 `{embedded, dropped, deferred, failed}`。
+
+    判定顺序（每一支都决定「这条队列行还要不要」）：
+
+    1. **消息不在索引里** → 队列行作废（`dropped`）。没有 rowid 可删——purge 已按
+       `acct_chat` 删过向量。
+    2. **在排除清单里** → 删向量、作废队列行（`dropped`）。被销毁的数据**不会**复活。
+    3. **`id` 高于向量水位线** → 还没被嵌入过，下一次前向扫描会按当前正文嵌入；
+       只作废队列行（`deferred`），不重复嵌入。
+    4. **不再可嵌入**（类型变成图片、正文过短）→ 删向量、作废（`dropped`）。
+    5. 其余：按**当前**内容重算 `doc_text`（含回查的上文前缀），批量嵌入一次，
+       逐条「先删后插」并在**同一事务**里完成队列行删除；同时把**后继消息**入队
+       （它的前缀依赖这一条）。
+
+    嵌入失败时：整批记失败账本、保留队列行、提交失败记录，然后抛 `VectorError`——
+    下一次运行会重试同一批，直到收敛。**不静默吞掉**。
+    """
+    limit = DIRTY_BATCH if limit is None else limit
+    embedder = embedder or default_embedder()
+    keys = _queued_keys(con, accounts, limit)
+    stats = {"embedded": 0, "dropped": 0, "deferred": 0, "failed": 0}
+    todo: list[tuple[str, object, str, str]] = []      # (key, row, text, preview)
+
+    for key in keys:
+        row = con.execute(
+            "SELECT id, msg_key, account, chat_md5, chat_id, ts, local_id, msg_type,"
+            " sender_id, sender_name, is_self, content, media_hint"
+            " FROM messages WHERE msg_key=?", (key,)).fetchone()
+        if row is None or _is_excluded(con, key):
+            if row is not None:
+                _delete_vec(con, row["id"])
+            store.dequeue_reembed(con, key)
+            stats["dropped"] += 1
+            continue
+        if row["id"] > _vector_watermark(con, row["account"]):
+            store.dequeue_reembed(con, key)
+            stats["deferred"] += 1
+            continue
+        if not should_embed(row):
+            _delete_vec(con, row["id"])
+            store.dequeue_reembed(con, key)
+            stats["dropped"] += 1
+            continue
+        prev = _prev_text(con, row)
+        todo.append((key, row, doc_text(row, prev), prev or ""))
+
+    if todo:
+        try:
+            vecs = embedder.embed([t for _, _, t, _ in todo])
+        except Exception as exc:                       # noqa: BLE001 — 出口统一翻译
+            reason = redact(str(exc))[:300]
+            for key, _, _, _ in todo:
+                store.record_reembed_failure(con, key, reason)
+            _commit(con)
+            stats["failed"] = len(todo)
+            raise VectorError(
+                f"重嵌失败（{len(todo)} 条已记录，队列保留）：{reason}",
+                hint="确认模型可加载后重跑；失败次数见 CLI `agent-wechat vector-status`"
+            ) from exc
+        if len(vecs) != len(todo):
+            for key, _, _, _ in todo:
+                store.record_reembed_failure(con, key, "嵌入返回的向量数不足")
+            _commit(con)
+            raise VectorError(
+                f"嵌入返回的向量数不足（{len(vecs)} != {len(todo)}）：本批未写入",
+                hint="重跑一次即可（队列行还在）；反复出现请检查 embedder")
+        if vecs and len(vecs[0]) != store.VECTOR_DIM:
+            raise VectorError(
+                f"嵌入模型维度 {len(vecs[0])} 与索引库的 {store.VECTOR_DIM} 不一致："
+                "换模型后必须重建索引",
+                hint="用 rebuild=True 重建（DDL 会按新维度建表）")
+        try:
+            for (key, row, _text, preview), v in zip(todo, vecs):
+                _write_vec(con, row, v, preview=preview)
+                store.dequeue_reembed(con, key)
+                nxt = _next_embed_key(con, row)
+                if nxt:
+                    store.enqueue_reembed(con, nxt)
+            _commit(con)
+        except (sqlite3.Error, OSError) as exc:
+            if con.in_transaction:
+                con.rollback()
+            raise store.index_unavailable(exc) from exc
+        stats["embedded"] = len(todo)
+    else:
+        # 只有作废/延后时也要提交（dequeue 是写）
+        _commit(con)
+    return stats
+
+
+def freshness(con: sqlite3.Connection, account: str | None = None) -> dict:
+    """索引新鲜度：模型、水位线、队列深度、失败次数。**只读**（不建表、不加载扩展）。"""
+    out: dict = {"model": MODEL_ID, "embedded": 0, "skipped": 0,
+                 "watermark": {}, **store.reembed_queue_stats(con, account)}
+    if store._has_table(con, "vector_meta"):
+        row = con.execute(
+            "SELECT embedded, skipped FROM vector_meta WHERE model_id=?",
+            (MODEL_ID,)).fetchone()
+        if row:
+            out["embedded"], out["skipped"] = int(row[0]), int(row[1])
+    if store._has_table(con, "vector_watermark"):
+        sql = "SELECT account, last_rowid FROM vector_watermark"
+        args: tuple = ()
+        if account:
+            sql += " WHERE account=?"
+            args = (account,)
+        out["watermark"] = dict(con.execute(sql, args).fetchall())
+    return out
 
 
 # ---------- KNN 查询 ----------

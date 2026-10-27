@@ -249,6 +249,22 @@ def cmd_vector_build(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_vector_status(args: argparse.Namespace) -> int:
+    """向量索引新鲜度：模型、水位线、重嵌队列深度与失败次数。只读，不建库、不加载扩展。"""
+    import json
+
+    from . import store, vector
+    if not store.DB_PATH.exists():
+        # 只读诊断不许「看一次就建库」（与 `status` 同一条规矩）：没有索引就答零。
+        info = {"model": vector.MODEL_ID, "embedded": 0, "skipped": 0,
+                "watermark": {}, "pending": 0, "failed": 0, "max_attempts": 0}
+    else:
+        with store.open() as con:
+            info = vector.freshness(con, args.account)
+    print(json.dumps(info, ensure_ascii=False, indent=2))
+    return 0
+
+
 def cmd_semantic(args: argparse.Namespace) -> int:
     """语义检索。chat_id 原样打印（与 search 子命令一致），展示名只用于 MCP 的返回结构。"""
     from . import usecases
@@ -995,6 +1011,10 @@ def main(argv: list[str] | None = None) -> None:
     sp.add_argument("--rebuild", action="store_true", help="先清空索引再全量重建")
     sp.add_argument("--account", help="仅索引该账号；省略则索引全部账号")
     sp.set_defaults(fn=cmd_vector_build)
+
+    sp = sub.add_parser("vector-status", help="向量索引新鲜度：水位线 / 重嵌队列 / 失败次数")
+    sp.add_argument("--account", help="只看该账号；省略则全部账号")
+    sp.set_defaults(fn=cmd_vector_status)
 
     sp = sub.add_parser("semantic", help="语义检索（需先 vector-build）")
     sp.add_argument("query")

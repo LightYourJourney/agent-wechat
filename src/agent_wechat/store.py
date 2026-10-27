@@ -48,7 +48,15 @@ AUDIT_CURSOR_DDL = (
 PENDING_REEMBED_DDL = (
     "CREATE TABLE IF NOT EXISTS pending_reembed ("
     " msg_key TEXT PRIMARY KEY, changed_at INTEGER NOT NULL) WITHOUT ROWID")
-AUDIT_TABLES = (AUDIT_CURSOR_DDL, PENDING_REEMBED_DDL)
+# Phase 03：重嵌失败账本。队列行本身（`pending_reembed`）保持「待办集合」语义——
+# 成功才删；失败只在这里累计尝试次数与最近原因，队列行留在原处等下一轮。
+REEMBED_FAILURES_DDL = (
+    "CREATE TABLE IF NOT EXISTS reembed_failures ("
+    " msg_key TEXT PRIMARY KEY,"
+    " attempts INTEGER NOT NULL,"
+    " last_error TEXT,"
+    " last_attempt_at INTEGER NOT NULL) WITHOUT ROWID")
+AUDIT_TABLES = (AUDIT_CURSOR_DDL, PENDING_REEMBED_DDL, REEMBED_FAILURES_DDL)
 
 _SCHEMA_BODY = f"""
 PRAGMA journal_mode=WAL;
@@ -138,6 +146,9 @@ CREATE TABLE IF NOT EXISTS msg_extras (
 -- 事务**写入，所以「SQLite 已改、FTS 已跟随（既有触发器）、重嵌标记已落」三者不会分叉。
 -- Phase 03 消费它；本阶段只保证标记正确产生。
 {PENDING_REEMBED_DDL};
+
+-- Phase 03：重嵌失败账本（与队列分表：队列是待办集合，这里记重试信息）
+{REEMBED_FAILURES_DDL};
 """
 
 # FTS 触发器：**单一来源**。`SCHEMA` 用它拼出全量建库脚本；迁移 v2 用同一批字符串
@@ -175,7 +186,7 @@ SCHEMA = _SCHEMA_BODY + "\n" + "\n".join(FTS_TRIGGERS) + "\n" + REEMBED_TRIGGER
 
 # 本程序已知的 main scope 最新版本。迁移只列**IF NOT EXISTS 表达不了**的变更；
 # 基线（v1）由 `migrations.apply` 隐式 stamp——那代表「整套 DDL 已由 ensure 建好」。
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 MIGRATIONS: tuple[migrations.Migration, ...] = (
     migrations.Migration(
@@ -193,6 +204,11 @@ MIGRATIONS: tuple[migrations.Migration, ...] = (
         # 两张表 ensure 也会建（自愈）；这里再写一遍，是为了让「v2 的库升到 v3」这件事
         # 在迁移事务里有一份显式的、可审计的记录。触发器要 DROP 再建：老库上可能没有。
         statements=AUDIT_TABLES + ("DROP TRIGGER IF EXISTS msg_reembed_au", REEMBED_TRIGGER),
+    ),
+    migrations.Migration(
+        version=4,
+        name="重嵌失败账本（Phase 03）",
+        statements=(REEMBED_FAILURES_DDL,),
     ),
 )
 
@@ -570,6 +586,10 @@ def delete_chat(con: sqlite3.Connection, *, account: str, chat_id: str) -> dict[
     con.execute("DELETE FROM msg_extras WHERE substr(msg_key, 1, ?) = ?", (len(p), p))
     con.execute("DELETE FROM messages WHERE account=? AND chat_id=?", a)   # FTS 由触发器跟随
     con.execute("DELETE FROM display_names WHERE account=? AND chat_id=?", a)
+    # 重嵌队列与失败账本：它们是**工作清单**，不是用户数据。删掉与删除同一事务——
+    # 留着会让 Phase 03 的消费者对着已销毁的 msg_key 空转（消费侧也有排除判据兜底）。
+    con.execute("DELETE FROM pending_reembed WHERE substr(msg_key, 1, ?) = ?", (len(p), p))
+    con.execute("DELETE FROM reembed_failures WHERE substr(msg_key, 1, ?) = ?", (len(p), p))
     # 向量水位线：min 而非 max。**不要复用 vector._set_vector_watermark**——它的 upsert 写的是
     # max(...)（单调不减），这一行 min 会被它当场吃掉、静默无效（spec §5.2 第 1 条）。
     # 取**该账号自己的** max 即可（与那条 WHERE account=? 天然配对）。
@@ -920,6 +940,77 @@ def save_audit_cursors(con: sqlite3.Connection, account: str,
         con.commit()
     except (sqlite3.Error, OSError) as exc:
         raise index_unavailable(exc) from exc
+
+
+# ---------- 重嵌队列（Phase 02 写入 / Phase 03 消费） ----------
+
+def enqueue_reembed(con: sqlite3.Connection, msg_key: str) -> None:
+    """把一条消息放进重嵌队列（幂等）。**不 commit**：与调用方的向量写入同事务。
+
+    队列是**集合**不是日志：同一条消息改十次也只是一行，`changed_at` 取最后一次。
+    消费时读的是 `messages` 的**当前**内容，所以中间版本不需要保留。
+    """
+    con.execute(
+        "INSERT INTO pending_reembed(msg_key, changed_at) VALUES (?, ?) "
+        "ON CONFLICT(msg_key) DO UPDATE SET changed_at=excluded.changed_at",
+        (msg_key, int(time.time())))
+
+
+def dequeue_reembed(con: sqlite3.Connection, msg_key: str) -> None:
+    """消费完成（或判定无需向量）：删队列行与失败账本。不 commit。"""
+    con.execute("DELETE FROM pending_reembed WHERE msg_key=?", (msg_key,))
+    con.execute("DELETE FROM reembed_failures WHERE msg_key=?", (msg_key,))
+
+
+def record_reembed_failure(con: sqlite3.Connection, msg_key: str,
+                           error: str) -> int:
+    """记一次失败：尝试次数 +1，保存最近原因。返回新的次数。不 commit。"""
+    con.execute(
+        "INSERT INTO reembed_failures(msg_key, attempts, last_error, last_attempt_at) "
+        "VALUES (?, 1, ?, ?) ON CONFLICT(msg_key) DO UPDATE SET "
+        "attempts=attempts + 1, last_error=excluded.last_error, "
+        "last_attempt_at=excluded.last_attempt_at",
+        (msg_key, error, int(time.time())))
+    return int(con.execute("SELECT attempts FROM reembed_failures WHERE msg_key=?",
+                           (msg_key,)).fetchone()[0])
+
+
+def queued_reembed(con: sqlite3.Connection, account: str | None = None,
+                   limit: int = 256) -> list[str]:
+    """取一批待重嵌的 `msg_key`（按 `changed_at`，再按 key 稳定排序）。
+
+    `account` 给定时按 `msg_key` 前缀筛（`msg_key` 第一段就是账号，wxid 里不可能有 `|`）。
+    队列是小表：它的规模由「改写了多少条」决定，不是全量消息数。
+    """
+    if account is None:
+        rows = con.execute(
+            "SELECT msg_key FROM pending_reembed ORDER BY changed_at, msg_key LIMIT ?",
+            (int(limit),)).fetchall()
+    else:
+        p = f"{account}|"
+        rows = con.execute(
+            "SELECT msg_key FROM pending_reembed WHERE substr(msg_key, 1, ?) = ? "
+            "ORDER BY changed_at, msg_key LIMIT ?", (len(p), p, int(limit))).fetchall()
+    return [r[0] for r in rows]
+
+
+def reembed_queue_stats(con: sqlite3.Connection, account: str | None = None) -> dict:
+    """队列深度与失败分布（新鲜度诊断用）。表不存在时返回零（轻装安装）。"""
+    if not _has_table(con, "pending_reembed"):
+        return {"pending": 0, "failed": 0, "max_attempts": 0}
+    if account is None:
+        pending = con.execute("SELECT count(*) FROM pending_reembed").fetchone()[0]
+        fails = con.execute(
+            "SELECT count(*), COALESCE(max(attempts), 0) FROM reembed_failures").fetchone()
+    else:
+        p = f"{account}|"
+        pending = con.execute(
+            "SELECT count(*) FROM pending_reembed WHERE substr(msg_key, 1, ?) = ?",
+            (len(p), p)).fetchone()[0]
+        fails = con.execute(
+            "SELECT count(*), COALESCE(max(attempts), 0) FROM reembed_failures "
+            "WHERE substr(msg_key, 1, ?) = ?", (len(p), p)).fetchone()
+    return {"pending": pending, "failed": fails[0], "max_attempts": fails[1]}
 
 
 def clear_audit_cursors(con: sqlite3.Connection, account: str) -> None:
