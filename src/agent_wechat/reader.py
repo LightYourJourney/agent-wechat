@@ -27,6 +27,11 @@ except ImportError:  # pragma: no cover
 # 类型词汇表的 owner 是 messages.py；此处转出以保持既有引用点可用。
 TYPE_NAMES = messages.TYPE_NAMES
 
+# 导出/回看读的列清单（含 packed_info_data 与 server_id 之外的两个媒体列）。
+# 两处 SELECT 共用一个常量：列清单漂了，回看与前向会对同一条消息给出不同的 refs。
+_EXPORT_COLUMNS = ("local_id, local_type, real_sender_id, create_time, "
+                   "message_content, WCDB_CT_message_content, packed_info_data")
+
 
 @dataclass
 class Message:
@@ -108,6 +113,10 @@ class MessageReader:
         # 解不开」是 DecryptError——不记的话会话名静默落 `md5:<hex>`，用户只知道名字丢了
         # 一些，不知道去修哪个库。`collect_degradations` 把两者合并成 degraded 条目。
         self._source_notes: list[tuple[str, str]] = []
+        # 上一次 `iter_all` 的回看游标：{(shard, chat_md5): 下一个位置}。由导出在数据
+        # 提交后落盘；在这里初始化，是为了让「fake reader 忘了它」变成响亮的
+        # AttributeError，而不是静默地永远不推进游标。
+        self.audit_marks: dict[tuple[str, str], int] = {}
 
     def _contacts_all_cached(self) -> list[dict]:
         """**全量**联系人（不带 `LIMIT`）。同一 reader 生命周期内只解密一次 contact.db
@@ -490,7 +499,7 @@ class MessageReader:
                       sticker_names):
         """一行源数据 → `(messages 行, media_ref 或 None)`。
 
-        **iter_all 与 iter_audit 共用**：两条路径若各写一份 refs 提取，导出与回看对同一条
+        **前向扫描与回看共用**：两条路径若各写一份 refs 提取，导出与回看对同一条
         消息会得出不同的 `media_refs`（贴纸那种「`file_key` 位放 md5」的约定尤其容易走偏）。
         """
         lid, ltype, sender, ts, mc, ct, packed = row
@@ -514,6 +523,28 @@ class MessageReader:
             msg_type=m.msg_type, sender_id=m.sender_id,
             sender_name=m.sender_name, is_self=1 if m.is_self else 0,
             content=m.content, media_hint=m.media_hint), ref
+
+    def _batched(self, src_rows, *, batch: int, shard: str, md5hex: str,
+                 chat_map, n2i, sticker_names):
+        """源行 → `(messages 行批次, refs 批次)`。**前向扫描与回看共用**：
+
+        以前两条路径各写一份解码 + 分批循环，改一处忘另一处就会让「导出」与「回看」
+        对同一条消息产出不同的 media_refs（贴纸的 `file_key` 位放 md5 尤其容易走偏）。
+        """
+        rows: list[messages.MessageRow] = []
+        refs: list[tuple[str, str, str | None, str | None]] = []
+        for row in src_rows:
+            out, ref = self._export_piece(
+                row, shard=shard, md5hex=md5hex, chat_map=chat_map,
+                n2i=n2i, sticker_names=sticker_names)
+            if ref:
+                refs.append(ref)
+            rows.append(out)
+            if len(rows) >= batch:
+                yield rows, refs
+                rows, refs = [], []
+        if rows:
+            yield rows, refs
 
     def iter_all(self, chat_id: str | None = None, resume: dict[str, int] | None = None,
                  batch: int | None = None, *,
@@ -556,22 +587,12 @@ class MessageReader:
                     # 唯一那张表，这里再判一次是恒真分支（同一判据两处维护）。
                     start = resume.get((shard.name, md5hex), 0)
                     cur = con.execute(
-                        f"SELECT local_id, local_type, real_sender_id, create_time, "
-                        f"message_content, WCDB_CT_message_content, packed_info_data "
-                        f"FROM '{table}' WHERE local_id > ? ORDER BY local_id", (start,))
-                    rows: list[messages.MessageRow] = []
-                    refs: list[tuple[str, str, str | None, str | None]] = []
-                    for row in cur:
-                        out, ref = self._export_piece(
-                            row, shard=shard.name, md5hex=md5hex,
-                            chat_map=chat_map, n2i=n2i, sticker_names=sticker_names)
-                        if ref:
-                            refs.append(ref)
-                        rows.append(out)
-                        if len(rows) >= batch:
-                            yield rows, refs
-                            rows = []
-                            refs = []
+                        f"SELECT {_EXPORT_COLUMNS} FROM '{table}' "
+                        f"WHERE local_id > ? ORDER BY local_id", (start,))
+                    yield from self._batched(
+                        cur, batch=batch, shard=shard.name, md5hex=md5hex,
+                        chat_map=chat_map, n2i=n2i, sticker_names=sticker_names)
+
                     if audit_sink is not None and audit_rows > 0:
                         # 回看与导出**共用同一次分片解密**：另开一趟会让每轮增量多付
                         # 一次 sqlcipher 导出（500MB 量级的常态成本）。游标走到表尾
@@ -580,30 +601,17 @@ class MessageReader:
                         # 回看的行走 `audit_sink` 而**不**混进 yield：调用方要把「本轮
                         # 新写入的行」与「回看过的行」分开计数（`rows` 是已发布契约），
                         # 混在一起会让每次增量都报出几万行。
-                        start = (audit_cursors or {}).get((shard.name, md5hex), 0)
+                        a_start = (audit_cursors or {}).get((shard.name, md5hex), 0)
                         got = con.execute(
-                            f"SELECT local_id, local_type, real_sender_id, create_time, "
-                            f"message_content, WCDB_CT_message_content, packed_info_data "
-                            f"FROM '{table}' WHERE local_id > ? ORDER BY local_id LIMIT ?",
-                            (start, int(audit_rows))).fetchall()
+                            f"SELECT {_EXPORT_COLUMNS} FROM '{table}' "
+                            f"WHERE local_id > ? ORDER BY local_id LIMIT ?",
+                            (a_start, int(audit_rows))).fetchall()
                         self.audit_marks[(shard.name, md5hex)] = (
                             0 if len(got) < audit_rows else int(got[-1][0]))
-                        arows: list[messages.MessageRow] = []
-                        arefs: list[tuple[str, str, str | None, str | None]] = []
-                        for row in got:
-                            out, ref = self._export_piece(
-                                row, shard=shard.name, md5hex=md5hex,
-                                chat_map=chat_map, n2i=n2i, sticker_names=sticker_names)
-                            if ref:
-                                arefs.append(ref)
-                            arows.append(out)
-                            if len(arows) >= batch:
-                                audit_sink(arows, arefs)
-                                arows, arefs = [], []
-                        if arows:
-                            audit_sink(arows, arefs)
-                    if rows:
-                        yield rows, refs
+                        for a_rows, a_refs in self._batched(
+                                got, batch=batch, shard=shard.name, md5hex=md5hex,
+                                chat_map=chat_map, n2i=n2i, sticker_names=sticker_names):
+                            audit_sink(a_rows, a_refs)
 
     def iter_extras_input(self) -> Iterator[tuple[str, int, bytes]]:
         """为 `msg_extras` 回填供料：逐条 yield `(msg_key, msg_type, payload)`。

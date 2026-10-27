@@ -39,7 +39,18 @@ BATCH = 2000
 # （`msg_key` 的规模可以到几千），不该让一次调用生成一条几千占位符的语句。
 KEYS_BATCH = 500
 
-_SCHEMA_BODY = """
+# Phase 02 的两张表：DDL 只有这一份，`SCHEMA` 与迁移 v3 都引用它。
+AUDIT_CURSOR_DDL = (
+    "CREATE TABLE IF NOT EXISTS audit_cursor ("
+    " account TEXT NOT NULL, shard TEXT NOT NULL, chat_md5 TEXT NOT NULL,"
+    " audited_local_id INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL,"
+    " PRIMARY KEY (account, shard, chat_md5)) WITHOUT ROWID")
+PENDING_REEMBED_DDL = (
+    "CREATE TABLE IF NOT EXISTS pending_reembed ("
+    " msg_key TEXT PRIMARY KEY, changed_at INTEGER NOT NULL) WITHOUT ROWID")
+AUDIT_TABLES = (AUDIT_CURSOR_DDL, PENDING_REEMBED_DDL)
+
+_SCHEMA_BODY = f"""
 PRAGMA journal_mode=WAL;
 CREATE TABLE IF NOT EXISTS messages (
     id          INTEGER PRIMARY KEY,
@@ -121,22 +132,12 @@ CREATE TABLE IF NOT EXISTS msg_extras (
 -- Phase 02：历史消息**审计游标**。导出水位线只向前扫（local_id > max），看不见旧行被改写；
 -- 这张表记录「每个 (账号,分片,会话) 已经回看到哪」。每轮导出只回看一小段，游标到头绕回 0，
 -- 于是整段历史会在若干轮内被完整重读一遍。恒定内存：一轮只取 AUDIT_ROWS 行。
-CREATE TABLE IF NOT EXISTS audit_cursor (
-    account         TEXT NOT NULL,
-    shard           TEXT NOT NULL,
-    chat_md5        TEXT NOT NULL,
-    audited_local_id INTEGER NOT NULL DEFAULT 0,
-    updated_at      INTEGER NOT NULL,
-    PRIMARY KEY (account, shard, chat_md5)
-) WITHOUT ROWID;
+{AUDIT_CURSOR_DDL};
 
 -- Phase 02：内容被改写、等待重嵌的消息。由 `msg_reembed_au` 触发器维护——**与更新同一
 -- 事务**写入，所以「SQLite 已改、FTS 已跟随（既有触发器）、重嵌标记已落」三者不会分叉。
 -- Phase 03 消费它；本阶段只保证标记正确产生。
-CREATE TABLE IF NOT EXISTS pending_reembed (
-    msg_key   TEXT PRIMARY KEY,
-    changed_at INTEGER NOT NULL
-) WITHOUT ROWID;
+{PENDING_REEMBED_DDL};
 """
 
 # FTS 触发器：**单一来源**。`SCHEMA` 用它拼出全量建库脚本；迁移 v2 用同一批字符串
@@ -176,15 +177,6 @@ SCHEMA = _SCHEMA_BODY + "\n" + "\n".join(FTS_TRIGGERS) + "\n" + REEMBED_TRIGGER
 # 基线（v1）由 `migrations.apply` 隐式 stamp——那代表「整套 DDL 已由 ensure 建好」。
 SCHEMA_VERSION = 3
 
-_AUDIT_TABLES = (
-    "CREATE TABLE IF NOT EXISTS audit_cursor ("
-    " account TEXT NOT NULL, shard TEXT NOT NULL, chat_md5 TEXT NOT NULL,"
-    " audited_local_id INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL,"
-    " PRIMARY KEY (account, shard, chat_md5)) WITHOUT ROWID",
-    "CREATE TABLE IF NOT EXISTS pending_reembed ("
-    " msg_key TEXT PRIMARY KEY, changed_at INTEGER NOT NULL) WITHOUT ROWID",
-)
-
 MIGRATIONS: tuple[migrations.Migration, ...] = (
     migrations.Migration(
         version=2,
@@ -200,7 +192,7 @@ MIGRATIONS: tuple[migrations.Migration, ...] = (
         name="历史消息审计游标与重嵌队列（Phase 02）",
         # 两张表 ensure 也会建（自愈）；这里再写一遍，是为了让「v2 的库升到 v3」这件事
         # 在迁移事务里有一份显式的、可审计的记录。触发器要 DROP 再建：老库上可能没有。
-        statements=_AUDIT_TABLES + ("DROP TRIGGER IF EXISTS msg_reembed_au", REEMBED_TRIGGER),
+        statements=AUDIT_TABLES + ("DROP TRIGGER IF EXISTS msg_reembed_au", REEMBED_TRIGGER),
     ),
 )
 
@@ -366,7 +358,13 @@ _INSERT_SQL = (
     # 属性（退化形态 `md5:<hex>` 是真名的降级），名字解析回来后必须能自愈；只认 content
     # 时同一条消息会永远停在首次写入的 chat_id 上，同一 chat_md5 的行分裂成两种 id。
     "WHERE messages.content IS NOT excluded.content "
-    "   OR messages.chat_id IS NOT excluded.chat_id")
+    "   OR (messages.chat_id IS NOT excluded.chat_id "
+    # 退化名（`md5:<hex>`）**只许修好、不许写坏**：回看会重读旧行，而名字源
+    # （session/contact）可能临时读不出来——那时 chat_map 缺项、解码结果退回退化 id。
+    # 没有这半句，一次临时降级会把索引里所有好名字覆盖成 `md5:…`（只增改的库还会
+    # 就此固化）。反向（退化 → 真名）仍然更新，这正是「会话标识恢复」。
+    f"      AND (excluded.chat_id NOT LIKE '{messages.MD5_PREFIX}%' "
+    f"           OR messages.chat_id LIKE '{messages.MD5_PREFIX}%'))")
 
 
 def schema_drift_notes(con: sqlite3.Connection) -> list[str]:
@@ -395,6 +393,16 @@ def schema_drift_notes(con: sqlite3.Connection) -> list[str]:
                          "（改过 DDL 的老库不会自动升级；只报不改库——此类差异通常不影响"
                          "既有行为，重建索引时自然消除）")
     return notes
+
+
+def _begin_immediate(con: sqlite3.Connection) -> None:
+    """拿写锁。**BEGIN 本身也会失败**（`database is locked`）——此前的四处都裸穿，
+    回看把这条路径的触发面放大了（每轮都会写旧行）。与提交段同一个出口。
+    """
+    try:
+        con.execute("BEGIN IMMEDIATE")
+    except (sqlite3.Error, OSError) as exc:
+        raise index_unavailable(exc) from exc
 
 
 def _filter_excluded(con: sqlite3.Connection, keys: Sequence[str]) -> set[str]:
@@ -428,7 +436,7 @@ def upsert_batch(con: sqlite3.Connection, rows: list[messages.MessageRow]) -> in
     调用方据此把「读到的」与「入库的」分开计（计数契约，见 `export.run_export`）。
     """
     if not con.in_transaction:
-        con.execute("BEGIN IMMEDIATE")
+        _begin_immediate(con)
     now = int(time.time())
     skip = _filter_excluded(con, [r["msg_key"] for r in rows])
     keep = [r for r in rows if r["msg_key"] not in skip]
@@ -632,7 +640,7 @@ def upsert_media_refs(con: sqlite3.Connection,
     if not rows:
         return 0
     if not con.in_transaction:
-        con.execute("BEGIN IMMEDIATE")
+        _begin_immediate(con)
     skip = _filter_excluded(con, [r[0] for r in rows])
     keep = [r for r in rows if r[0] not in skip]
     if keep:
@@ -755,7 +763,7 @@ def upsert_extras(con: sqlite3.Connection,
     if not rows:
         return 0
     if not con.in_transaction:
-        con.execute("BEGIN IMMEDIATE")
+        _begin_immediate(con)
     skip = _filter_excluded(con, [r[0] for r in rows])
     keep = [r for r in rows if r[0] not in skip]
     if keep:
@@ -802,7 +810,7 @@ def upsert_msg_parts(con: sqlite3.Connection,
     if not rows:
         return 0
     if not con.in_transaction:
-        con.execute("BEGIN IMMEDIATE")
+        _begin_immediate(con)
     skip = _filter_excluded(con, [r[0] for r in rows])
     keep = [r for r in rows if r[0] not in skip]
     if keep:

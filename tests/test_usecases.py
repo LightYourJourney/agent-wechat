@@ -377,8 +377,7 @@ def test_export_task_carries_skipped_rows_beside_rows(tmp_path, monkeypatch):
         def iter_all(self, **kw):
             yield victim_rows + keep_rows, []      # 微信库里那两条「还在」
 
-        def iter_audit(self, cursors, **kw):
-            return iter(())                        # 本用例只关心前向扫描的计数
+        audit_marks: dict = {}
 
     monkeypatch.setattr(reader, "MessageReader", _R)
 

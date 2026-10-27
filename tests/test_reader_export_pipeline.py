@@ -1772,6 +1772,14 @@ def test_rewrites_are_caught_by_the_audit_pass_but_not_by_forward_scan(tmp_path,
         assert con.execute("SELECT count(*) FROM pending_reembed WHERE msg_key=?",
                            (key,)).fetchone()[0] == 1
 
+    # ③ `--full` 仍是即时核对手段：前向全量重扫会修正新改写（这一轮不做回看）
+    build_shard(wx, ACCT, "message_0.db",
+                {FRIEND: [(1, 1, 1, T0 + 10, "第三版正文", 0)]}, [FRIEND])
+    assert export.run_export(ACCT, full=True) == 1
+    with store.open() as con:
+        assert con.execute("SELECT content FROM messages WHERE msg_key=?",
+                           (key,)).fetchone()[0] == "第三版正文"
+
 
 def test_chat_export_renders_the_location_block_end_to_end(tmp_path, monkeypatch):
     """**真路径**：合成微信树 → `export` → `extras rebuild` → `usecases.chat_export` → 读产物文件。

@@ -58,8 +58,10 @@ def run_export(acct: str, chat_id: str | None = None, full: bool = False,
         resume = {} if full else None
         if resume is None:
             resume = store.load_export_watermarks(con, acct)
-        limit = store.AUDIT_ROWS if audit_rows is None else audit_rows
-        audit_cursors = store.load_audit_cursors(con, acct) if limit > 0 else {}
+        # `full` = 前向扫描已经读完整段历史，回看是纯重复（而游标刚被清零，不回看的话
+        # 下一轮会从 0 重新走）。全量时不回看，也别读游标。
+        audit_window = 0 if full else (store.AUDIT_ROWS if audit_rows is None else audit_rows)
+        audit_cursors = store.load_audit_cursors(con, acct) if audit_window > 0 else {}
         def _audit_sink(rows: list, refs: list) -> None:
             """回看批次：写法与前向一致，但**不计入** `total`（见 run_export 的契约）。"""
             if refs:
@@ -67,8 +69,9 @@ def run_export(acct: str, chat_id: str | None = None, full: bool = False,
             store.upsert_batch(con, rows)
 
         for rows, refs in r.iter_all(chat_id=chat_id, resume=resume,
-                                     audit_cursors=audit_cursors, audit_rows=limit,
-                                     audit_sink=_audit_sink if limit > 0 else None):
+                                     audit_cursors=audit_cursors,
+                                     audit_rows=audit_window,
+                                     audit_sink=_audit_sink if audit_window > 0 else None):
             if refs:
                 # 先写 refs，再 upsert_batch。refs 自己 BEGIN IMMEDIATE（判据的读也因此落在
                 # 写事务里，Task 4 fix1）；upsert_batch 复用同一事务并在尾部 commit——
@@ -84,7 +87,10 @@ def run_export(acct: str, chat_id: str | None = None, full: bool = False,
         # 回看在同一次分片解密里完成（`iter_all` 的 audit_* 参数）：另开一趟会多付一次
         # sqlcipher 导出。游标**最后统一落盘**——它必须晚于数据提交；中途失败就整批
         # 不推进，下一轮重看同一段（upsert 幂等）。
-        store.save_audit_cursors(con, acct, getattr(r, "audit_marks", {}))
+        if audit_window > 0:
+            # 显式取属性：fake reader 忘了 `audit_marks` 时要响亮地红，而不是静默地
+            # 永远不推进游标（那会让同一段历史被无限重读）。
+            store.save_audit_cursors(con, acct, r.audit_marks)
     if on_skipped is not None and skipped:
         on_skipped(skipped)
     if on_reader is not None:
