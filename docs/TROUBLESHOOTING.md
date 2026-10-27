@@ -157,3 +157,17 @@ agent-wechat recent filehelper -n 3           # 端到端读取
 **备份**：迁移前想留退路就拷 `index.db`（+`-wal`/`-shm`）与 `exclusions.db`。
 本阶段的迁移**不删列、不改表结构**，所以通常不需要回退；最坏情况是
 `purge --index` 后重跑 `export`（2.5–3 h，含向量）。
+
+
+## 8. 向量索引与重嵌队列
+
+历史消息被改写后，变化先进 `pending_reembed`，由下一次 `vector-build` 消费。
+`agent-wechat vector-status` 是唯一需要看的诊断（只读）：
+
+| 现象 | 原因 | 处置 |
+|---|---|---|
+| `pending` 持续不降 | 没跑 `vector-build`，或积压超过每轮 4 批（256 条） | 再跑几次；`--rebuild` 不必要 |
+| `failed` / `max_attempts` 升高 | 嵌入模型加载失败、维度不符 | 先修环境（模型缓存/依赖），再重跑；失败行在队列里等重试，不会丢 |
+| 检索结果仍是旧语义 | 队列还没被消费 | 跑 `vector-build`（增量即可），再看 `pending` 归零 |
+| `semantic_search` 报「与当前模型不一致」 | 索引由别的模型建的 | `vector-build --rebuild`（会清空队列，全量重嵌） |
+| 模型缓存缺失时构建报错 | 首次使用需要本地模型 | `vector-build` 首次会下载约 95MB；离线环境请先准备好缓存 |

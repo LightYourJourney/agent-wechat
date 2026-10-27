@@ -131,6 +131,8 @@ vector.build_index(accounts, rebuild)       # 长任务，读的是已导出的�
   → 逐条构造嵌入文本：`[日期 发送者] 上文: <上一条入索引消息的前 30 字>… | 正文`（确定性前缀）
   → fastembed（ONNX，CPU）批量嵌入 → vec0 虚表 vec_messages（cosine，512 维）
   → 每 COMMIT_ROWS 行提交（数据+水位线同事务）；rebuild 时先 DROP 再重建
+  → 前向扫描之后消费 `pending_reembed` 脏队列（Phase 03）：每条只重嵌改动的那条，
+    外加因「上文前缀」依赖而过时的**后继**；向量写与队列删同一事务，失败记账重试
 
 vector.semantic_search(query, chat_id, limit, account)
   → 模型一致性检查（存在异模型 meta 行 → 报错，要求 rebuild）
@@ -256,9 +258,9 @@ moments.iter_posts(account, report=…)       # 复用 passphrase 解密 sns/sns
 - **增量嵌入的上下文前缀不连续**：`上文:` 前缀在单次运行内按会话累积，增量运行从水位线
   开始，各会话本轮第一条被嵌入的消息没有前缀（即便确有前一条）；需要连续上下文时用
   `vector-build --rebuild` 全量重建
-- **历史改写会被导出修正，但向量仍要等 Phase 03**：Phase 02 起回看会把旧行的新正文写回
-  `messages` 与 FTS，并在 `pending_reembed` 里投递重嵌标记；**向量索引还没有消费者**，
-  所以旧向量会一直留着，直到 Phase 03 或手动 `--rebuild`。
+- **历史改写会修正 SQLite/FTS，并在下一次 `vector-build` 重嵌**：Phase 02 把改写投递到
+  `pending_reembed`，Phase 03 在每次构建里消费它（每轮最多 4 批）。**不是实时**：没跑
+  `vector-build` 之前，旧向量仍在（检索可能返回旧语义），`vector-status` 会显示积压。
 - **回看是有界、非实时的**：每轮只回看每个会话的一小段（默认 100 行），游标绕圈；
   完整覆盖一轮约 `ceil(行数/100)` 次导出。要立即核对历史用 `export --full`。
 - **源库删除不传播**：索引只增改，不把「扫描不到」当成删除（分片消失/缓存淘汰同理）

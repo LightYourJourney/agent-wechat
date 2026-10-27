@@ -395,13 +395,13 @@ CREATE TABLE IF NOT EXISTS schema_version (
 ) WITHOUT ROWID;
 ```
 
-- **三个 scope**：`main`（`index.db` 主表，当前 **3**）、`vector`（vec0 三表，当前 **1**）、
+- **三个 scope**：`main`（`index.db` 主表，当前 **4**）、`vector`（vec0 三表，当前 **1**）、
   `exclusions`（在 `exclusions.db` 里，SQL 写作 `exclusions.schema_version`，当前 **1**）。
 - **ensure 与 migrate 分工**：`CREATE … IF NOT EXISTS` 每次连接照跑（缺对象就补建的自愈）；
   迁移只处理 `IF NOT EXISTS` **表达不了**的变更（改触发器体、加列、重建表），每条只跑一次。
   版本迁移：`main v2` 把 FTS 三条触发器重建为代码里的最新定义（EA-077 的旧体漂移）；
   `main v3`（Phase 02）建立历史回看游标与重嵌队列（`audit_cursor` / `pending_reembed`）
-  并重建重嵌触发器。
+  并重建重嵌触发器；`main v4`（Phase 03）新增重嵌失败账本 `reembed_failures`。
 - **整次升级 = 一笔事务**：`BEGIN IMMEDIATE; <本次全部待执行迁移的 DDL>; <逐条写版本行>;
   COMMIT`。任一句失败整次回滚（版本停在升级前），抛 `SchemaMigrationError`；下次连接重做。
   已是最新的库走只读快路径，**不拿写锁**；重复执行是 no-op（`applied_at` 都不变）。
@@ -443,4 +443,20 @@ CREATE TABLE IF NOT EXISTS pending_reembed (
 ```
 
 由触发器 `msg_reembed_au` 维护（`AFTER UPDATE OF content, chat_id`，`WHEN old IS NOT new`）：
-它与消息行、FTS 索引在**同一笔事务**里更新。Phase 02 只负责投递；消费是 Phase 03。
+它与消息行、FTS 索引在**同一笔事务**里更新。**它是集合不是日志**：同一条改十次也只有
+一行，消费时读 `messages` 的当前内容。
+
+**`reembed_failures`**——消费失败的重试信息（Phase 03）：
+
+```sql
+CREATE TABLE IF NOT EXISTS reembed_failures (
+    msg_key        TEXT PRIMARY KEY,
+    attempts       INTEGER NOT NULL,
+    last_error     TEXT,
+    last_attempt_at INTEGER NOT NULL
+) WITHOUT ROWID;
+```
+
+消费成功时与队列行一起删；失败只累计次数与最近原因，队列行留在原处等下一轮。
+`purge --chat` 会在删除事务里连这两张表一起清（它们是工作清单，不是用户数据）。
+`vector.build_index` 每轮消费最多 4 批（每批 64 条），`rebuild=True` 清空队列。
