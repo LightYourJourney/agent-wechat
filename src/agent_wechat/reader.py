@@ -11,7 +11,7 @@ import contextlib
 import dataclasses
 import sqlite3
 import zlib
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, asdict
 
 from . import (appmsg, decrypt, errors, keys, media, messages, msgextra,
@@ -486,12 +486,50 @@ class MessageReader:
             return []
         return self._apply_roster(chat_id, pieces)[-limit:]
 
+    def _export_piece(self, row, *, shard: str, md5hex: str, chat_map, n2i,
+                      sticker_names):
+        """一行源数据 → `(messages 行, media_ref 或 None)`。
+
+        **iter_all 与 iter_audit 共用**：两条路径若各写一份 refs 提取，导出与回看对同一条
+        消息会得出不同的 `media_refs`（贴纸那种「`file_key` 位放 md5」的约定尤其容易走偏）。
+        """
+        lid, ltype, sender, ts, mc, ct, packed = row
+        m = self._decode_row(lid, ltype, sender, ts, mc, ct, md5hex, chat_map, n2i,
+                             sticker_names=sticker_names)
+        ref = None
+        if m.msg_type in (messages.TYPE_IMAGE, messages.TYPE_VIDEO):
+            # 提取只用原始 XML（_decode_row 产出的 content 是 [image] 占位）；
+            # 只在图片/视频上多解一次压缩，量小可忽略
+            got = media.extract_media_ref(m.msg_type, _decode_content(mc, ct), packed)
+            if got:
+                kind, fk, xm = got
+                ref = (messages.row_key(self.acct, md5hex, shard, lid), kind, fk, xm)
+        elif m.sticker_md5:
+            # 贴纸引用：`file_key` 位放 md5（它就是这个 kind 的定位键），`xml_md5` 位留 None。
+            ref = (messages.row_key(self.acct, md5hex, shard, lid),
+                   "sticker", m.sticker_md5, None)
+        return messages.make_row(
+            account=self.acct, chat_md5=md5hex, chat_id=m.chat_id,
+            shard=shard, local_id=m.local_id, ts=m.ts,
+            msg_type=m.msg_type, sender_id=m.sender_id,
+            sender_name=m.sender_name, is_self=1 if m.is_self else 0,
+            content=m.content, media_hint=m.media_hint), ref
+
     def iter_all(self, chat_id: str | None = None, resume: dict[str, int] | None = None,
-                 batch: int | None = None):
+                 batch: int | None = None, *,
+                 audit_cursors: Mapping[tuple[str, str], int] | None = None,
+                 audit_rows: int = 0,
+                 audit_sink: Callable[[list, list], None] | None = None):
         """全量流式导出（生成器）。逐分片→逐表→按批 yield。
 
         resume: {(shard, chat_md5): 已导出的 max(local_id)}（来自 store.load_export_watermarks；
         local_id 是分片内序号，键必须含 shard）。
+        `audit_cursors` / `audit_rows` / `audit_sink`（Phase 02）：在同一次分片解密里
+        顺带回看每个 `(分片, 会话)` 的旧行，经 `audit_sink(rows, refs)` 交给调用方——
+        **不混进 yield**：`rows` 是「本轮新写入」的已发布计数契约，混进来会让每次增量都
+        报出几万行。回看后的游标记在 `self.audit_marks`，由调用方在数据提交后落盘。
+        `audit_sink is None` 时完全不回看（`audit_rows` 也就无所谓）。
+
         yield (rows, refs)：rows 是 list[dict]，字段与 store.upsert_batch 对齐；refs 是
         [(msg_key, media_kind, file_key, xml_md5)]，与 store.upsert_media_refs 对齐——
         图片/视频消息顺带抽取（spec §4.3），贴纸消息带出 md5（`file_key` 位），
@@ -499,6 +537,10 @@ class MessageReader:
         """
         batch = batch or store.BATCH
         resume = resume or {}
+        # 本轮回看后的游标：{(shard, chat_md5): 下一个位置}。**只在调用方把对应数据
+        # 提交之后**才该落盘（见 `store.save_audit_cursors`）；先游标后数据，崩在中间
+        # 就是这段历史再也不会被回看。
+        self.audit_marks = {}
         chat_map = self.md5_map()
         sticker_names = self.sticker_captions()   # **循环外取一次**（同 recent）
         want_md5 = messages.md5_of(chat_id) if chat_id else None
@@ -520,37 +562,46 @@ class MessageReader:
                     rows: list[messages.MessageRow] = []
                     refs: list[tuple[str, str, str | None, str | None]] = []
                     for row in cur:
-                        lid, ltype, sender, ts, mc, ct, packed = row
-                        m = self._decode_row(lid, ltype, sender, ts, mc, ct,
-                                             md5hex, chat_map, n2i,
-                                             sticker_names=sticker_names)
-                        if m.msg_type in (messages.TYPE_IMAGE, messages.TYPE_VIDEO):
-                            # 提取只用原始 XML（_decode_row 产出的 content 是 [image] 占位）；
-                            # 只在图片/视频上多解一次压缩，量小可忽略
-                            ref = media.extract_media_ref(m.msg_type, _decode_content(mc, ct),
-                                                          packed)
-                            if ref:
-                                kind, fk, xm = ref
-                                refs.append((messages.row_key(self.acct, md5hex,
-                                                              shard.name, lid),
-                                             kind, fk, xm))
-                        elif m.sticker_md5:
-                            # 贴纸引用：`file_key` 位放 md5（它就是这个 kind 的定位键），
-                            # `xml_md5` 位留 None。**不再多解一次压缩**——`_decode_row`
-                            # 已经把 XML 解过了，`m.sticker_md5` 就是那一趟的结果。
-                            refs.append((messages.row_key(self.acct, md5hex,
-                                                          shard.name, lid),
-                                         "sticker", m.sticker_md5, None))
-                        rows.append(messages.make_row(
-                            account=self.acct, chat_md5=md5hex, chat_id=m.chat_id,
-                            shard=shard.name, local_id=m.local_id, ts=m.ts,
-                            msg_type=m.msg_type, sender_id=m.sender_id,
-                            sender_name=m.sender_name, is_self=1 if m.is_self else 0,
-                            content=m.content, media_hint=m.media_hint))
+                        out, ref = self._export_piece(
+                            row, shard=shard.name, md5hex=md5hex,
+                            chat_map=chat_map, n2i=n2i, sticker_names=sticker_names)
+                        if ref:
+                            refs.append(ref)
+                        rows.append(out)
                         if len(rows) >= batch:
                             yield rows, refs
                             rows = []
                             refs = []
+                    if audit_sink is not None and audit_rows > 0:
+                        # 回看与导出**共用同一次分片解密**：另开一趟会让每轮增量多付
+                        # 一次 sqlcipher 导出（500MB 量级的常态成本）。游标走到表尾
+                        # （本段不足 audit_rows）就绕回 0，下一轮从头再走。
+                        #
+                        # 回看的行走 `audit_sink` 而**不**混进 yield：调用方要把「本轮
+                        # 新写入的行」与「回看过的行」分开计数（`rows` 是已发布契约），
+                        # 混在一起会让每次增量都报出几万行。
+                        start = (audit_cursors or {}).get((shard.name, md5hex), 0)
+                        got = con.execute(
+                            f"SELECT local_id, local_type, real_sender_id, create_time, "
+                            f"message_content, WCDB_CT_message_content, packed_info_data "
+                            f"FROM '{table}' WHERE local_id > ? ORDER BY local_id LIMIT ?",
+                            (start, int(audit_rows))).fetchall()
+                        self.audit_marks[(shard.name, md5hex)] = (
+                            0 if len(got) < audit_rows else int(got[-1][0]))
+                        arows: list[messages.MessageRow] = []
+                        arefs: list[tuple[str, str, str | None, str | None]] = []
+                        for row in got:
+                            out, ref = self._export_piece(
+                                row, shard=shard.name, md5hex=md5hex,
+                                chat_map=chat_map, n2i=n2i, sticker_names=sticker_names)
+                            if ref:
+                                arefs.append(ref)
+                            arows.append(out)
+                            if len(arows) >= batch:
+                                audit_sink(arows, arefs)
+                                arows, arefs = [], []
+                        if arows:
+                            audit_sink(arows, arefs)
                     if rows:
                         yield rows, refs
 

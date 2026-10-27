@@ -14,7 +14,7 @@ import pathlib
 import re
 import sqlite3
 import time
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 
 from . import errors, exclusions, messages, migrations, paths
 
@@ -117,6 +117,26 @@ CREATE TABLE IF NOT EXISTS msg_extras (
     msg_type INTEGER NOT NULL,      -- 48 位置 / 42 名片（**原样记**，不猜语义）
     payload  BLOB NOT NULL          -- 规范化后的 XML，zlib 压缩（与 msg_parts.raw_xml 同款）
 ) WITHOUT ROWID;
+
+-- Phase 02：历史消息**审计游标**。导出水位线只向前扫（local_id > max），看不见旧行被改写；
+-- 这张表记录「每个 (账号,分片,会话) 已经回看到哪」。每轮导出只回看一小段，游标到头绕回 0，
+-- 于是整段历史会在若干轮内被完整重读一遍。恒定内存：一轮只取 AUDIT_ROWS 行。
+CREATE TABLE IF NOT EXISTS audit_cursor (
+    account         TEXT NOT NULL,
+    shard           TEXT NOT NULL,
+    chat_md5        TEXT NOT NULL,
+    audited_local_id INTEGER NOT NULL DEFAULT 0,
+    updated_at      INTEGER NOT NULL,
+    PRIMARY KEY (account, shard, chat_md5)
+) WITHOUT ROWID;
+
+-- Phase 02：内容被改写、等待重嵌的消息。由 `msg_reembed_au` 触发器维护——**与更新同一
+-- 事务**写入，所以「SQLite 已改、FTS 已跟随（既有触发器）、重嵌标记已落」三者不会分叉。
+-- Phase 03 消费它；本阶段只保证标记正确产生。
+CREATE TABLE IF NOT EXISTS pending_reembed (
+    msg_key   TEXT PRIMARY KEY,
+    changed_at INTEGER NOT NULL
+) WITHOUT ROWID;
 """
 
 # FTS 触发器：**单一来源**。`SCHEMA` 用它拼出全量建库脚本；迁移 v2 用同一批字符串
@@ -138,21 +158,49 @@ END;""",
 END;""",
 )
 
-SCHEMA = _SCHEMA_BODY + "\n" + "\n".join(FTS_TRIGGERS)
+# Phase 02：内容/会话名被改写时，**在更新它的同一事务里**投递一条重嵌标记。
+# 不在 Python 里比对前后值：upsert 的 WHERE 已经保证「值没变就不更新」，触发器只需要
+# 在真的更新发生时记一笔——这样标记、消息行与 FTS（既有三条触发器）三者天然同事务。
+REEMBED_TRIGGER = """CREATE TRIGGER IF NOT EXISTS msg_reembed_au
+AFTER UPDATE OF content, chat_id ON messages
+WHEN old.content IS NOT new.content OR old.chat_id IS NOT new.chat_id
+BEGIN
+    INSERT INTO pending_reembed(msg_key, changed_at)
+    VALUES (new.msg_key, CAST(strftime('%s','now') AS INTEGER))
+    ON CONFLICT(msg_key) DO UPDATE SET changed_at=excluded.changed_at;
+END;"""
+
+SCHEMA = _SCHEMA_BODY + "\n" + "\n".join(FTS_TRIGGERS) + "\n" + REEMBED_TRIGGER
 
 # 本程序已知的 main scope 最新版本。迁移只列**IF NOT EXISTS 表达不了**的变更；
 # 基线（v1）由 `migrations.apply` 隐式 stamp——那代表「整套 DDL 已由 ensure 建好」。
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+
+_AUDIT_TABLES = (
+    "CREATE TABLE IF NOT EXISTS audit_cursor ("
+    " account TEXT NOT NULL, shard TEXT NOT NULL, chat_md5 TEXT NOT NULL,"
+    " audited_local_id INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL,"
+    " PRIMARY KEY (account, shard, chat_md5)) WITHOUT ROWID",
+    "CREATE TABLE IF NOT EXISTS pending_reembed ("
+    " msg_key TEXT PRIMARY KEY, changed_at INTEGER NOT NULL) WITHOUT ROWID",
+)
 
 MIGRATIONS: tuple[migrations.Migration, ...] = (
     migrations.Migration(
-        version=SCHEMA_VERSION,
+        version=2,
         name="对齐 FTS 触发器体（EA-077）",
         # 只重建触发器：DROP 后立刻按当前定义创建。数据与 FTS 内容都不动——
         # 触发器体漂移影响的是**后续写入**的镜像，不是存量行；存量失同步由 search 的
         # 探针单独报告（重跑导出可重建）。
         statements=tuple(f"DROP TRIGGER IF EXISTS {n}" for n in FTS_TRIGGER_NAMES)
         + FTS_TRIGGERS,
+    ),
+    migrations.Migration(
+        version=3,
+        name="历史消息审计游标与重嵌队列（Phase 02）",
+        # 两张表 ensure 也会建（自愈）；这里再写一遍，是为了让「v2 的库升到 v3」这件事
+        # 在迁移事务里有一份显式的、可审计的记录。触发器要 DROP 再建：老库上可能没有。
+        statements=_AUDIT_TABLES + ("DROP TRIGGER IF EXISTS msg_reembed_au", REEMBED_TRIGGER),
     ),
 )
 
@@ -823,6 +871,53 @@ def load_export_watermarks(con: sqlite3.Connection, account: str) -> dict[tuple[
 def clear_export_watermarks(con: sqlite3.Connection, account: str) -> None:
     """重置指定账号的导出水位线（全量导出用）。只删该 account，别的账号不受影响。"""
     con.execute("DELETE FROM watermark WHERE account = ?", (account,))
+
+
+# ---------- 历史回看游标（Phase 02） ----------
+
+# 每个 (分片, 会话) 每轮回看的行数上限。它与 `BATCH` 分工不同：BATCH 是「一次 yield 多少
+# 行」，这里是「一轮总共回看多少行」——后者决定增量导出的额外成本上限。
+# 772 个会话 × 100 行 ≈ 7.7 万行/轮（全量 84 万行的 9%），完整覆盖一轮约 11 次导出。
+AUDIT_ROWS = 100
+
+
+def load_audit_cursors(con: sqlite3.Connection, account: str) -> dict[tuple[str, str], int]:
+    """该账号的回看游标：`{(shard, chat_md5): audited_local_id}`。
+
+    与导出水位线**分表分键**：水位线问「新消息扫到哪」，游标问「旧消息回看到哪」。
+    两者互不推进——把游标塞进 `watermark` 会让 `local_id > max` 的扫描直接跳过历史。
+    """
+    return {(shard, md5): int(lid) for shard, md5, lid in con.execute(
+        "SELECT shard, chat_md5, audited_local_id FROM audit_cursor WHERE account=?",
+        (account,))}
+
+
+def save_audit_cursors(con: sqlite3.Connection, account: str,
+                       marks: Mapping[tuple[str, str], int]) -> None:
+    """推进回看游标并提交。
+
+    **必须在数据 upsert 提交之后调用**：游标先走、数据没落，崩在中间就是「这段历史再也
+    不会被回看」。反过来（数据已落、游标没走）最坏只是下一轮重看同一段——upsert 幂等，
+    没有代价。所以这一步单独提交，不跟 upsert 抢同一个事务。
+    """
+    if not marks:
+        return
+    now = int(time.time())
+    try:
+        con.executemany(
+            "INSERT INTO audit_cursor(account, shard, chat_md5, audited_local_id, updated_at) "
+            "VALUES (?,?,?,?,?) ON CONFLICT(account, shard, chat_md5) DO UPDATE SET "
+            "audited_local_id=excluded.audited_local_id, updated_at=excluded.updated_at",
+            [(account, s, m, lid, now) for (s, m), lid in marks.items()])
+        con.commit()
+    except (sqlite3.Error, OSError) as exc:
+        raise index_unavailable(exc) from exc
+
+
+def clear_audit_cursors(con: sqlite3.Connection, account: str) -> None:
+    """重置该账号的回看游标（`--full` 用：全量重扫等于把整段历史都看过了）。"""
+    con.execute("DELETE FROM audit_cursor WHERE account = ?", (account,))
+
 
 
 def counts(con: sqlite3.Connection) -> dict:

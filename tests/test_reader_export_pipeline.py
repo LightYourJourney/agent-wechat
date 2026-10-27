@@ -1707,14 +1707,13 @@ def test_recent_and_iter_all_pass_emoticon_captions_down(env, tmp_path, monkeypa
 
 # ---------- EA-042：增量不重扫「同一 local_id 内容被改写」的行 ----------
 
-def test_rewriting_a_message_in_place_is_not_picked_up_incrementally(tmp_path, monkeypatch):
-    """**characterization 夹具**（EA-042）——它钉的是**现状**，写完全绿是预期，
-    **不是红转绿**（批 B10 的批报告里注明）。
+def test_rewrites_are_caught_by_the_audit_pass_but_not_by_forward_scan(tmp_path, monkeypatch):
+    """Phase 02：**前向扫描看不见原地改写，回看能看见**——两半都钉。
 
-    水位线只按 `max(local_id)` 推进，所以同一条消息的内容被改写（撤回后重发 / 编辑 /
-    对方用同一个 local_id 覆盖）时，**增量导出不会重扫它**；`--full` 会。
-    这是**契约**而不是缺陷：要修得让每轮都做内容比对（改增量语义）或加 `content_hash` 列
-    （条目列出的更大路径，本期按预裁不做）。对策是文档那一句：定时任务用 `--full`。
+    前半是 EA-042 的现状（水位线只按 `max(local_id)` 推进）：`audit_rows=0` 时同一
+    `local_id` 的正文被改写不会被拾取，`--full` 才修正。这条**仍然是契约**——回看是有界
+    的、不是实时的。后半是本阶段新增的契约：默认导出会回看每个会话的一小段，改写落库、
+    FTS 跟随、`pending_reembed` 投递重嵌标记。
 
     **自建一棵树**，不用 module 级的 `wechat` 夹具：这条测试要**改写源库**，而那个夹具是
     模块级共享的——T12 记过这条（往共享夹具里加一个分片，同模块 4 条用例当场红）。
@@ -1750,16 +1749,28 @@ def test_rewriting_a_message_in_place_is_not_picked_up_incrementally(tmp_path, m
     # 同一个 local_id、改了正文——**这就是撤回/编辑在库里的形态**
     build_shard(wx, ACCT, "message_0.db", {FRIEND: [(1, 1, 1, T0 + 10, "第二版正文", 0)]},
                 [FRIEND])
-    assert export.run_export(ACCT) == 0, "增量导出没有新行可导（水位线停在那里）"
+
+    # ① 关掉回看 = 旧行为：前向扫描确实看不见已扫过的区间（EA-042 的现状）
+    assert export.run_export(ACCT, audit_rows=0) == 0
     with store.open() as con:
         assert con.execute("SELECT content FROM messages WHERE msg_key=?",
                            (key,)).fetchone()[0] == "第一版正文", \
-            "**这就是契约**：增量不修正原地改写（改了它说明契约变了，得同时改文档）"
+            "前向扫描只读 local_id > 水位线，原地改写必须看不见"
+        assert con.execute("SELECT count(*) FROM pending_reembed").fetchone()[0] == 0
 
-    export.run_export(ACCT, full=True)
+    # ② 默认回看：下一轮把改写拾取回来，FTS 跟随，重嵌标记投递
+    assert export.run_export(ACCT) == 0
     with store.open() as con:
         assert con.execute("SELECT content FROM messages WHERE msg_key=?",
-                           (key,)).fetchone()[0] == "第二版正文", "--full 必须重扫到改写后的正文"
+                           (key,)).fetchone()[0] == "第二版正文"
+        assert con.execute(
+            "SELECT count(*) FROM messages_fts WHERE messages_fts MATCH '\"第二版\"'"
+        ).fetchone()[0] == 1
+        assert con.execute(
+            "SELECT count(*) FROM messages_fts WHERE messages_fts MATCH '\"第一版\"'"
+        ).fetchone()[0] == 0
+        assert con.execute("SELECT count(*) FROM pending_reembed WHERE msg_key=?",
+                           (key,)).fetchone()[0] == 1
 
 
 def test_chat_export_renders_the_location_block_end_to_end(tmp_path, monkeypatch):
