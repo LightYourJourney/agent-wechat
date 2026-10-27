@@ -395,12 +395,13 @@ CREATE TABLE IF NOT EXISTS schema_version (
 ) WITHOUT ROWID;
 ```
 
-- **三个 scope**：`main`（`index.db` 主表，当前 **2**）、`vector`（vec0 三表，当前 **1**）、
+- **三个 scope**：`main`（`index.db` 主表，当前 **3**）、`vector`（vec0 三表，当前 **1**）、
   `exclusions`（在 `exclusions.db` 里，SQL 写作 `exclusions.schema_version`，当前 **1**）。
 - **ensure 与 migrate 分工**：`CREATE … IF NOT EXISTS` 每次连接照跑（缺对象就补建的自愈）；
   迁移只处理 `IF NOT EXISTS` **表达不了**的变更（改触发器体、加列、重建表），每条只跑一次。
-  当前唯一的版本迁移是 `main v2`：把 FTS 三条触发器重建为代码里的最新定义（EA-077 的
-  旧体漂移）。
+  版本迁移：`main v2` 把 FTS 三条触发器重建为代码里的最新定义（EA-077 的旧体漂移）；
+  `main v3`（Phase 02）建立历史回看游标与重嵌队列（`audit_cursor` / `pending_reembed`）
+  并重建重嵌触发器。
 - **整次升级 = 一笔事务**：`BEGIN IMMEDIATE; <本次全部待执行迁移的 DDL>; <逐条写版本行>;
   COMMIT`。任一句失败整次回滚（版本停在升级前），抛 `SchemaMigrationError`；下次连接重做。
   已是最新的库走只读快路径，**不拿写锁**；重复执行是 no-op（`applied_at` 都不变）。
@@ -410,3 +411,36 @@ CREATE TABLE IF NOT EXISTS schema_version (
   ——降级运行新库会把未知结构改坏。
 - **备份**：`schema_version` 随 `index.db` 一起备份；`exclusions.db` 里那张随排除清单备份。
 - **`purge --index`** 删掉整个 `index.db`，版本表随之消失；重跑 `export` 时按新库初始化。
+
+
+## 11. 历史回看与重嵌队列（Phase 02）
+
+**`audit_cursor`**——每个 `(账号, 分片, 会话)` 已经**回看**到哪：
+
+```sql
+CREATE TABLE IF NOT EXISTS audit_cursor (
+    account         TEXT NOT NULL,
+    shard           TEXT NOT NULL,
+    chat_md5        TEXT NOT NULL,
+    audited_local_id INTEGER NOT NULL DEFAULT 0,
+    updated_at      INTEGER NOT NULL,
+    PRIMARY KEY (account, shard, chat_md5)
+) WITHOUT ROWID;
+```
+
+它与导出水位线 `watermark` **分表分键、互不推进**：水位线问「新消息扫到哪」，游标问
+「旧消息回看到哪」。每轮导出在每个会话上回看 `store.AUDIT_ROWS`（默认 100）行，游标
+走到表尾绕回 0——`ceil(行数 / 100)` 轮覆盖整段历史。游标**只在数据提交之后**才落盘
+（先游标后数据会丢历史；反过来最坏只是重看一遍，upsert 幂等）。
+
+**`pending_reembed`**——内容/会话名被改写、等待重嵌的消息：
+
+```sql
+CREATE TABLE IF NOT EXISTS pending_reembed (
+    msg_key    TEXT PRIMARY KEY,
+    changed_at INTEGER NOT NULL
+) WITHOUT ROWID;
+```
+
+由触发器 `msg_reembed_au` 维护（`AFTER UPDATE OF content, chat_id`，`WHEN old IS NOT new`）：
+它与消息行、FTS 索引在**同一笔事务**里更新。Phase 02 只负责投递；消费是 Phase 03。

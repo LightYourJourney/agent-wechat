@@ -105,9 +105,12 @@ reader.recent(chat_id, limit)
 
 ```
 export.run_export
-  → 逐分片：快照（db+wal+shm）→ sqlcipher raw-key 解密到 0700 临时目录
-  → 逐表（Msg_<md5>）按 local_id > 水位线游标扫描
+  → 逐分片：快照（db+wal+shm）→ sqlcipher raw-key 解密到 0700 临时目录（**一次**）
+  → 逐表（Msg_<md5>）两段读：
+      ① 前向：local_id > 导出水位线 → 新消息
+      ② 回看：local_id > audit_cursor 的一小段旧行（默认 100 行/会话/轮）
   → fetchmany(batch) 分批解码 → 批量幂等 upsert + 水位线推进（同一事务）
+  → 数据提交之后才推进 audit_cursor（回看游标；绕圈覆盖整段历史）
   → 临时明文删除；进度写 tasks.json（进程重启后从该文件载入，遗留的 running 记为 failed）；
   中断后重跑自动续传
 ```
@@ -253,9 +256,12 @@ moments.iter_posts(account, report=…)       # 复用 passphrase 解密 sns/sns
 - **增量嵌入的上下文前缀不连续**：`上文:` 前缀在单次运行内按会话累积，增量运行从水位线
   开始，各会话本轮第一条被嵌入的消息没有前缀（即便确有前一条）；需要连续上下文时用
   `vector-build --rebuild` 全量重建
-- **内容被改写不触发重嵌**（EA-057）：水位线只按 `messages.id` 推进，同一条消息的内容后来
-  被改写（撤回 / 编辑）**不会再被扫到**——旧向量会一直留着。需要时用 `--rebuild` 全量重建
-  （双键水位线 / `content_hash` 的根治本期不做）
+- **历史改写会被导出修正，但向量仍要等 Phase 03**：Phase 02 起回看会把旧行的新正文写回
+  `messages` 与 FTS，并在 `pending_reembed` 里投递重嵌标记；**向量索引还没有消费者**，
+  所以旧向量会一直留着，直到 Phase 03 或手动 `--rebuild`。
+- **回看是有界、非实时的**：每轮只回看每个会话的一小段（默认 100 行），游标绕圈；
+  完整覆盖一轮约 `ceil(行数/100)` 次导出。要立即核对历史用 `export --full`。
+- **源库删除不传播**：索引只增改，不把「扫描不到」当成删除（分片消失/缓存淘汰同理）
 - **语义检索没有相关性阈值**：KNN 恒返回最近的 `k` 条（无论距离多远），`distance`（cosine，
   越小越近）原样返回，由调用方判断可用性——不要直接把结果当作「相关结果」
 - **全局检索无 ANN**：不限会话的 KNN 是暴力扫描（68 万行实测：热 ~0.6s / 冷 ~2.6s）；单会话靠 `acct_chat`
