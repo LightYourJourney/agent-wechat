@@ -185,8 +185,9 @@ moments.iter_posts(account, report=…)       # 复用 passphrase 解密 sns/sns
 `IF NOT EXISTS` **表达不了**的变更（改触发器体、加列、重建表），每条只执行一次。
 
 版本表 `schema_version(scope, version, applied_at)`，scope = `main` / `vector` /
-`exclusions`。一条迁移 = 一笔 `BEGIN IMMEDIATE … COMMIT`（DDL 与版本行同事务）：失败整条
-回滚、版本停在上一版、下次连接重试；库的版本**高于**程序已知最新版时拒绝打开。
+`exclusions`。整次升级 = 一笔 `BEGIN IMMEDIATE … COMMIT`（DDL 与版本行同事务）：失败整次
+回滚、版本停在升级前、下次连接重做；已是最新时只读版本行、不拿写锁；库的版本**高于**
+程序已知最新版时在 ensure 之前拒绝（一个对象都不写）。
 
 **向量单独一个 scope**：`vec_messages` 依赖 sqlite-vec 扩展，没装扩展的机器上 `main` /
 `exclusions` 必须照常、基础检索必须可用。三个 scope 各自版本化，**不假设跨库原子**

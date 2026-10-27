@@ -151,8 +151,8 @@ MIGRATIONS: tuple[migrations.Migration, ...] = (
         # 只重建触发器：DROP 后立刻按当前定义创建。数据与 FTS 内容都不动——
         # 触发器体漂移影响的是**后续写入**的镜像，不是存量行；存量失同步由 search 的
         # 探针单独报告（重跑导出可重建）。
-        script="\n".join(f"DROP TRIGGER IF EXISTS {n};" for n in FTS_TRIGGER_NAMES)
-        + "\n" + "\n".join(FTS_TRIGGERS),
+        statements=tuple(f"DROP TRIGGER IF EXISTS {n}" for n in FTS_TRIGGER_NAMES)
+        + FTS_TRIGGERS,
     ),
 )
 
@@ -227,6 +227,11 @@ def connect(db_path: pathlib.Path | None = None) -> sqlite3.Connection:
         ex_path = exclusions.path_for(pathlib.Path(db))
         ex_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         con.execute("ATTACH DATABASE ? AS exclusions", (str(ex_path),))
+        # 先判版本、再写：`ensure` 里的 CREATE 也是写。版本过新的库必须在**任何写入之前**
+        # 停下——否则旧程序会先给新库补建对象，再声称「不碰库」。
+        migrations.refuse_if_newer(con, scope=migrations.SCOPE_MAIN, latest=SCHEMA_VERSION)
+        migrations.refuse_if_newer(con, scope=migrations.SCOPE_EXCLUSIONS, latest=1,
+                                   table=migrations.EXCLUSIONS_TABLE)
         # ensure：整套 DDL 每次连接都跑（自愈：缺表/缺索引就补建）。`CREATE … IF NOT EXISTS`
         # 的重建能力是既有行为，不能挪进「只跑一次」的迁移里。
         con.executescript(SCHEMA)

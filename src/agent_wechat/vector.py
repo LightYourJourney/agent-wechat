@@ -48,6 +48,8 @@ def connect() -> sqlite3.Connection:
     con.enable_load_extension(False)
     try:
         con.execute("SELECT vec_version()").fetchone()  # 探活：真正验证扩展可用
+        # 先判版本、再写（与 store.connect 同一条纪律）：版本过新的库在任何 ensure 之前停。
+        migrations.refuse_if_newer(con, scope=migrations.SCOPE_VECTOR, latest=1)
         # ensure：向量表每次连接都建（vec0 需要扩展在场，所以归属本模块而不是 store）。
         con.executescript(store.VECTOR_SCHEMA)
         # migrate：向量 schema 与主库**分开版本化**——没装扩展的机器上 main 迁移照常，
@@ -430,7 +432,8 @@ def build_index(accounts: Sequence[str] | None = None, rebuild: bool = False,
                     + f"\nDELETE FROM vector_watermark WHERE model_id='{MODEL_ID}';\n"
                     # 整表重建 = 回到未初始化态：版本行必须一起清掉，否则下一次
                     # `apply` 会认为 vector scope 已就绪、将来的迁移被跳过。
-                    + f"\nDELETE FROM schema_version WHERE scope='{migrations.SCOPE_VECTOR}';\n"
+                    + f"\nDELETE FROM {migrations.VERSION_TABLE}"
+                      f" WHERE scope='{migrations.SCOPE_VECTOR}';\n"
                     + "COMMIT;")
                 con.executescript(store.VECTOR_SCHEMA)
                 migrations.apply(con, scope=migrations.SCOPE_VECTOR, migrations=())

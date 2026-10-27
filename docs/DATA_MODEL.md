@@ -401,9 +401,9 @@ CREATE TABLE IF NOT EXISTS schema_version (
   迁移只处理 `IF NOT EXISTS` **表达不了**的变更（改触发器体、加列、重建表），每条只跑一次。
   当前唯一的版本迁移是 `main v2`：把 FTS 三条触发器重建为代码里的最新定义（EA-077 的
   旧体漂移）。
-- **一条迁移 = 一笔事务**：`BEGIN IMMEDIATE; <DDL>; <写版本行>; COMMIT`。失败整条回滚，
-  版本停在上一版，抛 `SchemaMigrationError`；下次连接重试同一条。重复执行是 no-op
-  （`applied_at` 都不变）。
+- **整次升级 = 一笔事务**：`BEGIN IMMEDIATE; <本次全部待执行迁移的 DDL>; <逐条写版本行>;
+  COMMIT`。任一句失败整次回滚（版本停在升级前），抛 `SchemaMigrationError`；下次连接重做。
+  已是最新的库走只读快路径，**不拿写锁**；重复执行是 no-op（`applied_at` 都不变）。
 - **不假设跨库原子**：`index.db` 与 `exclusions.db` 是两个文件、主库是 WAL，跨文件 COMMIT
   不保证崩溃原子；两个 scope 各自版本化，一个成功一个失败时下次连接接着做。
 - **版本过新**：库的版本高于程序已知最新版时**拒绝打开**（不写库），提示升级程序或恢复备份

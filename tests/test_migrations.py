@@ -137,9 +137,9 @@ def test_failed_migration_rolls_back_and_keeps_old_version(tmp_path):
     con.execute("INSERT INTO schema_version VALUES ('main', 1, 1)")
     con.commit()
 
-    bad = (migrations.Migration(2, "坏迁移",
-                                "CREATE TABLE half_done (x INTEGER);\n"
-                                "INSERT INTO no_such_table VALUES (1);"),)
+    bad = (migrations.Migration(2, "坏迁移", statements=(
+        "CREATE TABLE half_done (x INTEGER)",
+        "INSERT INTO no_such_table VALUES (1)")),)
     with pytest.raises(errors.SchemaMigrationError) as ei:
         migrations.apply(con, scope="main", migrations=bad)
     assert "v2" in str(ei.value)
@@ -150,7 +150,8 @@ def test_failed_migration_rolls_back_and_keeps_old_version(tmp_path):
     assert not con.in_transaction, "失败后必须把事务收掉"
 
     # 修好后重跑：从 2 继续，且只跑一次
-    good = (migrations.Migration(2, "好迁移", "CREATE TABLE half_done (x INTEGER);"),)
+    good = (migrations.Migration(2, "好迁移",
+                                 statements=("CREATE TABLE half_done (x INTEGER)",)),)
     assert migrations.apply(con, scope="main", migrations=good) == 2
     assert con.execute(
         "SELECT count(*) FROM sqlite_master WHERE name='half_done'").fetchone()[0] == 1
@@ -181,9 +182,19 @@ def test_migration_refuses_to_run_inside_an_open_transaction(tmp_path):
     con.execute("BEGIN IMMEDIATE")
     with pytest.raises(errors.SchemaMigrationError, match="自动提交态"):
         migrations.apply(con, scope="main",
-                         migrations=(migrations.Migration(2, "x", "SELECT 1;"),))
+                         migrations=(migrations.Migration(2, "x", statements=("SELECT 1",)),))
     con.rollback()
     con.close()
+
+
+def test_bad_scope_is_a_project_error_not_a_value_error():
+    """core 的契约是「只抛 AgentWeChatError 子类」——入口校验也不能抛裸 ValueError。"""
+    con = sqlite3.connect(":memory:")
+    try:
+        with pytest.raises(errors.SchemaMigrationError):
+            migrations.apply(con, scope="Bad Scope")
+    finally:
+        con.close()
 
 
 def test_write_lock_is_reported_as_a_migration_error(tmp_path):
@@ -197,7 +208,7 @@ def test_write_lock_is_reported_as_a_migration_error(tmp_path):
     try:
         with pytest.raises(errors.SchemaMigrationError, match="locked"):
             migrations.apply(con2, scope="main",
-                             migrations=(migrations.Migration(2, "x", "SELECT 1;"),))
+                             migrations=(migrations.Migration(2, "x", statements=("SELECT 1",)),))
     finally:
         con2.close()
         con1.rollback()
@@ -214,7 +225,7 @@ def test_disk_failure_surfaces_as_a_migration_error(tmp_path, monkeypatch):
     try:
         with pytest.raises(errors.SchemaMigrationError):
             migrations.apply(con, scope="main",
-                             migrations=(migrations.Migration(2, "x", "SELECT 1;"),))
+                             migrations=(migrations.Migration(2, "x", statements=("SELECT 1",)),))
     finally:
         con.close()
 
@@ -222,10 +233,18 @@ def test_disk_failure_surfaces_as_a_migration_error(tmp_path, monkeypatch):
 # ---------------------------------------------------------------- scope 隔离
 
 def test_future_version_is_refused_without_touching_the_database(tmp_path):
+    """拒绝必须发生在 **ensure 之前**：ensure 里的 CREATE 也是写。
+
+    判据是「删掉一张表之后连接仍被拒，且那张表**没有**被补回来」——只在 apply 里拒绝
+    的实现会让 ensure 先把表建好，再报「不碰库」（复审实测：v99 库凭空多出 13 张表）。
+    """
     db = tmp_path / "i.db"
     con = store.connect(db)
     con.execute("UPDATE schema_version SET version=99 WHERE scope='main'")
+    con.execute("DROP TABLE msg_extras")          # 探针：ensure 若跑了就会把它补回来
     con.commit()
+    mode_before = con.execute("PRAGMA journal_mode").fetchone()[0]
+    objects_before = {r[0] for r in con.execute("SELECT name FROM sqlite_master")}
     con.close()
 
     with pytest.raises(errors.SchemaMigrationError) as ei:
@@ -234,10 +253,41 @@ def test_future_version_is_refused_without_touching_the_database(tmp_path):
 
     raw = sqlite3.connect(db)
     try:
+        assert raw.execute("PRAGMA journal_mode").fetchone()[0] == mode_before
+        assert {r[0] for r in raw.execute("SELECT name FROM sqlite_master")} == objects_before, \
+            "拒绝之前不许补建任何对象"
         assert raw.execute(
             "SELECT version FROM schema_version WHERE scope='main'").fetchone()[0] == 99
     finally:
         raw.close()
+
+
+def test_a_failure_rolls_back_the_whole_upgrade(tmp_path):
+    """整次升级是一笔事务：后面的迁移失败，前面已执行的那条也必须回滚。
+
+    这是「失败后版本停在上一版」的强形式——否则版本行会被前面那条推进到 v2，而 v3
+    的失败让库停在一个**部分升级**的状态，下次连接会从 v2 继续、永远不会重做 v3。
+    """
+    db = tmp_path / "i.db"
+    con = _legacy_db(db)
+    migrations.ensure_table(con)
+    con.execute("INSERT INTO schema_version VALUES ('main', 1, 1)")
+    con.commit()
+
+    chain = (
+        migrations.Migration(2, "第一步", statements=("CREATE TABLE step1 (x INTEGER)",)),
+        migrations.Migration(3, "第二步", statements=(
+            "CREATE TABLE step2 (x INTEGER)",
+            "INSERT INTO no_such_table VALUES (1)")),
+    )
+    with pytest.raises(errors.SchemaMigrationError) as ei:
+        migrations.apply(con, scope="main", migrations=chain)
+    assert "v3" in str(ei.value)
+
+    assert migrations.stored_version(con, "main") == 1
+    assert con.execute(
+        "SELECT count(*) FROM sqlite_master WHERE name IN ('step1','step2')").fetchone()[0] == 0
+    con.close()
 
 
 def test_exclusions_scope_is_versioned_separately_and_keeps_tombstones(tmp_path):

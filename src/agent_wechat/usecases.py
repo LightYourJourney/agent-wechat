@@ -1163,7 +1163,7 @@ def purge_chat_targets(contact: str, account: str | None = None) -> list[dict] |
                 rows = con.execute(
                     "SELECT account FROM exclusions.excluded WHERE chat_md5=? "
                     "ORDER BY account", (md5,)).fetchall()
-    except (sqlite3.Error, OSError, errors.IndexUnavailable) as exc:
+    except (sqlite3.Error, OSError, errors.IndexUnavailable, errors.SchemaMigrationError) as exc:
         # 与 plan_chat 同一口径：读不了索引/清单时裸 sqlite3.Error 会一路逃到 CLI 的
         # `except AgentWeChatError` 之外，用户看到的是一整个 traceback 而不是一行拒绝。
         # EA-074 之后 `store.connect()` 会先翻一次（IndexUnavailable）——同样是「读不了」，
