@@ -23,6 +23,7 @@ src/agent_wechat/mcp_server.py:: unused function 'export_chat_media' (60% confid
 src/agent_wechat/mcp_server.py:: unused function 'export_full_history' (60% confidence)
 src/agent_wechat/mcp_server.py:: unused function 'export_moments' (60% confidence)
 src/agent_wechat/mcp_server.py:: unused function 'get_account_status' (60% confidence)
+src/agent_wechat/mcp_server.py:: unused function 'get_message_context' (60% confidence)
 src/agent_wechat/mcp_server.py:: unused function 'get_message_media' (60% confidence)
 src/agent_wechat/mcp_server.py:: unused function 'get_message_parts' (60% confidence)
 src/agent_wechat/mcp_server.py:: unused function 'get_recent_messages' (60% confidence)

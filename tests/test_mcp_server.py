@@ -439,17 +439,18 @@ def test_msg_dict_carries_msg_key():
 
 # ---------- T7：get_message_media 的信封（spec §4.5） ----------
 
-def test_tool_count_is_thirteen():          # 原 test_tool_count_is_eleven 改名
+def test_tool_count_is_fifteen():           # 13（Phase 04）→ 15（Phase 05 加检索两件）
     """工具数变了，README/TOOLS.md 的数法必须跟着变 —— 这条断言守的就是「别忘改文档」。
 
     两条断言各守一件事：注册表里的工具数（拿掉一个即红）与**活文档**里逐条计数
-    （把任一处退回「11 个工具」即红）。只扫活文档：CHANGELOG 的「5 个工具」「7 个工具」
+    （把任一处退回「13 个工具」即红）。只扫活文档：CHANGELOG 的「5 个工具」「7 个工具」
     是发布历史，永远不该被改成 11；TOOLS.md 末尾的「≤10 个任务」是**任务**数，故模式
     要求数字后面紧跟「工具」或「MCP 工具」。
     """
     tools = asyncio.run(mcp_server.server.list_tools())
-    assert len(tools) == 13
-    assert {"export_chat", "get_message_parts"} <= {t.name for t in tools}
+    assert len(tools) == 15
+    assert {"export_chat", "get_message_parts",
+            "search_messages", "get_message_context"} <= {t.name for t in tools}
     root = pathlib.Path(__file__).resolve().parent.parent
     for rel in ("README.md", "docs/TOOLS.md", "docs/ARCHITECTURE.md"):
         text = (root / rel).read_text(encoding="utf-8")

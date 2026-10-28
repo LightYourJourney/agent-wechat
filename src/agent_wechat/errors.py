@@ -145,6 +145,10 @@ class SchemaMigrationError(AgentWeChatError):
     """
 
 
+class ScopeDenied(AgentWeChatError):
+    """该会话在用户声明的**读取范围**之外（`AGENT_WECHAT_DENY`）。"""
+
+
 class SyncInputError(AgentWeChatError):
     """同步/调度命令的入参不合法（例如 `--interval-minutes` 太小）。"""
 

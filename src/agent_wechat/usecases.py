@@ -1408,6 +1408,44 @@ def search_history(query: str, contact: str | None = None, limit: int = 20,
     return res
 
 
+LIMIT_RETRIEVAL = (1, 100)
+
+
+def search_messages(query: str, *, contact: str | None = None,
+                    account: str | None = None,
+                    after_ts: int | None = None, before_ts: int | None = None,
+                    limit: int = 20, mode: str = "hybrid") -> dict | NeedConfirm:
+    """Phase 05 统一检索（关键词 / 语义 / RRF 融合）。返回**片段 + msg_key**。"""
+    ctx = ChatContext(account)
+    chat_id = ctx.resolve_optional(contact)
+    if isinstance(chat_id, NeedConfirm):
+        return chat_id
+    _refresh_roster(ctx)
+    res = retrieval.search_messages(
+        query, account=ctx.account, chat_id=chat_id,
+        after_ts=after_ts, before_ts=before_ts,
+        limit=clamp_limit(limit, LIMIT_RETRIEVAL), mode=mode)
+    res["degraded"] = [*res.get("degraded", []), *ctx.degradations()]
+    return res
+
+
+def message_context(msg_key: str, *, contact: str | None = None,
+                    before: int = 2, after: int = 2,
+                    account: str | None = None) -> dict | NeedConfirm:
+    """Phase 05 第二阶段：按 `msg_key` 取完整原文与同会话上下文。"""
+    ctx = ChatContext(account)
+    chat_id = ctx.resolve_optional(contact)
+    if isinstance(chat_id, NeedConfirm):
+        return chat_id
+    res = retrieval.get_context(msg_key, account=ctx.account,
+                                before=before, after=after)
+    if chat_id and res["chat_id"] != chat_id:
+        raise errors.DataNotFound(
+            "msg_key 不属于该联系人",
+            hint="只传 msg_key、省略 contact，或核对两者是否同属一个会话")
+    return res
+
+
 def semantic_search(query: str, contact: str | None = None, limit: int = 10,
                     account: str | None = None) -> dict | NeedConfirm:
     """同 search_history：hits 的 `display` 也由名册富化（Ruling 13）。"""

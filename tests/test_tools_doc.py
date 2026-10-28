@@ -1,4 +1,4 @@
-"""TOOLS.md ↔ 13 个 MCP 工具的 wire 签名对账（F5，T8 复审）。
+"""TOOLS.md ↔ 15 个 MCP 工具的 wire 签名对账（F5，T8 复审）。
 
 此前这条对账只是一次性脚本：把 §9 的 `limit` 默认列改成 2000、或删掉一整行参数行，
 全量 1117 条**全绿**——文档参数表在仓内没有任何门禁。本文件把它钉成测试：
@@ -67,7 +67,7 @@ def _parse_default(cell: str):
 
 def test_every_tool_parameter_and_default_matches_TOOLS_md():
     sections, tools = _sections(), _tools()
-    assert len(tools) == 13, sorted(tools)
+    assert len(tools) == 15, sorted(tools)
     problems: list[str] = []
     for name, fn in sorted(tools.items()):
         section = sections.get(name)

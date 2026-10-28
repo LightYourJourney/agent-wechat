@@ -265,6 +265,35 @@ def cmd_vector_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_retrieve(args: argparse.Namespace) -> int:
+    """统一检索（Phase 05）：关键词 / 语义 / RRF 融合，只输出证据片段。"""
+    import json
+
+    from . import usecases
+    res = usecases.search_messages(args.query, contact=args.contact,
+                                   account=args.account, after_ts=args.after,
+                                   before_ts=args.before, limit=args.limit,
+                                   mode=args.mode)
+    if isinstance(res, usecases.NeedConfirm):
+        return _need_confirm(args.contact, res)
+    print(json.dumps(res, ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_context(args: argparse.Namespace) -> int:
+    """第二阶段：按 msg_key 取完整原文与同会话上下文。"""
+    import json
+
+    from . import usecases
+    res = usecases.message_context(args.msg_key, contact=args.contact,
+                                   before=args.before, after=args.after,
+                                   account=args.account)
+    if isinstance(res, usecases.NeedConfirm):
+        return _need_confirm(args.contact, res)
+    print(json.dumps(res, ensure_ascii=False, indent=2))
+    return 0
+
+
 def cmd_sync(args: argparse.Namespace) -> int:
     """一次同步：环境检查 → 增量导出（含历史回看）→ 向量脏队列 → 健康快照。"""
     import json
@@ -1079,6 +1108,24 @@ def main(argv: list[str] | None = None) -> None:
     sp = sub.add_parser("vector-status", help="向量索引新鲜度：水位线 / 重嵌队列 / 失败次数")
     sp.add_argument("--account", help="只看该账号；省略则全部账号")
     sp.set_defaults(fn=cmd_vector_status)
+
+    sp = sub.add_parser("retrieve", help="统一检索：keyword / semantic / hybrid（只给片段）")
+    sp.add_argument("query")
+    sp.add_argument("--contact", help="限定会话（username 或展示名）")
+    sp.add_argument("--after", type=int, default=None, help="起始 unix 秒（含）")
+    sp.add_argument("--before", type=int, default=None, help="结束 unix 秒（不含）")
+    sp.add_argument("--limit", type=int, default=20, help="返回条数（1-100）")
+    sp.add_argument("--mode", default="hybrid", choices=("keyword", "semantic", "hybrid"))
+    sp.add_argument("--account")
+    sp.set_defaults(fn=cmd_retrieve)
+
+    sp = sub.add_parser("context", help="按 msg_key 读取完整原文与同会话上下文")
+    sp.add_argument("msg_key")
+    sp.add_argument("--contact", help="校验 msg_key 属于该会话")
+    sp.add_argument("--before", type=int, default=2, help="向前取几条（0-10）")
+    sp.add_argument("--after", type=int, default=2, help="向后取几条（0-10）")
+    sp.add_argument("--account")
+    sp.set_defaults(fn=cmd_context)
 
     sp = sub.add_parser("sync", help="一次同步：环境检查→增量导出（含回看）→向量脏队列")
     sp.add_argument("--account", help="只同步该账号；省略则同步当前登录账号")

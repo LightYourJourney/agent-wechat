@@ -727,7 +727,15 @@ _SELECT_MSGS = ("SELECT " + (
 
 
 def semantic_search(query: str, chat_id: str | None = None, limit: int = 10,
-                    account: str = "", embedder: FastEmbedEmbedder | None = None) -> dict:
+                    account: str = "", embedder: FastEmbedEmbedder | None = None, *,
+                    after_ts: int | None = None,
+                    before_ts: int | None = None) -> dict:
+    """KNN 语义检索。`after_ts` 含下界、`before_ts` 不含上界（Phase 05）。
+
+    时间过滤在**取回候选之后**做（vec0 的 metadata 范围过滤不在我们依赖的契约里）：
+    `k = limit*3` 的候选里被时间窗筛掉的不会补位，所以时间窗越窄、命中可能越少——
+    调用方要更多结果就自己调大 `limit`。这条边界写进 内部阶段审计记录。
+    """
     """KNN 语义检索。account 必传（多账号隔离，与 search.search 规则一致）。
 
     先 KNN 取 rowid 与 distance，再单独查 messages —— 不用 JOIN+LIMIT
@@ -776,6 +784,10 @@ def semantic_search(query: str, chat_id: str | None = None, limit: int = 10,
                          "is_self": bool(m["is_self"]), "content": m["content"],
                          "media_hint": m["media_hint"], "msg_key": m["msg_key"],
                          "distance": r["distance"]})
+        if after_ts is not None:
+            hits = [h for h in hits if h["ts"] >= after_ts]
+        if before_ts is not None:
+            hits = [h for h in hits if h["ts"] < before_ts]
         return {"mode": "semantic", "model": MODEL_ID,
                 "total": len(hits[:limit]), "hits": hits[:limit]}
     finally:
