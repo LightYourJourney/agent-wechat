@@ -802,9 +802,6 @@ rebuild 与否）各起一条。（F-D，T7 复验：与 §4 同款的合并语�
 - **不联网、不写微信目录、不写任何产物**：只读本地检索库；`contact` 的解析要读一次
   `contact.db`（只读，同其它 contact 类工具）。
 
-
----
-
 ---
 
 ## 14. search_messages 🆕（Phase 05）
@@ -845,7 +842,7 @@ distance / untrusted`。**没有 `content`**——完整正文用 §15。
 
 **返回**：`chat_id / msg_key / messages[{msg_key,time,sender,is_self,content,untrusted}] /
 untrusted / notice`。只返回**同账号同会话**；被 `purge --chat` 销毁的消息**拒绝返回**
-（`{"error": "该消息已被销毁…"}`）。会话在 `AGENT_WECHAT_DENY` 里时拒绝。
+（`{"error": "该消息已被销毁…"}`）。会话在 `AGENT_WECHAT_DENY` 里时拒绝（该变量只约束本工具与 §14，不改变其它工具）。
 
 ## 错误汇总
 

@@ -747,3 +747,27 @@ def test_appmsg_rebuild_parts_reports_skipped_rows(stub, monkeypatch):
     seen = []
     usecases.appmsg_rebuild_parts(on_skipped=seen.append)
     assert seen == [1], seen
+
+
+def test_search_messages_usecase_clamps_and_merges_degradations(stub, monkeypatch):
+    _unique(stub)
+    seen: dict = {}
+
+    def fake(query, **kw):
+        seen.update(kw)
+        return {"hits": [], "degraded": [{"capability": "semantic", "effect": "x"}]}
+
+    monkeypatch.setattr(usecases.retrieval, "search_messages", fake)
+    res = usecases.search_messages("爬山", contact="张三", account=ACCT,
+                                   limit=9999)
+    assert seen["limit"] == usecases.LIMIT_RETRIEVAL[1]
+    assert seen["chat_id"] == "wxid_target"
+    assert [d["capability"] for d in res["degraded"]] == ["semantic"]
+
+
+def test_message_context_usecase_checks_chat_ownership(stub, monkeypatch):
+    _unique(stub)
+    monkeypatch.setattr(usecases.retrieval, "get_context",
+                        lambda *a, **k: {"chat_id": "some_other_chat"})
+    with pytest.raises(errors.DataNotFound, match="不属于"):
+        usecases.message_context("acct|md5|message_0.db|1", contact="张三")

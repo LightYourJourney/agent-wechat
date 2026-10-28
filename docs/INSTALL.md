@@ -151,6 +151,7 @@ AGENT_WECHAT_HOME = "/Users/you/.agent-wechat"
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `AGENT_WECHAT_HOME` | `~/.agent-wechat` | 密钥缓存、索引库、临时文件的根目录（自动 0700） |
+| `AGENT_WECHAT_DENY` | 空 | 逗号分隔的 chat_id；**只约束 Phase 05 的 `retrieve` / `context`**，不给既有工具加行为 |
 
 ## 7. 安装验证清单
 

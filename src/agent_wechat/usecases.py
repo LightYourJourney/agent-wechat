@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING
 
 from . import account as acc_mod
 from . import (appmsg, chatview, errors, exclusions, export, keys, media, messages,
-                msgextra, paths, reader, search, store, tasks, vector)
+                msgextra, paths, reader, retrieval, search, store, tasks, vector)
 # 模板模块名与下面的用例函数 `chat_index()` **同名**：这里起别名，否则函数定义会遮蔽
 # 模块名（`index_html.render` 那处引用会变成调用函数自身）。
 from . import chat_index as index_html
@@ -1408,7 +1408,7 @@ def search_history(query: str, contact: str | None = None, limit: int = 20,
     return res
 
 
-LIMIT_RETRIEVAL = (1, 100)
+LIMIT_RETRIEVAL = (1, retrieval.MAX_LIMIT)
 
 
 def search_messages(query: str, *, contact: str | None = None,

@@ -8,6 +8,7 @@ import sys
 from typing import TYPE_CHECKING
 
 from . import account, bootstrap, decrypt, errors, keys, paths
+from .retrieval import MODES as RETRIEVAL_MODES
 
 if TYPE_CHECKING:
     # 仅类型检查期：usecases 会连带拉起 vector→fastembed，不能进 CLI 的启动路径
@@ -1115,7 +1116,7 @@ def main(argv: list[str] | None = None) -> None:
     sp.add_argument("--after", type=int, default=None, help="起始 unix 秒（含）")
     sp.add_argument("--before", type=int, default=None, help="结束 unix 秒（不含）")
     sp.add_argument("--limit", type=int, default=20, help="返回条数（1-100）")
-    sp.add_argument("--mode", default="hybrid", choices=("keyword", "semantic", "hybrid"))
+    sp.add_argument("--mode", default="hybrid", choices=RETRIEVAL_MODES)
     sp.add_argument("--account")
     sp.set_defaults(fn=cmd_retrieve)
 

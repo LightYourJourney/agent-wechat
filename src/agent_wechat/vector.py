@@ -13,7 +13,7 @@ from typing import Callable, Mapping, Sequence
 
 import sqlite_vec
 
-from . import errors, messages, migrations, paths, store
+from . import errors, exclusions, messages, migrations, paths, store
 from .errors import SearchInputError, VectorError, VectorIndexEmpty, redact
 
 MODEL_NAME = "BAAI/bge-small-zh-v1.5"
@@ -511,9 +511,8 @@ def _commit(con: sqlite3.Connection) -> None:
 
 
 def _is_excluded(con: sqlite3.Connection, msg_key: str) -> bool:
-    """该消息是否已被 `purge --chat` 立碑（排除清单里有一条即算）。"""
-    return con.execute("SELECT 1 FROM exclusions.excluded WHERE msg_key=? LIMIT 1",
-                       (msg_key,)).fetchone() is not None
+    """该消息是否已被 `purge --chat` 立碑（实现收口在 `exclusions.is_excluded`）。"""
+    return exclusions.is_excluded(con, msg_key)
 
 
 def _delete_vec(con: sqlite3.Connection, rowid: int) -> None:
@@ -730,16 +729,14 @@ def semantic_search(query: str, chat_id: str | None = None, limit: int = 10,
                     account: str = "", embedder: FastEmbedEmbedder | None = None, *,
                     after_ts: int | None = None,
                     before_ts: int | None = None) -> dict:
-    """KNN 语义检索。`after_ts` 含下界、`before_ts` 不含上界（Phase 05）。
-
-    时间过滤在**取回候选之后**做（vec0 的 metadata 范围过滤不在我们依赖的契约里）：
-    `k = limit*3` 的候选里被时间窗筛掉的不会补位，所以时间窗越窄、命中可能越少——
-    调用方要更多结果就自己调大 `limit`。这条边界写进 内部阶段审计记录。
-    """
     """KNN 语义检索。account 必传（多账号隔离，与 search.search 规则一致）。
 
     先 KNN 取 rowid 与 distance，再单独查 messages —— 不用 JOIN+LIMIT
     （sqlite-vec issue #96：JOIN 与标准 LIMIT 子句在 KNN 下不兼容）。
+
+    `after_ts` 含下界、`before_ts` 不含上界（Phase 05）：时间过滤在**取回候选之后**做
+    （vec0 的 metadata 范围过滤不在我们依赖的契约里），被时间窗筛掉的不会补位，所以
+    时间窗越窄、命中可能越少——调用方要更多结果就自己调大 `limit`。
     """
     if not account:
         raise SearchInputError(

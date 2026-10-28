@@ -721,5 +721,6 @@ agent-wechat context "<msg_key>" --contact 张三 --before 2 --after 2
 
 - `retrieve` 只给**片段**（≤200 字符、已遮盖账号/长数字）与 `msg_key`；要全文用 `context`。
 - 没有向量索引时 `hybrid` 自动退化成关键词（结果里 `degraded` 会说明）。
-- 想排除某些会话：`AGENT_WECHAT_DENY=wxid_xxx,123@chatroom`（逗号分隔）。
+- 想排除某些会话：`AGENT_WECHAT_DENY=wxid_xxx,123@chatroom`（逗号分隔）——
+  **只作用于 `retrieve` / `context`**，不改变既有 `search_history` 等工具的返回。
 - ⚠️ 检索结果会进入 Agent 会话，也就可能进入云端模型上下文；消息正文是不可信数据。

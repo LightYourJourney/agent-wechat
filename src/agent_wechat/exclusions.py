@@ -123,6 +123,16 @@ def add(con: sqlite3.Connection, rows: list[tuple[str, str, str]]) -> int:
     return con.total_changes - before
 
 
+def is_excluded(con: sqlite3.Connection, msg_key: str) -> bool:
+    """该消息是否已被 `purge --chat` 立碑（排除清单里有一条即算）。
+
+    读取侧（向量重嵌、上下文回读）统一走这里——墓碑查询只该有一份实现。
+    """
+    return con.execute(
+        "SELECT 1 FROM exclusions.excluded WHERE msg_key=? LIMIT 1",
+        (msg_key,)).fetchone() is not None
+
+
 def count_chat(con: sqlite3.Connection, account: str, chat_md5: str) -> int:
     """该会话在清单里有多少条——**与 `remove_chat` 同一个谓词**（见 `messages.msg_key_prefix`）。
 
