@@ -141,6 +141,7 @@ agent-wechat/
 │   ├── usecases.py        用例层（两个入口共享的入口策略）
 │   ├── purge.py           数据销毁（CLI 专属）
 │   ├── exclusions.py      会话销毁的排除清单（唯一不可重建的产物）
+│   ├── derived.py         本地 OCR/ASR 派生文本与事实记忆（Phase 06）
 │   ├── retrieval.py       统一检索与两阶段披露（Phase 05）
 │   ├── sync.py            同步编排与只读诊断（Phase 04）
 │   ├── mcp_server.py      MCP 工具层

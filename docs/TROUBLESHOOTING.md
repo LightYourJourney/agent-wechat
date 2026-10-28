@@ -194,3 +194,17 @@ agent-wechat recent filehelper -n 3           # 端到端读取
 `agent-wechat doctor` 只读、不建库：先看它的 `problems` 数组，再按上面的表处置。
 `problems` 里出现「FTS 行数不一致」时，重跑一次导出即可重建；出现「版本高于本程序」时
 必须升级程序，不要用旧版继续写库。
+
+
+## 10. 本地识别（`derived`）不产出文字
+
+先跑 `agent-wechat derived status` 看引擎：
+
+| 现象 | 原因 | 处置 |
+|---|---|---|
+| `ocr.available=false` | 没有 `tesseract` | 本机安装 tesseract（需要 sudo，必须由人执行） |
+| 中文识别为空/乱码 | 只装了 `eng` 语言包 | 自行安装 `chi_sim.traineddata`；程序不会下载 |
+| `asr.available=false` | 没有 `whisper-cli` 或没有模型 | 安装 whisper.cpp，并用 `AGENT_WECHAT_WHISPER_MODEL` 指向本地 `ggml-*.bin` |
+| `skipped.media_not_exported` 很多 | 媒体还没导出 | 先 `agent-wechat media export` |
+| `too_large` / `too_long` | 超过 20 MB / 600 s | 单条处理，或调大上限（改代码常量，非配置） |
+| `DerivedBusy` | 另一个摄取在跑 | 等它结束 |

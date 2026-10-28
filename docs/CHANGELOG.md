@@ -3,6 +3,20 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 风格，
 版本号语义为 0.x 阶段（API 可能变动）。
 
+### 工程基线 P06（进行中）
+
+2026-10-28 起。本地多模态派生与可验证记忆，设计与边界见 `内部阶段审计记录`。
+
+- **新 CLI `derived`**：对本机已导出的图片/语音跑本地 `tesseract` / `whisper-cli`；
+  结果写 `derived_text`（含引擎、版本、来源、质量），**不覆盖原始消息**。
+  支持查看、纠正、删除；删除留墓碑，重扫不复活；purge 连派生与证据一起清。
+- **新 CLI `memory`**：主张 + 原始证据；四态 `candidate/confirmed/retracted/disputed`，
+  新增恒为候选，**没有自动抽取**；证据被 purge 后无证据的主张自动转 retracted。
+- **schema `main v7`**：五张新表。
+- **检索**：`retrieve --mode hybrid` 增加第三路 derived（RRF 同权融合，按 msg_key 去重）；
+  `keyword` 模式保持既有语义。
+- 默认离线：不下载模型、不上传图片/语音/文字；引擎缺失如实报 `engine_unavailable`。
+
 ### 工程基线 P05（进行中）
 
 2026-10-28 起。统一检索与两阶段披露，设计与评测见 `内部阶段审计记录`。

@@ -724,3 +724,22 @@ agent-wechat context "<msg_key>" --contact 张三 --before 2 --after 2
 - 想排除某些会话：`AGENT_WECHAT_DENY=wxid_xxx,123@chatroom`（逗号分隔）——
   **只作用于 `retrieve` / `context`**，不改变既有 `search_history` 等工具的返回。
 - ⚠️ 检索结果会进入 Agent 会话，也就可能进入云端模型上下文；消息正文是不可信数据。
+
+
+## 10. 本地识别与事实记忆（Phase 06）
+
+```bash
+agent-wechat derived status
+agent-wechat derived ingest --account <账号> --chat <会话> --kinds ocr,asr
+agent-wechat derived list --account <账号> --kind ocr
+agent-wechat derived edit "<msg_key>|ocr" --text "纠正后的文字"
+agent-wechat derived delete "<msg_key>|ocr"
+
+agent-wechat memory add --account <账号> --text "周末去爬山" --evidence "<msg_key>"
+agent-wechat memory confirm <claim_id>
+```
+
+- 只处理**已导出**的本机媒体（先跑 `media export`）；引擎和模型都要你自己准备，
+  程序不下载、不联网。
+- `derived delete` 留墓碑，重扫不会复活；`purge --chat` 会连同派生与证据一起销毁。
+- `memory add` 永远是**候选**；只有 `memory confirm` 才是用户确认。

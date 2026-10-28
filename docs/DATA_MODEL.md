@@ -395,14 +395,14 @@ CREATE TABLE IF NOT EXISTS schema_version (
 ) WITHOUT ROWID;
 ```
 
-- **三个 scope**：`main`（`index.db` 主表，当前 **6**）、`vector`（vec0 三表，当前 **1**）、
+- **三个 scope**：`main`（`index.db` 主表，当前 **7**）、`vector`（vec0 三表，当前 **1**）、
   `exclusions`（在 `exclusions.db` 里，SQL 写作 `exclusions.schema_version`，当前 **1**）。
 - **ensure 与 migrate 分工**：`CREATE … IF NOT EXISTS` 每次连接照跑（缺对象就补建的自愈）；
   迁移只处理 `IF NOT EXISTS` **表达不了**的变更（改触发器体、加列、重建表），每条只跑一次。
   版本迁移：`main v2` 把 FTS 三条触发器重建为代码里的最新定义（EA-077 的旧体漂移）；
   `main v3`（Phase 02）建立历史回看游标与重嵌队列（`audit_cursor` / `pending_reembed`）
   并重建重嵌触发器；`main v4`（Phase 03）新增重嵌失败账本 `reembed_failures`；
-  `main v5`（Phase 03）给队列加 `reason` 列（表重建）；`main v6`（Phase 04）新增同步终态表 `sync_state`。
+  `main v5`（Phase 03）给队列加 `reason` 列（表重建）；`main v6`（Phase 04）新增同步终态表 `sync_state`；`main v7`（Phase 06）新增派生文本（`derived_text` / `derived_tombstone` / `derived_fts`）与事实记忆（`fact_claim` / `fact_evidence`）。
 - **整次升级 = 一笔事务**：`BEGIN IMMEDIATE; <本次全部待执行迁移的 DDL>; <逐条写版本行>;
   COMMIT`。任一句失败整次回滚（版本停在升级前），抛 `SchemaMigrationError`；下次连接重做。
   已是最新的库走只读快路径，**不拿写锁**；重复执行是 no-op（`applied_at` 都不变）。
@@ -479,3 +479,28 @@ CREATE TABLE IF NOT EXISTS sync_state (
 
 由 `sync` 在终态写入（upsert），`doctor` 只读展示。它记录的是**最近一次**同步，不是历史；
 日志（`sync.log`，JSONL）才保留多条。`purge --all` 会随整个数据目录一起清掉。
+
+
+## 13. 派生文本（Phase 06）
+
+OCR/ASR 结果只写 `derived_text`，**不覆盖 `messages.content`**：
+
+- `derivation_id = f"{msg_key}|{kind}"`（确定性）；`kind ∈ {ocr, asr}`。
+- 记录 `engine` / `engine_version` / `source`（本机媒体路径）/ `quality` / `created_at`。
+- `status`：`auto`（引擎产出）/ `edited`（用户改过）/ `deleted`（正文已清空）。
+- `derived_tombstone(msg_key, kind)`：删除后重扫**不得复活**。
+- `derived_fts`（trigram）由三条触发器跟随 `derived_text`；只在 `hybrid` 检索里作为
+  第三路参与 RRF。
+
+## 14. 事实记忆（Phase 06）
+
+```sql
+fact_claim(claim_id PK, account, chat_id, claim, status, conflicts_with, note,
+           created_at, updated_at)
+fact_evidence(claim_id, msg_key, role, created_at)   -- 至少一条
+```
+
+`status` 四态：`candidate`（Agent/用户提交，未经确认）/ `confirmed`（用户确认）/
+`retracted`（撤回）/ `disputed`（有争议，`conflicts_with` 指向另一条 claim）。
+**没有自动抽取**：新增恒为 `candidate`。`purge` 删除同会话主张与证据；证据被销毁后
+没有证据的主张自动转 `retracted`（`note=evidence_purged`）。
