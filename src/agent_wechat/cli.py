@@ -295,6 +295,54 @@ def cmd_context(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_derived(args: argparse.Namespace) -> int:
+    import json
+
+    from . import derived
+    if args.derived_cmd == "status":
+        res = derived.engine_status()
+    elif args.derived_cmd == "ingest":
+        res = derived.ingest(args.account, args.chat,
+                             kinds=tuple(args.kinds.split(",")) if args.kinds else ("ocr", "asr"),
+                             limit=args.limit)
+    elif args.derived_cmd == "list":
+        res = derived.list_derived(args.account, chat=args.chat, kind=args.kind,
+                                   status=args.status, limit=args.limit)
+    elif args.derived_cmd == "search":
+        res = derived.search_derived(args.query, account=args.account,
+                                     chat_id=args.chat, limit=args.limit)
+    elif args.derived_cmd == "edit":
+        res = derived.edit_derived(args.derivation_id, args.text)
+    else:
+        res = derived.delete_derived(args.derivation_id)
+    print(json.dumps(res, ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_memory(args: argparse.Namespace) -> int:
+    import json
+
+    from . import derived
+    if args.memory_cmd == "add":
+        res = derived.add_claim(args.account, args.text,
+                                evidence=[k for k in args.evidence.split(",") if k],
+                                chat_id=args.chat, note=args.note)
+    elif args.memory_cmd == "list":
+        res = derived.list_claims(args.account, status=args.status, limit=args.limit)
+    elif args.memory_cmd == "show":
+        res = derived.get_claim(args.claim_id)
+    elif args.memory_cmd == "delete":
+        res = {"deleted": derived.delete_claim(args.claim_id)}
+    else:
+        status = {"confirm": "confirmed", "retract": "retracted",
+                  "dispute": "disputed"}[args.memory_cmd]
+        res = derived.set_claim_status(args.claim_id, status,
+                                       conflicts_with=args.conflicts_with,
+                                       note=args.note)
+    print(json.dumps(res, ensure_ascii=False, indent=2))
+    return 0
+
+
 def cmd_sync(args: argparse.Namespace) -> int:
     """一次同步：环境检查 → 增量导出（含历史回看）→ 向量脏队列 → 健康快照。"""
     import json
@@ -861,6 +909,9 @@ _CHAT_TABLES = (
     ("extras", "位置 / 名片载荷", ""),
     ("refs", "媒体引用", ""),
     ("display_names", "群成员显示名", ""),
+    ("derived", "OCR/ASR 派生文本", "含派生 FTS（触发器跟随）"),
+    ("claims", "事实主张", ""),
+    ("evidence", "事实证据", ""),
 )
 
 
@@ -1127,6 +1178,66 @@ def main(argv: list[str] | None = None) -> None:
     sp.add_argument("--after", type=int, default=2, help="向后取几条（0-10）")
     sp.add_argument("--account")
     sp.set_defaults(fn=cmd_context)
+
+    # Phase 06：本地多模态派生文本（离线引擎，不下载、不联网）
+    sp = sub.add_parser("derived", help="本地 OCR/ASR 派生文本（查看/纠正/删除）")
+    dsub = sp.add_subparsers(dest="derived_cmd", required=True)
+    d = dsub.add_parser("ingest", help="对已导出的本机媒体跑本地识别")
+    d.add_argument("--account", required=True)
+    d.add_argument("--chat")
+    d.add_argument("--kinds", default="ocr,asr")
+    d.add_argument("--limit", type=int, default=50)
+    d.set_defaults(fn=cmd_derived)
+    d = dsub.add_parser("status", help="本机 OCR/ASR 引擎可用性")
+    d.set_defaults(fn=cmd_derived)
+    d = dsub.add_parser("list", help="列派生文本")
+    d.add_argument("--account", required=True)
+    d.add_argument("--chat")
+    d.add_argument("--kind", choices=("ocr", "asr"))
+    d.add_argument("--status", choices=("auto", "edited", "deleted"))
+    d.add_argument("--limit", type=int, default=100)
+    d.set_defaults(fn=cmd_derived)
+    d = dsub.add_parser("search", help="在派生文本里检索")
+    d.add_argument("query")
+    d.add_argument("--account", required=True)
+    d.add_argument("--chat")
+    d.add_argument("--limit", type=int, default=20)
+    d.set_defaults(fn=cmd_derived)
+    d = dsub.add_parser("edit", help="纠正派生文本")
+    d.add_argument("derivation_id")
+    d.add_argument("--text", required=True)
+    d.set_defaults(fn=cmd_derived)
+    d = dsub.add_parser("delete", help="删除派生文本（留墓碑，重扫不复活）")
+    d.add_argument("derivation_id")
+    d.set_defaults(fn=cmd_derived)
+
+    sp = sub.add_parser("memory", help="可核查的事实记忆（候选/确认/撤回/争议）")
+    msub = sp.add_subparsers(dest="memory_cmd", required=True)
+    m = msub.add_parser("add", help="新增候选主张（不会自动确认）")
+    m.add_argument("--account", required=True)
+    m.add_argument("--text", required=True)
+    m.add_argument("--evidence", required=True, help="逗号分隔的 msg_key（≥1）")
+    m.add_argument("--chat")
+    m.add_argument("--note")
+    m.set_defaults(fn=cmd_memory)
+    for name in ("confirm", "retract", "dispute"):
+        m = msub.add_parser(name, help={"confirm": "确认", "retract": "撤回",
+                                        "dispute": "标记争议"}[name])
+        m.add_argument("claim_id")
+        m.add_argument("--conflicts-with")
+        m.add_argument("--note")
+        m.set_defaults(fn=cmd_memory)
+    m = msub.add_parser("list", help="列主张")
+    m.add_argument("--account", required=True)
+    m.add_argument("--status", choices=("candidate", "confirmed", "retracted", "disputed"))
+    m.add_argument("--limit", type=int, default=50)
+    m.set_defaults(fn=cmd_memory)
+    m = msub.add_parser("show", help="看单条主张与证据")
+    m.add_argument("claim_id")
+    m.set_defaults(fn=cmd_memory)
+    m = msub.add_parser("delete", help="硬删除主张与证据")
+    m.add_argument("claim_id")
+    m.set_defaults(fn=cmd_memory)
 
     sp = sub.add_parser("sync", help="一次同步：环境检查→增量导出（含回看）→向量脏队列")
     sp.add_argument("--account", help="只同步该账号；省略则同步当前登录账号")

@@ -68,6 +68,79 @@ SYNC_STATE_DDL = (
     " last_status TEXT,"
     " last_error TEXT,"
     " stats_json TEXT) WITHOUT ROWID")
+# Phase 06：派生文本（OCR/ASR）。**不覆盖原始消息**：正文只写在这里，按 msg_key 关联。
+# `status` 三态：auto（引擎产出）/edited（用户改过）/deleted（用户删过，正文已清空）。
+DERIVED_TEXT_DDL = """CREATE TABLE IF NOT EXISTS derived_text (
+    derivation_id  TEXT PRIMARY KEY,          -- f"{msg_key}|{kind}"（确定性）
+    msg_key        TEXT NOT NULL,
+    account        TEXT NOT NULL,
+    chat_id        TEXT NOT NULL,
+    kind           TEXT NOT NULL,             -- ocr | asr
+    text           TEXT NOT NULL DEFAULT '',
+    engine         TEXT NOT NULL,
+    engine_version TEXT,
+    source         TEXT,                      -- 本机媒体路径（敏感，只存本地库）
+    quality        REAL,
+    status         TEXT NOT NULL DEFAULT 'auto',
+    created_at     INTEGER NOT NULL,
+    edited_at      INTEGER
+);"""
+DERIVED_INDEXES = (
+    "CREATE INDEX IF NOT EXISTS idx_derived_msg ON derived_text(msg_key)",
+    "CREATE INDEX IF NOT EXISTS idx_derived_chat ON derived_text(account, chat_id)",
+)
+
+# 删除过的派生文本留墓碑：重扫**不得复活**（与 purge 的排除清单同一立场，但按 (msg_key, kind)）。
+DERIVED_TOMBSTONE_DDL = """CREATE TABLE IF NOT EXISTS derived_tombstone (
+    msg_key   TEXT NOT NULL,
+    kind      TEXT NOT NULL,
+    deleted_at INTEGER NOT NULL,
+    PRIMARY KEY (msg_key, kind)
+) WITHOUT ROWID;"""
+
+DERIVED_FTS_DDL = """CREATE VIRTUAL TABLE IF NOT EXISTS derived_fts
+    USING fts5(text, tokenize='trigram');"""
+
+DERIVED_TRIGGERS: tuple[str, ...] = (
+    """CREATE TRIGGER IF NOT EXISTS derived_fts_ai AFTER INSERT ON derived_text BEGIN
+    INSERT INTO derived_fts(rowid, text) VALUES (new.rowid, new.text);
+END;""",
+    """CREATE TRIGGER IF NOT EXISTS derived_fts_au AFTER UPDATE OF text ON derived_text BEGIN
+    UPDATE derived_fts SET text = new.text WHERE rowid = old.rowid;
+END;""",
+    """CREATE TRIGGER IF NOT EXISTS derived_fts_ad AFTER DELETE ON derived_text BEGIN
+    DELETE FROM derived_fts WHERE rowid = old.rowid;
+END;""",
+)
+
+# Phase 06：事实记忆。`status` 的四种语义是本阶段的核心区分：
+# candidate=模型/Agent 提出、未经用户确认；confirmed=用户确认；retracted=用户撤回；
+# disputed=有冲突（`conflicts_with` 指向另一条 claim）。
+FACT_CLAIM_DDL = """CREATE TABLE IF NOT EXISTS fact_claim (
+    claim_id      TEXT PRIMARY KEY,
+    account       TEXT NOT NULL,
+    chat_id       TEXT,
+    claim         TEXT NOT NULL,
+    status        TEXT NOT NULL DEFAULT 'candidate'
+                  CHECK (status IN ('candidate','confirmed','retracted','disputed')),
+    conflicts_with TEXT,
+    note          TEXT,
+    created_at    INTEGER NOT NULL,
+    updated_at    INTEGER NOT NULL
+);"""
+FACT_INDEXES = (
+    "CREATE INDEX IF NOT EXISTS idx_claim_account ON fact_claim(account, chat_id)",
+    "CREATE INDEX IF NOT EXISTS idx_evidence_msg ON fact_evidence(msg_key)",
+)
+
+FACT_EVIDENCE_DDL = """CREATE TABLE IF NOT EXISTS fact_evidence (
+    claim_id  TEXT NOT NULL,
+    msg_key   TEXT NOT NULL,
+    role      TEXT NOT NULL DEFAULT 'support',
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (claim_id, msg_key)
+) WITHOUT ROWID;"""
+
 AUDIT_TABLES = (AUDIT_CURSOR_DDL, PENDING_REEMBED_DDL, REEMBED_FAILURES_DDL)
 
 _SCHEMA_BODY = f"""
@@ -164,6 +237,15 @@ CREATE TABLE IF NOT EXISTS msg_extras (
 
 -- Phase 04：最近一次同步的终态（无正文/密钥/媒体路径）
 {SYNC_STATE_DDL};
+
+-- Phase 06：派生文本、删除墓碑、检索索引与事实记忆（原始消息表不动）
+{DERIVED_TEXT_DDL};
+{DERIVED_TOMBSTONE_DDL};
+{DERIVED_FTS_DDL};
+{FACT_CLAIM_DDL};
+{FACT_EVIDENCE_DDL};
+{"; ".join(DERIVED_INDEXES)};
+{"; ".join(FACT_INDEXES)};
 """
 
 # FTS 触发器：**单一来源**。`SCHEMA` 用它拼出全量建库脚本；迁移 v2 用同一批字符串
@@ -205,11 +287,12 @@ BEGIN
         changed_at=excluded.changed_at, reason=excluded.reason;
 END;"""
 
-SCHEMA = _SCHEMA_BODY + "\n" + "\n".join(FTS_TRIGGERS) + "\n" + REEMBED_TRIGGER
+SCHEMA = (_SCHEMA_BODY + "\n" + "\n".join(FTS_TRIGGERS) + "\n" + REEMBED_TRIGGER
+          + "\n" + "\n".join(DERIVED_TRIGGERS))
 
 # 本程序已知的 main scope 最新版本。迁移只列**IF NOT EXISTS 表达不了**的变更；
 # 基线（v1）由 `migrations.apply` 隐式 stamp——那代表「整套 DDL 已由 ensure 建好」。
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 MIGRATIONS: tuple[migrations.Migration, ...] = (
     migrations.Migration(
@@ -257,6 +340,13 @@ MIGRATIONS: tuple[migrations.Migration, ...] = (
         version=6,
         name="同步终态表（Phase 04）",
         statements=(SYNC_STATE_DDL,),
+    ),
+    migrations.Migration(
+        version=7,
+        name="派生文本与事实记忆（Phase 06）",
+        statements=(DERIVED_TEXT_DDL, DERIVED_TOMBSTONE_DDL, DERIVED_FTS_DDL,
+                    FACT_CLAIM_DDL, FACT_EVIDENCE_DDL,
+                    *DERIVED_INDEXES, *FACT_INDEXES) + DERIVED_TRIGGERS,
     ),
 )
 
@@ -569,7 +659,7 @@ def _vec_exec(con: sqlite3.Connection, sql: str, args: tuple = ()) -> sqlite3.Cu
 
 
 def chat_row_counts(con: sqlite3.Connection, account: str, chat_id: str) -> dict[str, int]:
-    """该会话在五张表里的存活条数。核查与测试共用，避免各处各写一套判据。
+    """该会话在各张表里的存活条数。核查与测试共用，避免各处各写一套判据。
 
     **`msg_parts` / `media_refs` 必须按 `msg_key` 前缀数，不能经 `messages` 子查询数。**
     子查询那版有个致命的盲区（Task 3 的实现者用变异证明了）：`messages` 一删，子查询立刻为空，
@@ -597,11 +687,17 @@ def chat_row_counts(con: sqlite3.Connection, account: str, chat_id: str) -> dict
         "refs": n("SELECT count(*) FROM media_refs WHERE substr(msg_key, 1, ?) = ?", (len(p), p)),
         "extras": n("SELECT count(*) FROM msg_extras WHERE substr(msg_key, 1, ?) = ?", (len(p), p)),
         "display_names": n("SELECT count(*) FROM display_names WHERE account=? AND chat_id=?", a),
+        # Phase 06：派生文本与事实记忆同属「删了就要核实真的没了」的那类数据。
+        "derived": n("SELECT count(*) FROM derived_text WHERE substr(msg_key, 1, ?) = ?",
+                     (len(p), p)),
+        "claims": n("SELECT count(*) FROM fact_claim WHERE account=? AND chat_id=?", a),
+        "evidence": n("SELECT count(*) FROM fact_evidence WHERE substr(msg_key, 1, ?) = ?",
+                      (len(p), p)),
     }
 
 
 def delete_chat(con: sqlite3.Connection, *, account: str, chat_id: str) -> dict[str, int]:
-    """删掉一个会话在本工具里的全部副本。**八处，一处不漏**（spec §5.1；第八处是 EA-041 的 `msg_extras`——它与 `msg_parts` / `media_refs` 同属按 `msg_key` 前缀删的宽谓词那一类，孤儿行照样盖得住）。
+    """删掉一个会话在本工具里的全部副本。**十二处，一处不漏**（spec §5.1；第八处是 EA-041 的 `msg_extras`——它与 `msg_parts` / `media_refs` 同属按 `msg_key` 前缀删的宽谓词那一类，孤儿行照样盖得住）。
 
     **调用方负责**：① 事务边界（自己 `BEGIN IMMEDIATE` / `commit`）；
     ② `PRAGMA secure_delete=ON`——实测默认设置下被删消息的正文仍留在 index.db 的 freelist
@@ -636,6 +732,18 @@ def delete_chat(con: sqlite3.Connection, *, account: str, chat_id: str) -> dict[
     con.execute("DELETE FROM msg_parts WHERE substr(msg_key, 1, ?) = ?", (len(p), p))
     con.execute("DELETE FROM media_refs WHERE substr(msg_key, 1, ?) = ?", (len(p), p))
     con.execute("DELETE FROM msg_extras WHERE substr(msg_key, 1, ?) = ?", (len(p), p))
+    # Phase 06：派生文本、它的删除墓碑、以及事实记忆的证据/主张。派生 FTS 由触发器跟随。
+    con.execute("DELETE FROM derived_text WHERE substr(msg_key, 1, ?) = ?", (len(p), p))
+    con.execute("DELETE FROM derived_tombstone WHERE substr(msg_key, 1, ?) = ?", (len(p), p))
+    con.execute("DELETE FROM fact_evidence WHERE substr(msg_key, 1, ?) = ?", (len(p), p))
+    con.execute("DELETE FROM fact_claim WHERE account=? AND chat_id=?", a)
+    # 证据被销毁后，**没有证据的主张不得继续成立**：标记为 retracted（保留审计痕迹）。
+    con.execute(
+        "UPDATE fact_claim SET status='retracted',"
+        " note=COALESCE(note,'evidence_purged'),"
+        " updated_at=CAST(strftime('%s','now') AS INTEGER)"
+        " WHERE account=? AND status!='retracted'"
+        " AND claim_id NOT IN (SELECT claim_id FROM fact_evidence)", (account,))
     con.execute("DELETE FROM messages WHERE account=? AND chat_id=?", a)   # FTS 由触发器跟随
     con.execute("DELETE FROM display_names WHERE account=? AND chat_id=?", a)
     # 重嵌队列与失败账本：它们是**工作清单**，不是用户数据。删掉与删除同一事务——

@@ -20,7 +20,7 @@ import math
 import os
 import re
 
-from . import errors, exclusions, search, store, vector
+from . import derived, errors, exclusions, search, store, vector
 
 RRF_K = 60                     # RRF 常数：k 越大，头部排名差的影响越小
 DEFAULT_LIMIT = 20
@@ -94,10 +94,18 @@ def _normalize(hit: dict, source: str) -> dict:
             "distance": hit.get("distance") if source == "semantic" else None}
 
 
-def fuse(keyword_hits: list[dict], semantic_hits: list[dict], limit: int) -> tuple[list[dict], int]:
-    """RRF 融合：score = Σ 1/(k + rank)，按 `msg_key` 去重。返回 (前 limit 条, 去重后总数)。"""
+def fuse(keyword_hits: list[dict], semantic_hits: list[dict],
+         derived_hits: list[dict] | None = None,
+         limit: int = DEFAULT_LIMIT) -> tuple[list[dict], int]:
+    """RRF 融合：score = Σ 1/(k + rank)，按 `msg_key` 去重。返回 (前 limit 条, 去重后总数)。
+
+    `derived` 是第三路（OCR/ASR 派生文本），只在 `hybrid` 里参与；它的片段是识别文本，
+    原消息仍要经 `get_context` 才能看到。
+    """
     merged: dict[str, dict] = {}
-    for source, hits in (("keyword", keyword_hits), ("semantic", semantic_hits)):
+    sources = (("keyword", keyword_hits), ("semantic", semantic_hits),
+               ("derived", derived_hits or []))
+    for source, hits in sources:
         for rank, hit in enumerate(hits, start=1):
             key = hit["msg_key"]
             entry = merged.get(key)
@@ -170,9 +178,21 @@ def search_messages(query: str, *, account: str, chat_id: str | None = None,
                                          limit=candidates, after_ts=after_ts,
                                          before_ts=before_ts)
         degraded.extend(notes)
+    derived_hits: list[dict] = []
+    if mode == "hybrid":
+        # 派生文本（OCR/ASR）作为第三路；它是**旁证**，不取代原消息。
+        try:
+            dres = derived.search_derived(query, account=account, chat_id=chat_id,
+                                          limit=candidates)
+            derived_hits = [h for h in dres["hits"]
+                            if after_ts is None or h["ts"] >= after_ts]
+            derived_hits = [h for h in derived_hits
+                            if before_ts is None or h["ts"] < before_ts]
+        except errors.DerivedInputError:
+            derived_hits = []
 
     if mode == "hybrid":
-        ordered, deduped_total = fuse(keyword_hits, semantic_hits, limit)
+        ordered, deduped_total = fuse(keyword_hits, semantic_hits, derived_hits, limit)
     else:
         source = keyword_hits if mode == "keyword" else semantic_hits
         ordered = []

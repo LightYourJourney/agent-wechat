@@ -149,6 +149,14 @@ class ScopeDenied(AgentWeChatError):
     """该会话在用户声明的**读取范围**之外（`AGENT_WECHAT_DENY`）。"""
 
 
+class DerivedInputError(AgentWeChatError):
+    """派生文本 / 事实记忆的入参或状态迁移不合法。"""
+
+
+class DerivedBusy(AgentWeChatError):
+    """另一个派生任务正在运行（非阻塞锁）。"""
+
+
 class SyncInputError(AgentWeChatError):
     """同步/调度命令的入参不合法（例如 `--interval-minutes` 太小）。"""
 

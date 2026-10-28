@@ -47,7 +47,7 @@ def test_all_project_errors_share_one_base():
     # 某类改成继承 `Exception` 时它只是从集合里**消失**，断言照样绿（实测踩过）；
     # 名册相等让「丢基类」与「新增未登记」两种漂移都红。
     expected = {
-        "AccountNotFound", "CaptureError", "ContainerWriteRefused", "ContactNotFound",
+        "AccountNotFound", "CaptureError", "ContainerWriteRefused", "ContactNotFound", "DerivedBusy", "DerivedInputError",
         "DataNotFound", "DecryptError", "DependencyMissing", "HomeUnavailable",
         "IndexUnavailable", "KeyNotFound", "MediaKeyError", "MediaOutputError",
         "PurgeRefused", "SchemaDrift", "SchemaMigrationError", "SearchInputError",
