@@ -208,3 +208,5 @@ agent-wechat recent filehelper -n 3           # 端到端读取
 | `skipped.media_not_exported` 很多 | 媒体还没导出 | 先 `agent-wechat media export` |
 | `too_large` / `too_long` | 超过 20 MB / 600 s | 单条处理，或调大上限（改代码常量，非配置） |
 | `DerivedBusy` | 另一个摄取在跑 | 等它结束 |
+| 报「需要显式 --chat」 | 没有给会话 | 加 `--chat`，或明确 `--all` 跨会话 |
+| 磁盘不足 50 MB | 派生要写索引库 | 清理磁盘后重跑 |

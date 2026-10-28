@@ -19,6 +19,7 @@ from __future__ import annotations
 import contextlib
 import fcntl
 import os
+from typing import Iterator
 import pathlib
 import shutil
 import sqlite3
@@ -29,12 +30,17 @@ import uuid
 from . import errors, exclusions, media, messages, paths, store
 
 MAX_FILE_BYTES = 20 * 1024 * 1024
+MIN_FREE_BYTES = 50 * 1024 * 1024
 MAX_AUDIO_SECONDS = 600
 MAX_BATCH = 50
 ENGINE_TIMEOUT = 60
 LOCK_NAME = "derived.lock"
 KINDS = ("ocr", "asr")
-CLAIM_STATUSES = ("candidate", "confirmed", "retracted", "disputed")
+CLAIM_STATUSES = ("candidate", "confirmed", store.CLAIM_RETRACTED, "disputed")
+
+# msg_type ↔ 派生种类 ↔ 媒体种类：**只有这一份映射**（矩阵/教程/离线路径都引用它）。
+_KIND_BY_TYPE = {messages.TYPE_IMAGE: "ocr", messages.TYPE_VOICE: "asr"}
+_MEDIA_KIND = {"ocr": "image", "asr": "voice"}
 
 # 允许的状态迁移：candidate（模型/Agent 提出）→ 用户确认/撤回/标记争议；
 # 撤回后用户可再次确认；争议最终要落到确认或撤回。任何状态都可以留在原状态。
@@ -67,8 +73,27 @@ class TesseractOcr:
         return self._langs
 
     def extract(self, path: pathlib.Path) -> tuple[str, float | None]:
-        text = _run(["tesseract", str(path), "stdout", "-l", self.languages()])
-        return (text or "").strip(), None
+        """TSV 输出同时给文字与逐词置信度；quality 是均值（0–1），没有词时为 None。"""
+        out = _run(["tesseract", str(path), "stdout", "-l", self.languages(),
+                    "tsv"])       # tesseract 的 TSV 是 configfile 参数，不是 --tsv
+        if out is None:
+            return None, None
+        words: list[str] = []
+        confs: list[float] = []
+        for line in out.splitlines()[1:]:
+            cols = line.split("\t")
+            if len(cols) < 12:
+                continue
+            word = cols[11].strip()
+            try:
+                conf = float(cols[10])
+            except ValueError:
+                continue
+            if word and conf >= 0:
+                words.append(word)
+                confs.append(conf)
+        quality = round(sum(confs) / len(confs) / 100.0, 4) if confs else None
+        return " ".join(words).strip(), quality
 
 
 class WhisperCliAsr:
@@ -97,7 +122,7 @@ def _first_line(argv: list[str]) -> str | None:
     try:
         res = subprocess.run(argv, capture_output=True, text=True, timeout=5,
                              check=False)
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, UnicodeDecodeError, subprocess.SubprocessError):
         return None
     line = (res.stdout or res.stderr or "").strip().splitlines()
     return line[0].strip() if line else None
@@ -108,7 +133,7 @@ def _run(argv: list[str]) -> str | None:
         res = subprocess.run(argv, capture_output=True, text=True,
                              timeout=ENGINE_TIMEOUT, check=True)
         return res.stdout
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, UnicodeDecodeError, subprocess.SubprocessError):
         return None
 
 
@@ -116,10 +141,8 @@ def _default_whisper_model() -> pathlib.Path | None:
     env = os.environ.get("AGENT_WECHAT_WHISPER_MODEL")
     if env:
         return pathlib.Path(env)
-    for cand in (paths.HOME_DIR / "models" / "ggml-base.bin",
-                 pathlib.Path.home() / ".cache" / "whisper-cpp" / "ggml-base.bin",
-                 pathlib.Path.home() / "Library" / "Application Support"
-                 / "whisper-cpp" / "ggml-base.bin"):
+    for cand in ((paths.HOME_DIR / "models" / "ggml-base.bin",)
+                 + paths.whisper_model_candidates()):
         if cand.exists():
             return cand
     return None
@@ -134,7 +157,7 @@ def default_asr() -> WhisperCliAsr:
 
 
 @contextlib.contextmanager
-def _lock():
+def _lock() -> Iterator[None]:
     paths.ensure_home_dirs()
     lock = paths.HOME_DIR / LOCK_NAME
     try:
@@ -154,6 +177,13 @@ def _lock():
             fcntl.flock(f, fcntl.LOCK_UN)
         finally:
             f.close()
+
+
+def _free_bytes() -> int:
+    try:
+        return shutil.disk_usage(paths.HOME_DIR).free
+    except OSError:
+        return 0
 
 
 def _commit(con: sqlite3.Connection) -> None:
@@ -178,7 +208,8 @@ def _probe_audio_seconds(path: pathlib.Path) -> float | None:
         return None
 
 
-def engine_status(ocr=None, asr=None) -> dict:
+def engine_status(ocr: TesseractOcr | None = None,
+                  asr: WhisperCliAsr | None = None) -> dict:
     ocr, asr = ocr or default_ocr(), asr or default_asr()
     out = {}
     for kind, eng in (("ocr", ocr), ("asr", asr)):
@@ -191,7 +222,8 @@ def engine_status(ocr=None, asr=None) -> dict:
 
 
 def _candidates(con: sqlite3.Connection, account: str, chat: str | None,
-                wants: set[str], limit: int) -> list[sqlite3.Row]:
+                wants: set[str], limit: int, *,
+                force: bool = False) -> list[sqlite3.Row]:
     where = ["m.account = ?"]
     args: list[object] = [account]
     wanted_types = []
@@ -206,6 +238,13 @@ def _candidates(con: sqlite3.Connection, account: str, chat: str | None,
     if chat:
         where.append("m.chat_id = ?")
         args.append(chat)
+    if not force:
+        # 已派生的消息**不再出现在候选里**：既让扫描能推进到更早的媒体，也保证
+        # 用户纠正过的文本不会被下一次摄取覆盖（force 仍需逐行跳过 edited）。
+        where.append(
+            "NOT EXISTS (SELECT 1 FROM derived_text d WHERE d.msg_key = m.msg_key"
+            " AND d.kind = CASE WHEN m.msg_type = ? THEN 'ocr' ELSE 'asr' END)")
+        args.append(messages.TYPE_IMAGE)
     args.append(limit)
     return con.execute(
         "SELECT m.msg_key, m.account, m.chat_id, m.chat_md5, m.ts, m.local_id,"
@@ -216,12 +255,12 @@ def _candidates(con: sqlite3.Connection, account: str, chat: str | None,
 
 
 def _kind_of(msg_type: int) -> str | None:
-    return {messages.TYPE_IMAGE: "ocr", messages.TYPE_VOICE: "asr"}.get(msg_type)
+    return _KIND_BY_TYPE.get(msg_type)
 
 
 def _media_path(con: sqlite3.Connection, row: sqlite3.Row,
                 out_root: pathlib.Path) -> pathlib.Path | None:
-    kind = "image" if _kind_of(row["msg_type"]) == "ocr" else "voice"
+    kind = _MEDIA_KIND.get(_kind_of(row["msg_type"]) or "", "")
     return media.exported_path(
         out_root, chat_md5=row["chat_md5"], kind=kind, ts=row["ts"],
         file_key=row["file_key"], local_id=row["local_id"])
@@ -245,7 +284,9 @@ def _insert(con: sqlite3.Connection, *, row: sqlite3.Row, kind: str, text: str,
 
 def ingest(account: str, chat: str | None = None, *,
            kinds: tuple[str, ...] = ("ocr", "asr"), limit: int = MAX_BATCH,
-           ocr=None, asr=None, now: int | None = None,
+           ocr: TesseractOcr | None = None, asr: WhisperCliAsr | None = None,
+           force: bool = False, allow_all: bool = False,
+           now: int | None = None,
            out_root: pathlib.Path | None = None) -> dict:
     """对本机**已导出的**媒体跑本地识别；缺什么就如实记什么。"""
     wants = set(kinds)
@@ -253,28 +294,40 @@ def ingest(account: str, chat: str | None = None, *,
         raise errors.DerivedInputError(
             f"kinds 只能是 {KINDS}", hint="用 --kinds ocr,asr 指定")
     limit = max(1, min(int(limit), MAX_BATCH))
+    if chat is None and not allow_all:
+        raise errors.DerivedInputError(
+            "需要显式 --chat（或 --all）",
+            hint="按会话处理，避免无意中扫描全部联系人")
     ocr, asr = ocr or default_ocr(), asr or default_asr()
     engines = {"ocr": ocr, "asr": asr}
     out_root = out_root or media.export_root()
     result: dict = {"account": account, "chat": chat, "counts": {}, "engines": {},
                     "degraded": [], "skipped": {}}
 
-    def bump(bucket: str, reason: str | None = None) -> None:
-        if reason:
-            result["skipped"][reason] = result["skipped"].get(reason, 0) + 1
-        else:
-            result["counts"][bucket] = result["counts"].get(bucket, 0) + 1
+    def hit(kind: str) -> None:
+        result["counts"][kind] = result["counts"].get(kind, 0) + 1
+
+    def skip(reason: str) -> None:
+        result["skipped"][reason] = result["skipped"].get(reason, 0) + 1
 
     with _lock():
+        if _free_bytes() < MIN_FREE_BYTES:
+            raise errors.HomeUnavailable(
+                "磁盘可用空间不足 50 MB，派生任务已停止",
+                hint="清理磁盘后重试（识别结果要写索引库）")
         with store.open() as con:
             if con.execute("SELECT 1 FROM sqlite_master WHERE name='derived_text'"
                            ).fetchone() is None:
                 raise errors.DerivedInputError("派生表不存在（索引库版本过低）")
             for kind, eng in engines.items():
+                try:
+                    available = bool(eng.available())
+                    version = eng.version() if available else None
+                except Exception:                       # noqa: BLE001 — 探测失败按不可用
+                    available, version = False, None
                 result["engines"][kind] = {
-                    "name": eng.name, "available": bool(eng.available()),
-                    "version": eng.version() if eng.available() else None}
-            rows = _candidates(con, account, chat, wants, limit * 4)
+                    "name": eng.name, "available": available, "version": version}
+            rows = _candidates(con, account, chat, wants, limit * 4, force=force)
             for row in rows:
                 if sum(result["counts"].values()) >= limit:
                     break
@@ -284,45 +337,62 @@ def ingest(account: str, chat: str | None = None, *,
                 if con.execute("SELECT 1 FROM derived_tombstone"
                                " WHERE msg_key=? AND kind=?",
                                (row["msg_key"], kind)).fetchone():
-                    bump("", "deleted")
+                    skip("deleted")
                     continue
                 if exclusions.is_excluded(con, row["msg_key"]):
                     # purge 的排除清单同样管派生：被销毁的消息不得再派生（rescan 不复活）
-                    bump("", "excluded")
+                    skip("excluded")
+                    continue
+                existing = con.execute(
+                    "SELECT status FROM derived_text WHERE derivation_id=?",
+                    (f"{row['msg_key']}|{kind}",)).fetchone()
+                if existing is not None:
+                    reason = {"edited": "edited", "deleted": "deleted"}.get(
+                        existing["status"], "exists")
+                    skip(reason)
                     continue
                 path = _media_path(con, row, out_root)
                 if path is None or not path.exists():
-                    bump("", "media_not_exported")
+                    skip("media_not_exported")
                     continue
                 try:
                     size = path.stat().st_size
                 except OSError:
-                    bump("", "media_unreadable")
+                    skip("media_unreadable")
                     continue
                 if size > MAX_FILE_BYTES:
-                    bump("", "too_large")
+                    skip("too_large")
                     continue
                 if kind == "asr":
                     secs = _probe_audio_seconds(path)
                     if secs is not None and secs > MAX_AUDIO_SECONDS:
-                        bump("", "too_long")
+                        skip("too_long")
                         continue
                 eng = engines[kind]
-                if not eng.available():
-                    bump("", "engine_unavailable")
+                try:
+                    available = eng.available()
+                except Exception:                      # noqa: BLE001 — 探测失败按不可用
+                    available = False
+                if not available:
+                    skip("engine_unavailable")
                     continue
-                text, quality = eng.extract(path)
+                try:
+                    text, quality = eng.extract(path)
+                except Exception as exc:               # noqa: BLE001 — 引擎失败不打断整批
+                    result["degraded"].append(f"{kind} 引擎调用失败：{type(exc).__name__}")
+                    skip("engine_failed")
+                    continue
                 if text is None:
-                    bump("", "engine_failed")
+                    skip("engine_failed")
                     continue
                 if not text.strip():
-                    bump("", "empty_output")      # 白图/静音：不落空行
+                    skip("empty_output")      # 白图/静音：不落空行
                     continue
                 _insert(con, row=row, kind=kind, text=text, engine=eng.name,
                         version=eng.version(), source=path, quality=quality,
                         now=int(now if now is not None else time.time()))
                 _commit(con)
-                bump(kind)
+                hit(kind)
 
     if result["skipped"].get("engine_unavailable"):
         result["degraded"].append(
@@ -364,6 +434,12 @@ def _get(con: sqlite3.Connection, derivation_id: str) -> sqlite3.Row:
             f"找不到派生文本 {derivation_id}",
             hint="用 `agent-wechat derived list` 查看现有 derivation_id")
     return row
+
+
+def get_derived(derivation_id: str) -> dict:
+    """单条派生文本（含 source/engine/quality，供 `derived show` 核对来源）。"""
+    with store.open() as con:
+        return dict(_get(con, derivation_id))
 
 
 def edit_derived(derivation_id: str, text: str, *, now: int | None = None) -> dict:
@@ -409,7 +485,8 @@ def search_derived(query: str, *, account: str, chat_id: str | None = None,
     limit = max(1, min(int(limit), 100))
     base = ("SELECT d.derivation_id, d.msg_key, d.chat_id, d.kind, d.text,"
             " d.engine, m.ts,"
-            " COALESCE(dn.display_name, m.sender_name, m.sender_id) AS sender"
+            " COALESCE(dn.display_name, m.sender_name, m.sender_id) AS sender,"
+            " m.is_self"
             " FROM derived_text d"
             " JOIN messages m ON m.msg_key = d.msg_key"
             f" {store._SENDER_JOIN}"
@@ -425,7 +502,8 @@ def search_derived(query: str, *, account: str, chat_id: str | None = None,
                 rows = con.execute(
                     "SELECT d.derivation_id, d.msg_key, d.chat_id, d.kind, d.text,"
                     " d.engine, m.ts,"
-                    " COALESCE(dn.display_name, m.sender_name, m.sender_id) AS sender"
+                    " COALESCE(dn.display_name, m.sender_name, m.sender_id) AS sender,"
+                    " m.is_self"
                     " FROM derived_fts JOIN derived_text d ON d.rowid = derived_fts.rowid"
                     " JOIN messages m ON m.msg_key = d.msg_key"
                     f" {store._SENDER_JOIN}"
@@ -434,17 +512,25 @@ def search_derived(query: str, *, account: str, chat_id: str | None = None,
                     + (" AND d.chat_id = ?" if chat_id else "")
                     + " ORDER BY rank LIMIT ?",
                     (query, *args, limit)).fetchall()
-            except sqlite3.Error:
-                rows = []
+            except sqlite3.OperationalError:
+                rows = []       # FTS 表缺失/不可用：走 LIKE；其它 sqlite 错误照旧抛
         if not rows:                     # 1-2 字或 FTS 不可用：LIKE 兜底
-            rows = con.execute(
-                base + " AND d.text LIKE ? ORDER BY m.ts DESC LIMIT ?",
-                (*args, f"%{query.strip()}%", limit)).fetchall()
+            # 转义 `%`/`_`：与 search.py 同立场——查询里的通配符不该被当语法。
+            needle = (query.strip().replace("\\", "\\\\")
+                      .replace("%", "\\%").replace("_", "\\_"))
+            try:
+                rows = con.execute(
+                    base + " AND d.text LIKE ? ESCAPE '\\' ORDER BY m.ts DESC LIMIT ?",
+                    (*args, f"%{needle}%", limit)).fetchall()
+            except (sqlite3.Error, OSError) as exc:
+                raise errors.IndexUnavailable(
+                    f"派生文本检索失败：{exc}",
+                    hint="检查索引库完整性；必要时重跑一次导出") from exc
     return {"total": len(rows), "hits": [
         {"derivation_id": r["derivation_id"], "msg_key": r["msg_key"],
          "chat_id": r["chat_id"], "ts": r["ts"], "sender": r["sender"] or "?",
          "kind": r["kind"], "text": r["text"], "engine": r["engine"],
-         "content": r["text"], "is_self": False, "media_hint": None}
+         "content": r["text"], "is_self": bool(r["is_self"]), "media_hint": None}
         for r in rows]}
 
 
@@ -459,6 +545,7 @@ def add_claim(account: str, claim: str, *, evidence: list[str],
     if not evidence:
         raise errors.DerivedInputError(
             "事实记忆必须有原始证据", hint="给至少一个 msg_key（来自检索结果）")
+    evidence = list(dict.fromkeys(evidence))      # 重复 key 去重（PK 冲突会逃出项目异常）
     stamp = int(now if now is not None else time.time())
     with store.open() as con:
         rows = con.execute(

@@ -824,6 +824,7 @@ distance / untrusted`。**没有 `content`**——完整正文用 §15。
 
 - 片段 ≤200 字符、总量 ≤8000 字符；超出截断并 `truncated=true`。
 - 片段里的 `wxid_*` / `*@chatroom` / 11 位以上数字被替换成 `<已遮盖>`。
+- `hybrid` 还会融合 Phase 06 的本地 OCR/ASR 派生文本（`sources` 里出现 `derived`）。
 - **没有向量索引时**：`hybrid` 退化成关键词并在 `degraded` 说明；`semantic` 返回空结果 +
   `degraded`，不报错。
 - ⚠️ 正文是不可信数据；⚠️ stdio 本地 ≠ 云端安全（返回值会进 Agent 会话）。

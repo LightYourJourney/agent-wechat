@@ -143,6 +143,11 @@ FACT_EVIDENCE_DDL = """CREATE TABLE IF NOT EXISTS fact_evidence (
 
 AUDIT_TABLES = (AUDIT_CURSOR_DDL, PENDING_REEMBED_DDL, REEMBED_FAILURES_DDL)
 
+# 事实记忆的状态词表：`derived.CLAIM_STATUSES` 从这里取，purge 也写这两个值——
+# 词表只该有一处定义（store 被 derived 依赖，反向 import 会成环）。
+CLAIM_RETRACTED = "retracted"
+EVIDENCE_PURGED = "evidence_purged"
+
 _SCHEMA_BODY = f"""
 PRAGMA journal_mode=WAL;
 CREATE TABLE IF NOT EXISTS messages (
@@ -693,6 +698,14 @@ def chat_row_counts(con: sqlite3.Connection, account: str, chat_id: str) -> dict
         "claims": n("SELECT count(*) FROM fact_claim WHERE account=? AND chat_id=?", a),
         "evidence": n("SELECT count(*) FROM fact_evidence WHERE substr(msg_key, 1, ?) = ?",
                       (len(p), p)),
+        "derived_tombstones": n(
+            "SELECT count(*) FROM derived_tombstone WHERE substr(msg_key, 1, ?) = ?",
+            (len(p), p)),
+        # 全局不变量：FTS 行没有对应的 derived_text 行 = 触发器失效、正文可能已删而索引还在。
+        # 它不是「本会话」的计数（FTS 没有 msg_key 列），但 purge 的核查要求它恒为 0。
+        "derived_fts_orphans": n(
+            "SELECT count(*) FROM derived_fts_content c"
+            " LEFT JOIN derived_text d ON d.rowid = c.id WHERE d.rowid IS NULL", ()),
     }
 
 
@@ -735,12 +748,16 @@ def delete_chat(con: sqlite3.Connection, *, account: str, chat_id: str) -> dict[
     # Phase 06：派生文本、它的删除墓碑、以及事实记忆的证据/主张。派生 FTS 由触发器跟随。
     con.execute("DELETE FROM derived_text WHERE substr(msg_key, 1, ?) = ?", (len(p), p))
     con.execute("DELETE FROM derived_tombstone WHERE substr(msg_key, 1, ?) = ?", (len(p), p))
+    # 本会话主张的**全部证据**都要删：证据可能挂在别的会话的消息上（跨会话引用），
+    # 只按 msg_key 前缀删会留下孤儿证据，而主张一删就再也没人能定位它们。
+    con.execute("DELETE FROM fact_evidence WHERE claim_id IN"
+                " (SELECT claim_id FROM fact_claim WHERE account=? AND chat_id=?)", a)
     con.execute("DELETE FROM fact_evidence WHERE substr(msg_key, 1, ?) = ?", (len(p), p))
     con.execute("DELETE FROM fact_claim WHERE account=? AND chat_id=?", a)
     # 证据被销毁后，**没有证据的主张不得继续成立**：标记为 retracted（保留审计痕迹）。
     con.execute(
-        "UPDATE fact_claim SET status='retracted',"
-        " note=COALESCE(note,'evidence_purged'),"
+        f"UPDATE fact_claim SET status='{CLAIM_RETRACTED}',"
+        f" note=COALESCE(note,'{EVIDENCE_PURGED}'),"
         " updated_at=CAST(strftime('%s','now') AS INTEGER)"
         " WHERE account=? AND status!='retracted'"
         " AND claim_id NOT IN (SELECT claim_id FROM fact_evidence)", (account,))

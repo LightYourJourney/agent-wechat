@@ -93,3 +93,37 @@ def test_purge_retracts_a_claim_whose_evidence_is_destroyed(tmp_path, monkeypatc
     assert claim["status"] == "retracted", "证据被销毁后主张不得继续成立"
     assert claim["note"] == "evidence_purged"
     assert claim["evidence"] == []
+
+
+def test_duplicate_evidence_is_deduped(tmp_path, monkeypatch):
+    _env(tmp_path, monkeypatch)
+    claim = derived.add_claim(ACCT, "重复证据", evidence=[_key(1), _key(1)])
+    assert [e["msg_key"] for e in claim["evidence"]] == [_key(1)]
+
+
+def test_purge_removes_cross_chat_evidence_of_a_deleted_claim(tmp_path, monkeypatch):
+    """证据可能挂在别的会话；主张按 chat_id 删除时，它的证据一条都不能留。"""
+    _env(tmp_path, monkeypatch)
+    other = "wxid_otherchat"
+    with store.open() as con:
+        store.upsert_batch(con, [messages.make_row(
+            account=ACCT, chat_md5=hashlib.md5(other.encode()).hexdigest(),
+            chat_id=other, shard="message_0.db", local_id=1, ts=T0 + 1,
+            msg_type=1, sender_id=None, sender_name=None, is_self=0,
+            content="别的会话", media_hint=None)])
+        con.execute(
+            "INSERT INTO fact_claim(claim_id, account, chat_id, claim, status,"
+            " created_at, updated_at) VALUES('c-cross',?,?,'跨会话','confirmed',1,1)",
+            (ACCT, CHAT))
+        con.execute(
+            "INSERT INTO fact_evidence(claim_id, msg_key, role, created_at)"
+            " VALUES('c-cross', ?, 'support', 1)",
+            (messages.row_key(ACCT, hashlib.md5(other.encode()).hexdigest(),
+                              "message_0.db", 1),))
+        con.commit()
+        store.delete_chat(con, account=ACCT, chat_id=CHAT)
+        con.commit()
+    with store.open() as con:
+        assert con.execute("SELECT count(*) FROM fact_evidence").fetchone()[0] == 0
+    with pytest.raises(errors.DataNotFound):
+        derived.get_claim("c-cross")

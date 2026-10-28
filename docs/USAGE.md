@@ -731,6 +731,8 @@ agent-wechat context "<msg_key>" --contact 张三 --before 2 --after 2
 ```bash
 agent-wechat derived status
 agent-wechat derived ingest --account <账号> --chat <会话> --kinds ocr,asr
+agent-wechat derived ingest --account <账号> --all --limit 20   # 显式跨会话
+agent-wechat derived show "<msg_key>|ocr"                     # 引擎/来源/质量
 agent-wechat derived list --account <账号> --kind ocr
 agent-wechat derived edit "<msg_key>|ocr" --text "纠正后的文字"
 agent-wechat derived delete "<msg_key>|ocr"

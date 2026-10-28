@@ -308,6 +308,17 @@ def launch_agents_dir() -> pathlib.Path:
     return pathlib.Path.home() / "Library" / "LaunchAgents"
 
 
+def whisper_model_candidates() -> tuple[pathlib.Path, ...]:
+    """whisper.cpp 常见模型位置（**真实家目录**，不跟随 AGENT_WECHAT_HOME）。
+
+    与 `launch_agents_dir` 同一条理由：whisper-cli 只认用户自己放的模型，位置由它
+    所在生态决定，不由我们的数据根决定。**只探测，不下载。**
+    """
+    home = pathlib.Path.home()
+    return (home / ".cache" / "whisper-cpp" / "ggml-base.bin",
+            home / "Library" / "Application Support" / "whisper-cpp" / "ggml-base.bin")
+
+
 def pid_alive(pid: object) -> bool:
     """这个 pid 还活着吗。**判不出来一律当活着**（保守：不收割、不清扫），缺 pid / 非正整数
     → 视为不活。

@@ -304,13 +304,16 @@ def cmd_derived(args: argparse.Namespace) -> int:
     elif args.derived_cmd == "ingest":
         res = derived.ingest(args.account, args.chat,
                              kinds=tuple(args.kinds.split(",")) if args.kinds else ("ocr", "asr"),
-                             limit=args.limit)
+                             limit=args.limit, force=args.force,
+                             allow_all=args.all)
     elif args.derived_cmd == "list":
         res = derived.list_derived(args.account, chat=args.chat, kind=args.kind,
                                    status=args.status, limit=args.limit)
     elif args.derived_cmd == "search":
         res = derived.search_derived(args.query, account=args.account,
                                      chat_id=args.chat, limit=args.limit)
+    elif args.derived_cmd == "show":
+        res = derived.get_derived(args.derivation_id)
     elif args.derived_cmd == "edit":
         res = derived.edit_derived(args.derivation_id, args.text)
     else:
@@ -912,6 +915,8 @@ _CHAT_TABLES = (
     ("derived", "OCR/ASR 派生文本", "含派生 FTS（触发器跟随）"),
     ("claims", "事实主张", ""),
     ("evidence", "事实证据", ""),
+    ("derived_tombstones", "派生删除墓碑", ""),
+    ("derived_fts_orphans", "派生 FTS 孤儿行", "全局不变量，正常恒为 0"),
 )
 
 
@@ -1187,6 +1192,10 @@ def main(argv: list[str] | None = None) -> None:
     d.add_argument("--chat")
     d.add_argument("--kinds", default="ocr,asr")
     d.add_argument("--limit", type=int, default=50)
+    d.add_argument("--force", action="store_true",
+                   help="重新识别未编辑过的行（edited 永不覆盖）")
+    d.add_argument("--all", action="store_true",
+                   help="不限定会话（默认必须给 --chat，避免遍历全部联系人）")
     d.set_defaults(fn=cmd_derived)
     d = dsub.add_parser("status", help="本机 OCR/ASR 引擎可用性")
     d.set_defaults(fn=cmd_derived)
@@ -1202,6 +1211,9 @@ def main(argv: list[str] | None = None) -> None:
     d.add_argument("--account", required=True)
     d.add_argument("--chat")
     d.add_argument("--limit", type=int, default=20)
+    d.set_defaults(fn=cmd_derived)
+    d = dsub.add_parser("show", help="看单条派生文本（引擎/来源/质量）")
+    d.add_argument("derivation_id")
     d.set_defaults(fn=cmd_derived)
     d = dsub.add_parser("edit", help="纠正派生文本")
     d.add_argument("derivation_id")

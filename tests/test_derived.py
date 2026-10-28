@@ -129,6 +129,7 @@ def test_size_duration_and_batch_limits(tmp_path, monkeypatch):
     res2 = derived.ingest(ACCT, CHAT, ocr=FakeOcr(), asr=FakeAsr())
     assert res2["skipped"].get("too_long") == 1 and res2["counts"].get("ocr") == 1
 
+    monkeypatch.setattr(derived, "_probe_audio_seconds", lambda p: 1.0)
     res3 = derived.ingest(ACCT, CHAT, ocr=FakeOcr(), asr=FakeAsr(), limit=1)
     assert sum(res3["counts"].values()) == 1, "批量上限必须生效"
 
@@ -159,8 +160,14 @@ def test_edit_updates_search_and_delete_leaves_a_tombstone(tmp_path, monkeypatch
 
     derived.delete_derived(item["derivation_id"], now=3000)
     assert derived.search_derived("新文字", account=ACCT)["total"] == 0
-    again = derived.ingest(ACCT, CHAT, ocr=FakeOcr("旧文字"), asr=FakeAsr())
+    # 普通重扫：已派生的行压根不进候选（也顺带避免覆盖纠正）
+    derived.ingest(ACCT, CHAT, ocr=FakeOcr("旧文字"), asr=FakeAsr())
+    assert derived.search_derived("旧文字", account=ACCT)["total"] == 0
+    # force 重扫：墓碑挡在派生之前
+    again = derived.ingest(ACCT, CHAT, ocr=FakeOcr("旧文字"), asr=FakeAsr(),
+                           force=True)
     assert again["skipped"].get("deleted") == 1, "删除后重扫不得复活"
+    assert again["skipped"].get("edited", 0) == 0
     row = derived.list_derived(ACCT, status="deleted")["items"][0]
     assert row["text"] == "", "删除必须清空正文"
 
@@ -227,3 +234,110 @@ def test_real_tesseract_recognises_english_text(tmp_path):
 def test_whisper_without_a_local_model_is_unavailable():
     eng = derived.WhisperCliAsr(model=pathlib.Path("/nonexistent/ggml-base.bin"))
     assert eng.available() is False
+
+
+# ---------------------------------------------------------------- 复审补充
+
+def test_edited_text_survives_a_force_reingest(tmp_path, monkeypatch):
+    _env(tmp_path, monkeypatch)
+    derived.ingest(ACCT, CHAT, ocr=FakeOcr("原始识别"), asr=FakeAsr())
+    img = next(i for i in derived.list_derived(ACCT)["items"] if i["kind"] == "ocr")
+    derived.edit_derived(img["derivation_id"], "用户纠正过")
+    res = derived.ingest(ACCT, CHAT, ocr=FakeOcr("新识别"), asr=FakeAsr(), force=True)
+    assert res["skipped"].get("edited") == 1
+    row = derived.get_derived(img["derivation_id"])
+    assert row["text"] == "用户纠正过" and row["status"] == "edited", \
+        "重扫不得覆盖用户纠正"
+
+
+def test_repeated_ingest_advances_to_older_media(tmp_path, monkeypatch):
+    out = _env(tmp_path, monkeypatch)
+    # 补第二条更早的图片：已派生的行不再进候选，扫描必须能推进到它
+    with store.open() as con:
+        store.upsert_batch(con, [_row(3, messages.TYPE_IMAGE, "[图片2]")])
+        store.upsert_media_refs(con, [
+            (_row(3, messages.TYPE_IMAGE, None)["msg_key"], "image", "e" * 32, None)])
+        con.commit()
+    md5 = hashlib.md5(CHAT.encode()).hexdigest()
+    month = dt.datetime.fromtimestamp(T0 + 3, dt.timezone.utc).strftime("%Y-%m")
+    p = out / md5 / "image" / month / f"{'e' * 32}.png"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 64)
+
+    first = derived.ingest(ACCT, CHAT, kinds=("ocr",), ocr=FakeOcr(), limit=1)
+    second = derived.ingest(ACCT, CHAT, kinds=("ocr",), ocr=FakeOcr(), limit=1)
+    assert first["counts"] == {"ocr": 1} and second["counts"] == {"ocr": 1}
+    assert derived.list_derived(ACCT, kind="ocr")["total"] == 2
+
+
+def test_ingest_requires_an_explicit_chat_or_all(tmp_path, monkeypatch):
+    _env(tmp_path, monkeypatch)
+    with pytest.raises(errors.DerivedInputError):
+        derived.ingest(ACCT, ocr=FakeOcr(), asr=FakeAsr())
+    assert derived.ingest(ACCT, allow_all=True, ocr=FakeOcr(),
+                          asr=FakeAsr())["counts"] == {"ocr": 1, "asr": 1}
+
+
+def test_disk_low_stops_ingest(tmp_path, monkeypatch):
+    _env(tmp_path, monkeypatch)
+    monkeypatch.setattr(derived, "_free_bytes", lambda: 1)
+    with pytest.raises(errors.HomeUnavailable):
+        derived.ingest(ACCT, CHAT, ocr=FakeOcr(), asr=FakeAsr())
+
+
+def test_derived_show_includes_engine_source_and_quality(tmp_path, monkeypatch):
+    _env(tmp_path, monkeypatch)
+    derived.ingest(ACCT, CHAT, ocr=FakeOcr(quality=0.9), asr=FakeAsr())
+    img = next(i for i in derived.list_derived(ACCT)["items"] if i["kind"] == "ocr")
+    row = derived.get_derived(img["derivation_id"])
+    assert row["quality"] == 0.9 and row["engine"] == "fake-ocr"
+    assert str(row["source"]).endswith(".png")
+
+
+def test_derived_hits_report_is_self(tmp_path, monkeypatch):
+    _env(tmp_path, monkeypatch, export_image=False, export_voice=False)
+    mine = messages.make_row(
+        account=ACCT, chat_md5=hashlib.md5(CHAT.encode()).hexdigest(), chat_id=CHAT,
+        shard="message_0.db", local_id=9, ts=T0 + 9, msg_type=messages.TYPE_IMAGE,
+        sender_id=None, sender_name=None, is_self=1, content="[图片]", media_hint=None)
+    with store.open() as con:
+        store.upsert_batch(con, [mine])
+        con.commit()
+    # 直接种一条派生行，避免依赖引擎/媒体文件
+    with store.open() as con:
+        con.execute(
+            "INSERT INTO derived_text(derivation_id, msg_key, account, chat_id, kind,"
+            " text, engine, status, created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+            (f"{mine['msg_key']}|ocr", mine["msg_key"], ACCT, CHAT, "ocr",
+             "自己发的图", "fake", "auto", 1))
+        con.commit()
+    hit = derived.search_derived("自己发的图", account=ACCT)["hits"][0]
+    assert hit["is_self"] is True
+
+
+@pytest.mark.skipif(not derived.TesseractOcr().available(),
+                    reason="本机没有 tesseract")
+def test_end_to_end_ocr_ingest_search_and_jump(tmp_path, monkeypatch):
+    """验收链：本机 PNG → 真实 OCR → 摄取 → hybrid 检索 → msg_key 跳回原消息。"""
+    PIL = pytest.importorskip("PIL.Image")
+    draw_mod = pytest.importorskip("PIL.ImageDraw")
+    out = _env(tmp_path, monkeypatch, export_voice=False)
+    img = PIL.new("RGB", (520, 140), "white")
+    draw_mod.Draw(img).text((12, 50), "HELLO EVIDENCE", fill="black")
+    md5 = hashlib.md5(CHAT.encode()).hexdigest()
+    month = dt.datetime.fromtimestamp(T0 + 1, dt.timezone.utc).strftime("%Y-%m")
+    p = out / md5 / "image" / month / f"{'f' * 32}.png"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    img.save(p)
+
+    res = derived.ingest(ACCT, CHAT, kinds=("ocr",))
+    assert res["counts"] == {"ocr": 1}, res
+    row = derived.list_derived(ACCT, kind="ocr")["items"][0]
+    assert "HELLO" in row["text"].upper()
+    assert row["quality"] is not None
+
+    hy = retrieval.search_messages("HELLO", account=ACCT, mode="hybrid")
+    hit = next(h for h in hy["hits"] if h["msg_key"] == _keys()[0])
+    assert "derived" in hit["sources"]
+    ctx = retrieval.get_context(hit["msg_key"], account=ACCT, before=0, after=0)
+    assert ctx["messages"][0]["content"] == "[图片]", "跳回的是原消息，不是派生文本"

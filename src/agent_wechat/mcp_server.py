@@ -209,7 +209,8 @@ def search_messages(query: str, contact: str | None = None,
     `msg_key`；要读完整原文与同会话上下文，再用 `get_message_context` 按 `msg_key` 取。
 
     mode：`keyword`（FTS5 trigram，1-2 字自动 LIKE）/ `semantic`（本地向量 KNN）/
-    `hybrid`（默认，RRF 融合并按 `msg_key` 去重）。**没有向量索引时**：`hybrid` 退化成
+    `hybrid`（默认，RRF 融合关键词、语义与本地 OCR/ASR 派生文本三路，按 `msg_key`
+    去重）。**没有向量索引时**：`hybrid` 退化成
     关键词并在 `degraded` 里说明；`semantic` 返回空结果 + `degraded`，不报错。
     时间窗：`after_ts` 含下界、`before_ts` 不含上界（unix 秒）。
     contact 可选限定会话；展示名歧义返回 `need_confirm`，未命中返回 `error`。

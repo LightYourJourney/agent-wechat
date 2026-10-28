@@ -154,10 +154,12 @@ def test_delete_chat_removes_every_place(_temp_index):
     got = store.delete_chat(con, account="a", chat_id=VICTIM)
     # parts/refs 各 2：一条挂在存活消息上、一条是孤儿。**子查询版这里只会是 1**——孤儿看不见。
     assert got == {"messages": 2, "vectors": 0, "parts": 2, "extras": 2, "refs": 2,
-                   "display_names": 1, "derived": 1, "claims": 1, "evidence": 1}
+                   "display_names": 1, "derived": 1, "claims": 1, "evidence": 1,
+                   "derived_tombstones": 0, "derived_fts_orphans": 0}
     assert store.chat_row_counts(con, "a", VICTIM) == {
         "messages": 0, "vectors": 0, "parts": 0, "extras": 0, "refs": 0,
-        "display_names": 0, "derived": 0, "claims": 0, "evidence": 0}
+        "display_names": 0, "derived": 0, "claims": 0, "evidence": 0,
+        "derived_tombstones": 0, "derived_fts_orphans": 0}
     # 这两条是**宽谓词的回归**（也是上面那两条断言的补丁）：子查询版删不到孤儿，两张表各留一行
     # （`msg_parts.raw_xml` 就是 purge 要销毁的那份载荷），而上面照样全绿。
     # 判据在测试里**独立写一遍**（不借 chat_row_counts，也不用全表计数——keeper 在这两张表里
@@ -179,7 +181,8 @@ def test_delete_chat_leaves_the_other_chat_untouched(_temp_index):
     # 都会在这里或上一条断言的 `got` 上现形。
     assert store.chat_row_counts(con, "a", KEEPER) == {
         "messages": 1, "vectors": 0, "parts": 1, "extras": 1, "refs": 1,
-        "display_names": 1, "derived": 1, "claims": 0, "evidence": 0}
+        "display_names": 1, "derived": 1, "claims": 0, "evidence": 0,
+        "derived_tombstones": 0, "derived_fts_orphans": 0}
     assert con.execute("SELECT count(*) FROM display_names WHERE chat_id=?", (KEEPER,)
                        ).fetchone()[0] == 1
     assert con.execute("SELECT count(*) FROM messages_fts").fetchone()[0] == 1, \
