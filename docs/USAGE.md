@@ -709,3 +709,17 @@ agent-wechat logs clean --yes       # 清理 sync.log 与 launchd out/err（默�
   缓存缺失就报 `vector_unavailable`（消息仍已同步）。
 - 调度只写 `~/Library/LaunchAgents/com.agent-wechat.sync.plist`，启用/停用命令打印给你自己执行。
 - 完整状态码与排障见 `内部阶段审计记录`。
+
+
+## 9. 统一检索（Phase 05）
+
+```bash
+agent-wechat retrieve "上次说的爬山" --mode hybrid --limit 10
+agent-wechat retrieve "爬山" --after 1750000000 --before 1760000000 --mode keyword
+agent-wechat context "<msg_key>" --contact 张三 --before 2 --after 2
+```
+
+- `retrieve` 只给**片段**（≤200 字符、已遮盖账号/长数字）与 `msg_key`；要全文用 `context`。
+- 没有向量索引时 `hybrid` 自动退化成关键词（结果里 `degraded` 会说明）。
+- 想排除某些会话：`AGENT_WECHAT_DENY=wxid_xxx,123@chatroom`（逗号分隔）。
+- ⚠️ 检索结果会进入 Agent 会话，也就可能进入云端模型上下文；消息正文是不可信数据。

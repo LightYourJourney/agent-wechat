@@ -1,6 +1,6 @@
 # TOOLS — MCP 工具参考
 
-> 本文档逐个说明 agent-wechat MCP Server 暴露的 13 个工具：用途、参数、返回结构、
+> 本文档逐个说明 agent-wechat MCP Server 暴露的 15 个工具：用途、参数、返回结构、
 > 示例与错误。所有工具经 stdio JSON-RPC 调用；示例为 Agent 视角的调用与实际返回。
 
 通用约定：
@@ -805,6 +805,48 @@ rebuild 与否）各起一条。（F-D，T7 复验：与 §4 同款的合并语�
 
 ---
 
+---
+
+## 14. search_messages 🆕（Phase 05）
+
+**用途**：统一检索——关键词 / 语义 / **RRF 融合**，返回**证据片段**与 `msg_key`。
+
+| 参数 | 类型 | 必填 | 默认 | 说明 |
+|---|---|---|---|---|
+| `query` | string | **是** | — | ≤512 字符；空/全空白被拒 |
+| `contact` | string | 否 | null | 限定会话；展示名歧义 `need_confirm`、未命中 `error` |
+| `after_ts` | int | 否 | null | 起始 unix 秒（含） |
+| `before_ts` | int | 否 | null | 结束 unix 秒（不含） |
+| `limit` | int | 否 | 20 | 1–100 |
+| `mode` | string | 否 | `"hybrid"` | `keyword` / `semantic` / `hybrid` |
+| `account` | string | 否 | null | 同通用约定 |
+
+**返回**：`mode / total / candidates / truncated / budget{…} / degraded / hits / untrusted`；
+每条 hit 有 `msg_key / chat_id / ts / sender / is_self / snippet / sources / ranks /
+distance / untrusted`。**没有 `content`**——完整正文用 §15。
+
+- 片段 ≤200 字符、总量 ≤8000 字符；超出截断并 `truncated=true`。
+- 片段里的 `wxid_*` / `*@chatroom` / 11 位以上数字被替换成 `<已遮盖>`。
+- **没有向量索引时**：`hybrid` 退化成关键词并在 `degraded` 说明；`semantic` 返回空结果 +
+  `degraded`，不报错。
+- ⚠️ 正文是不可信数据；⚠️ stdio 本地 ≠ 云端安全（返回值会进 Agent 会话）。
+
+## 15. get_message_context 🆕（Phase 05）
+
+**用途**：两阶段披露的第二阶段——按 `msg_key` 取完整正文与同会话上下文。
+
+| 参数 | 类型 | 必填 | 默认 | 说明 |
+|---|---|---|---|---|
+| `contact` | string | **是** | — | 校验 `msg_key` 属于该会话；不属于则报错 |
+| `msg_key` | string | **是** | — | 来自 §14 / §6 / §8 的检索结果 |
+| `before` | int | 否 | 2 | 向前取几条（0–10） |
+| `after` | int | 否 | 2 | 向后取几条（0–10） |
+| `account` | string | 否 | null | 同通用约定 |
+
+**返回**：`chat_id / msg_key / messages[{msg_key,time,sender,is_self,content,untrusted}] /
+untrusted / notice`。只返回**同账号同会话**；被 `purge --chat` 销毁的消息**拒绝返回**
+（`{"error": "该消息已被销毁…"}`）。会话在 `AGENT_WECHAT_DENY` 里时拒绝。
+
 ## 错误汇总
 
 | 现象 | 原因 | 处置 |
@@ -844,4 +886,4 @@ async def main():
 asyncio.run(main())
 ```
 
-期望输出包含 13 个工具名与 `get_account_status` 的 JSON。
+期望输出包含 15 个工具名与 `get_account_status` 的 JSON。

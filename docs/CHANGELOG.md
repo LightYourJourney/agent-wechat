@@ -3,6 +3,19 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 风格，
 版本号语义为 0.x 阶段（API 可能变动）。
 
+### 工程基线 P05（进行中）
+
+2026-10-28 起。统一检索与两阶段披露，设计与评测见 `内部阶段审计记录`。
+
+- **新 MCP 工具 `search_messages`（第 14 个）与 CLI `retrieve`**：关键词 / 语义 /
+  **RRF 融合**，按 `msg_key` 去重；支持时间窗与 `limit` 预算。**只返回片段**（≤200 字符，
+  账号与长数字已遮盖），没有 `content`。
+- **新 MCP 工具 `get_message_context`（第 15 个）与 CLI `context`**：按 `msg_key` 取完整
+  正文与同会话上下文；被 purge 的消息拒绝返回。
+- **降级明确**：无向量索引时 `hybrid` 退化成关键词、`semantic` 返回空 + `degraded`，不抛。
+- **读取范围**：`AGENT_WECHAT_DENY` 在检索与上下文两处生效。
+- **既有 `search_history` / `semantic_search` 行为不变**（只是内部多了可选时间参数）。
+
 ### 工程基线 P04（进行中）
 
 2026-10-28 起。本地同步编排与健康诊断，设计与证据见 `内部阶段审计记录`。
