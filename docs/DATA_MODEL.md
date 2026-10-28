@@ -504,3 +504,6 @@ fact_evidence(claim_id, msg_key, role, created_at)   -- 至少一条
 `retracted`（撤回）/ `disputed`（有争议，`conflicts_with` 指向另一条 claim）。
 **没有自动抽取**：新增恒为 `candidate`。`purge` 删除同会话主张与证据；证据被销毁后
 没有证据的主张自动转 `retracted`（`note=evidence_purged`）。
+
+
+> Phase 07 没有 schema 变更（仍为 main v7）；工作台只读索引库，唯一写操作是派生文本删除。

@@ -745,3 +745,14 @@ agent-wechat memory confirm <claim_id>
   程序不下载、不联网。
 - `derived delete` 留墓碑，重扫不会复活；`purge --chat` 会连同派生与证据一起销毁。
 - `memory add` 永远是**候选**；只有 `memory confirm` 才是用户确认。
+
+
+## 11. 本地工作台（Phase 07）
+
+```bash
+agent-wechat ui --port 8765
+```
+
+浏览器打开 `http://127.0.0.1:8765/`。可选账号/会话、日期范围、keyword/semantic/hybrid
+检索；点结果看证据、时间线与媒体状态。只有「派生文本删除」是写操作（需要页面令牌）。
+服务默认关闭、只监听本机、无访问日志；不提供导出/purge/bootstrap 等危险操作。

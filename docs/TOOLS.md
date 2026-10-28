@@ -845,6 +845,11 @@ distance / untrusted`。**没有 `content`**——完整正文用 §15。
 untrusted / notice`。只返回**同账号同会话**；被 `purge --chat` 销毁的消息**拒绝返回**
 （`{"error": "该消息已被销毁…"}`）。会话在 `AGENT_WECHAT_DENY` 里时拒绝（该变量只约束本工具与 §14，不改变其它工具）。
 
+## 附：本地工作台与工具的关系
+
+`agent-wechat ui` 的 HTTP 接口**不是** MCP 工具：它只复用 core（检索/证据/派生）与
+`usecases`（会话/时间线），工具数仍是 15，MCP 契约不变。工作台默认关闭、仅 loopback。
+
 ## 错误汇总
 
 | 现象 | 原因 | 处置 |

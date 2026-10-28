@@ -154,6 +154,17 @@ AGENT_WECHAT_HOME = "/Users/you/.agent-wechat"
 | `AGENT_WECHAT_DENY` | 空 | 逗号分隔的 chat_id；**只约束 Phase 05 的 `retrieve` / `context`**，不给既有工具加行为 |
 | `AGENT_WECHAT_WHISPER_MODEL` | 自动探测本地模型 | Phase 06 的 ASR 模型路径；**只读本地文件，绝不下载** |
 
+### 6.4 本地工作台（可选）
+
+```bash
+agent-wechat ui --port 8765        # 只监听 127.0.0.1；Ctrl-C 停止
+agent-wechat ui --port 8765 --open # 顺便打开浏览器
+```
+
+- **默认关闭**：不装 launchd、不开机自启；只有这条命令会起服务。
+- 页面显示聊天内容：仅本机使用，不要截图外传；浏览器不做缓存（`no-store`）。
+- 绑定非 loopback 地址会被拒绝；`Host`/`Origin` 只认 `127.0.0.1` / `localhost` / `::1`。
+
 ## 7. 安装验证清单
 
 ```bash

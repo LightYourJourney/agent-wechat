@@ -52,6 +52,8 @@ src/agent_wechat/
 ├── purge.py        数据销毁：清单 → 计划 → 执行 → 核查（只做 CLI，不进 MCP）
 ├── exclusions.py   被销毁会话的排除清单（`exclusions.db` 的墓碑；**唯一不可重建的产物**，
 │                   由 `store.connect()` ATTACH 进来，写入端的拦截判据与写入同事务）
+├── webui.py       本地只读工作台（Phase 07）：stdlib HTTP + loopback/Host/CSRF/CSP；
+│                   无文件服务、无访问日志、无遥测；只调用 core/usecases
 ├── derived.py     本地 OCR/ASR 派生文本与事实记忆（Phase 06）：只调用本机引擎、
 │                   只处理已导出媒体；派生文本按 msg_key 关联、删除留墓碑
 ├── retrieval.py   统一检索与两阶段披露（Phase 05）：keyword/semantic/RRF 融合、

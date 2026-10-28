@@ -25,6 +25,7 @@
 | 📱 朋友圈导出 | 读取本账号可见的动态 / 评论 / 点赞，渲染成单文件 HTML 时间线；正文里的**外链**、**视频号**卡片（昵称 / 描述 / 封面）、**小视频**与 `type=7` 公开图都能出（此前这四类读不到或取不到）；**只覆盖微信本地缓存窗口，不是完整历史**；**默认零网络**，`--with-media` 才下载远程媒体本体（本机约 1.5 GiB） |
 | 📄 会话时间线导出 | 把某会话导成可读的**时间线**（HTML / Markdown 双格式，可搬走）：appmsg（引用 / 链接 / 文件 / 转账）渲染成结构化块、引用可跳转到原消息（HTML 侧）、已导出的媒体以相对路径在位；appmsg 原始载荷由 `appmsg rebuild`、位置/名片由 `extras rebuild` 一次性回填（`chat export` / `chat index`，MCP `export_chat` / `get_message_parts`） |
 | 🤖 Agent 集成 | MCP Server（15 个工具）+ Claude Code Skill + 同源 CLI |
+| 🖥️ 本地工作台 | `agent-wechat ui`（默认关闭，仅 loopback，只读 + 派生删除） |
 
 ## 适用场景
 
@@ -141,6 +142,7 @@ agent-wechat/
 │   ├── usecases.py        用例层（两个入口共享的入口策略）
 │   ├── purge.py           数据销毁（CLI 专属）
 │   ├── exclusions.py      会话销毁的排除清单（唯一不可重建的产物）
+│   ├── webui.py           本地只读工作台（Phase 07，仅 loopback）
 │   ├── derived.py         本地 OCR/ASR 派生文本与事实记忆（Phase 06）
 │   ├── retrieval.py       统一检索与两阶段披露（Phase 05）
 │   ├── sync.py            同步编排与只读诊断（Phase 04）
@@ -187,3 +189,6 @@ agent-wechat/
 > 且"规避技术保护措施"的法律定性存在争议。使用本项目的一切后果由使用者自行承担，
 > 包括但不限于账号受限。开发者不对任何人因使用本项目而遭受的损失负责。请勿用于
 > 读取他人账号数据、二次分发或任何商业用途。
+
+
+版本：`0.2.0rc1`（私有发布候选；验收矩阵见 `内部阶段审计记录`）。
