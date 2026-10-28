@@ -205,8 +205,16 @@ class FastEmbedEmbedder:
                                  "回退下载会在同一个不可读目录上以更晦涩的错误失败",
                         ) from exc
                     pass                       # 目录不存在或读得了 → 按「缓存缺失」回退下载
-            # 显式 local_files_only=True 的调用方要求「失败即报错」，不做下载回退
-            self._model = TextEmbedding(local_files_only=self._local_only, **kwargs)
+            # 显式 local_files_only=True 的调用方要求「失败即报错」，不做下载回退。
+            # 兜住 fastembed 的裸 ValueError：同步的向量阶段要把它翻成「向量不可用」，
+            # 而不是一个看不出是模型问题的 ValueError。
+            try:
+                self._model = TextEmbedding(local_files_only=self._local_only, **kwargs)
+            except Exception as exc:                    # noqa: BLE001 — 第三方异常统一翻译
+                raise VectorError(
+                    f"嵌入模型不可用：{exc}",
+                    hint="模型缓存缺失或损坏；联网环境可先跑一次 vector-build 下载模型，"
+                         "离线环境请准备 ~/.agent-wechat/models") from exc
         return self._model
 
     def embed(self, texts: list[str]) -> list[Sequence[float]]:

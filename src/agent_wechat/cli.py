@@ -265,6 +265,70 @@ def cmd_vector_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_sync(args: argparse.Namespace) -> int:
+    """一次同步：环境检查 → 增量导出（含历史回看）→ 向量脏队列 → 健康快照。"""
+    import json
+
+    from . import sync
+    res = sync.run_sync(args.account, full=args.full, skip_vector=args.skip_vector)
+    if args.json:
+        print(json.dumps(res.to_dict(), ensure_ascii=False, indent=2))
+    else:
+        print(f"{res.status}：账号 {res.account or '—'}，本轮写入 {res.exported} 行")
+        if (res.vector or {}).get("embedded") is not None:
+            print(f"  向量重嵌 {res.vector.get('embedded', 0)} 条")
+        if res.detail:
+            print(f"详情：{res.detail}", file=sys.stderr)
+        if res.hint:
+            print(f"下一步：{res.hint}", file=sys.stderr)
+    return 0 if res.ok else 1
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    """只读健康诊断（不建库、不联网）。"""
+    import json
+
+    from . import sync
+    info = sync.diagnose(args.account)
+    print(json.dumps(info, ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_schedule(args: argparse.Namespace) -> int:
+    """launchd 调度：只生成/安装/移除 plist，**从不调用 launchctl**。"""
+    import json
+
+    from . import sync
+    if args.schedule_cmd == "print":
+        print(sync.launchd_plist(account=args.account,
+                                 interval_minutes=args.interval_minutes))
+        return 0
+    if args.schedule_cmd == "install":
+        dest = sync.schedule_install(account=args.account,
+                                     interval_minutes=args.interval_minutes)
+        print(json.dumps({"installed": str(dest),
+                          **sync.schedule_commands(args.account)},
+                         ensure_ascii=False, indent=2))
+        print("\n默认**未启用**：上面 enable 那条命令需要你自己执行。",
+              file=sys.stderr)
+        return 0
+    removed = sync.schedule_uninstall()
+    print(json.dumps({"removed": removed,
+                      **sync.schedule_commands(args.account)},
+                     ensure_ascii=False, indent=2))
+    print("\n文件已移除；若曾启用，请执行上面 disable 那条命令。", file=sys.stderr)
+    return 0
+
+
+def cmd_logs_clean(args: argparse.Namespace) -> int:
+    """清理同步日志（默认只预览，加 --yes 才删）。"""
+    import json
+
+    from . import sync
+    print(json.dumps(sync.clean_logs(yes=args.yes), ensure_ascii=False, indent=2))
+    return 0
+
+
 def cmd_semantic(args: argparse.Namespace) -> int:
     """语义检索。chat_id 原样打印（与 search 子命令一致），展示名只用于 MCP 的返回结构。"""
     from . import usecases
@@ -1015,6 +1079,34 @@ def main(argv: list[str] | None = None) -> None:
     sp = sub.add_parser("vector-status", help="向量索引新鲜度：水位线 / 重嵌队列 / 失败次数")
     sp.add_argument("--account", help="只看该账号；省略则全部账号")
     sp.set_defaults(fn=cmd_vector_status)
+
+    sp = sub.add_parser("sync", help="一次同步：环境检查→增量导出（含回看）→向量脏队列")
+    sp.add_argument("--account", help="只同步该账号；省略则同步当前登录账号")
+    sp.add_argument("--full", action="store_true", help="忽略水位线全量重扫（分钟级）")
+    sp.add_argument("--skip-vector", action="store_true", help="跳过向量阶段（只同步消息）")
+    sp.add_argument("--json", action="store_true", help="输出 JSON（供 launchd/脚本使用）")
+    sp.set_defaults(fn=cmd_sync)
+
+    sp = sub.add_parser("doctor", help="只读健康诊断：索引版本/FTS/水位线/脏队列/权限/磁盘")
+    sp.add_argument("--account", help="只看该账号的同步终态与脏队列")
+    sp.set_defaults(fn=cmd_doctor)
+
+    sp = sub.add_parser("schedule", help="launchd 调度：生成/安装/移除 plist（默认不启用）")
+    ssp = sp.add_subparsers(dest="schedule_cmd", required=True)
+    for name, helptext in (("print", "打印 plist（不落盘）"),
+                           ("install", "写入 ~/Library/LaunchAgents（不加载）"),
+                           ("uninstall", "移除 plist（不停止已加载的服务）")):
+        one = ssp.add_parser(name, help=helptext)
+        one.add_argument("--account")
+        one.add_argument("--interval-minutes", type=int, default=360,
+                         help="StartInterval 分钟数（默认 360，最小 5）")
+        one.set_defaults(fn=cmd_schedule, schedule_cmd=name)
+
+    sp = sub.add_parser("logs", help="同步日志清理")
+    lsp = sp.add_subparsers(dest="logs_cmd", required=True)
+    one = lsp.add_parser("clean", help="删除 sync.log（默认预览，加 --yes 才删）")
+    one.add_argument("--yes", action="store_true")
+    one.set_defaults(fn=cmd_logs_clean)
 
     sp = sub.add_parser("semantic", help="语义检索（需先 vector-build）")
     sp.add_argument("query")

@@ -145,6 +145,10 @@ class SchemaMigrationError(AgentWeChatError):
     """
 
 
+class SyncBusy(AgentWeChatError):
+    """另一个同步进程正持锁。**不是故障**：等它结束再试，或看它的终态。"""
+
+
 class TaskNotFound(AgentWeChatError):
     """查询的任务 id 不在注册表里（含重启后记录仍在、但 id 写错的情形）。"""
 

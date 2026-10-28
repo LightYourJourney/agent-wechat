@@ -58,6 +58,16 @@ REEMBED_FAILURES_DDL = (
     " attempts INTEGER NOT NULL,"
     " last_error TEXT,"
     " last_attempt_at INTEGER NOT NULL) WITHOUT ROWID")
+# Phase 04：一次同步的终态（`sync` 自己写；`doctor` 只读）。只记状态与计数，
+# **不记**消息正文、密钥、媒体路径——这张表是运维诊断面，不是数据面。
+SYNC_STATE_DDL = (
+    "CREATE TABLE IF NOT EXISTS sync_state ("
+    " account TEXT PRIMARY KEY,"
+    " last_started_at INTEGER,"
+    " last_finished_at INTEGER,"
+    " last_status TEXT,"
+    " last_error TEXT,"
+    " stats_json TEXT) WITHOUT ROWID")
 AUDIT_TABLES = (AUDIT_CURSOR_DDL, PENDING_REEMBED_DDL, REEMBED_FAILURES_DDL)
 
 _SCHEMA_BODY = f"""
@@ -151,6 +161,9 @@ CREATE TABLE IF NOT EXISTS msg_extras (
 
 -- Phase 03：重嵌失败账本（与队列分表：队列是待办集合，这里记重试信息）
 {REEMBED_FAILURES_DDL};
+
+-- Phase 04：最近一次同步的终态（无正文/密钥/媒体路径）
+{SYNC_STATE_DDL};
 """
 
 # FTS 触发器：**单一来源**。`SCHEMA` 用它拼出全量建库脚本；迁移 v2 用同一批字符串
@@ -196,7 +209,7 @@ SCHEMA = _SCHEMA_BODY + "\n" + "\n".join(FTS_TRIGGERS) + "\n" + REEMBED_TRIGGER
 
 # 本程序已知的 main scope 最新版本。迁移只列**IF NOT EXISTS 表达不了**的变更；
 # 基线（v1）由 `migrations.apply` 隐式 stamp——那代表「整套 DDL 已由 ensure 建好」。
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 MIGRATIONS: tuple[migrations.Migration, ...] = (
     migrations.Migration(
@@ -239,6 +252,11 @@ MIGRATIONS: tuple[migrations.Migration, ...] = (
             "ALTER TABLE pending_reembed_v5 RENAME TO pending_reembed",
             REEMBED_TRIGGER,
         ),
+    ),
+    migrations.Migration(
+        version=6,
+        name="同步终态表（Phase 04）",
+        statements=(SYNC_STATE_DDL,),
     ),
 )
 
@@ -1057,6 +1075,37 @@ def reembed_queue_stats(con: sqlite3.Connection, account: str | None = None) -> 
         by_reason = dict(con.execute(sql + " GROUP BY reason", args).fetchall())
     return {"pending": pending, "failed": fails[0], "max_attempts": fails[1],
             "by_reason": by_reason}
+
+
+# ---------- 同步终态（Phase 04） ----------
+
+def record_sync_state(con: sqlite3.Connection, account: str, *,
+                      started_at: int, finished_at: int, status: str,
+                      error: str | None, stats: str) -> None:
+    """写一次同步的终态（幂等 upsert）。不 commit（调用方收口）。
+
+    `stats` 是**已序列化的计数摘要**（JSON 文本）；调用方负责保证里面没有正文、
+    密钥或媒体路径——本模块不解析它。
+    """
+    con.execute(
+        "INSERT INTO sync_state(account, last_started_at, last_finished_at,"
+        " last_status, last_error, stats_json) VALUES (?,?,?,?,?,?) "
+        "ON CONFLICT(account) DO UPDATE SET "
+        "last_started_at=excluded.last_started_at, "
+        "last_finished_at=excluded.last_finished_at, "
+        "last_status=excluded.last_status, last_error=excluded.last_error, "
+        "stats_json=excluded.stats_json",
+        (account, started_at, finished_at, status, error, stats))
+
+
+def load_sync_state(con: sqlite3.Connection, account: str) -> dict | None:
+    row = con.execute(
+        "SELECT account, last_started_at, last_finished_at, last_status,"
+        " last_error, stats_json FROM sync_state WHERE account=?", (account,)).fetchone()
+    if row is None:
+        return None
+    return {"account": row[0], "started_at": row[1], "finished_at": row[2],
+            "status": row[3], "error": row[4], "stats": row[5]}
 
 
 def clear_audit_cursors(con: sqlite3.Connection, account: str) -> None:

@@ -151,7 +151,7 @@ def test_embedder_falls_back_to_download_only_when_cache_missing(monkeypatch):
     assert [c["local_files_only"] for c in calls] == [True, False]
 
     calls.clear()
-    with pytest.raises(ValueError, match="not cached"):
+    with pytest.raises(errors.VectorError, match="模型不可用"):
         vector.FastEmbedEmbedder(local_files_only=True).embed(["x"])
     assert [c["local_files_only"] for c in calls] == [True]
 
