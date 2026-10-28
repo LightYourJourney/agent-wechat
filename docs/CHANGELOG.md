@@ -3,6 +3,20 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 风格，
 版本号语义为 0.x 阶段（API 可能变动）。
 
+### 工程基线 P04（进行中）
+
+2026-10-28 起。本地同步编排与健康诊断，设计与证据见 `内部阶段审计记录`。
+
+- **新 CLI `agent-wechat sync`**：一次跑完「环境检查 → 增量导出（含历史回看）→ 向量脏队列
+  → 健康快照」，每账号非阻塞锁；微信未运行 / 密钥缺失 / 源不可读 / 索引不可用 / 磁盘不足 /
+  并发 / 向量失败各有独立状态码。向量阶段固定只读模型缓存（不发网络请求）。
+- **新 CLI `agent-wechat doctor`**：只读诊断——索引版本、FTS 一致性、水位线、回看游标、
+  重嵌队列、任务、权限、磁盘、模型可用性；不建库、不联网。
+- **新 CLI `agent-wechat schedule print|install|uninstall`**：生成/安装/移除 launchd plist，
+  **从不调用 launchctl**、默认不启用（`RunAtLoad=false`）。
+- **新 CLI `agent-wechat logs clean`**：同步日志只记计数，无正文/密钥/媒体路径；`--yes` 才删。
+- **schema `main v6`**：新增 `sync_state`。
+
 ### 工程基线 P03（进行中）
 
 2026-10-27 起。向量索引的脏队列消费，设计与证据见 `内部阶段审计记录`。

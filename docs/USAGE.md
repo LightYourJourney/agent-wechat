@@ -694,3 +694,18 @@ agent-wechat purge --excluded              # 列出排除清单的规模（按�
   `[贴纸#md5前8位]`（源 XML 里没有合法 md5 时回落 `[sticker]`），而 `media_hint`
   仍是 `[sticker]`
 - 时间一律为 unix 秒；`is_self=1` 表示本人发送
+
+
+## 8. 同步与定时（Phase 04）
+
+```bash
+agent-wechat sync --json            # 一次完整同步（导出 + 回看 + 向量脏队列）
+agent-wechat doctor                 # 只读健康诊断
+agent-wechat schedule install --interval-minutes 360 --account <账号>
+agent-wechat logs clean --yes       # 清理同步日志（默认只预览）
+```
+
+- `sync` **不会**自动 bootstrap、不会下载模型、不会联网：向量阶段只用本地模型缓存，
+  缓存缺失就报 `vector_unavailable`（消息仍已同步）。
+- 调度只写 `~/Library/LaunchAgents/com.agent-wechat.sync.plist`，启用/停用命令打印给你自己执行。
+- 完整状态码与排障见 `内部阶段审计记录`。

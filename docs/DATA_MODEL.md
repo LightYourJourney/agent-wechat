@@ -395,14 +395,14 @@ CREATE TABLE IF NOT EXISTS schema_version (
 ) WITHOUT ROWID;
 ```
 
-- **三个 scope**：`main`（`index.db` 主表，当前 **5**）、`vector`（vec0 三表，当前 **1**）、
+- **三个 scope**：`main`（`index.db` 主表，当前 **6**）、`vector`（vec0 三表，当前 **1**）、
   `exclusions`（在 `exclusions.db` 里，SQL 写作 `exclusions.schema_version`，当前 **1**）。
 - **ensure 与 migrate 分工**：`CREATE … IF NOT EXISTS` 每次连接照跑（缺对象就补建的自愈）；
   迁移只处理 `IF NOT EXISTS` **表达不了**的变更（改触发器体、加列、重建表），每条只跑一次。
   版本迁移：`main v2` 把 FTS 三条触发器重建为代码里的最新定义（EA-077 的旧体漂移）；
   `main v3`（Phase 02）建立历史回看游标与重嵌队列（`audit_cursor` / `pending_reembed`）
   并重建重嵌触发器；`main v4`（Phase 03）新增重嵌失败账本 `reembed_failures`；
-  `main v5`（Phase 03）给队列加 `reason` 列（表重建）。
+  `main v5`（Phase 03）给队列加 `reason` 列（表重建）；`main v6`（Phase 04）新增同步终态表 `sync_state`。
 - **整次升级 = 一笔事务**：`BEGIN IMMEDIATE; <本次全部待执行迁移的 DDL>; <逐条写版本行>;
   COMMIT`。任一句失败整次回滚（版本停在升级前），抛 `SchemaMigrationError`；下次连接重做。
   已是最新的库走只读快路径，**不拿写锁**；重复执行是 no-op（`applied_at` 都不变）。
@@ -462,3 +462,20 @@ CREATE TABLE IF NOT EXISTS reembed_failures (
 消费成功时与队列行一起删；失败只累计次数与最近原因，队列行留在原处等下一轮。
 `purge --chat` 会在删除事务里连这两张表一起清（它们是工作清单，不是用户数据）。
 `vector.build_index` 每轮消费最多 4 批（每批 64 条），`rebuild=True` 清空队列。
+
+
+## 12. 同步终态（Phase 04）
+
+```sql
+CREATE TABLE IF NOT EXISTS sync_state (
+    account          TEXT PRIMARY KEY,
+    last_started_at  INTEGER,
+    last_finished_at INTEGER,
+    last_status      TEXT,        -- ok|no_new|wechat_not_running|key_missing|…
+    last_error       TEXT,
+    stats_json       TEXT         -- 只含计数，不含正文/密钥/媒体路径
+) WITHOUT ROWID;
+```
+
+由 `sync` 在终态写入（upsert），`doctor` 只读展示。它记录的是**最近一次**同步，不是历史；
+日志（`sync.log`，JSONL）才保留多条。`purge --all` 会随整个数据目录一起清掉。
