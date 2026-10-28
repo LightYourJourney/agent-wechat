@@ -811,6 +811,54 @@ def chat_md5_in_index(con: sqlite3.Connection, account: str) -> set[str]:
         "SELECT DISTINCT chat_md5 FROM messages WHERE account=?", (account,))}
 
 
+def chats_in_index(con: sqlite3.Connection, account: str, *, query: str = "",
+                   limit: int = 50) -> list[dict]:
+    """索引里出现过的会话（有界），供工作台的会话选择器使用。**不读微信库、不要密钥。**"""
+    limit = max(1, min(int(limit), 100))
+    needle = (query.strip().replace("\\", "\\\\")
+              .replace("%", "\\%").replace("_", "\\_"))
+    rows = con.execute(
+        "SELECT m.chat_id AS chat_id,"
+        " COALESCE(MAX(dn.display_name), m.chat_id) AS display,"
+        " COUNT(*) AS messages, MAX(m.ts) AS last_ts"
+        " FROM messages m LEFT JOIN display_names dn"
+        "   ON dn.account = m.account AND dn.chat_id = m.chat_id"
+        "  AND dn.member_key = m.chat_id"
+        " WHERE m.account = ? AND (m.chat_id LIKE ? ESCAPE '\\'"
+        "   OR COALESCE(dn.display_name, '') LIKE ? ESCAPE '\\')"
+        " GROUP BY m.chat_id ORDER BY last_ts DESC LIMIT ?",
+        (account, f"%{needle}%", f"%{needle}%", limit)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def message_page(con: sqlite3.Connection, account: str, chat_id: str, *,
+                 before_ts: int | None = None, before_local_id: int | None = None,
+                 limit: int = 50) -> dict:
+    """按 `(ts, local_id)` 倒序的**有界分页**；`next_cursor` 为 None 表示到底了。
+
+    不读微信库：工作台时间线只回索引里的行（purge 过的会话这里自然为空）。
+    """
+    limit = max(1, min(int(limit), 100))
+    where = ["m.account = ?", "m.chat_id = ?"]
+    args: list[object] = [account, chat_id]
+    if before_ts is not None and before_local_id is not None:
+        where.append("(m.ts < ? OR (m.ts = ? AND m.local_id < ?))")
+        args.extend([int(before_ts), int(before_ts), int(before_local_id)])
+    args.append(limit + 1)            # 多取一条判断是否还有下一页
+    rows = con.execute(
+        "SELECT m.msg_key, m.chat_id, m.ts, m.local_id, m.is_self, m.content,"
+        " m.media_hint, m.msg_type, " + _SENDER_EXPR + " AS sender"
+        " FROM messages m " + _SENDER_JOIN +
+        " WHERE " + " AND ".join(where) +
+        " ORDER BY m.ts DESC, m.local_id DESC LIMIT ?", args).fetchall()
+    more = len(rows) > limit
+    rows = rows[:limit]
+    cursor = None
+    if more and rows:
+        cursor = {"ts": rows[-1]["ts"], "local_id": rows[-1]["local_id"]}
+    return {"messages": [dict(r) for r in rows], "next_cursor": cursor}
+
+
 def upsert_media_refs(con: sqlite3.Connection,
                       rows: list[tuple[str, str, str | None, str | None]]) -> int:
     """批量幂等写 media_refs。返回**被排除而跳过的**行数（`0` = 全写入）。

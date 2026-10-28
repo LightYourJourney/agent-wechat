@@ -302,6 +302,27 @@ def contacts(query: str = "", limit: int = 200,
                                                 limit=clamp_limit(limit))
 
 
+def timeline(chat_id: str, *, account: str | None = None,
+             before_ts: int | None = None, before_local_id: int | None = None,
+             limit: int = 50) -> dict:
+    """工作台时间线：从**索引**分页读，不经微信库、不返回全量。"""
+    acct = account or acc_mod.resolve_account(None)
+    if not chat_id:
+        raise errors.ContactNotFound("会话不能为空")
+    with store.open() as con:
+        return store.message_page(con, acct, chat_id, before_ts=before_ts,
+                                  before_local_id=before_local_id,
+                                  limit=clamp_limit(limit, (1, 100)))
+
+
+def chats(account: str | None = None, query: str = "", limit: int = 50) -> list[dict]:
+    """会话选择器：索引里出现过的会话（有界、不读微信库）。"""
+    acct = account or acc_mod.resolve_account(None)
+    with store.open() as con:
+        return store.chats_in_index(con, acct, query=query,
+                                    limit=clamp_limit(limit, (1, 100)))
+
+
 def recent_messages(contact: str, limit: int = 50,
                     account: str | None = None) -> RecentMessages | NeedConfirm:
     ctx = ChatContext(account)

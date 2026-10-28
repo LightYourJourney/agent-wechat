@@ -346,6 +346,16 @@ def cmd_memory(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_ui(args: argparse.Namespace) -> int:
+    from . import webui
+    try:
+        webui.serve(args.port, open_browser=args.open)
+    except errors.ScopeDenied as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    return 0
+
+
 def cmd_sync(args: argparse.Namespace) -> int:
     """一次同步：环境检查 → 增量导出（含历史回看）→ 向量脏队列 → 健康快照。"""
     import json
@@ -1250,6 +1260,11 @@ def main(argv: list[str] | None = None) -> None:
     m = msub.add_parser("delete", help="硬删除主张与证据")
     m.add_argument("claim_id")
     m.set_defaults(fn=cmd_memory)
+
+    sp = sub.add_parser("ui", help="本地只读工作台（仅 loopback，默认关闭）")
+    sp.add_argument("--port", type=int, default=8765)
+    sp.add_argument("--open", action="store_true", help="启动后打开浏览器")
+    sp.set_defaults(fn=cmd_ui)
 
     sp = sub.add_parser("sync", help="一次同步：环境检查→增量导出（含回看）→向量脏队列")
     sp.add_argument("--account", help="只同步该账号；省略则同步当前登录账号")
