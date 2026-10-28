@@ -213,8 +213,8 @@ class FastEmbedEmbedder:
             except Exception as exc:                    # noqa: BLE001 — 第三方异常统一翻译
                 raise VectorError(
                     f"嵌入模型不可用：{exc}",
-                    hint="模型缓存缺失或损坏；联网环境可先跑一次 vector-build 下载模型，"
-                         "离线环境请准备 ~/.agent-wechat/models") from exc
+                    hint=f"模型缓存缺失或损坏；联网环境可先跑一次 vector-build 下载模型，"
+                         f"离线环境请准备 {paths.HOME_DIR / 'models'}") from exc
         return self._model
 
     def embed(self, texts: list[str]) -> list[Sequence[float]]:

@@ -702,7 +702,7 @@ agent-wechat purge --excluded              # 列出排除清单的规模（按�
 agent-wechat sync --json            # 一次完整同步（导出 + 回看 + 向量脏队列）
 agent-wechat doctor                 # 只读健康诊断
 agent-wechat schedule install --interval-minutes 360 --account <账号>
-agent-wechat logs clean --yes       # 清理同步日志（默认只预览）
+agent-wechat logs clean --yes       # 清理 sync.log 与 launchd out/err（默认只预览）
 ```
 
 - `sync` **不会**自动 bootstrap、不会下载模型、不会联网：向量阶段只用本地模型缓存，

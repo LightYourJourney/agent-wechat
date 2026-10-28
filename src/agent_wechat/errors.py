@@ -145,6 +145,10 @@ class SchemaMigrationError(AgentWeChatError):
     """
 
 
+class SyncInputError(AgentWeChatError):
+    """同步/调度命令的入参不合法（例如 `--interval-minutes` 太小）。"""
+
+
 class SyncBusy(AgentWeChatError):
     """另一个同步进程正持锁。**不是故障**：等它结束再试，或看它的终态。"""
 

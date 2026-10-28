@@ -181,12 +181,15 @@ agent-wechat recent filehelper -n 3           # 端到端读取
 | `no_new` / `ok` | 没有/有新增 | 无需处理 |
 | `wechat_not_running` | 未给 `--account` 且微信未登录 | 登录微信，或显式给本机账号 |
 | `key_missing` | 该账号没有 passphrase 缓存 | 完成一次性引导（需要 sudo，必须由人执行） |
-| `key_invalid` | 解密失败 | 重新 bootstrap；确认微信升级过 |
-| `source_unavailable` | 微信数据目录/分片读不到 | 检查完整磁盘访问权限与容器路径 |
+| `account_not_found` | 显式 `--account` 指向不存在的目录 | 用 `status` 看已有账号，或省略该参数 |
+| `key_invalid` | 解密失败（sqlcipher/密钥） | 重新 bootstrap；确认微信升级过 |
+| `source_unavailable` | 微信数据目录/分片读不到（含快照复制失败） | 检查完整磁盘访问权限与容器路径 |
 | `index_unavailable` | 索引库打不开 / 迁移失败 | 看 `doctor` 的 schema 段；必要时恢复备份 |
 | `vector_unavailable` | 消息已同步，向量阶段失败 | 准备本地模型缓存后重跑 `vector-build` |
 | `disk_low` | 可用空间 < 200 MB | 清理磁盘 |
-| `concurrent` | 另一个同步在跑 | 等它结束；`doctor` 看 `sync_state` |
+| `concurrent` | 另一个同步在跑（全局锁） | 等它结束；`doctor` 看 `sync_state`（本次不覆盖） |
+| `disk_error` | 磁盘错误（EIO/ENOSPC 等） | 修磁盘/权限后重跑 |
+| `failed` | 未预期异常（详情带类型） | 看 `detail` 后重跑；持续失败请报 issue |
 
 `agent-wechat doctor` 只读、不建库：先看它的 `problems` 数组，再按上面的表处置。
 `problems` 里出现「FTS 行数不一致」时，重跑一次导出即可重建；出现「版本高于本程序」时

@@ -298,6 +298,16 @@ def all_dbs(account: str) -> list[pathlib.Path]:
     return sorted(out)
 
 
+def launch_agents_dir() -> pathlib.Path:
+    """launchd 用户级目录：**真实家目录**下的 `~/Library/LaunchAgents`。
+
+    **刻意不跟随 `AGENT_WECHAT_HOME` / `HOME_DIR`**：launchd 只扫描真实家目录，
+    写到别处不会被加载。这是本模块里唯一一处合法使用 `Path.home()` 的地方——
+    其余路径都由 `HOME_DIR` 派生。测试 monkeypatch 本函数来隔离。
+    """
+    return pathlib.Path.home() / "Library" / "LaunchAgents"
+
+
 def pid_alive(pid: object) -> bool:
     """这个 pid 还活着吗。**判不出来一律当活着**（保守：不收割、不清扫），缺 pid / 非正整数
     → 视为不活。

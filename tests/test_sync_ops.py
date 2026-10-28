@@ -7,6 +7,8 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import json
+import subprocess
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -47,7 +49,7 @@ def _env(tmp_path, monkeypatch, texts=("甲一", "乙二")):
     monkeypatch.setattr(store, "DB_PATH", home / "index.db")
     monkeypatch.setattr(tasks, "TASKS_FILE", home / "tasks.json")
     monkeypatch.setattr(vector, "MODEL_CACHE_DIR", home / "models")
-    monkeypatch.setattr(sync, "LAUNCH_AGENTS", home / "LaunchAgents")
+    monkeypatch.setattr(paths, "launch_agents_dir", lambda: home / "LaunchAgents")
     keys.save_cached_hex(SELF, PW.encode().hex())
     fake = account_mod.AccountStatus(running=True, current=ACCT, accounts=[ACCT], pid=1)
     monkeypatch.setattr(sync.account_mod, "status", lambda: fake)
@@ -225,14 +227,16 @@ def test_multi_account_state_is_isolated(tmp_path, monkeypatch):
 
 # ---------------------------------------------------------------- 日志清理 / 调度
 
-def test_logs_clean_previews_then_removes(tmp_path, monkeypatch):
+def test_logs_clean_previews_then_removes_all_three(tmp_path, monkeypatch):
     _env(tmp_path, monkeypatch)
     sync.run_sync(ACCT)
-    assert sync.log_path().exists()
-    assert sync.clean_logs(yes=False)["would_remove"] is True
+    for name in (sync.LOG_NAME, *sync.LAUNCHD_LOGS):
+        (paths.HOME_DIR / name).write_text("{}")
+    preview = sync.clean_logs(yes=False)
+    assert preview["would_remove"] == 3
     assert sync.log_path().exists(), "预览不许删"
-    assert sync.clean_logs(yes=True)["removed"] is True
-    assert not sync.log_path().exists()
+    assert sync.clean_logs(yes=True)["removed"] == 3
+    assert not any((paths.HOME_DIR / n).exists() for n in (sync.LOG_NAME, *sync.LAUNCHD_LOGS))
 
 
 def test_schedule_generates_installs_and_removes_without_launchctl(tmp_path, monkeypatch):
@@ -250,3 +254,102 @@ def test_schedule_generates_installs_and_removes_without_launchctl(tmp_path, mon
     assert sync.schedule_uninstall() is True
     assert not dest.exists()
     assert sync.schedule_uninstall() is False
+
+
+# ---------------------------------------------------------------- 复审补充
+
+def test_key_invalid_and_source_unreadable_are_distinguished(tmp_path, monkeypatch):
+    _env(tmp_path, monkeypatch)
+
+    def bad_key(*a, **k):
+        raise errors.DecryptError("sqlcipher 解密失败: bad key")
+
+    monkeypatch.setattr(sync.export, "run_export", bad_key)
+    assert sync.run_sync(ACCT).status == "key_invalid"
+
+    def bad_source(*a, **k):
+        raise errors.DecryptError("无法快照微信数据库（只读复制失败）：message_0.db")
+
+    monkeypatch.setattr(sync.export, "run_export", bad_source)
+    assert sync.run_sync(ACCT).status == "source_unavailable"
+
+
+def test_an_explicit_unknown_account_is_not_reported_as_wechat_not_running(tmp_path, monkeypatch):
+    _env(tmp_path, monkeypatch)
+    res = sync.run_sync("wxid_other")
+    assert res.status == "account_not_found"
+
+
+def test_a_too_small_interval_is_a_project_error():
+    with pytest.raises(errors.SyncInputError):
+        sync.launchd_plist(interval_minutes=1)
+
+
+def test_a_real_sigkill_releases_the_lock(tmp_path, monkeypatch):
+    _env(tmp_path, monkeypatch)
+    paths.ensure_home_dirs()
+    lock = paths.HOME_DIR / sync.LOCK_NAME
+    code = ("import fcntl,sys,time;"
+            "f=open(sys.argv[1],'a');fcntl.flock(f,fcntl.LOCK_EX);"
+            "print('ready',flush=True);time.sleep(60)")
+    child = subprocess.Popen([sys.executable, "-c", code, str(lock)],
+                             stdout=subprocess.PIPE, text=True)
+    try:
+        assert child.stdout.readline().strip() == "ready"
+        assert sync.run_sync(ACCT).status == "concurrent"
+    finally:
+        child.kill()
+        child.wait()
+    assert sync.run_sync(ACCT).ok, "SIGKILL 后锁必须随进程释放"
+
+
+def test_degradations_reach_the_result_without_paths(tmp_path, monkeypatch):
+    _env(tmp_path, monkeypatch)
+
+    class _Drift:
+        pass
+
+    class _Reader:
+        _drift = (errors.SchemaDrift("roster", "contact/contact.db", "chat_room"),)
+        _source_notes = ()
+
+    def fake(acct, **kw):
+        kw["on_reader"](_Reader())
+        return 0
+
+    monkeypatch.setattr(sync.export, "run_export", fake)
+    res = sync.run_sync(ACCT)
+    assert res.degraded and res.degraded[0]["capability"] == "roster"
+    assert all("contact.db" not in json.dumps(d) for d in res.degraded), "降级不带路径"
+
+
+def test_concurrent_run_does_not_overwrite_the_last_real_state(tmp_path, monkeypatch):
+    _env(tmp_path, monkeypatch)
+    assert sync.run_sync(ACCT).ok
+    paths.ensure_home_dirs()
+    holder = open(paths.HOME_DIR / sync.LOCK_NAME, "a")
+    fcntl.flock(holder, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    try:
+        assert sync.run_sync(ACCT).status == "concurrent"
+    finally:
+        fcntl.flock(holder, fcntl.LOCK_UN)
+        holder.close()
+    with store.open() as con:
+        assert store.load_sync_state(con, ACCT)["status"] == "ok"
+
+
+def test_sync_records_a_health_snapshot(tmp_path, monkeypatch):
+    _env(tmp_path, monkeypatch)
+    res = sync.run_sync(ACCT)
+    assert res.health is not None
+    assert res.health["schema_version"] == store.SCHEMA_VERSION
+    assert res.health["fts_desync"] is False
+    with store.open() as con:
+        stats = json.loads(store.load_sync_state(con, ACCT)["stats"])
+        assert stats["health"]["dirty_pending"] == 0
+
+
+def test_an_empty_model_cache_directory_is_not_reported_ready(tmp_path, monkeypatch):
+    _env(tmp_path, monkeypatch)
+    vector.MODEL_CACHE_DIR.mkdir(parents=True, exist_ok=True)     # 空目录
+    assert sync.diagnose(ACCT)["vector"]["model_cache"] is False
