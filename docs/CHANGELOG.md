@@ -8,12 +8,14 @@
 2026-10-27 起。向量索引的脏队列消费，设计与证据见 `内部阶段审计记录`。
 
 - **历史改写会被增量构建局部修正**：`vector-build` / MCP `build_vector_index` 每轮消费
-  `pending_reembed`（最多 4 批 × 64 条），只重嵌**改动的那一条**与因「上文前缀」依赖而
-  过时的**后继**；向量写与队列删在同一事务，失败记账重试（`reembed_failures`）。
+  `pending_reembed`（最多 4 批 × 64 条，记录原因 content/msg_type/sender/chat_id/prefix），
+  只重嵌**改动的那一条**与因「上文前缀」依赖而过时的**后继**；发送者与消息类型的
+  变化现在也会传播（此前只比正文与会话名）；向量写与队列删在同一事务，失败记账重试（`reembed_failures`）。
   **用户可见**：改一条旧消息后不必 `--rebuild`；不跑构建之前检索仍可能返回旧语义。
 - **新 CLI `agent-wechat vector-status`**：只读显示模型、水位线、队列积压与失败次数
   （没有索引时不建库）。
-- **schema `main v4`**：新增 `reembed_failures`；`purge --chat` 连队列/失败账本一起清。
+- **schema `main v4`/`v5`**：新增 `reembed_failures`；队列加 `reason` 列；
+  `purge --chat` 连队列/失败账本一起清。
 
 ### 工程基线 P02（进行中）
 

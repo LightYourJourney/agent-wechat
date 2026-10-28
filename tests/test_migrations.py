@@ -364,3 +364,32 @@ def test_vector_rebuild_restamps_the_vector_scope(tmp_path):
         assert migrations.stored_version(con, migrations.SCOPE_VECTOR) == 1
     finally:
         con.close()
+
+
+def test_v5_upgrades_a_v4_queue_table_without_losing_rows(tmp_path):
+    """v5 是**表重建**迁移：老库（无 reason 列）升级后行不丢、触发器换成新体。"""
+    db = tmp_path / "i.db"
+    con = sqlite3.connect(db)
+    con.executescript(
+        "CREATE TABLE pending_reembed ("
+        " msg_key TEXT PRIMARY KEY, changed_at INTEGER NOT NULL) WITHOUT ROWID;"
+        "INSERT INTO pending_reembed VALUES ('acct|m|message_0.db|1', 123);"
+        "CREATE TABLE schema_version ("
+        " scope TEXT PRIMARY KEY, version INTEGER NOT NULL,"
+        " applied_at INTEGER NOT NULL) WITHOUT ROWID;"
+        "INSERT INTO schema_version VALUES ('main', 4, 0);")
+    con.commit()
+    con.close()
+
+    con = store.connect(db)
+    try:
+        assert migrations.stored_version(con, migrations.SCOPE_MAIN) == store.SCHEMA_VERSION
+        row = con.execute(
+            "SELECT msg_key, changed_at, reason FROM pending_reembed").fetchone()
+        assert tuple(row) == ("acct|m|message_0.db|1", 123, "content"), \
+            "老行必须保留，原因按默认值补"
+        sql = con.execute(
+            "SELECT sql FROM sqlite_master WHERE name='msg_reembed_au'").fetchone()[0]
+        assert "reason" in sql, "触发器要换成写原因的新体"
+    finally:
+        con.close()

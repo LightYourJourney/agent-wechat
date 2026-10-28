@@ -145,8 +145,9 @@ def test_embed_failure_keeps_the_queue_and_records_attempts(con):
     # 失败不能丢工作：换一个好 embedder 就收敛
     good = FakeEmbedder()
     vector.build_index(accounts=[ACCT], embedder=good)
-    assert store.reembed_queue_stats(c, ACCT) == {
-        "pending": 0, "failed": 0, "max_attempts": 0}
+    stats = store.reembed_queue_stats(c, ACCT)
+    assert (stats["pending"], stats["failed"], stats["max_attempts"]) == (0, 0, 0)
+    assert stats["by_reason"] == {}
     assert any("改后正文" in t for t in _texts(good))
 
 
@@ -234,11 +235,11 @@ def test_message_gone_from_index_is_dequeued(con):
 
 def test_multi_account_drain_is_scoped(con):
     c = con
-    _seed(c, ["A 的正文"], acct=ACCT, chat="wxid_a")
-    _seed(c, ["B 的正文"], acct=ACCT_B, chat="wxid_b")
+    _seed(c, ["A 的正文"], acct=ACCT, chat="wxid_friend02")
+    _seed(c, ["B 的正文"], acct=ACCT_B, chat="wxid_otherchat")
     vector.build_index(accounts=[ACCT, ACCT_B], embedder=FakeEmbedder())
-    store.upsert_batch(c, [_row(ACCT, "wxid_a", 1, "A 改后")])
-    store.upsert_batch(c, [_row(ACCT_B, "wxid_b", 1, "B 改后")])
+    store.upsert_batch(c, [_row(ACCT, "wxid_friend02", 1, "A 改后")])
+    store.upsert_batch(c, [_row(ACCT_B, "wxid_otherchat", 1, "B 改后")])
     fake = FakeEmbedder()
     vector.apply_dirty(c, accounts=[ACCT], limit=10, embedder=fake)
     assert any("A 改后" in t for t in _texts(fake))
@@ -284,3 +285,115 @@ def test_freshness_reports_queue_and_watermark(con):
     assert info["pending"] == 1 and info["failed"] == 0
     assert info["embedded"] == 1
     assert info["watermark"] == {ACCT: 1}
+
+
+# ---------------------------------------------------------------- 队列原因 / 前缀依赖原因
+
+def test_queue_records_the_reason_and_prefix_cascade_is_tagged(con):
+    c = con
+    _seed(c, ["第一句正文", "第二句正文"])
+    vector.build_index(accounts=[ACCT], embedder=FakeEmbedder())
+    store.upsert_batch(c, [_row(ACCT, CHAT, 1, "改后的第一句")])
+    row = c.execute("SELECT reason FROM pending_reembed WHERE msg_key=?",
+                    (_key(1),)).fetchone()
+    assert row["reason"] == "content", "触发器要写清是哪一种变化"
+
+    vector.apply_dirty(c, accounts=[ACCT], limit=10, embedder=FakeEmbedder())
+    row = c.execute("SELECT reason FROM pending_reembed WHERE msg_key=?",
+                    (_key(2),)).fetchone()
+    assert row is not None and row["reason"] == "prefix", \
+        "后继不是自己变了，是上文前缀过期"
+
+
+def test_sender_change_is_queued_and_updates_the_row(con):
+    """`doc_text` 的发送者前缀来自 `sender_name`——它变了也要落库、也要重嵌。"""
+    c = con
+    row = messages.make_row(
+        account=ACCT, chat_md5=CHAT_MD5, chat_id=CHAT, shard="message_0.db",
+        local_id=1, ts=T0 + 1, msg_type=1, sender_id="wxid_x",
+        sender_name="张三", is_self=0, content="群里的正文", media_hint=None)
+    store.upsert_batch(c, [row])
+    vector.build_index(accounts=[ACCT], embedder=FakeEmbedder())
+
+    store.upsert_batch(c, [dict(row, sender_name="李四")])
+    assert c.execute("SELECT sender_name FROM messages").fetchone()[0] == "李四"
+    assert c.execute("SELECT reason FROM pending_reembed").fetchone()[0] == "sender"
+    fake = FakeEmbedder()
+    vector.build_index(accounts=[ACCT], embedder=fake)
+    assert any("李四" in t for t in _texts(fake))
+
+
+def test_type_change_with_same_content_is_queued(con):
+    c = con
+    _seed(c, ["会被标成图片"])
+    vector.build_index(accounts=[ACCT], embedder=FakeEmbedder())
+    store.upsert_batch(c, [_row(ACCT, CHAT, 1, "会被标成图片",
+                                msg_type=messages.TYPE_IMAGE)])
+    assert c.execute("SELECT reason FROM pending_reembed").fetchone()[0] == "msg_type"
+    stats = vector.apply_dirty(c, accounts=[ACCT], embedder=FakeEmbedder())
+    assert stats["dropped"] == 1 and _vec_count(c) == 0
+
+
+# ---------------------------------------------------------------- 崩溃恢复 / 不重复嵌入
+
+def test_a_crash_mid_batch_rolls_back_and_keeps_the_queue(con, monkeypatch):
+    """向量写与队列删同事务：中途异常必须整批回滚，队列行一条不少。"""
+    c = con
+    _seed(c, ["甲一", "甲二"])
+    vector.build_index(accounts=[ACCT], embedder=FakeEmbedder())
+    store.upsert_batch(c, [_row(ACCT, CHAT, 1, "甲一改"), _row(ACCT, CHAT, 2, "甲二改")])
+    assert store.reembed_queue_stats(c, ACCT)["pending"] == 2
+
+    real = store.dequeue_reembed
+    calls = {"n": 0}
+
+    def boom(con_, key):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise RuntimeError("模拟崩溃")
+        return real(con_, key)
+
+    monkeypatch.setattr(store, "dequeue_reembed", boom)
+    with pytest.raises(RuntimeError):
+        vector.apply_dirty(c, accounts=[ACCT], limit=10, embedder=FakeEmbedder())
+    assert store.reembed_queue_stats(c, ACCT)["pending"] == 2, "整批回滚，队列不丢"
+    assert _vec_count(c) == 2, "向量写入也回滚"
+
+    monkeypatch.setattr(store, "dequeue_reembed", real)
+    stats = vector.apply_dirty(c, accounts=[ACCT], limit=10, embedder=FakeEmbedder())
+    assert stats["embedded"] == 2
+    assert store.reembed_queue_stats(c, ACCT)["pending"] == 0
+
+
+def test_a_new_row_edited_before_first_embed_is_not_embedded_twice(con):
+    """前向扫描刚按当前正文嵌过的新行，drain 只作废队列行，不再嵌一次。"""
+    c = con
+    _seed(c, ["第一条正文"])
+    vector.build_index(accounts=[ACCT], embedder=FakeEmbedder())
+
+    store.upsert_batch(c, [_row(ACCT, CHAT, 2, "第二条初稿")])
+    store.upsert_batch(c, [_row(ACCT, CHAT, 2, "第二条改后")])
+    assert store.reembed_queue_stats(c, ACCT)["pending"] == 1
+
+    fake = FakeEmbedder()
+    res = vector.build_index(accounts=[ACCT], embedder=fake)
+    assert len(_texts(fake)) == 1, f"只该嵌一次：{_texts(fake)}"
+    assert "第二条改后" in _texts(fake)[0]
+    assert res["embedded_this_run"] == 1
+    assert store.reembed_queue_stats(c, ACCT)["pending"] == 0
+
+
+# ---------------------------------------------------------------- 检索不返回已销毁的行
+
+def test_semantic_search_does_not_return_purged_rows(con):
+    c = con
+    _seed(c, ["保留会话的正文"], chat="wxid_friend02")
+    _seed(c, ["待销毁会话的正文"], chat="wxid_otherchat")
+    vector.build_index(accounts=[ACCT], embedder=FakeEmbedder())
+    purge.execute_chat(purge.plan_chat(
+        [{"account": ACCT, "chat_id": "wxid_otherchat",
+          "chat_md5": hashlib.md5("wxid_otherchat".encode()).hexdigest()}]))
+
+    res = vector.semantic_search("任意查询", account=ACCT, embedder=FakeEmbedder())
+    assert res["hits"], "另一个会话还在，索引不是空的"
+    assert {h["chat_id"] for h in res["hits"]} == {"wxid_friend02"}

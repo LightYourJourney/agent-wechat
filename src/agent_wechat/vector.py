@@ -9,7 +9,7 @@ import os
 import sqlite3
 import threading
 import time
-from typing import Callable, Sequence
+from typing import Callable, Mapping, Sequence
 
 import sqlite_vec
 
@@ -459,6 +459,8 @@ def build_index(accounts: Sequence[str] | None = None, rebuild: bool = False,
         _ensure_meta(con)
         targets = (list(accounts) if accounts is not None else
                    [r[0] for r in con.execute("SELECT DISTINCT account FROM messages")])
+        # 前向扫描之前的水位线：drain 用它判断「这一轮刚被前向嵌过」，避免重复嵌入。
+        wm_before = {acct: _vector_watermark(con, acct) for acct in targets}
         embedded = skipped = 0
         for acct in targets:
             # 进度带偏移：_build_account 的计数是每账号局部的（各自从 0 起），直接
@@ -474,7 +476,8 @@ def build_index(accounts: Sequence[str] | None = None, rebuild: bool = False,
         # 因前缀依赖而过时的）。有界：一轮最多 4 批，剩下的留给下一次构建。
         if targets:
             for _ in range(4):
-                dirty = apply_dirty(con, accounts=targets, embedder=embedder)
+                dirty = apply_dirty(con, accounts=targets, embedder=embedder,
+                                    covered_above=wm_before)
                 embedded += dirty["embedded"]
                 if dirty["embedded"] == 0 and dirty["dropped"] == 0 \
                         and dirty["deferred"] == 0:
@@ -569,7 +572,8 @@ def _queued_keys(con: sqlite3.Connection, accounts, limit: int) -> list[str]:
 
 def apply_dirty(con: sqlite3.Connection, *, accounts: Sequence[str] | None = None,
                 limit: int | None = None,
-                embedder: FastEmbedEmbedder | None = None) -> dict:
+                embedder: FastEmbedEmbedder | None = None,
+                covered_above: Mapping[str, int] | None = None) -> dict:
     """消费最多 `limit` 条重嵌队列，返回 `{embedded, dropped, deferred, failed}`。
 
     判定顺序（每一支都决定「这条队列行还要不要」）：
@@ -584,37 +588,54 @@ def apply_dirty(con: sqlite3.Connection, *, accounts: Sequence[str] | None = Non
        逐条「先删后插」并在**同一事务**里完成队列行删除；同时把**后继消息**入队
        （它的前缀依赖这一条）。
 
+    `covered_above`：调用方（`build_index`）在**前向扫描之前**记下的水位线。给了它时，
+    `id` 高于该值的行算「本轮前向扫描已经按当前正文嵌过」——只作废队列行、不再嵌一次。
+    不给则按当前水位线判（独立调用/测试的语义）。
+
     嵌入失败时：整批记失败账本、保留队列行、提交失败记录，然后抛 `VectorError`——
     下一次运行会重试同一批，直到收敛。**不静默吞掉**。
     """
     limit = DIRTY_BATCH if limit is None else limit
     embedder = embedder or default_embedder()
-    keys = _queued_keys(con, accounts, limit)
     stats = {"embedded": 0, "dropped": 0, "deferred": 0, "failed": 0}
     todo: list[tuple[str, object, str, str]] = []      # (key, row, text, preview)
 
-    for key in keys:
-        row = con.execute(
-            "SELECT id, msg_key, account, chat_md5, chat_id, ts, local_id, msg_type,"
-            " sender_id, sender_name, is_self, content, media_hint"
-            " FROM messages WHERE msg_key=?", (key,)).fetchone()
-        if row is None or _is_excluded(con, key):
-            if row is not None:
+    try:
+        keys = _queued_keys(con, accounts, limit)
+    except (sqlite3.Error, OSError) as exc:
+        raise store.index_unavailable(exc) from exc
+
+    try:
+        for key in keys:
+            row = con.execute(
+                "SELECT id, msg_key, account, chat_md5, chat_id, ts, local_id, msg_type,"
+                " sender_id, sender_name, is_self, content, media_hint"
+                " FROM messages WHERE msg_key=?", (key,)).fetchone()
+            if row is None or _is_excluded(con, key):
+                if row is not None:
+                    _delete_vec(con, row["id"])
+                store.dequeue_reembed(con, key)
+                stats["dropped"] += 1
+                continue
+            # 「这一行是否已经被本轮前向扫描嵌过」的判据：用**前向之前**的水位线。
+            ceiling = (covered_above[row["account"]] if covered_above
+                       and row["account"] in covered_above
+                       else _vector_watermark(con, row["account"]))
+            if row["id"] > ceiling:
+                store.dequeue_reembed(con, key)
+                stats["deferred"] += 1
+                continue
+            if not should_embed(row):
                 _delete_vec(con, row["id"])
-            store.dequeue_reembed(con, key)
-            stats["dropped"] += 1
-            continue
-        if row["id"] > _vector_watermark(con, row["account"]):
-            store.dequeue_reembed(con, key)
-            stats["deferred"] += 1
-            continue
-        if not should_embed(row):
-            _delete_vec(con, row["id"])
-            store.dequeue_reembed(con, key)
-            stats["dropped"] += 1
-            continue
-        prev = _prev_text(con, row)
-        todo.append((key, row, doc_text(row, prev), prev or ""))
+                store.dequeue_reembed(con, key)
+                stats["dropped"] += 1
+                continue
+            prev = _prev_text(con, row)
+            todo.append((key, row, doc_text(row, prev), prev or ""))
+    except (sqlite3.Error, OSError) as exc:
+        if con.in_transaction:
+            con.rollback()
+        raise store.index_unavailable(exc) from exc
 
     if todo:
         try:
@@ -647,12 +668,19 @@ def apply_dirty(con: sqlite3.Connection, *, accounts: Sequence[str] | None = Non
                 store.dequeue_reembed(con, key)
                 nxt = _next_embed_key(con, row)
                 if nxt:
-                    store.enqueue_reembed(con, nxt)
+                    # 原因与触发器写的那几种并列：`prefix` = 自己的正文没变、
+                    # 是前一条变了导致上文前缀过时。
+                    store.enqueue_reembed(con, nxt, reason="prefix")
             _commit(con)
         except (sqlite3.Error, OSError) as exc:
             if con.in_transaction:
                 con.rollback()
             raise store.index_unavailable(exc) from exc
+        except BaseException:
+            # 非 sqlite 的意外（将来某处抛 RuntimeError…）同样不许留半截事务。
+            if con.in_transaction:
+                con.rollback()
+            raise
         stats["embedded"] = len(todo)
     else:
         # 只有作废/延后时也要提交（dequeue 是写）

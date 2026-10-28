@@ -47,7 +47,9 @@ AUDIT_CURSOR_DDL = (
     " PRIMARY KEY (account, shard, chat_md5)) WITHOUT ROWID")
 PENDING_REEMBED_DDL = (
     "CREATE TABLE IF NOT EXISTS pending_reembed ("
-    " msg_key TEXT PRIMARY KEY, changed_at INTEGER NOT NULL) WITHOUT ROWID")
+    " msg_key TEXT PRIMARY KEY,"
+    " changed_at INTEGER NOT NULL,"
+    " reason TEXT NOT NULL DEFAULT 'content') WITHOUT ROWID")
 # Phase 03：重嵌失败账本。队列行本身（`pending_reembed`）保持「待办集合」语义——
 # 成功才删；失败只在这里累计尝试次数与最近原因，队列行留在原处等下一轮。
 REEMBED_FAILURES_DDL = (
@@ -174,19 +176,27 @@ END;""",
 # 不在 Python 里比对前后值：upsert 的 WHERE 已经保证「值没变就不更新」，触发器只需要
 # 在真的更新发生时记一笔——这样标记、消息行与 FTS（既有三条触发器）三者天然同事务。
 REEMBED_TRIGGER = """CREATE TRIGGER IF NOT EXISTS msg_reembed_au
-AFTER UPDATE OF content, chat_id ON messages
+AFTER UPDATE OF content, chat_id, sender_name, msg_type ON messages
 WHEN old.content IS NOT new.content OR old.chat_id IS NOT new.chat_id
+  OR old.sender_name IS NOT new.sender_name OR old.msg_type IS NOT new.msg_type
 BEGIN
-    INSERT INTO pending_reembed(msg_key, changed_at)
-    VALUES (new.msg_key, CAST(strftime('%s','now') AS INTEGER))
-    ON CONFLICT(msg_key) DO UPDATE SET changed_at=excluded.changed_at;
+    INSERT INTO pending_reembed(msg_key, changed_at, reason)
+    VALUES (new.msg_key, CAST(strftime('%s','now') AS INTEGER),
+            CASE
+                WHEN old.content IS NOT new.content THEN 'content'
+                WHEN old.msg_type IS NOT new.msg_type THEN 'msg_type'
+                WHEN old.sender_name IS NOT new.sender_name THEN 'sender'
+                ELSE 'chat_id'
+            END)
+    ON CONFLICT(msg_key) DO UPDATE SET
+        changed_at=excluded.changed_at, reason=excluded.reason;
 END;"""
 
 SCHEMA = _SCHEMA_BODY + "\n" + "\n".join(FTS_TRIGGERS) + "\n" + REEMBED_TRIGGER
 
 # 本程序已知的 main scope 最新版本。迁移只列**IF NOT EXISTS 表达不了**的变更；
 # 基线（v1）由 `migrations.apply` 隐式 stamp——那代表「整套 DDL 已由 ensure 建好」。
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 MIGRATIONS: tuple[migrations.Migration, ...] = (
     migrations.Migration(
@@ -209,6 +219,26 @@ MIGRATIONS: tuple[migrations.Migration, ...] = (
         version=4,
         name="重嵌失败账本（Phase 03）",
         statements=(REEMBED_FAILURES_DDL,),
+    ),
+    migrations.Migration(
+        version=5,
+        name="重嵌队列记录原因（Phase 03）",
+        # 表重建而不是 ALTER：`ensure` 在迁移**之前**跑，老库上 `CREATE TABLE IF NOT
+        # EXISTS` 不会加列，而新库上列已存在——只有「建新表 → 搬数据 → 换名」这一种
+        # 脚本对新旧两种状态都成立（与 v3 的触发器 DROP/CREATE 同一条思路）。
+        statements=(
+            "CREATE TABLE IF NOT EXISTS pending_reembed_v5 ("
+            " msg_key TEXT PRIMARY KEY, changed_at INTEGER NOT NULL,"
+            " reason TEXT NOT NULL DEFAULT 'content') WITHOUT ROWID",
+            "INSERT OR IGNORE INTO pending_reembed_v5(msg_key, changed_at, reason) "
+            "SELECT msg_key, changed_at, 'content' FROM pending_reembed",
+            # 触发器引用旧表：**先删触发器再删表**，否则 SQLite 在 DROP TABLE 时
+            # 会因为触发器体指向一张不存在的表而拒绝（实测 v5 第一版就栽在这里）。
+            "DROP TRIGGER IF EXISTS msg_reembed_au",
+            "DROP TABLE pending_reembed",
+            "ALTER TABLE pending_reembed_v5 RENAME TO pending_reembed",
+            REEMBED_TRIGGER,
+        ),
     ),
 )
 
@@ -374,6 +404,10 @@ _INSERT_SQL = (
     # 属性（退化形态 `md5:<hex>` 是真名的降级），名字解析回来后必须能自愈；只认 content
     # 时同一条消息会永远停在首次写入的 chat_id 上，同一 chat_md5 的行分裂成两种 id。
     "WHERE messages.content IS NOT excluded.content "
+    # Phase 03：`doc_text` 的发送者前缀与「是否可嵌入」的判定都来自这两列——它们变了
+    # 也要落库（触发器才能看到并投递重嵌）。`ts` / `sender_id` 对同一条消息稳定，不比。
+    "   OR messages.sender_name IS NOT excluded.sender_name "
+    "   OR messages.msg_type IS NOT excluded.msg_type "
     "   OR (messages.chat_id IS NOT excluded.chat_id "
     # 退化名（`md5:<hex>`）**只许修好、不许写坏**：回看会重读旧行，而名字源
     # （session/contact）可能临时读不出来——那时 chat_map 缺项、解码结果退回退化 id。
@@ -944,16 +978,18 @@ def save_audit_cursors(con: sqlite3.Connection, account: str,
 
 # ---------- 重嵌队列（Phase 02 写入 / Phase 03 消费） ----------
 
-def enqueue_reembed(con: sqlite3.Connection, msg_key: str) -> None:
+def enqueue_reembed(con: sqlite3.Connection, msg_key: str,
+                    reason: str = "cascade") -> None:
     """把一条消息放进重嵌队列（幂等）。**不 commit**：与调用方的向量写入同事务。
 
     队列是**集合**不是日志：同一条消息改十次也只是一行，`changed_at` 取最后一次。
     消费时读的是 `messages` 的**当前**内容，所以中间版本不需要保留。
     """
     con.execute(
-        "INSERT INTO pending_reembed(msg_key, changed_at) VALUES (?, ?) "
-        "ON CONFLICT(msg_key) DO UPDATE SET changed_at=excluded.changed_at",
-        (msg_key, int(time.time())))
+        "INSERT INTO pending_reembed(msg_key, changed_at, reason) VALUES (?, ?, ?) "
+        "ON CONFLICT(msg_key) DO UPDATE SET changed_at=excluded.changed_at, "
+        "reason=excluded.reason",
+        (msg_key, int(time.time()), reason))
 
 
 def dequeue_reembed(con: sqlite3.Connection, msg_key: str) -> None:
@@ -1010,7 +1046,17 @@ def reembed_queue_stats(con: sqlite3.Connection, account: str | None = None) -> 
         fails = con.execute(
             "SELECT count(*), COALESCE(max(attempts), 0) FROM reembed_failures "
             "WHERE substr(msg_key, 1, ?) = ?", (len(p), p)).fetchone()
-    return {"pending": pending, "failed": fails[0], "max_attempts": fails[1]}
+    by_reason: dict[str, int] = {}
+    if pending:
+        sql = "SELECT reason, count(*) FROM pending_reembed"
+        args: tuple = ()
+        if account is not None:
+            p = f"{account}|"
+            sql += " WHERE substr(msg_key, 1, ?) = ?"
+            args = (len(p), p)
+        by_reason = dict(con.execute(sql + " GROUP BY reason", args).fetchall())
+    return {"pending": pending, "failed": fails[0], "max_attempts": fails[1],
+            "by_reason": by_reason}
 
 
 def clear_audit_cursors(con: sqlite3.Connection, account: str) -> None:
