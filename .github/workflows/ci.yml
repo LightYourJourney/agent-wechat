@@ -10,8 +10,6 @@ jobs:
   gate:
     runs-on: macos-14
     timeout-minutes: 30
-    env:
-      AGENT_WECHAT_HOME: ${{ runner.temp }}/aw-home
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -19,4 +17,8 @@ jobs:
           enable-cache: true
       - run: uv sync --frozen
       - run: git config core.hooksPath security/hooks
+      # `runner` 上下文在 jobs.<id>.env 不可用——写在那层会让整份工作流被判为无效
+      # （0 s 失败、无 job）。放 step 级才生效。
       - run: scripts/check.sh
+        env:
+          AGENT_WECHAT_HOME: ${{ runner.temp }}/aw-home
