@@ -1,0 +1,11 @@
+[mcp_servers.agent-wechat]
+command = "uv"
+args = [
+    "--directory",
+    "/Users/you/agent-wechat",
+    "run",
+    "agent-wechat-mcp",
+]
+
+[mcp_servers.agent-wechat.env]
+AGENT_WECHAT_HOME = "/Users/you/.agent-wechat"

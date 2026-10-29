@@ -1,7 +1,7 @@
 # CONTRIBUTING — 贡献指南
 
-> 本仓库为**个人自用项目，不公开分发**（合规原因见 [SECURITY.md](SECURITY.md) §5），
-> 不接受外部 Pull Request。本文面向"未来的自己"与本地协作者，规范开发与提交流程。
+> 本仓库已公开，但**不接受外部 Pull Request**——它首先是作者的自用工具，流程按单人开发
+> 设计（合规背景见 [SECURITY.md](SECURITY.md) §5）。本文面向"未来的自己"与本地协作者。
 
 ## 1. 开发环境
 
@@ -59,14 +59,16 @@ uv run pytest tests/ -q          # 运行测试
 - **账号标识一律用占位符**：真实 wxid（本机账号目录名、联系人 username）不得入库，
   文档与测试统一用 `wxid_testacct01` / `wxid_abc123def456` 这类合成值；
   示例与测试夹具里的本机绝对路径同理，用 `/Users/you`，不要写真实用户名。
-  例外只有两处：`.mcp.json` 与 `.codex/config.toml`——它们是**功能性本机配置**，
-  写的就是运行这台机器所需的真实路径，且 JSON/TOML 不展开 `~`；README 目录树已注明。
+  本仓库不再入库两处**功能性本机配置**：`.mcp.json` 与 `.codex/config.toml`（`~` 在
+  JSON/TOML 里不展开，写进去只能是绝对路径，故由 `.gitignore` 挡住，模板是同名
+  `.example`）。扫描器对它们的路径形仍保留按 (文件, 形状) 的豁免，以防旧克隆把它们带回来。
   路径这条**有自动层**（2026-10-12 起，**在 macOS 形态上**）：`security/scan.py` 的路径形
   会拦下 `/Users/<第一段>`（第一段不是 `you` 也不是 `Shared`）——`/home/…` 与
   `C:\Users\…` 不在形状里，**不拦**；而且它**不进豁免清单**——`--allow` 拒绝登记路径，
   **手抄进去也不生效**（命中照拦，还会被 `--verify-allowlist` 判成死条目）；登记等于把
   真实用户名写进一个会被提交的文件
-- 不加公开 remote、不 push（见 SECURITY.md §5）
+- 本仓库已公开，push 前确认提交拦截已装：`git config core.hooksPath security/hooks`
+  （见 SECURITY.md §6 出口 #2）
 
 ## 5. 版本与文档同步
 

@@ -1,7 +1,8 @@
 [project]
 name = "agent-wechat"
 version = "0.2.0rc1"
-description = "Add your description here"
+description = "读取本机已登录微信账号的聊天记录，供 Claude Code / Codex 等 Agent 调用的本地 MCP 服务器"
+license = { text = "GPL-3.0-only" }
 readme = "README.md"
 authors = [
     { name = "Yanjin Li", email = "yanjinli502@gmail.com" }
@@ -28,9 +29,8 @@ build-backend = "hatchling.build"
 packages = ["src/agent_wechat"]
 
 # 默认（不给 include/exclude）hatchling 按 VCS 跟踪面把整棵工作树打进 sdist——
-# 实测 55 个条目，含 docs/(13) tests/(14) skills/ spike/ .mcp.json .codex/。本项目
-# 「个人自用、不得公开分发」（docs/SECURITY.md §5），故只保留装包与运行必需的最小面。
-# README.md 必须在列：构建 wheel 时构建后端要读它生成 PKG-INFO。
+# 实测 55 个条目，含 docs/(13) tests/(14) skills/ spike/。sdist 只保留装包与运行
+# 必需的最小面。README.md 必须在列：构建 wheel 时构建后端要读它生成 PKG-INFO。
 [tool.hatch.build.targets.sdist]
 include = [
     "src/agent_wechat",

@@ -1,7 +1,7 @@
 # 最小 CI：只跑仓库内的**合成、离线**测试与静态检查。
 # - 不上传任何聊天数据/密钥/数据库：仓库里没有它们，测试只用临时目录里的合成夹具。
 # - 唯一的网络是 runner 自己按 uv.lock 装依赖；本项目的运行时代码在测试里没有外联。
-# - 本文件在本机**未在 GitHub Actions 上实际执行过**（本阶段不允许 push），审计里记为 PARTIAL。
+# - 本机只验证过它调用的 scripts/check.sh；工作流本身要到公开仓首次 push 后才真正跑起来。
 name: ci
 on: [push, pull_request]
 permissions:

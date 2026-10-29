@@ -103,7 +103,7 @@ def test_path_marker_notation_does_not_self_match(scan):
     """文档描述脱敏规则时用的记号 `/Users/<用户名>` 不许命中。
 
     字符集是 ASCII 的、`<` 不在类内——这是**刻意的**：那个记号出现在
-    `内部记录/` 的验收记录里，若判成命中，它没有登记这条退路，
+    `内部验收记录`里，若判成命中，它没有登记这条退路，
     只能去改写历史记录。把字符类放宽成「非斜杠的任意字符」，这条会红。
     """
     assert scan.hits_in_text("/Users/<用户名>/x") == []
@@ -150,15 +150,25 @@ def test_path_value_never_ends_with_a_dot(scan):
     assert [v for _s, _e, _sh, v in scan.hits_in_text("/Users/" + "a")] == ["/Users/" + "a"]
 
 
-def test_the_two_functional_configs_are_exempt_for_the_path_shape(scan):
+def test_the_two_functional_configs_are_exempt_for_the_path_shape(scan, tmp_path, monkeypatch):
     """CONTRIBUTING §4 明文豁免的两个功能性本机配置——**只豁免路径形**。
 
-    两条断言的顺序是刻意的：**先**证明形状在这份真文本上确实命中，否则「0 命中」
-    也可能只是文件里根本没有路径形，这条测试就什么都没证明；**再**证明 `scan_repo()`
-    把它们排除了。删掉豁免判据 → 第二条红。
+    这两个文件本身不入库（见 .gitignore，模板是同名 `.example`），所以这里在临时目录里
+    造出真实形态：一条带真实用户名的绝对路径。两条断言的顺序是刻意的：**先**证明形状在
+    这份文本上确实命中，否则「0 命中」也可能只是文件里根本没有路径形，这条测试就什么都
+    没证明；**再**证明 `scan_repo()` 把它们排除了。删掉豁免判据 → 第二条红。
     """
-    for rel in (".mcp.json", ".codex/config.toml"):
-        text = (ROOT / rel).read_text(encoding="utf-8")
+    rels = (".mcp.json", ".codex/config.toml")
+    for rel in rels:
+        p = tmp_path / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text('{"a": "' + PATH_FAKE + '/x"}\n', encoding="utf-8")
+    monkeypatch.setattr(scan, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(scan, "_tracked_files", lambda: list(rels))
+    monkeypatch.setattr(scan, "ALLOWLIST_PATH", tmp_path / "allowlist.txt")
+
+    for rel in rels:
+        text = (tmp_path / rel).read_text(encoding="utf-8")
         assert [h for h in scan.hits_in_text(text) if h[2] == "path"], \
             "%s 里没有路径形命中——那这条测试证明不了豁免" % rel
         assert not [h for h in scan.scan_repo() if h[0] == rel and h[2] == "path"], \

@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "agent-wechat": {
+      "command": "/Users/you/agent-wechat/.venv/bin/agent-wechat-mcp",
+      "args": [],
+      "env": {
+        "AGENT_WECHAT_HOME": "/Users/you/.agent-wechat"
+      }
+    }
+  }
+}

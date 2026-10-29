@@ -7,6 +7,10 @@ __pycache__/
 .claude/
 .superpowers/
 
+# 本机 MCP 配置：写的是各人的绝对路径，不入库；模板见同名 .example
+.mcp.json
+.codex/config.toml
+
 # 构建产物（hatchling 后端，uv build 会产出）
 dist/
 build/
