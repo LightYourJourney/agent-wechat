@@ -71,6 +71,7 @@
 
 ```bash
 # 1. 安装（macOS + 微信 4.1.x，见 INSTALL.md 的完整前置条件）
+git clone https://github.com/LightYourJourney/agent-wechat.git ~/agent-wechat
 cd ~/agent-wechat && uv sync
 
 # 2. 一次性引导（仅首次 / 微信升级后；需 sudo，期间要在微信里重新登录一次）
@@ -111,8 +112,8 @@ uv run agent-wechat semantic "上次说的那个爬山的安排"
 agent-wechat/
 ├── README.md              ← 本文件
 ├── CONTEXT.md             领域词表（代码与文档共用的术语）
-├── .mcp.json              Claude Code 项目级 MCP 配置
-├── .codex/config.toml     Codex 项目级 MCP 配置（与 .mcp.json 同构的 TOML 版）
+├── .mcp.json.example      Claude Code 项目级 MCP 配置模板（复制成 .mcp.json）
+├── .codex/config.toml.example  Codex 项目级 MCP 配置模板（同构的 TOML 版）
 ├── src/agent_wechat/      核心包（模块职责见 ARCHITECTURE.md）
 │   ├── paths.py           路径常量与账号目录解析
 │   ├── account.py         登录态检测与账号识别
@@ -194,4 +195,4 @@ Copyright (C) 2026 Yanjin Li
 > 包括但不限于账号受限。开发者不对任何人因使用本项目而遭受的损失负责。请勿用于
 > 读取他人账号数据或任何商业用途。
 
-版本：`0.2.0rc1`（发布候选；验收矩阵见 `内部阶段审计记录`）。
+版本：`0.2.0rc1`（发布候选）。

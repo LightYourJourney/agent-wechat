@@ -206,8 +206,7 @@ moments.iter_posts(account, report=…)       # 复用 passphrase 解密 sns/sns
 `exclusions` 必须照常、基础检索必须可用。三个 scope 各自版本化，**不假设跨库原子**
 （`index.db` 与 `exclusions.db` 是两个文件、主库是 WAL）。
 
-细节见 [内部阶段审计记录](内部阶段审计记录) 与
-[DATA_MODEL.md](DATA_MODEL.md) §10。
+细节见 [DATA_MODEL.md](DATA_MODEL.md) §10。
 
 ## 4. 关键设计决策与取舍
 

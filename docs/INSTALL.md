@@ -21,7 +21,8 @@
 ## 2. 安装步骤
 
 ```bash
-# 1) 获取代码（本仓库为本地仓库，勿从公网拉取不明副本）
+# 1) 获取代码（认准官方仓库，勿用来路不明的副本）
+git clone https://github.com/LightYourJourney/agent-wechat.git ~/agent-wechat
 cd ~/agent-wechat
 
 # 2) 安装依赖（自动创建 .venv）
@@ -111,8 +112,15 @@ sudo uv run --directory <仓库路径> agent-wechat bootstrap
 
 ### 6.1 Claude Code
 
-**项目级**（推荐）：仓库根目录已带 [.mcp.json](../.mcp.json)——本机实际形态是**直调**
-`.venv/bin/agent-wechat-mcp`；下面给的是等价的 `uv run` 写法（两种形态都可用）：
+**项目级**（推荐）：仓库根目录带的是模板 [.mcp.json.example](../.mcp.json.example)
+（`.mcp.json` 写的是各人绝对路径，故不入库）：
+
+```bash
+cp .mcp.json.example .mcp.json      # 再把里面的 /Users/you 换成你的实际路径
+```
+
+模板里的形态是**直调** `.venv/bin/agent-wechat-mcp`；下面给的是等价的 `uv run` 写法
+（两种形态都可用）：
 
 ```json
 {
@@ -134,7 +142,10 @@ sudo uv run --directory <仓库路径> agent-wechat bootstrap
 
 ### 6.2 Codex
 
-在 `~/.codex/config.toml` 追加：
+项目级模板见仓库根 [.codex/config.toml.example](../.codex/config.toml.example)
+（同样要先复制、再把 `/Users/you` 换成实际路径）。
+
+全局则把下面这段追加到 `~/.codex/config.toml`：
 
 ```toml
 [mcp_servers.agent-wechat]

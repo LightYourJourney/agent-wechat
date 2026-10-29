@@ -370,7 +370,7 @@ def container_bundle() -> pathlib.Path:
 
     **调用时由 `CONTAINER_DATA.parent` 派生，不做模块常量**：测试会 monkeypatch
     `paths.CONTAINER_DATA` 把判据重定向到 tmp（`test_fault_injection` /
-    `test_fault_matrix`），import 期绑定的副本会让那条重定向静默失效。
+    故障矩阵用例），import 期绑定的副本会让那条重定向静默失效。
 
     定义在文件末尾是**刻意的**：`内部审计台账` 的故障矩阵按
     **行号**冻结（`paths.py:65:resolve` 这类），在文件前部插函数会把所有行号推移，

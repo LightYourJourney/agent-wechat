@@ -6,6 +6,7 @@
 ## 1. 开发环境
 
 ```bash
+git clone https://github.com/LightYourJourney/agent-wechat.git ~/agent-wechat
 cd ~/agent-wechat
 uv sync                          # 安装运行时依赖
 uv add --dev pytest              # 开发依赖按需

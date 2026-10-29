@@ -35,7 +35,7 @@ packages = ["src/agent_wechat"]
 include = [
     "src/agent_wechat",
     "pyproject.toml",
-    "README.md",
+    "/README.md",
 ]
 
 [dependency-groups]

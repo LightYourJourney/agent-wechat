@@ -55,7 +55,7 @@ def _forbid_real_external_commands(monkeypatch):
     """**第五个闸**（Phase 00 基线实测补）：测试期不许起任何真实外部命令。
 
     上一个闸只钉 `paths.shutil`，而 `purge._tmutil` / `purge._holders` 走的是本模块自己的
-    模块级别名 `purge._run = subprocess.run`——那条路绕过了它。实测 `test_fault_matrix`
+    模块级别名 `purge._run = subprocess.run`——那条路绕过了它。实测 故障矩阵用例
     的 purge 格真的执行了 `tmutil isexcluded` / `tmutil listlocalsnapshots`（进程路径里带
     `test_cell_purge__purge_py_*`），与「测试期不许起真实 tmutil」的明文承诺相反，也让
     测试依赖 macOS 系统状态。

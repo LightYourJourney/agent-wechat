@@ -708,7 +708,7 @@ agent-wechat logs clean --yes       # 清理 sync.log 与 launchd out/err（默�
 - `sync` **不会**自动 bootstrap、不会下载模型、不会联网：向量阶段只用本地模型缓存，
   缓存缺失就报 `vector_unavailable`（消息仍已同步）。
 - 调度只写 `~/Library/LaunchAgents/com.agent-wechat.sync.plist`，启用/停用命令打印给你自己执行。
-- 完整状态码与排障见 `内部阶段审计记录`。
+- 完整状态码与排障见 [TROUBLESHOOTING.md](TROUBLESHOOTING.md)。
 
 
 ## 9. 统一检索（Phase 05）

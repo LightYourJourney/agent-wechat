@@ -397,7 +397,7 @@ def ingest(account: str, chat: str | None = None, *,
     if result["skipped"].get("engine_unavailable"):
         result["degraded"].append(
             "有媒体因本地识别引擎不可用而被跳过（OCR 需 tesseract；"
-            "ASR 需 whisper-cli + 本地模型，见 内部阶段审计记录）")
+            "ASR 需 whisper-cli + 本地模型）")
     return result
 
 
