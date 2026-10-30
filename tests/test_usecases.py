@@ -771,3 +771,20 @@ def test_message_context_usecase_checks_chat_ownership(stub, monkeypatch):
                         lambda *a, **k: {"chat_id": "some_other_chat"})
     with pytest.raises(errors.DataNotFound, match="不属于"):
         usecases.message_context("acct|md5|message_0.db|1", contact="张三")
+
+
+def test_out_symlink_loop_is_a_project_error_not_a_traceback(tmp_path):
+    """`--out` 指向符号链接环时必须是项目异常，不是裸 `RuntimeError`。
+
+    `Path.resolve()` 在 3.12 对 ELOOP 抛的是 `RuntimeError`（**不是** `OSError`），所以
+    `except OSError` 接不住。此前三条 `--out` 入口（`chat_export` / `moments_export` /
+    `message_media`）都会让整屏 traceback 穿到 CLI，MCP 侧则落到 `generic_payload`。
+    `paths` 对 `HOME_DIR` 侧早就有这条翻译，`--out` 侧一直没有。
+    """
+    a, b = tmp_path / "a", tmp_path / "b"
+    a.symlink_to(b)
+    b.symlink_to(a)                       # a ↔ b 互链：resolve() 抛 RuntimeError
+
+    with pytest.raises(errors.HomeUnavailable) as ei:
+        usecases.chat_index(out_dir=str(a / "x"), account="acct")
+    assert "符号链接环" in str(ei.value)

@@ -353,3 +353,40 @@ def test_an_empty_model_cache_directory_is_not_reported_ready(tmp_path, monkeypa
     _env(tmp_path, monkeypatch)
     vector.MODEL_CACHE_DIR.mkdir(parents=True, exist_ok=True)     # 空目录
     assert sync.diagnose(ACCT)["vector"]["model_cache"] is False
+
+
+def test_schedule_commands_point_at_an_invocable_doctor(monkeypatch):
+    """`schedule_commands()["inspect"]` 印给人抄的命令，参数必须真的被 `doctor` 接受。
+
+    此前写的是 `agent-wechat doctor --json`，而 `doctor` 压根没有 `--json`（它本来就恒输出
+    JSON）——用户照着抄得到 `unrecognized arguments`、退出码 2。
+
+    **判据不能用 `cli.main(argv + ["--help"])`**：argparse 见到 `--help` 会抢先打印帮助并
+    退出 0，未知参数根本不会被检查（实测：把 `--json` 改回去，那种写法照样绿）。这里直接
+    比对子命令 parser 的合法选项集。
+    """
+    import argparse
+
+    from agent_wechat import cli
+
+    captured = {}
+
+    def fake_parse_args(self, *a, **k):
+        captured["p"] = self
+        raise SystemExit(0)
+
+    monkeypatch.setattr(argparse.ArgumentParser, "parse_args", fake_parse_args)
+    with pytest.raises(SystemExit):
+        cli.main([])
+
+    root = captured["p"]
+    sub = next(a for a in root._actions if isinstance(a, argparse._SubParsersAction))
+    doctor = sub.choices["doctor"]
+    legal = {o for a in doctor._actions for o in a.option_strings}
+
+    cmd = sync.schedule_commands()["inspect"]
+    argv = cmd.split()[1:]                       # 去掉 `agent-wechat`
+    assert argv[0] == "doctor", cmd
+    for tok in argv[1:]:
+        assert tok in legal, (
+            f"`{cmd}` 里的 `{tok}` 不被 `doctor` 接受；合法选项：{sorted(legal)}")

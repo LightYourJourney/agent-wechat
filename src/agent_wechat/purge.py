@@ -993,6 +993,26 @@ def execute_chat(plan: ChatPlan) -> tuple[ChatReport, ...]:
             hint="删名字不会删字节，会造成「已清干净」的假象；请先处理那些链接"
                  "（`ls -li` 看 inode 相同的就是）再重试")
     out = []
+    # **在飞的长任务闸门**（与整库那条 `_holders` 同族，但判据不同）：
+    # 向量构建 / 导出都是「先读消息、再写派生行」的两段式。删除落在那两段之间时，
+    # 核查（在删除后立刻跑）看不到还没写回的行，于是报 ✅——随后构建把 `vec_messages`
+    # 插回去（`preview` 列就是被删正文的纯文本），孤儿向量永久留存，水位线还被写回。
+    #
+    # 判据用**任务注册表**而不是 `_holders`：后者只问「谁打开了这个文件」，常驻的 MCP
+    # server 也会被算进去，那会让 `purge --chat` 在 MCP 运行时**恒被拒绝**——把一个可修的
+    # 竞态换成一个必现的可用性回归。注册表里的 `running` 才是真的在写。
+    try:
+        running = [t for t in tasks.status() if t.get("status") == "running"]
+    except Exception:                     # noqa: BLE001 —— 注册表读不出来不挡删除
+        running = []                      # （与 `_holders` 的「判不出来就留着」不同：
+        #   那边是「说不定有人持有，别删」；这边是「没有证据表明有人正在写」，而任务
+        #   注册表**不存在**是最常见的情形——新机器、纯 CLI 用户。挡它等于挡掉正常用法。
+    if running:
+        kinds = sorted({t.get("kind") or "?" for t in running})
+        raise errors.PurgeRefused(
+            f"有长任务正在运行（{', '.join(kinds)}），拒绝按会话销毁："
+            f"它可能在本次删除之后把派生行写回来",
+            hint="等任务结束（`agent-wechat logs` / 任务状态）后重试")
     # fail-closed（spec §4.2）：读不出排除清单就没法建立不可逆性，这一次删除就只是「暂时看不见」。
     # 宁可什么都不做，也不做一个看起来成功的假删除。
     try:

@@ -308,7 +308,7 @@ def test_sticker_cdn_fetch_network_failure_returns_none(monkeypatch):
 
     op = _BadOpener()
     monkeypatch.setattr(media, "_cdn_opener", lambda: op)
-    assert media._fetch_cdn_bytes("http://vweixinf.tc.qq.com/x", "0" * 32) is None
+    assert media._fetch_cdn_bytes("http://vweixinf.tc.qq.com/x", "0" * 32) == (None, "failed")
     assert op.calls == 1, "必须真的走到网络调用（否则测的不是这条分支）"
 
 

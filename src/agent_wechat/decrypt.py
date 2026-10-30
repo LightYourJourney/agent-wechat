@@ -31,7 +31,10 @@ def _first_line(text: str) -> str:
     return ""
 
 
-_AWDEC_RE = re.compile(r"^awdec-(\d+)-")
+# `tmp/` 下**所有**带 pid 的明文临时目录。此前只认 `awdec-`（众数分片解密），于是
+# 语音解码的 `awvoice-`（silk + 中间 pcm，成对明文）崩溃后残留**永不清扫**——同一类
+# 残留，一类有兜底一类没有。两种前缀共用清扫判据。
+_STALE_TMP_RE = re.compile(r"^(?:awdec|awvoice)-(\d+)-")
 
 
 def tmp_dir() -> pathlib.Path:
@@ -43,7 +46,7 @@ _swept_stale = False          # 每进程只扫一次（EA-019）
 
 
 def sweep_stale_tempdirs() -> int:
-    """清扫 `tmp/` 下**没有活进程持有**的 `awdec-<pid>-*`，返回清掉的目录数（EA-019）。
+    """清扫 `tmp/` 下**没有活进程持有**的 `awdec-<pid>-*` / `awvoice-<pid>-*`，返回清掉的目录数（EA-019）。
 
     「用后即焚」此前只覆盖 `finally` 那条优雅路径：SIGKILL/崩溃时它不执行，MCP server 被
     客户端关闭时长任务在 **daemon 线程**里被解释器丢弃、`finally` 同样不保证执行——于是
@@ -51,7 +54,7 @@ def sweep_stale_tempdirs() -> int:
 
     **绝不无条件 `rmtree`**：多进程下会误删正在跑的任务的明文（`purge.py` 那句注释点过
     同款坑）。判据是 `os.kill(pid, 0)`：只有「确定已死」才清；判不出来（`PermissionError`
-    等）一律留着。非 `awdec-` 形态的目录一律不碰。
+    等）一律留着。不带 pid 的目录名字一律不碰。
     """
     swept = 0
     try:
@@ -59,7 +62,7 @@ def sweep_stale_tempdirs() -> int:
     except OSError:
         return 0                       # tmp 读不了：清扫是尽力而为，绝不因此挡住解密
     for d in entries:
-        m = _AWDEC_RE.match(d.name)
+        m = _STALE_TMP_RE.match(d.name)
         if not m or paths.pid_alive(int(m.group(1))):
             continue
         try:
@@ -136,8 +139,12 @@ def decrypted(db: pathlib.Path, passphrase: bytes):
         # 「Parse error in 3rd command line argument」变成「Parse error near line N」，
         # 而「回显出错语句 + 插入符」的机制两形态都在——errors.redact 仍是必需的安全网。
         try:
+            # `timeout=` 必须给：不给的话下面那个 `except TimeoutExpired` **永远不可达**
+            # （死分支），而 sqlcipher 一旦卡住（超大库、挂载/IO 卡死）`decrypted()` 会无限
+            # 阻塞，连带 reader / 语音 / 贴纸回源全部挂死，用户没有任何退出手段。
+            # 300 s 对「几百 MB 的库做一次 sqlcipher_export」有充足余量。
             r = subprocess.run(["sqlcipher", str(snap)], input="\n".join(cmds) + "\n",
-                               capture_output=True, text=True)
+                               capture_output=True, text=True, timeout=300)
         except FileNotFoundError as exc:
             raise errors.DependencyMissing(
                 "找不到 sqlcipher 命令",

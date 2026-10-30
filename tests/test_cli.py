@@ -2534,3 +2534,23 @@ def test_render_residue_keeps_the_undecidable_wording(capsys):
         out = capsys.readouterr().out
         assert raw in out, f"{raw!r} 被判定句吞掉了：{out!r}"
         assert "已排除" not in out and "个本地快照" not in out
+
+
+def test_ui_reports_a_bad_port_in_one_line(monkeypatch, capsys):
+    """`ui` 的端口错误必须是单行中文 + 退出码 1，不是 traceback。
+
+    `--port` 只做 `type=int`，此前 `webui.serve` 的 bind 异常无人接住：`-1` / `70000`
+    抛 `OverflowError`、`<1024` 抛 `PermissionError`、端口被占抛 `OSError`，三种都是整屏堆栈。
+    """
+    from agent_wechat import webui
+
+    def boom(port, *, open_browser=False):
+        raise OverflowError("bind(): port must be 0-65535.")
+    monkeypatch.setattr(webui, "serve", boom)
+
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["ui", "--port", "-1"])
+    assert ei.value.code == 1
+    err = capsys.readouterr().err
+    assert "无法在端口 -1 上启动工作台" in err
+    assert "Traceback" not in err

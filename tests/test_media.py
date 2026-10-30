@@ -2076,7 +2076,7 @@ def test_sticker_export_sends_no_request_without_the_flag(tmp_path, monkeypatch)
     monkeypatch.setattr(media, "sticker_cdn_urls",
                         lambda *a, **k: called.append("urls") or ({}, None))
     monkeypatch.setattr(media, "_fetch_cdn_bytes",
-                        lambda *a, **k: called.append("bytes") or None)
+                        lambda *a, **k: called.append("bytes") or (None, "failed"))
     con = _one_sticker_index(ts, md5)
     try:
         rep = media.export_media(account, ["wxid_x"], kinds=["sticker"],
@@ -2103,7 +2103,7 @@ def test_sticker_export_calls_cdn_only_with_the_flag(tmp_path, monkeypatch):
                                                   or {(cm_, "message_0.db", 7):
                                                       ("http://wxapp.tc.qq.com/x", md5)}, None))
     monkeypatch.setattr(media, "_fetch_cdn_bytes",
-                        lambda url, expect, **k: fetched.append((url, expect)) or None)
+                        lambda url, expect, **k: fetched.append((url, expect)) or (None, "failed"))
     con = _one_sticker_index(ts, md5)
     try:
         rep = media.export_media(account, ["wxid_x"], kinds=["sticker"],
@@ -2170,7 +2170,8 @@ def _fetch_one(account, cm, shard, lid):
     if loc not in urls:
         return None
     url, expect_md5 = urls[loc]
-    return m._fetch_cdn_bytes(url, expect_md5)
+    data, _why = m._fetch_cdn_bytes(url, expect_md5)   # (bytes|None, reason)
+    return data
 
 
 def test_fetch_sticker_swallows_any_opener_exception(tmp_path, monkeypatch):
@@ -2353,7 +2354,7 @@ def test_sticker_export_fetches_a_repeated_sticker_only_once(tmp_path, monkeypat
                         lambda acct, items, **k: ({
         (cm, "message_0.db", 7 + i): ("http://wxapp.tc.qq.com/x", md5) for i in range(3)}, None))
     monkeypatch.setattr(media, "_fetch_cdn_bytes",
-                        lambda url, expect, **k: fetched.append(url) or None)
+                        lambda url, expect, **k: fetched.append(url) or (None, "failed"))
     try:
         rep = media.export_media(account, ["wxid_x"], kinds=["sticker"],
                                  out_dir=tmp_path / "media", con=con, with_cdn=True)
@@ -2476,7 +2477,7 @@ def test_sticker_export_tries_other_messages_of_the_same_sticker(tmp_path, monke
                         lambda acct, items, **k: ({
         (cm, "message_0.db", 8): ("http://wxapp.tc.qq.com/x", md5)}, None))
     monkeypatch.setattr(media, "_fetch_cdn_bytes",
-                        lambda url, expect, **k: fetched.append(url) or None)
+                        lambda url, expect, **k: fetched.append(url) or (None, "failed"))
     try:
         rep = media.export_media(account, ["wxid_x"], kinds=["sticker"],
                                  out_dir=tmp_path / "media", con=con, with_cdn=True)
@@ -2530,7 +2531,7 @@ def test_sticker_export_sources_credentials_from_another_month(tmp_path, monkeyp
 
     monkeypatch.setattr(media, "sticker_cdn_urls", _fake_urls)
     monkeypatch.setattr(media, "_fetch_cdn_bytes",
-                        lambda url, expect, **k: fetched.append(url) or png)
+                        lambda url, expect, **k: fetched.append(url) or (png, "ok"))
     out = tmp_path / "media"
     try:
         rep = media.export_media(account, ["wxid_x"], kinds=["sticker"],
@@ -2611,7 +2612,7 @@ def test_sticker_wxgf_transcodes_to_jpeg(tmp_path, monkeypatch):
                         lambda acct, items, **k: ({(cm, "message_0.db", 7):
                                                    ("http://wxapp.tc.qq.com/x", md5)}, None))
     monkeypatch.setattr(media, "_fetch_cdn_bytes",
-                        lambda url, expect, **k: WXGF_BLOB)
+                        lambda url, expect, **k: (WXGF_BLOB, "ok"))
 
     def _fake_transcode(data, dest):
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -2645,7 +2646,7 @@ def test_sticker_wxgf_without_transcode_saves_container_and_says_so(tmp_path, mo
                         lambda acct, items, **k: ({(cm, "message_0.db", 7):
                                                    ("http://wxapp.tc.qq.com/x", md5)}, None))
     monkeypatch.setattr(media, "_fetch_cdn_bytes",
-                        lambda url, expect, **k: WXGF_BLOB)
+                        lambda url, expect, **k: (WXGF_BLOB, "ok"))
     monkeypatch.setattr(media, "_wxgf_to_jpeg", lambda data, dest: False)   # 无 ffmpeg / 转码失败
     out = tmp_path / "media"
     try:
@@ -2899,7 +2900,7 @@ def test_cdn_opener_forces_a_direct_connection(monkeypatch):
 
 def test_fetch_cdn_bytes_refuses_a_malformed_url_and_a_non_200(monkeypatch):
     """`urlsplit` 的 ValueError 也要落在「返回 None、不抛」这道网里；非 200 同理。"""
-    assert media._fetch_cdn_bytes("http://[", "0" * 32) is None
+    assert media._fetch_cdn_bytes("http://[", "0" * 32) == (None, "refused")
 
     class _Resp:
         status = 500
@@ -2921,7 +2922,7 @@ def test_fetch_cdn_bytes_refuses_a_malformed_url_and_a_non_200(monkeypatch):
             return _Resp()
 
     monkeypatch.setattr(media, "_cdn_opener", lambda: _Opener())
-    assert media._fetch_cdn_bytes("http://vweixinf.tc.qq.com/x", good_md5) is None
+    assert media._fetch_cdn_bytes("http://vweixinf.tc.qq.com/x", good_md5) == (None, "failed")
 
 
 # ---------- §5.5 第二批：export_media 的降级/进度/上限分支 ----------
@@ -3099,7 +3100,7 @@ def test_sticker_rerun_counts_skipped(tmp_path, monkeypatch):
                         lambda *a, **k: ({(messages.md5_of("wxid_x"), "message_0.db", 7):
                                           ("http://wxapp.tc.qq.com/x", md5)}, None))
     monkeypatch.setattr(media, "_fetch_cdn_bytes",
-                        lambda *a, **k: b"\x89PNG\r\n\x1a\n" + b"x" * 8)
+                        lambda *a, **k: (b"\x89PNG\r\n\x1a\n" + b"x" * 8, "ok"))
     out = tmp_path / "media"
     con = _one_sticker_index(ts, md5)
     try:
@@ -3167,7 +3168,8 @@ def test_sticker_truncated_failed_and_progress(tmp_path, monkeypatch):
 
     # ① 上限：max_files=0 → truncated/remaining
     con = _one_sticker_index(ts, md5)
-    monkeypatch.setattr(media, "_fetch_cdn_bytes", lambda *a, **k: b"\x89PNG\r\n\x1a\n")
+    monkeypatch.setattr(media, "_fetch_cdn_bytes",
+                        lambda *a, **k: (b"\x89PNG\r\n\x1a\n", "ok"))
     try:
         rep = media.export_media(account, ["wxid_x"], kinds=["sticker"],
                                  out_dir=tmp_path / "m1", con=con, with_cdn=True, max_files=0)
@@ -3177,7 +3179,7 @@ def test_sticker_truncated_failed_and_progress(tmp_path, monkeypatch):
 
     # ② 取件失败 → failed
     con = _one_sticker_index(ts, md5)
-    monkeypatch.setattr(media, "_fetch_cdn_bytes", lambda *a, **k: None)
+    monkeypatch.setattr(media, "_fetch_cdn_bytes", lambda *a, **k: (None, "failed"))
     try:
         rep = media.export_media(account, ["wxid_x"], kinds=["sticker"],
                                  out_dir=tmp_path / "m2", con=con, with_cdn=True)
@@ -3187,7 +3189,7 @@ def test_sticker_truncated_failed_and_progress(tmp_path, monkeypatch):
 
     # ③ 未知格式 → failed
     con = _one_sticker_index(ts, md5)
-    monkeypatch.setattr(media, "_fetch_cdn_bytes", lambda *a, **k: b"garbage")
+    monkeypatch.setattr(media, "_fetch_cdn_bytes", lambda *a, **k: (b"garbage", "ok"))
     try:
         rep = media.export_media(account, ["wxid_x"], kinds=["sticker"],
                                  out_dir=tmp_path / "m3", con=con, with_cdn=True)
@@ -3198,7 +3200,8 @@ def test_sticker_truncated_failed_and_progress(tmp_path, monkeypatch):
     # ④ 落盘失败 → failed
     con = _one_sticker_index(ts, md5)
     real_save = media.save_artifact
-    monkeypatch.setattr(media, "_fetch_cdn_bytes", lambda *a, **k: b"\x89PNG\r\n\x1a\n")
+    monkeypatch.setattr(media, "_fetch_cdn_bytes",
+                        lambda *a, **k: (b"\x89PNG\r\n\x1a\n", "ok"))
     monkeypatch.setattr(media, "save_artifact", lambda *a: None)
     try:
         rep = media.export_media(account, ["wxid_x"], kinds=["sticker"],
@@ -3251,3 +3254,30 @@ def test_voice_export_reports_progress(tmp_path, monkeypatch):
     rep = media.export_media(account, [chat_name], kinds=["voice"], months=[mon],
                              out_dir=root / "home" / "media", progress=seen.append)
     assert rep.voice.ok == 1 and seen == [1], (rep.voice, seen)
+
+
+def test_a_refused_host_counts_as_missing_not_failed(tmp_path, monkeypatch):
+    """白名单外的主机归 `missing`（「不会去取」），不是 `failed`（「联网了但没取到」）。
+
+    两者对用户的含义正相反：`failed` 说「重试可能有用」，`missing` 说「重试无用」。
+    混在一起时，微信一旦换到白名单外的新 CDN 域，用户看到的是「一片可重试的网络失败」，
+    而实际重试一万次也不会成功。
+    """
+    _, account = make_tree(tmp_path, monkeypatch)
+    ts = int(datetime.datetime(2026, 9, 15, 12, 0).timestamp())
+    md5 = "d0f46ed3" + "0" * 24
+    cm = messages.md5_of("wxid_x")
+    # 白名单外的主机
+    urls = {(cm, "message_0.db", 7): ("http://evil.example.com/x?filekey=deadbeef", md5)}
+    monkeypatch.setattr(media, "sticker_cdn_urls", lambda *a, **k: (urls, None))
+    monkeypatch.setattr(media, "_fetch_cdn_bytes",
+                        lambda *a, **k: (None, "refused"))
+
+    con = _one_sticker_index(ts, md5)
+    try:
+        rep = media.export_media(account, ["wxid_x"], kinds=["sticker"],
+                                 out_dir=tmp_path / "m", con=con, with_cdn=True)
+    finally:
+        con.close()
+    assert rep.sticker.missing == 1, rep.sticker
+    assert rep.sticker.failed == 0, "白名单拒绝不是「联网失败」"

@@ -571,5 +571,7 @@ def schedule_commands(account: str | None = None) -> dict:
         "enable": f"launchctl bootstrap gui/{uid} {dest}",
         "kickstart": f"launchctl kickstart -k gui/{uid}/{LABEL}",
         "disable": f"launchctl bootout gui/{uid}/{LABEL}",
-        "inspect": "agent-wechat doctor --json",
+        # `doctor` 本来就恒输出 JSON，没有 `--json` 这个参数——印一个不存在的参数，
+        # 用户照着抄会得到 `unrecognized arguments`（退出码 2）。
+        "inspect": "agent-wechat doctor",
     }

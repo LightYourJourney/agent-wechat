@@ -522,3 +522,23 @@ def test_a_video_thumbnail_alone_is_not_reported_as_exported(tmp_path, monkeypat
     st2 = usecases._state_of(vrow, ("video", "ef01"), out_root=tmp_path,
                              account=ACCT, voice_keys=None)
     assert st2.status == "exported" and st2.path.endswith("ef01.mp4")
+
+
+def test_a_key_count_exactly_equal_to_the_limit_is_not_truncated(tmp_path, monkeypatch, idx):
+    """`keys` 分支的 `truncated` 必须是 `len(rows) > limit`，不是 `>=`。
+
+    这条路**没有 SQL `LIMIT`**：`rows` 是候选全量，`rows[:lim]` 只在超过 lim 时才真的丢东西。
+    用 `>=` 时「key 数恰好等于 limit」（真机常见：200 个 key + 默认 limit 200）会一条不丢地
+    报 `truncated=True`——MCP 于是告诉 agent「counts 只是部分」，CLI 还会印「已提前收手」。
+
+    `else` 分支保持 `>=`（那条路的 SQL 自己截断了，取回正好 lim 条时确实可能还有更多）。
+    """
+    con, rows = idx
+    monkeypatch.setattr(paths, "XWECHAT_FILES", tmp_path / "wx")
+    monkeypatch.setattr(usecases, "_voice_keys_for", lambda acct: frozenset())
+    keys = [r["msg_key"] for r in rows]
+    exact = usecases.message_media(
+        "wid", keys=keys, limit=len(keys), out_dir=str(tmp_path / "m"),
+        account=ACCT, _ctx=_FakeCtx(), _con=con)
+    assert len(exact.states) == len(keys), "该答的都要答回"
+    assert exact.truncated is False, "一条没丢却报截断 = 假警"

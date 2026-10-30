@@ -95,7 +95,10 @@ def add_from_messages(con: sqlite3.Connection, account: str, chat_id: str) -> in
         "INSERT OR IGNORE INTO exclusions.excluded "
         "(msg_key, account, chat_md5, excluded_at) "
         "SELECT msg_key, account, chat_md5, ? FROM messages "
-        "WHERE account=? AND chat_id=?", (int(time.time()), account, chat_id))
+        "WHERE account=? AND chat_md5=?",
+        # 按 **`chat_md5`** 而不是 `chat_id` 选：同一会话可能同时存在真名与退化 `md5:<hex>`
+        # 两种 id，只挡其中一种会让另一批行在下次 `--full` 复活（与 store 侧的判据一致）。
+        (int(time.time()), account, messages.chat_md5(chat_id)))
     return cur.rowcount
 
 

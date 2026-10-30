@@ -170,6 +170,47 @@ def test_delete_chat_removes_every_place(_temp_index):
                            (len(pref), pref)).fetchone()[0] == 0, f"{table} 里还留着 victim 的行"
 
 
+def test_delete_chat_covers_both_chat_id_forms(_temp_index):
+    """同一 `chat_md5` 的两种 `chat_id` 形态必须一起删、一起挡。
+
+    **这是核查也会继承的盲区**：`upsert` 的 EA-012 注释承认「名字源临时读不出来 → 解码退回
+    `md5:<hex>`，之后恢复才自愈」，于是同一个会话可能在库里分裂成两种 id。此前
+    `chat_row_counts` / `delete_chat` / 墓碑全按 `chat_id=?`（真名）过滤，退化那批行
+    **一条不中**：计划报 0 条、执行删 0 条、核查 leftover 0 → 对着残留正文报 ✅，
+    而它仍能被全局 `search` 命中（墓碑也没写，下次 `--full` 不挡）。
+
+    变异：任一处谓词退回 `chat_id=?`，本用例在 `chat_row_counts` 或残留断言上变红。
+    """
+    con = _temp_index
+    real = "wxid_testacct01_ab12"      # 已登记的合成值（security/allowlist.txt）
+    cm = messages.md5_of(real)
+    deg = messages.degraded_chat_id(cm)
+
+    def row(lid, cid, content):
+        return {"msg_key": f"a|{cm}|message_0.db|{lid}", "account": "a", "chat_md5": cm,
+                "chat_id": cid, "shard": "message_0.db", "local_id": lid,
+                "server_id": lid, "ts": 500 + lid, "msg_type": 1, "sender_id": None,
+                "sender_name": None, "is_self": 0, "content": content,
+                "media_hint": None}
+
+    store.upsert_batch(con, [row(1, real, "真名那条"), row(2, deg, "退化那条")])
+
+    # ① 计数必须看得见两种形态——否则 purge 的计划与核查都以为只有一条。
+    assert store.chat_row_counts(con, "a", real)["messages"] == 2
+    assert store.chat_row_counts(con, "a", deg)["messages"] == 2, "从退化 id 问也该是 2"
+
+    # ② 墓碑必须挡两种形态（先落墓碑，与 purge 的顺序一致）。
+    assert exclusions.add_from_messages(con, "a", real) == 2, \
+        "墓碑只挡真名，退化那批行下次 --full 会复活"
+
+    # ③ 删除必须带走两种形态。
+    got = store.delete_chat(con, account="a", chat_id=real)
+    assert got["messages"] == 2
+    assert store.chat_row_counts(con, "a", real)["messages"] == 0
+    assert con.execute("SELECT count(*) FROM messages WHERE chat_md5=?", (cm,)
+                       ).fetchone()[0] == 0, "同一 chat_md5 的行一条都不该剩"
+
+
 def test_delete_chat_leaves_the_other_chat_untouched(_temp_index):
     """**反向断言**：范围泄漏在这门命令上不可逆，比正断言重要。"""
     con = _temp_index

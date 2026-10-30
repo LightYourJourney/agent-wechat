@@ -353,6 +353,12 @@ def cmd_ui(args: argparse.Namespace) -> int:
     except errors.ScopeDenied as exc:
         print(str(exc), file=sys.stderr)
         return 1
+    except (OverflowError, OSError) as exc:
+        # 端口非法（`-1` / `70000` → `OverflowError`）、无权限（<1024 → `PermissionError`）、
+        # 已被占用（`OSError`）。三种此前都印整屏 traceback，破坏「项目错误 → 单行中文 +
+        # 退出码 1」的约定（MCP 侧无此入口，故只在这里收口）。
+        print(f"无法在端口 {args.port} 上启动工作台：{exc}", file=sys.stderr)
+        return 1
     return 0
 
 

@@ -34,6 +34,18 @@ uv run agent-wechat status
 
 依赖 6 个：`mcp`（MCP SDK）、`zstandard`（WCDB 压缩解码）、`fastembed` + `sqlite-vec`（本地向量检索，首次下载模型）、`cryptography`（图片 dat 的 AES 解密）、`pilk`（语音 SILK→WAV）；其余全为标准库。语音 / 向量为按需能力：缺 `pilk` 只降级、缺 `sqlite-vec` 则向量功能不可用。
 
+> **`uv.lock` 里的下载源是清华镜像**（`pypi.tuna.tsinghua.edu.cn`）：它由作者本机的
+> uv 配置生成，锁定文件因此记录了镜像 URL。**当你在中国大陆之外、或该镜像不可达**时，
+> 用下面任一种方式跳过锁定文件：
+>
+> ```bash
+> uv sync --no-frozen      # 按 pyproject 重新解析，走你自己配置的源
+> # 或显式指定官方源
+> UV_DEFAULT_INDEX=https://pypi.org/simple uv sync --refresh
+> ```
+>
+> 版本约束与 `uv.lock` 一致，只是来源不同。
+
 ### 2.1 全局命令（可选，推荐）
 
 默认情况下 `agent-wechat` 只存在于项目 `.venv/bin/`，需经 `uv run` 前缀调用（见

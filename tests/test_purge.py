@@ -2191,3 +2191,25 @@ def test_home_of_uid_returns_none_when_pwd_cannot_be_imported(monkeypatch):
 
     monkeypatch.setattr(builtins, "__import__", fake)
     assert purge._home_of_uid(0) is None
+
+
+def test_chat_purge_refuses_while_a_long_task_is_running(tmp_path, monkeypatch):
+    """有在飞的长任务时，按会话销毁必须拒绝。
+
+    向量构建 / 导出都是「先读消息、再写派生行」的两段式：删除落在那两段之间时，核查
+    （删除后立刻跑）看不到还没写回的行、报 ✅，随后构建把 `vec_messages` 插回去
+    （`preview` 列就是被删正文的纯文本），孤儿向量永久留存，水位线还被写回。
+
+    判据是**任务注册表**而不是 `_holders`：后者会把常驻的 MCP server 也算成持有者，
+    于是一个偶发竞态被换成「MCP 开着就永远删不了」的必现回归。
+    """
+    from agent_wechat import tasks
+
+    monkeypatch.setattr(tasks, "status",
+                        lambda: [{"task_id": "t1", "kind": "vector_build",
+                                  "status": "running"}])
+    plan = purge.plan_chat([{"account": "a", "chat_id": VICTIM, "chat_md5": VICTIM_MD5}])
+    with pytest.raises(errors.PurgeRefused) as ei:
+        purge.execute_chat(plan)
+    assert "长任务" in str(ei.value)
+    assert "vector_build" in str(ei.value), "要指名是哪一类任务"

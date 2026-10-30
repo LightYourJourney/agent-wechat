@@ -32,6 +32,12 @@ from . import chat_index as index_html
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
+    # `moments` / `sns_media` 只在导出那条路上惰性导入（避免顶层循环依赖），但类型注解
+    # 里引用了 `moments.SnsPost` / `moments.MomentsReport`。`from __future__ import
+    # annotations` 让它们在运行时只是字符串、不会炸；可类型检查器与 IDE 会报「未定义名」
+    # （ruff F821）。放进 TYPE_CHECKING 块，两边都满足。
+    from . import moments
+
 # ---------- 参数归一化 ----------
 
 # limit 一律夹下界 1：非正值会原样进 SQL——`LIMIT -1` 在 SQLite 里表示「不限量」，
@@ -585,6 +591,22 @@ def _month_clause(months: list[str] | None) -> tuple[str, list[int]]:
     return " AND (" + " OR ".join(parts) + ")", args
 
 
+def _resolve_out(out_dir: str | None) -> pathlib.Path:
+    """`--out` 的绝对化。**符号链接环必须在这里接住。**
+
+    `Path.resolve()` 在 3.12 遇到 ELOOP 抛的是 `RuntimeError`（不是 `OSError`），所以
+    `except OSError` 接不住它——它会一路穿到 CLI，印一整屏 traceback，破坏「项目错误
+    → 单行中文 + 退出码 1」；MCP 那边则落到 `generic_payload`，agent 只拿到「内部错误」。
+    `paths` 对 `HOME_DIR` 侧早就有这条翻译（`HomeUnavailable`），`--out` 侧此前没有。
+    """
+    try:
+        return (pathlib.Path(out_dir) if out_dir else media.export_root()).resolve()
+    except RuntimeError as exc:
+        raise errors.HomeUnavailable(
+            f"输出路径解析不了（符号链接环？）：{out_dir}",
+            hint="换一个正常的目录重试（CLI 的 --out / MCP 的 out_dir）") from exc
+
+
 def message_media(contact: str, *, keys: Sequence[str] | None = None,
                   months: list[str] | None = None, limit: int = 200,
                   out_dir: str | None = None, account: str | None = None,
@@ -609,7 +631,7 @@ def message_media(contact: str, *, keys: Sequence[str] | None = None,
     cm = messages.md5_of(chat_id)
     # 绝对化：`--out 相对路径` 会让 states[].path 变成 MCP 客户端用不了的相对路径。
     # `.resolve()` 是纯路径运算，不碰微信数据（红线不受影响）。
-    out_root = (pathlib.Path(out_dir) if out_dir else media.export_root()).resolve()
+    out_root = _resolve_out(out_dir)
     lim = clamp_limit(limit, LIMIT_MEDIA)
     month_sql, month_args = _month_clause(months)
     degraded: list[Degradation] = []
@@ -638,7 +660,13 @@ def message_media(contact: str, *, keys: Sequence[str] | None = None,
                 # `ORDER BY m.ts DESC` 等价（limit 截断取的必须是**最新**的那些）。
                 rows.sort(key=lambda r: r["ts"], reverse=True)
                 rows = [r for r in rows if r["account"] == ctx.account]
-                truncated = len(rows) >= lim
+                # **`>` 而不是 `>=`**：这条路（keys 分支）没有 SQL `LIMIT`，`rows` 就是候选
+                # 全量，`rows[:lim]` 只在**超过** lim 时才真的丢东西。用 `>=` 时「key 数恰好
+                # 等于 limit」（真机常见：200 个 key + 默认 limit 200）会一条不丢地报
+                # `truncated=True`，MCP 于是告诉 agent「counts 只是部分」、CLI 还会印
+                # 「已提前收手」。与下面 else 分支的 `>=` 不同——那条路的 SQL 自己截断了，
+                # 取回正好 lim 条时确实可能还有更多，只能保守。
+                truncated = len(rows) > lim
                 rows = rows[:lim]
             else:
                 type_ph = ",".join("?" * len(_MEDIA_TYPES))
@@ -823,7 +851,7 @@ def chat_export(contact: str, *, months: list[str] | None = None, limit: int = 5
     # （`message_media` 自己 resolve 过），`chat_text.media_src` 用 `os.path.relpath` 算
     # 相对引用时按 **cwd** 展开相对的那一侧 —— 产物的 `<img>` 照常渲染、打不开
     # （静默 404）。与 `message_media` 同款处理。
-    out_root = (pathlib.Path(out_dir) if out_dir else media.export_root()).resolve()
+    out_root = _resolve_out(out_dir)
     try:
         rows, truncated = search.messages_in_range(
             chat_id, account=ctx.account, after_ts=after_ts, before_ts=before_ts,
@@ -1090,7 +1118,7 @@ def chat_index(out_dir: str | None = None, account: str | None = None) -> ChatIn
         paths.refuse_container_out(out_dir)
     # 与 `chat_export` 同款绝对化：`--out` 给相对路径时，`out_dir`/`file` 才是能直接打开、
     # 也能与 `chat export` 对齐的路径。
-    out_root = (pathlib.Path(out_dir) if out_dir else media.export_root()).resolve()
+    out_root = _resolve_out(out_dir)
     # EA-035：枚举 `index.*` 后按 `{chat_md5}` **归并**——此前只枚举 `index.html`，
     # 于是用 `--format md` 导出的会话**永远不出现在索引页上**（`has_md` 只覆盖反方向）。
     # 排序让页面顺序不依赖文件系统。

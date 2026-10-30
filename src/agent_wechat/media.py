@@ -1284,8 +1284,14 @@ def sticker_cdn_urls(account: str, items: Sequence[tuple[str, str, int]]
     return out, note
 
 
-def _fetch_cdn_bytes(url: str, expect_md5: str, *, timeout: float = 15.0) -> bytes | None:
-    """取一次并校验，返回**明文图片**字节；任何失败返回 None，**不抛**。
+def _fetch_cdn_bytes(url: str, expect_md5: str, *, timeout: float = 15.0
+                     ) -> tuple[bytes | None, str]:
+    """取一次并校验。→ `(字节, "ok")` / `(None, "refused")` / `(None, "failed")`，**不抛**。
+
+    第二项把「**不会去取**」与「联网了但没取到」分开：前者是白名单外或 URL 畸形，发请求之前
+    就返回，重试**永远无效**；后者是网络/状态码/md5 不符，重试可能有用。两者混在一起记
+    `failed` 时，微信一旦换到白名单外的新 CDN 域，用户看到的是「一片可重试的网络失败」，
+    而实际重试一万次也不会成功。
 
     `expect_md5` 是 XML 的 `md5` 属性——实测它恒等于**明文对象**的 md5（spec 附录 E.1），
     故这是一次零成本的完整性校验：不符即失败、**绝不落盘**。它同时覆盖「下载内容不对」
@@ -1295,21 +1301,21 @@ def _fetch_cdn_bytes(url: str, expect_md5: str, *, timeout: float = 15.0) -> byt
         # **畸形 URL 会让 `urlsplit` 抛 `ValueError`**——放进同一道网里，别让它逃出 core。
         host = urllib.parse.urlsplit(url).hostname or ""
     except ValueError:
-        return None
+        return None, "refused"           # 畸形 URL：同样是「不会去取」
     if not host.endswith(_CDN_ALLOWED):
-        return None                      # 白名单外：一次请求都不发（跨跳由 handler 复查）
+        return None, "refused"           # 白名单外：一次请求都不发（跨跳由 handler 复查）
     try:
         with _cdn_opener().open(url, timeout=timeout) as resp:
             if resp.status != 200:
-                return None
+                return None, "failed"
             body = resp.read()
     except Exception:                    # noqa: BLE001 —— 见下
         # **必须宽到 `Exception`**：`http.client.HTTPException`（`BadStatusLine` 等）与
         # `ssl.SSLError` 不是 `OSError` 的子类，按类型列举会漏；漏出去的异常违反
         # 「core 层只抛项目异常」的契约（`sns_media.fetch` 对网络调用同样是宽接）。
         # **不回显任何内容**：错误消息里可能带 `filekey`，连类型名都不带出去。
-        return None
-    return body if hashlib.md5(body).hexdigest() == expect_md5 else None
+        return None, "failed"
+    return (body, "ok") if hashlib.md5(body).hexdigest() == expect_md5 else (None, "failed")
 
 
 def _export_stickers(account: str, chat_ids: list[str], out_root: pathlib.Path,
@@ -1441,9 +1447,14 @@ def _export_stickers(account: str, chat_ids: list[str], out_root: pathlib.Path,
             # 前者重试无用、要查数据形态。文档口径（TOOLS §9）已同批改为与本行一致。
             report.sticker.missing += 1
             continue
-        data = _fetch_cdn_bytes(got[0], got[1])
+        data, why = _fetch_cdn_bytes(got[0], got[1])
         if data is None:
-            report.sticker.failed += 1       # 联网了但没取到，**如实计失败**
+            if why == "refused":
+                # 白名单外 / URL 畸形：**一次请求都没发**，重试永远无效。归 `missing`
+                # （EA-022 那一族「不会去取」），而不是 `failed`（「联网了但没取到」）。
+                report.sticker.missing += 1
+            else:
+                report.sticker.failed += 1   # 联网了但没取到，**如实计失败**
             continue
         ext = detect_ext(data)
         if ext is None:
@@ -1538,8 +1549,11 @@ def _export_voices_from(con, chat_ids, out_root, report, want, is_full, bump,
                 try:
                     # 输入 silk 与中间 pcm **都**只落在 HOME/tmp 的 0700 临时目录里，退出即清
                     # （Ruling 19：silk_to_wav 会把中间明文 pcm 留在系统 TMPDIR 且不删）
+                    # 前缀**必须带 pid**：`decrypt.sweep_stale_tempdirs` 靠它判「持有者还在不在」。
+                    # 不带 pid 的目录在 SIGKILL / daemon 线程被丢弃时残留，且没有任何清扫路径
+                    # 能认领它（同一类明文残留，`awdec-` 那条早有兜底）。
                     with tempfile.TemporaryDirectory(dir=decrypt.tmp_dir(),
-                                                     prefix="awvoice-") as td:
+                                                     prefix=f"awvoice-{os.getpid()}-") as td:
                         tmp_silk = pathlib.Path(td) / "v.silk"
                         tmp_silk.write_bytes(blob)
                         tmp_pcm = pathlib.Path(td) / "v.pcm"

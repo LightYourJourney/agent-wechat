@@ -799,3 +799,15 @@ def test_display_text_takes_content_only():
 
     assert vector.display_text({"content": "  正文  ", "media_hint": "[图片]"}) == "正文"
     assert vector.display_text({"content": "", "media_hint": "[图片]"}) == ""
+
+
+def test_semantic_search_rejects_an_empty_query():
+    """空/全空白 query 必须在入口被拒——与 `search` 的 EA-073 同源。
+
+    此前这里没有判据：空的 query 经 `query_text` 只剩 BGE 指令前缀，照样进 KNN，
+    **有索引时**返回 k 条「最近邻」噪声、`total > 0`，用户以为搜到了东西。
+    """
+    with pytest.raises(errors.SearchInputError):
+        vector.semantic_search("   ", account="acct")
+    with pytest.raises(errors.SearchInputError):
+        vector.semantic_search("", account="acct")

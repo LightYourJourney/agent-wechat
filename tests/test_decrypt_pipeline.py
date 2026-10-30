@@ -248,7 +248,7 @@ def test_the_sweep_keeps_anything_it_cannot_prove_is_dead(tmp_path, monkeypatch)
 
 def test_the_tmpdir_the_pipeline_creates_is_recognizable_by_the_sweeper(tmp_path, monkeypatch):
     """创建点与清扫点的**形态必须同源**（EA-019）：`decrypted()` 建的目录名要能被
-    `_AWDEC_RE` 认出并解出**本进程的 pid**。
+    `_STALE_TMP_RE` 认出并解出**本进程的 pid**。
 
     否则清扫形同虚设——它只认带 pid 的形态，而崩溃残留永远认不出来。这一点在「手工造
     目录」的用例里测不到（变异 D4：把创建前缀退回 `awdec-` 时，那两条用例照样全绿）。
@@ -273,7 +273,7 @@ def test_the_tmpdir_the_pipeline_creates_is_recognizable_by_the_sweeper(tmp_path
 
     names = seen["names"]
     assert len(names) == 1, names
-    m = decrypt._AWDEC_RE.match(names[0])
+    m = decrypt._STALE_TMP_RE.match(names[0])
     assert m, f"清扫认不出这个形态：{names[0]}"
     assert int(m.group(1)) == os.getpid(), names
 
@@ -337,3 +337,67 @@ def test_sweep_stale_tempdirs_tolerates_an_unreadable_tmp(tmp_path, monkeypatch)
     monkeypatch.setattr(paths, "HOME_DIR", home)
     monkeypatch.setattr(decrypt, "_swept_stale", False)
     assert decrypt.sweep_stale_tempdirs() == 0
+
+
+def test_the_sweeper_also_reclaims_voice_workspaces(tmp_path, monkeypatch):
+    """语音解码的 `awvoice-<pid>-` 临时目录同样要被清扫认领。
+
+    它是**成对的明文**（`v.silk` 与中间 `v.pcm`），与 `awdec-` 的分片明文同一类残留。
+    此前创建点用的是不带 pid 的 `awvoice-`，而清扫只认 `awdec-<pid>-`——于是崩溃/SIGKILL
+    之后这批明文**永远没人清**，只能靠用户手工 `purge --tmp`。
+
+    变异：把创建前缀退回 `awvoice-`（不带 pid）或把清扫正则退回只认 `awdec-`，本用例变红。
+    """
+    from agent_wechat import decrypt
+    home = tmp_path / "home"
+    (home / "tmp").mkdir(parents=True)
+    monkeypatch.setattr(paths, "HOME_DIR", home)
+    monkeypatch.setattr(decrypt, "_swept_stale", False)
+
+    import subprocess as _sub, sys as _sys
+    dead = _sub.Popen([_sys.executable, "-c", "pass"])
+    dead.wait()                                       # 一个**确定已退出**的 pid
+
+    def mk(pid, name="v"):
+        d = home / "tmp" / f"awvoice-{pid}-{name}"
+        d.mkdir()
+        (d / "v.silk").write_bytes(b"\x02#!SILK_V3" + b"x" * 16)
+        (d / "v.pcm").write_bytes(b"p" * 32)
+        return d
+
+    stale = mk(dead.pid)
+    alive = mk(os.getpid(), "mine")
+
+    assert decrypt.sweep_stale_tempdirs() == 1
+    assert not stale.exists(), "已死进程的语音明文必须清掉"
+    assert alive.exists(), "本进程的语音目录不许动（可能正在解码）"
+
+
+def test_sqlcipher_is_run_with_a_timeout(tmp_path, monkeypatch):
+    """`subprocess.run` 必须带 `timeout=`。
+
+    没有它，第 145 行那个 `except subprocess.TimeoutExpired` 是**死分支**；而 sqlcipher
+    一旦卡住（超大库、挂载/IO 卡死），`decrypted()` 无限阻塞，连带 reader / 语音 / 贴纸
+    回源全部挂死，用户没有退出手段。
+    """
+    from agent_wechat import decrypt
+    home = tmp_path / "home"
+    (home / "tmp").mkdir(parents=True)
+    monkeypatch.setattr(paths, "HOME_DIR", home)
+    monkeypatch.setattr(decrypt, "_swept_stale", True)
+
+    seen = {}
+
+    def fake_run(argv, **kw):
+        seen.update(kw)
+        raise RuntimeError("停在这里就够了")
+
+    monkeypatch.setattr(decrypt.subprocess, "run", fake_run)
+    db = tmp_path / "message_0.db"
+    db.write_bytes(b"x" * 8192)
+    with pytest.raises(RuntimeError, match="停在这里就够了"):
+        with decrypt.decrypted(db, b"w" * 32):
+            pass
+
+    assert "timeout" in seen, "没传 timeout，TimeoutExpired 分支永远不可达"
+    assert seen["timeout"] and seen["timeout"] > 0

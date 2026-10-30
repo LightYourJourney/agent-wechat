@@ -742,6 +742,11 @@ def semantic_search(query: str, chat_id: str | None = None, limit: int = 10,
         raise SearchInputError(
             "semantic_search 需要显式 account（多账号索引隔离）",
             hint="传入目标账号目录名；MCP/CLI 层会先解析当前登录账号")
+    # EA-073 的同源判据：`search` / `search_messages` 都拒空串，唯独这里没有——空的 query
+    # 经 `query_text` 只剩 BGE 指令前缀，照样进 KNN，于是**有索引时**返回 k 条「最近邻」
+    # 噪声、`total > 0`，用户以为搜到了东西。无索引时才碰巧返回空。
+    if not query.strip():
+        raise SearchInputError("检索串不能为空（或全空白）")
     con = connect()
     try:
         if limit < 1:
