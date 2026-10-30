@@ -1,0 +1,194 @@
+{
+  "appmsg rebuild": {
+    "account": null
+  },
+  "bootstrap": {
+    "timeout": 300
+  },
+  "chat export": {
+    "account": null,
+    "chat": null,
+    "format": "html,md",
+    "limit": 500,
+    "months": null,
+    "out": null
+  },
+  "chat index": {
+    "account": null,
+    "out": null
+  },
+  "contacts": {
+    "account": null
+  },
+  "context": {
+    "account": null,
+    "after": 2,
+    "before": 2,
+    "contact": null
+  },
+  "decrypt": {
+    "account": null,
+    "out": null
+  },
+  "derived edit": {
+    "text": null
+  },
+  "derived ingest": {
+    "account": null,
+    "all": false,
+    "chat": null,
+    "force": false,
+    "kinds": "ocr,asr",
+    "limit": 50
+  },
+  "derived list": {
+    "account": null,
+    "chat": null,
+    "kind": null,
+    "limit": 100,
+    "status": null
+  },
+  "derived search": {
+    "account": null,
+    "chat": null,
+    "limit": 20
+  },
+  "doctor": {
+    "account": null
+  },
+  "export": {
+    "account": null,
+    "contact": null,
+    "full": false
+  },
+  "extras rebuild": {
+    "account": null
+  },
+  "inspect": {
+    "account": null,
+    "sample": 2
+  },
+  "logs clean": {
+    "yes": false
+  },
+  "media export": {
+    "account": null,
+    "chat": null,
+    "force": false,
+    "kinds": "image,voice,video",
+    "limit": 2000,
+    "months": null,
+    "out": null,
+    "with_cdn": false
+  },
+  "media locate": {
+    "account": null,
+    "chat": null,
+    "keys": null,
+    "limit": 200,
+    "months": null,
+    "out": null
+  },
+  "media rebuild-refs": {
+    "account": null
+  },
+  "memory add": {
+    "account": null,
+    "chat": null,
+    "evidence": null,
+    "note": null,
+    "text": null
+  },
+  "memory confirm": {
+    "conflicts_with": null,
+    "note": null
+  },
+  "memory dispute": {
+    "conflicts_with": null,
+    "note": null
+  },
+  "memory list": {
+    "account": null,
+    "limit": 50,
+    "status": null
+  },
+  "memory retract": {
+    "conflicts_with": null,
+    "note": null
+  },
+  "moments export": {
+    "account": null,
+    "chat": null,
+    "limit": 2000,
+    "months": null,
+    "out": null,
+    "with_media": false
+  },
+  "purge": {
+    "account": null,
+    "all": false,
+    "chat": null,
+    "excluded": false,
+    "index": false,
+    "keys": false,
+    "media": false,
+    "moments": false,
+    "tmp": false,
+    "undo": false,
+    "yes": false
+  },
+  "recent": {
+    "account": null,
+    "n": 50
+  },
+  "retrieve": {
+    "account": null,
+    "after": null,
+    "before": null,
+    "contact": null,
+    "limit": 20,
+    "mode": "hybrid"
+  },
+  "schedule install": {
+    "account": null,
+    "interval_minutes": 360
+  },
+  "schedule print": {
+    "account": null,
+    "interval_minutes": 360
+  },
+  "schedule uninstall": {
+    "account": null,
+    "interval_minutes": 360
+  },
+  "search": {
+    "account": null,
+    "contact": null,
+    "n": 20
+  },
+  "semantic": {
+    "account": null,
+    "contact": null,
+    "n": 10
+  },
+  "status": {
+    "verify_keys": false
+  },
+  "sync": {
+    "account": null,
+    "full": false,
+    "json": false,
+    "skip_vector": false
+  },
+  "ui": {
+    "open": false,
+    "port": 8765
+  },
+  "vector-build": {
+    "account": null,
+    "rebuild": false
+  },
+  "vector-status": {
+    "account": null
+  }
+}

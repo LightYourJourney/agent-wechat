@@ -8,6 +8,19 @@ authors = [
     { name = "Yanjin Li", email = "yanjinli502@gmail.com" }
 ]
 requires-python = ">=3.12"
+keywords = ["wechat", "mcp", "model-context-protocol", "claude-code", "codex", "sqlite", "fts5", "local-first"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Environment :: MacOS X",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Communications :: Chat",
+    "Topic :: Database",
+]
 dependencies = [
     "mcp>=2.2.0",
     "zstandard>=0.25.0",
@@ -20,6 +33,12 @@ dependencies = [
 [project.scripts]
 agent-wechat = "agent_wechat:main"
 agent-wechat-mcp = "agent_wechat.mcp_server:main"
+
+[project.urls]
+Homepage = "https://github.com/LightYourJourney/agent-wechat"
+Repository = "https://github.com/LightYourJourney/agent-wechat"
+Issues = "https://github.com/LightYourJourney/agent-wechat/issues"
+Changelog = "https://github.com/LightYourJourney/agent-wechat/blob/main/docs/CHANGELOG.md"
 
 [build-system]
 requires = ["hatchling"]
