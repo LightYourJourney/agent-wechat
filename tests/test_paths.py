@@ -231,7 +231,7 @@ def test_every_home_dir_path_owner_goes_through_the_gate():
 
     **它覆盖不到的面**（写清楚，免得被读成全覆盖）：就地拼 `paths.HOME_DIR / "x"` 而**不**建
     模块常量的新写者。判据只认「模块级常量」这个形态——它是本仓四种 owner 的**共同**形态，
-    而按行为驱动每个写入口成本高得多（见 `内部审计记录` ⑦）。
+    而按行为驱动每个写入口成本高得多。
     """
     import ast
     import re

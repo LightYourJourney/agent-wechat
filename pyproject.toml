@@ -37,6 +37,9 @@ include = [
     "pyproject.toml",
     "/README.md",
 ]
+# `.gitignore` 无论如何都会进 sdist——hatchling 的 sdist builder 强制包含它，
+# 实测 `exclude` / `only-include` / `ignore-vcs` 三种写法都排除不掉（2026-10-30）。
+# 它只含目录名（.venv/、.claude/ 之类），不含任何标识，故接受。
 
 [dependency-groups]
 dev = [

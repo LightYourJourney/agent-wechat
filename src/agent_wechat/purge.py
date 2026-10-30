@@ -1,7 +1,5 @@
 """数据销毁：清单 → 计划 → 执行 → 核查。只做 CLI，不进 MCP。
 
-设计取舍与实测依据见 内部设计记录。
-
 两条不可违反的约定：
 - 路径的唯一来源是**拥有它的模块**（keys.CACHE_FILE / store.db_paths() /
   decrypt.tmp_dir() / vector.MODEL_CACHE_DIR / tasks.TASKS_FILE / exclusions.path() /

@@ -188,7 +188,7 @@
 > 不存在」**：`secure_delete` 只清 SQLite 自己释放的页，vec0 的 `preview` 列装的是相邻消息的
 > 正文——chunk 没整块清空时，把 `index.db` 连同 `-wal` 读成字节去 grep，仍能在活跃页里命中它
 > （**不是**本工具的检索还能搜到：索引查询里它已经没有了）。要字节级清除只能 `purge --index`
-> 后重跑 `export`（实测与取舍见 `内部设计记录`
+> 后重跑 `export`（实测与取舍见下
 > §2.2b / §5.7）。
 
 > **「删名字」与「删字节」是两件事**（EA-030）：`purge` 删的是**目录项**。待删树上若有
@@ -253,7 +253,7 @@ Time Machine 的排除是绑在 **inode** 上的扩展属性，文件一旦被�
 | # | 出口 | 机制 |
 |---|---|---|
 | 1 | `--out DIR` 导出（`moments` / `media` / `chat export` / `decrypt --out`） | 落点判据**有**一条：解析后落在微信容器内即拒（§3）。除此之外**无**——明文能写到容器之外的任意目录，不受 Time Machine 排除、不受 `purge` 覆盖，**只靠人记得删**。刻意不加自动排除：一次性目录加上排除只会留下悬空配置 |
-| 2 | **git 提交**（含提交信息） | `pre-commit` + `commit-msg` 两个钩子，命中即拦。**这是本仓库唯一反复复发过的出口（2026-09-13 / 09-17 / 09-27 三次）**。机制（见 `内部设计记录`）：钩子**源随仓库入库**（`security/hooks/`，带执行位），每个 clone 跑一次 `git config core.hooksPath security/hooks`；`pull` 后**立即生效、不需要重装**，且**安装路径**上丢不了执行位（由 git 跟踪）——但本地 `chmod -x` 仍会让 git 跳过钩子，自检会报出来。⚠️ 该 clone 下 `.git/hooks/` 被**整体旁路**。**自检**：`uv run python security/scan.py --check-hooks`（五态；它的失效形态可以完全静默，所以要主动跑）。本机**已装且已验**：2026-10-12 实测伪造值提交被 `pre-commit` 拦、只进提交信息的同串被 `commit-msg` 拦（四条与收尾自证见 spec §7 的执行记录）——「**已装**」与「**已验**」是两件事，这行现在两者都有 |
+| 2 | **git 提交**（含提交信息） | `pre-commit` + `commit-msg` 两个钩子，命中即拦。**这是本仓库唯一反复复发过的出口（2026-09-13 / 09-17 / 09-27 三次）**。机制：钩子**源随仓库入库**（`security/hooks/`，带执行位），每个 clone 跑一次 `git config core.hooksPath security/hooks`；`pull` 后**立即生效、不需要重装**，且**安装路径**上丢不了执行位（由 git 跟踪）——但本地 `chmod -x` 仍会让 git 跳过钩子，自检会报出来。⚠️ 该 clone 下 `.git/hooks/` 被**整体旁路**。**自检**：`uv run python security/scan.py --check-hooks`（五态；它的失效形态可以完全静默，所以要主动跑）。本机**已装且已验**：2026-10-12 实测伪造值提交被 `pre-commit` 拦、只进提交信息的同串被 `commit-msg` 拦（四条与收尾自证见 spec §7 的执行记录）——「**已装**」与「**已验**」是两件事，这行现在两者都有 |
 | 3 | 备份 | 承载内容的位置已 `tmutil addexclusion`（见 §4），**当下七条全在排除范围内**。⚠️ 其中 `~/.claude/bash-commands.log` 是**活跃日志**：文件重建后排除随旧 inode 一起丢失（实测发生过一次），**要定期用 `tmutil isexcluded` 复查、丢了就 `tmutil addexclusion` 重做**。**清单是短的、人工确认的**——不要照抄扫描输出（扫描会把第三方插件夹具也列进来） |
 | 4 | `/tmp` | 一次性清理，不改配置。系统重启也会清 |
 | 5 | MCP 信封 → LLM | **无机制，且已不可撤回**（见 §1）。Phase 05 只给检索加了读取范围（`AGENT_WECHAT_DENY`，仅 `retrieve`/`context`），不改变既有工具的披露行为 |
@@ -264,8 +264,9 @@ Time Machine 的排除是绑在 **inode** 上的扩展属性，文件一旦被�
 
 **`pre-push` 那一枚覆盖到 push**（2026-10-14 加，spec §7）：它跑 `scripts/check.sh` 的全量
 五步（运行时 import 环 / vulture 候选集不超基线 / `pytest` / `scan --all` / 钩子自检）。
-**它同样不是「内容出门的最后一道」**：`git push --no-verify` 会跳过它，而本仓的红线是
-「不公开推送」——那条靠人守（`--no-verify` 在本仓**禁止使用**，见 CONTRIBUTING）。它挡的是
+**它同样不是「内容出门的最后一道」**：`git push --no-verify` 会跳过它。这个仓库已公开，
+唯一还靠人守的红线是「**不要把真实聊天数据 / 密钥 / 本机路径推上去**」——形状扫描拦得住
+形状，拦不住语义（见下）。它挡的是
 **质量退化**（环、新死代码、红测试、新形状命中），不是恶意绕过。
 
 **自动层的覆盖边界**：`security/scan.py` 认四种**形状**——`wxid_*`、`*@chatroom`、

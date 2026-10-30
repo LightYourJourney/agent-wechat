@@ -30,7 +30,6 @@ wxid_friend01  wxid · 13 字符 · --allow 5eae113f 登记
 wxid_anything  wxid · 13 字符 · --allow 5fa4a9e7 登记
 12345678@chatroom  chatroom · 17 字符 · --allow 6c02fd38 登记
 wxid_qz7x2m4k9p1v3n8b  wxid · 21 字符 · --allow 7850126c 登记
-# 结构理由：验收文档里那条 post id 的**中间一段**（完整 ID 比它长，这 11 位是形状扫描截出来的）
 # 结构理由：连号占位——前缀 13 + 尾部 9 位同一个数字，构造痕迹一眼可辨（朋友圈测试夹具）
 13000000000  phone · 11 字符 · --allow 8e0396e4 登记
 wxid_0000  wxid · 9 字符 · --allow 94ad6a38 登记
@@ -66,5 +65,3 @@ wxid_xxx_abcd  wxid · 13 字符 · --allow 2bddfde0 登记
 wxid_xxx_ab12  wxid · 13 字符 · --allow c8392dc6 登记
 # 结构理由：八进制 `127.0.0.1` 的写法（`0` + 此串）——WHATWG IPv4 判定的说明与它的测试
 17700000001  phone · 11 字符 · --allow a93d4abd 登记
-# 计划文档里的**探针用**伪造值（Task 8 的验收步骤拿它试钩子）。
-# 不能用计划自己的 FAKE 常量——那个 Task 7 已登记，探针就永远拦不住了。

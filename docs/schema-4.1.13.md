@@ -137,7 +137,6 @@ CREATE TABLE kStoreEmoticonFilesTable(
 - `kNonStoreEmoticonTable` 的 md5 列叫 **`md5`（无尾下划线）**，与上一张表**不同名**，别混。
   实测 748 行（2026-10-12；2026-09-22 当时 743）——**748 个逐个带 `cdn_url`、逐个有散文件**，
   而 `kStoreEmoticonFilesTable` 那 82 个**一个都没有**：两表**交集为 0**，是两批人。
-- 出处与实测口径：`内部设计记录` §8。
   **`schema.py` 的 `stickers` 只声明名字表**——上面这两张表**不在**产品读取范围内。
 
 ## 对去重键的直接影响

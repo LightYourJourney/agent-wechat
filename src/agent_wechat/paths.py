@@ -24,8 +24,8 @@ APP_DATA = CONTAINER / "app_data"
 # 写闸门的判据根（**不是**读路径的根，别与 `CONTAINER` 混用）：微信容器 bundle
 # `…/com.tencent.xinWeChat` 及它的**全部祖先**（一路到 `/`，含 `/` 本身）。
 # `CONTAINER_DATA` 只是 bundle 的 `Data` 子树；根上移到 bundle，因为「容器内 ⇒ 子路径
-# 也在内」只在 bundle 口径下闭合（`Data/../x` 是兄弟目录，只认 Data 会漏，见
-# 内部阶段审计记录）。派生见文件末尾的 `container_bundle()`。
+# 也在内」只在 bundle 口径下闭合（`Data/../x` 是兄弟目录，只认 Data 会漏）。
+# 派生见文件末尾的 `container_bundle()`。
 CONTAINER_DATA = CONTAINER.parent                 # …/com.tencent.xinWeChat/Data
 
 # 账号目录形如 wxid_testacct01_ab12（尾部 _hex4 是实例后缀）
@@ -372,8 +372,8 @@ def container_bundle() -> pathlib.Path:
     `paths.CONTAINER_DATA` 把判据重定向到 tmp（`test_fault_injection` /
     故障矩阵用例），import 期绑定的副本会让那条重定向静默失效。
 
-    定义在文件末尾是**刻意的**：`内部审计台账` 的故障矩阵按
-    **行号**冻结（`paths.py:65:resolve` 这类），在文件前部插函数会把所有行号推移，
-    整批格子随之「故障未命中」。追加在末尾，行号零位移。
+    定义在文件末尾是**刻意的**：故障矩阵按**行号**冻结（`paths.py:65:resolve` 这类），
+    在文件前部插函数会把所有行号推移，整批格子随之「故障未命中」。追加在末尾，
+    行号零位移。
     """
     return CONTAINER_DATA.parent

@@ -113,7 +113,7 @@ agent-wechat/
 ├── README.md              ← 本文件
 ├── CONTEXT.md             领域词表（代码与文档共用的术语）
 ├── .mcp.json.example      Claude Code 项目级 MCP 配置模板（复制成 .mcp.json）
-├── .codex/config.toml.example  Codex 项目级 MCP 配置模板（同构的 TOML 版）
+├── .codex/config.toml.example  Codex 项目级 MCP 配置模板（TOML 版）
 ├── src/agent_wechat/      核心包（模块职责见 ARCHITECTURE.md）
 │   ├── paths.py           路径常量与账号目录解析
 │   ├── account.py         登录态检测与账号识别

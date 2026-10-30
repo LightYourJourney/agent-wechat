@@ -616,7 +616,7 @@ agent-wechat purge --all --yes        # 整个 ~/.agent-wechat（含 models/、t
 #### 按会话销毁（`purge --chat`）
 
 销毁的**第二个轴**，与具名范围/`--all` **互斥**（后者问「删哪一类文件」，它问「删哪个会话」；
-设计见 `内部设计记录` §3）：
+）：
 
 ```bash
 agent-wechat purge --chat 小李             # 预览：将删哪些行、哪份导出物

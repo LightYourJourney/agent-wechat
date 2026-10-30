@@ -23,7 +23,7 @@
 **调用口径**：`<当前解释器> -m vulture src/ --min-confidence 60`。用 `sys.executable` 而不是
 PATH 上的 `vulture` 或 `uvx`：门禁由哪个解释器跑，就用哪个解释器里的那把尺——不依赖 PATH
 （钩子里的 PATH 与登录 shell 不同）、不依赖网络、不依赖 uv 缓存。vulture 因此是 dev 依赖
-（spec §7⑤ 要求「需入库依赖的候选在停点材料里标注」，已记入 `内部审计记录` ⑥）。
+（spec §7⑤ 要求「需入库依赖的候选在停点材料里标注」）。
 
 **比较口径**（与 `security/gate-baseline.txt` 的生成口径必须一致）：
   · **行号不进身份**：`file:12: 消息` 归一成 `file:: 消息`。条目的身份是 (文件, 类别, 符号)，

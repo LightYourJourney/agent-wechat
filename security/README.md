@@ -1,7 +1,6 @@
 # security/ —— 标识外流的出口拦截
 
-政策见 `docs/SECURITY.md` §6；设计与理由见
-`内部设计记录`。
+政策见 `docs/SECURITY.md` §6。
 **本文件只讲怎么做。**
 
 ## 它拦什么
