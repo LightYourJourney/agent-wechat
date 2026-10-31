@@ -592,19 +592,42 @@ def _month_clause(months: list[str] | None) -> tuple[str, list[int]]:
 
 
 def _resolve_out(out_dir: str | None) -> pathlib.Path:
-    """`--out` 的绝对化。**符号链接环必须在这里接住。**
+    """`--out` 的绝对化。**解析期的两类失败都必须在这里接住。**
 
-    `Path.resolve()` 在 3.12 遇到 ELOOP 抛的是 `RuntimeError`（不是 `OSError`），所以
-    `except OSError` 接不住它——它会一路穿到 CLI，印一整屏 traceback，破坏「项目错误
-    → 单行中文 + 退出码 1」；MCP 那边则落到 `generic_payload`，agent 只拿到「内部错误」。
-    `paths` 对 `HOME_DIR` 侧早就有这条翻译（`HomeUnavailable`），`--out` 侧此前没有。
+    - 符号链接环：`Path.resolve()` 在 3.12 抛的是 `RuntimeError`（**不是** `OSError`）；
+    - 单段名超过文件系统上限（255 字节）：抛 `OSError` / `ENAMETOOLONG`（errno 63）。
+
+    两种都会一路穿到 CLI，印一整屏 traceback，破坏「项目错误 → 单行中文 + 退出码 1」；
+    MCP 那边则落到 `generic_payload`，agent 只拿到「内部错误」。`paths` 对 `HOME_DIR` 侧
+    早就有这条翻译（`HomeUnavailable`），`--out` 侧此前一个都没有。
     """
     try:
-        return (pathlib.Path(out_dir) if out_dir else media.export_root()).resolve()
+        root = (pathlib.Path(out_dir) if out_dir else media.export_root()).resolve()
     except RuntimeError as exc:
         raise errors.HomeUnavailable(
             f"输出路径解析不了（符号链接环？）：{out_dir}",
             hint="换一个正常的目录重试（CLI 的 --out / MCP 的 out_dir）") from exc
+    except OSError as exc:
+        # 只用 `strerror`（"File name too long" / "Permission denied"），不回显路径——
+        # 超长路径经 `errors.redact` 会被打成一片 `<已脱敏>`，反而读不出原因。
+        raise errors.HomeUnavailable(
+            f"输出路径不可用：{exc.strerror or type(exc).__name__}",
+            hint="换一个更短、可写的目录重试（CLI 的 --out / MCP 的 out_dir）") from exc
+    # **探一次活**：`resolve()` 本身对超长路径不抛（它只做字符串运算），真正的
+    # `OSError: [Errno 63] File name too long` 要到后面的 `glob()` / `mkdir()` 才炸，
+    # 而那些调用点散在四个入口里。在这里统一 stat 一次，`FileNotFoundError` 是正常的
+    # （输出目录通常还没建），其余 OSError 一律提前翻译成项目异常。
+    try:
+        root.stat()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        # 只用 `strerror`（"File name too long" / "Permission denied"），不回显路径——
+        # 超长路径经 `errors.redact` 会被打成一片 `<已脱敏>`，反而读不出原因。
+        raise errors.HomeUnavailable(
+            f"输出路径不可用：{exc.strerror or type(exc).__name__}",
+            hint="换一个更短、可写的目录重试（CLI 的 --out / MCP 的 out_dir）") from exc
+    return root
 
 
 def message_media(contact: str, *, keys: Sequence[str] | None = None,

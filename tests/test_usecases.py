@@ -788,3 +788,16 @@ def test_out_symlink_loop_is_a_project_error_not_a_traceback(tmp_path):
     with pytest.raises(errors.HomeUnavailable) as ei:
         usecases.chat_index(out_dir=str(a / "x"), account="acct")
     assert "符号链接环" in str(ei.value)
+
+
+def test_out_path_too_long_is_a_project_error(tmp_path):
+    """单段名超过文件系统上限（255 字节）时必须是项目异常。
+
+    `Path.resolve()` 对超长路径**不抛**（只做字符串运算），真正的 `OSError` /
+    `ENAMETOOLONG` 要到后面的 `glob()` / `mkdir()` 才炸——而那些调用点散在四个入口里。
+    实测 `chat index --out /tmp/aaaa…(300 个 a)` 此前印整屏 traceback。
+    """
+    too_long = tmp_path / ("a" * 300)
+    with pytest.raises(errors.HomeUnavailable) as ei:
+        usecases.chat_index(out_dir=str(too_long), account="acct")
+    assert "File name too long" in str(ei.value)
