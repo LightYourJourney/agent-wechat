@@ -20,6 +20,7 @@ import argparse
 import json
 import os
 import pathlib
+import re
 
 import pytest
 
@@ -27,6 +28,7 @@ from agent_wechat import cli
 
 HERE = pathlib.Path(__file__).resolve().parent
 SNAPSHOT = HERE / "cli_defaults.json"
+USAGE_PATH = HERE.parent / "docs" / "USAGE.md"
 
 
 def _parser(monkeypatch) -> argparse.ArgumentParser:
@@ -98,20 +100,31 @@ def test_defaults_match_snapshot(monkeypatch):
 #
 # 格式：(子命令路径, 参数 dest, USAGE.md 里印的数字, USAGE.md 行号提示)
 USAGE_DOCUMENTED = [
-    ("semantic", "n", 10, "USAGE.md §4 参数表：`-n N` 返回条数，默认 10"),
-    ("moments export", "limit", 2000, "USAGE.md §? 参数表：`--limit N` 默认 2000"),
-    ("media export", "limit", 2000, "USAGE.md §? `--limit` 默认 2000（数的是本次新增）"),
-    ("media locate", "limit", 200, "USAGE.md §? 媒体归属：条数上限 1-500，默认 200"),
-    ("chat export", "limit", 500, "USAGE.md §? 时间线导出：封顶最近的 N 条，默认 500"),
+    ("semantic", "n", r"返回条数，默认 (\d+)"),
+    ("moments export", "limit", r"动态条数上限（下界 1，无上界；默认 (\d+)"),
+    ("chat export", "limit", r"\*\*最近的\*\* N 条，默认 (\d+)"),
+    ("media export", "limit", r"不限月份；--limit 默认 (\d+)"),
+    ("media locate", "limit", r"条数上限（1-500，默认 (\d+)）"),
 ]
 
 
-@pytest.mark.parametrize("cmd,dest,documented,where", USAGE_DOCUMENTED,
+@pytest.mark.parametrize("cmd,dest,pattern", USAGE_DOCUMENTED,
                          ids=[c.replace(" ", "-") for c, *_ in USAGE_DOCUMENTED])
-def test_usage_documented_defaults(monkeypatch, cmd, dest, documented, where):
-    """USAGE.md 印出来的默认值必须与 argparse 一致。"""
+def test_usage_documented_defaults(monkeypatch, cmd, dest, pattern):
+    """**从 `docs/USAGE.md` 里读出**印给用户的默认值，再与 argparse 比。
+
+    此前这条把 5 个数字硬编码在 Python 里——它只证明「代码没变」，**不证明「文档跟着变了」**
+    （实测把 USAGE 的 semantic「默认 10」改成 42，用例照样全绿）。现在数字来自文档正文：
+    文档改错、或代码改了而文档没跟，两边都会红。
+    """
+    text = USAGE_PATH.read_text(encoding="utf-8")
+    m = re.search(pattern, text)
+    assert m, f"USAGE.md 里找不到这段（正则 {pattern!r}）——是文档被改写了吗？"
+    documented = int(m.group(1))
+
     defaults = _defaults(_parser(monkeypatch))
     assert cmd in defaults, f"USAGE 写到的子命令 {cmd!r} 在 CLI 里不存在"
     assert dest in defaults[cmd], f"{cmd} 没有参数 {dest!r}"
     assert defaults[cmd][dest] == documented, (
-        f"{where}：文档写 {documented}，代码是 {defaults[cmd][dest]}")
+        f"USAGE.md 写的是 {documented}，代码是 {defaults[cmd][dest]}"
+        f"（正则 {pattern!r}）")

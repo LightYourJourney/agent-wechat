@@ -1002,7 +1002,7 @@ def execute_chat(plan: ChatPlan) -> tuple[ChatReport, ...]:
     # server 也会被算进去，那会让 `purge --chat` 在 MCP 运行时**恒被拒绝**——把一个可修的
     # 竞态换成一个必现的可用性回归。注册表里的 `running` 才是真的在写。
     try:
-        running = [t for t in tasks.status() if t.get("status") == "running"]
+        running = tasks.running()
     except Exception:                     # noqa: BLE001 —— 注册表读不出来不挡删除
         running = []                      # （与 `_holders` 的「判不出来就留着」不同：
         #   那边是「说不定有人持有，别删」；这边是「没有证据表明有人正在写」，而任务
@@ -1012,7 +1012,7 @@ def execute_chat(plan: ChatPlan) -> tuple[ChatReport, ...]:
         raise errors.PurgeRefused(
             f"有长任务正在运行（{', '.join(kinds)}），拒绝按会话销毁："
             f"它可能在本次删除之后把派生行写回来",
-            hint="等任务结束（`agent-wechat logs` / 任务状态）后重试")
+            hint="等任务结束后重试（进度可用 MCP 的 `get_task_status` 查）")
     # fail-closed（spec §4.2）：读不出排除清单就没法建立不可逆性，这一次删除就只是「暂时看不见」。
     # 宁可什么都不做，也不做一个看起来成功的假删除。
     try:

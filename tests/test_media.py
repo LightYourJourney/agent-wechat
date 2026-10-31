@@ -3281,3 +3281,57 @@ def test_a_refused_host_counts_as_missing_not_failed(tmp_path, monkeypatch):
         con.close()
     assert rep.sticker.missing == 1, rep.sticker
     assert rep.sticker.failed == 0, "白名单拒绝不是「联网失败」"
+
+
+def test_the_voice_workspace_is_recognizable_by_the_sweeper(tmp_path, monkeypatch):
+    """语音解码目录的**创建点**必须能被清扫正则认出，且带本进程 pid。
+
+    清掃端那条用例（`test_the_sweeper_also_reclaims_voice_workspaces`）用的是**手造**的
+    目录名——它证明「`awvoice-<pid>-` 这种形态会被清」，但**不证明 media.py 真的建这种名字**。
+    把 `media.py` 的创建前缀退回不带 pid 的 `awvoice-`，那条照样全绿（实测）。
+    本用例钉创建点：目录名要匹配 `decrypt._STALE_TMP_RE` 且解出本进程 pid。
+    """
+    from agent_wechat import decrypt
+
+    root, account = make_tree(tmp_path, monkeypatch)
+    ts = int(datetime.datetime(2026, 9, 15, 12, 0).timestamp())
+    mon = media.month_of(ts)
+    _voice_fixture(account, [(1, ts, 7, _silk_blob())])
+    _passthrough_decrypted(monkeypatch)
+
+    seen = []
+
+    class _FakePilk:
+        @staticmethod
+        def decode(src, dst, rate):
+            seen.append(pathlib.Path(src).parent.name)
+            pathlib.Path(dst).write_bytes(b"\x00" * 64)
+
+    monkeypatch.setattr(media, "_PILK", _FakePilk)
+    media.export_media(account, ["chatA@chatroom"], kinds=["voice"], months=[mon],
+                       out_dir=root / "home" / "media")
+
+    assert len(seen) == 1, seen
+    m = decrypt._STALE_TMP_RE.match(seen[0])
+    assert m, f"清扫认不出 media.py 建的目录名：{seen[0]}"
+    assert int(m.group(1)) == os.getpid(), f"目录名没带本进程 pid：{seen[0]}"
+
+
+def test_fetch_cdn_bytes_marks_a_non_allowlisted_host_as_refused(monkeypatch):
+    """白名单外的 host 必须返回 `"refused"` 而不是 `"failed"`——**直接断言**，不经上层计数。
+
+    上层那条用例（`test_a_refused_host_counts_as_missing_not_failed`）把 `_fetch_cdn_bytes`
+    整体桩掉了，所以它只证明「`refused` 会被记进 `missing`」，不证明「白名单真的返回
+    `refused`」。把白名单分支改回 `"failed"`，那条照样全绿（实测）。本用例补上这一环。
+    """
+    opened = []
+
+    class _Opener:
+        def open(self, *a, **k):
+            opened.append(a)
+            raise AssertionError("白名单外的 host 不该发起任何请求")
+
+    monkeypatch.setattr(media, "_cdn_opener", lambda: _Opener())
+    assert media._fetch_cdn_bytes("http://evil.example.com/x?filekey=d", "0" * 32) \
+        == (None, "refused")
+    assert opened == [], "一次请求都不该发"

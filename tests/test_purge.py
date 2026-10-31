@@ -2205,7 +2205,7 @@ def test_chat_purge_refuses_while_a_long_task_is_running(tmp_path, monkeypatch):
     """
     from agent_wechat import tasks
 
-    monkeypatch.setattr(tasks, "status",
+    monkeypatch.setattr(tasks, "running",
                         lambda: [{"task_id": "t1", "kind": "vector_build",
                                   "status": "running"}])
     plan = purge.plan_chat([{"account": "a", "chat_id": VICTIM, "chat_md5": VICTIM_MD5}])

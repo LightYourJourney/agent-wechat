@@ -663,6 +663,20 @@ def _vec_exec(con: sqlite3.Connection, sql: str, args: tuple = ()) -> sqlite3.Cu
                  "（store.connect() 不加载扩展）") from e
 
 
+def _chat_identity(account: str, chat_id: str) -> tuple[str, tuple]:
+    """→ (`WHERE` 片段的尾段, 参数)。**同一会话的全部 `chat_id` 形态一起覆盖。**
+
+    索引里同一个 `chat_md5` 可能同时有真名与退化 `md5:<hex>` 两种 `chat_id`（见 upsert 的
+    EA-012 注释）。逐处各写一份 `chat_id=?` 曾是 P0 缺陷的直接成因：计数、删除、写墓碑三处
+    都漏掉退化那批，而核查继承了同一个盲区，对着残留正文报 ✅。
+
+    **判据只有这一个来源**：新增按会话过滤的表时改这里，不要另写一份。
+    """
+    md5 = messages.chat_md5(chat_id)
+    return ("(chat_md5=? OR chat_id IN (?, ?))",
+            (account, md5, chat_id, messages.degraded_chat_id(md5)))
+
+
 def chat_row_counts(con: sqlite3.Connection, account: str, chat_id: str) -> dict[str, int]:
     """该会话在各张表里的存活条数。核查与测试共用，避免各处各写一套判据。
 
@@ -690,8 +704,8 @@ def chat_row_counts(con: sqlite3.Connection, account: str, chat_id: str) -> dict
     # 谓词是**并集**：`chat_md5` 覆盖「同一会话分裂成两种 chat_id」的全部形态，`chat_id IN`
     # 兜住历史/夹具里 `chat_md5` 与 `chat_id` 不匹配的行（真实数据两者恒一致，但索引是
     # 长期演进的，不能假设）。只用 md5 会在 `chat_md5` 不一致时**静默一条不中**。
-    a = (account, md5, chat_id, messages.degraded_chat_id(md5))
-    chat_where = "(chat_md5=? OR chat_id IN (?, ?))"
+    chat_where, a = _chat_identity(account, chat_id)
+    degraded_id = a[3]          # 退化形态 `md5:<hex>`：与真名属同一个会话
     return {
         "messages": n(f"SELECT count(*) FROM messages WHERE account=? AND {chat_where}", a),
         "vectors": (_vec_exec(con, "SELECT count(*) FROM vec_messages WHERE acct_chat=?",
@@ -702,13 +716,13 @@ def chat_row_counts(con: sqlite3.Connection, account: str, chat_id: str) -> dict
         "extras": n("SELECT count(*) FROM msg_extras WHERE substr(msg_key, 1, ?) = ?", (len(p), p)),
         "display_names": n(
             "SELECT count(*) FROM display_names WHERE account=? AND chat_id IN (?, ?)",
-            (account, chat_id, a[3])),
+            (account, chat_id, degraded_id)),
         # Phase 06：派生文本与事实记忆同属「删了就要核实真的没了」的那类数据。
         "derived": n("SELECT count(*) FROM derived_text WHERE substr(msg_key, 1, ?) = ?",
                      (len(p), p)),
         "claims": n(
             "SELECT count(*) FROM fact_claim WHERE account=? AND chat_id IN (?, ?)",
-            (account, chat_id, a[3])),
+            (account, chat_id, degraded_id)),
         "evidence": n("SELECT count(*) FROM fact_evidence WHERE substr(msg_key, 1, ?) = ?",
                       (len(p), p)),
         "derived_tombstones": n(
@@ -747,8 +761,8 @@ def delete_chat(con: sqlite3.Connection, *, account: str, chat_id: str) -> dict[
     acct_chat = messages.acct_chat(account, md5)
     p = messages.msg_key_prefix(account, md5)
     # 两种 `chat_id` 形态一起删，外加 `chat_md5` 兜底（理由见 `chat_row_counts`）。
-    a = (account, md5, chat_id, messages.degraded_chat_id(md5))
-    chat_where = "(chat_md5=? OR chat_id IN (?, ?))"
+    chat_where, a = _chat_identity(account, chat_id)
+    degraded_id = a[3]          # 退化形态 `md5:<hex>`：与真名属同一个会话
     if _has_table(con, "vec_messages"):                 # 轻装安装上不存在——见 _has_table
         # 按 **`acct_chat` 分区键**删，而不是按 `msg_rowid IN (SELECT id FROM messages …)`：
         # 后者会漏掉孤儿向量（消息行已经不在了的那些），而孤儿正是隐私删除最该清的东西。
@@ -767,10 +781,10 @@ def delete_chat(con: sqlite3.Connection, *, account: str, chat_id: str) -> dict[
     # 只按 msg_key 前缀删会留下孤儿证据，而主张一删就再也没人能定位它们。
     con.execute("DELETE FROM fact_evidence WHERE claim_id IN"
                 " (SELECT claim_id FROM fact_claim WHERE account=? AND chat_id IN (?, ?))",
-                (account, chat_id, a[3]))
+                (account, chat_id, degraded_id))
     con.execute("DELETE FROM fact_evidence WHERE substr(msg_key, 1, ?) = ?", (len(p), p))
     con.execute("DELETE FROM fact_claim WHERE account=? AND chat_id IN (?, ?)",
-                (account, chat_id, a[3]))
+                (account, chat_id, degraded_id))
     # 证据被销毁后，**没有证据的主张不得继续成立**：标记为 retracted（保留审计痕迹）。
     con.execute(
         f"UPDATE fact_claim SET status='{CLAIM_RETRACTED}',"
@@ -780,7 +794,7 @@ def delete_chat(con: sqlite3.Connection, *, account: str, chat_id: str) -> dict[
         " AND claim_id NOT IN (SELECT claim_id FROM fact_evidence)", (account,))
     con.execute(f"DELETE FROM messages WHERE account=? AND {chat_where}", a)  # FTS 跟随
     con.execute("DELETE FROM display_names WHERE account=? AND chat_id IN (?, ?)",
-                (account, chat_id, a[3]))
+                (account, chat_id, degraded_id))
     # 重嵌队列与失败账本：它们是**工作清单**，不是用户数据。删掉与删除同一事务——
     # 留着会让 Phase 03 的消费者对着已销毁的 msg_key 空转（消费侧也有排除判据兜底）。
     con.execute("DELETE FROM pending_reembed WHERE substr(msg_key, 1, ?) = ?", (len(p), p))

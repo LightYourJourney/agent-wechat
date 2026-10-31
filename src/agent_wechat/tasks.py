@@ -298,6 +298,18 @@ def update(task_id: str, **fields) -> None:
         _persist_locked({task_id: rec})
 
 
+def running() -> list[dict]:
+    """所有 `status == "running"` 的任务。
+
+    **不要用 `status()` 判「有没有在飞的任务」**：那个函数是给展示用的，只回**最近 10 条**
+    ——长任务被 10 条更新的任务挤出窗口后就查不到了，判据随之失明。`purge --chat` 的
+    「在飞任务」闸门就是因此改成调本函数。
+    """
+    with _lock:
+        _load_locked()
+        return [t for t in _tasks.values() if t.get("status") == "running"]
+
+
 def status(task_id: str | None = None) -> dict | list:
     """查询任务；task_id 省略则列出最近 ≤10 条。未知 id 抛 TaskNotFound。
 

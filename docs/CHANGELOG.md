@@ -3,6 +3,37 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 风格，
 版本号语义为 0.x 阶段（API 可能变动）。
 
+### 公开发布后的修复（2026-10-30 ~ 11-01）
+
+四轮审查（读改动对规范 / 验证文档宣称 / 深读实现 / 属性测试与 fuzz）之后的修复。
+只列**用户可见**的行为变更。
+
+**修复**
+
+- **`purge --chat` 此前会漏删**：同一会话在索引里可能同时有真名与退化 `md5:<hex>` 两种
+  `chat_id`，而计数、删除、写墓碑全按真名过滤——退化那批一条不中，核查却报 ✅，残留正文
+  仍能被 `search` 命中。判据改为 `chat_md5` 与 `chat_id` 的并集。
+- **`purge --chat` 新增在飞任务闸门**：有向量构建 / 导出在跑时拒绝执行（否则删除完成后
+  构建会把派生行写回来）。具名范围 / `--all` 那条路的 `lsof` 闸门不变。
+- **`semantic` / `semantic_search` 拒绝空查询**：此前空的 query 会退化成 k 条「最近邻」
+  噪声并返回 `total > 0`。
+- **`media export` 的 `sticker.missing` 口径扩大**：CDN 主机不在白名单、或 URL 畸形时
+  计 `missing`（「不会去取」）而不是 `failed`（「联网了但没取到」）——后者会让用户以为
+  重试有用。
+- **`message_media` / `media locate` 的 `truncated` 不再误报**：key 数恰好等于 `limit` 时
+  一条没丢，此前仍报「已截断」。
+- **`--out` 指向符号链接环或超长路径时**给单行中文错误（此前是整屏 traceback）。
+- **`sqlcipher` 调用加 300 秒超时**：此前卡住时会无限阻塞。
+- **`schedule` 印出的「下一步」命令**此前带一个不存在的 `--json` 参数。
+
+**其它**
+
+- 新增 `tests/test_cli_doc.py`：CLI 参数默认值的快照门禁 + `USAGE.md` 里 5 处默认值的
+  实时对账（文档改了而代码没改，或反之，都会红）。
+- `pyproject.toml` 补齐 `classifiers` / `urls` / `keywords`。
+- 语音解码的临时目录改为 `awvoice-<pid>-`，崩溃残留现在会被 `sweep_stale_tempdirs` 清掉
+  （此前只认 `awdec-<pid>-`）。
+
 ### 工程基线 P07（进行中）
 
 2026-10-29 起（**发布候选**）。本地可视化工作台与最终验收。

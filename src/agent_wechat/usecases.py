@@ -604,13 +604,13 @@ def _resolve_out(out_dir: str | None) -> pathlib.Path:
     try:
         root = (pathlib.Path(out_dir) if out_dir else media.export_root()).resolve()
     except RuntimeError as exc:
-        raise errors.HomeUnavailable(
+        raise errors.MediaOutputError(
             f"输出路径解析不了（符号链接环？）：{out_dir}",
             hint="换一个正常的目录重试（CLI 的 --out / MCP 的 out_dir）") from exc
     except OSError as exc:
         # 只用 `strerror`（"File name too long" / "Permission denied"），不回显路径——
         # 超长路径经 `errors.redact` 会被打成一片 `<已脱敏>`，反而读不出原因。
-        raise errors.HomeUnavailable(
+        raise errors.MediaOutputError(
             f"输出路径不可用：{exc.strerror or type(exc).__name__}",
             hint="换一个更短、可写的目录重试（CLI 的 --out / MCP 的 out_dir）") from exc
     # **探一次活**：`resolve()` 本身对超长路径不抛（它只做字符串运算），真正的
@@ -624,7 +624,7 @@ def _resolve_out(out_dir: str | None) -> pathlib.Path:
     except OSError as exc:
         # 只用 `strerror`（"File name too long" / "Permission denied"），不回显路径——
         # 超长路径经 `errors.redact` 会被打成一片 `<已脱敏>`，反而读不出原因。
-        raise errors.HomeUnavailable(
+        raise errors.MediaOutputError(
             f"输出路径不可用：{exc.strerror or type(exc).__name__}",
             hint="换一个更短、可写的目录重试（CLI 的 --out / MCP 的 out_dir）") from exc
     return root

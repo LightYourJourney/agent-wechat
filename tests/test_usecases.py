@@ -779,13 +779,13 @@ def test_out_symlink_loop_is_a_project_error_not_a_traceback(tmp_path):
     `Path.resolve()` 在 3.12 对 ELOOP 抛的是 `RuntimeError`（**不是** `OSError`），所以
     `except OSError` 接不住。此前三条 `--out` 入口（`chat_export` / `moments_export` /
     `message_media`）都会让整屏 traceback 穿到 CLI，MCP 侧则落到 `generic_payload`。
-    `paths` 对 `HOME_DIR` 侧早就有这条翻译，`--out` 侧一直没有。
+    `errors.py` 把「导出目标」归 `MediaOutputError`（不是 `HomeUnavailable`——后者是数据目录）。
     """
     a, b = tmp_path / "a", tmp_path / "b"
     a.symlink_to(b)
     b.symlink_to(a)                       # a ↔ b 互链：resolve() 抛 RuntimeError
 
-    with pytest.raises(errors.HomeUnavailable) as ei:
+    with pytest.raises(errors.MediaOutputError) as ei:
         usecases.chat_index(out_dir=str(a / "x"), account="acct")
     assert "符号链接环" in str(ei.value)
 
@@ -796,8 +796,10 @@ def test_out_path_too_long_is_a_project_error(tmp_path):
     `Path.resolve()` 对超长路径**不抛**（只做字符串运算），真正的 `OSError` /
     `ENAMETOOLONG` 要到后面的 `glob()` / `mkdir()` 才炸——而那些调用点散在四个入口里。
     实测 `chat index --out /tmp/aaaa…(300 个 a)` 此前印整屏 traceback。
+    覆盖的是走 `_resolve_out` 的三个入口（`chat export` / `chat index` / `message_media`）；
+    `media export` / `moments export` 经 `media.ensure_tree` 早已抛 `MediaOutputError`。
     """
     too_long = tmp_path / ("a" * 300)
-    with pytest.raises(errors.HomeUnavailable) as ei:
+    with pytest.raises(errors.MediaOutputError) as ei:
         usecases.chat_index(out_dir=str(too_long), account="acct")
     assert "File name too long" in str(ei.value)
