@@ -91,14 +91,21 @@ def add_from_messages(con: sqlite3.Connection, account: str, chat_id: str) -> in
     新消息不在墓碑里、却会被随后的谓词 DELETE 一并删掉——**删了但没挡**，下次 `--full`
     复活（spec §5.1）。`INSERT OR IGNORE` 让重复调用幂等。
     """
+    # **判据必须与 `delete_chat` 逐字同源**，否则就是「删了但没挡」——被删的那批不在墓碑里，
+    # 下次 `--full` 直接复活（spec §5.1 要防的正是这个）。
+    # 此前这里单独写 `chat_md5=?`：`chat_md5` 与 `chat_id` 不符的历史行会被 `delete_chat`
+    # 的并集谓词删掉、却进不了墓碑（实测：删 2 条、墓碑 1 条、重扫复活 1 条）。
+    # 惰性导入：`store` 顶层也 import 本模块（它要 `exclusions.path()` 来 ATTACH），
+    # 顶层互相 import 会成环（`check_import_cycles` 抓得到）。这里只在函数内要它。
+    from . import store
+
+    ident = store.chat_identity(account, chat_id)
     cur = con.execute(
         "INSERT OR IGNORE INTO exclusions.excluded "
         "(msg_key, account, chat_md5, excluded_at) "
         "SELECT msg_key, account, chat_md5, ? FROM messages "
-        "WHERE account=? AND chat_md5=?",
-        # 按 **`chat_md5`** 而不是 `chat_id` 选：同一会话可能同时存在真名与退化 `md5:<hex>`
-        # 两种 id，只挡其中一种会让另一批行在下次 `--full` 复活（与 store 侧的判据一致）。
-        (int(time.time()), account, messages.chat_md5(chat_id)))
+        f"WHERE account=? AND {ident.messages_where}",
+        (int(time.time()), *ident.messages_args))
     return cur.rowcount
 
 

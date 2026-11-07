@@ -595,7 +595,8 @@ agent-wechat purge --all --yes        # 整个 ~/.agent-wechat（含 models/、t
 - 有长任务正在运行（**仅 `purge --chat`**）——向量构建 / 导出是「先读消息、再写派生行」的
   两段式，删除落在那两段之间时，核查看不到还没写回的行、报 ✅，随后构建把 `vec_messages`
   写回来（`preview` 列就是被删正文的纯文本），孤儿向量永久留存。判据是任务注册表里
-  `status == "running"` 的那批（**不是** `agent-wechat status`——那个只回最近 10 条）；
+  `status == "running"` 的那批。**不要用 `agent-wechat status` 判断**：那条命令印的是登录态、
+  账号与密钥缓存，根本不列任务；只回最近 10 条的是 MCP 的 `get_task_status`；
 - 待删路径是符号链接。**文件型产物（`--keys`/`--index` 的目标）本身是链接时无条件拒绝**
   ——unlink 只删链接、目标必留存，核查会报「已清空」；**目录型产物（`--media`/`--moments`/
   `--tmp` 的目标）、`--all`，以及 `purge --chat` 的 `media/<会话md5>/` 走 rmtree，还会扫各自
@@ -641,10 +642,11 @@ agent-wechat purge --excluded              # 列出排除清单的规模（按�
   照常进索引。
 - **执行期间正在跑的导出任务会因写锁而失败**（spec §5.3）：本命令在读任何东西**之前**就
   `BEGIN IMMEDIATE` 取写锁（SQLite 同时只允许一个写者），于是后台那一次 `export` 的下一批
-  写入会等满 Python `sqlite3` 的默认 5 秒，然后抛 `database is locked`。**另一侧拦不住**
-  ——purge 是独立进程，`tasks` 注册表一读就把磁盘上的 running 误判成 failed，没有可靠的
-  提前探测手段——所以这句写在计划表里，让你先知道再决定；等导出跑完再执行即可。反过来，
+  写入会等满 Python `sqlite3` 的默认 5 秒，然后抛 `database is locked`。**具名范围 / `--all`
+  这条路拦不住**——它不查任务注册表。等导出跑完再执行即可。反过来，
   **purge 自己拿不到写锁时**会以 `PurgeRefused` 退 1，不许接住异常继续删（spec §6）。
+  （`purge --chat` 另有一道在飞任务闸门，见上文「拒绝执行的六种情形」；`tasks` 注册表的
+  `running` 状态由写它的那个进程维护，跨进程可读。）
 - **会话一条消息都没有时照样走完整流程**（spec §5.7）：计划表照印（各项 0 条、不写墓碑），
   但**导出物那一行是真的**——`media/<会话md5>/` 里解密出的图/语音/HTML 与索引里有没有行
   无关（典型是 `purge --index` 之后索引被逐会话重建、这个会话还没被重新导出）。`--yes`

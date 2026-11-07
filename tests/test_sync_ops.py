@@ -390,3 +390,37 @@ def test_schedule_commands_point_at_an_invocable_doctor(monkeypatch):
     for tok in argv[1:]:
         assert tok in legal, (
             f"`{cmd}` 里的 `{tok}` 不被 `doctor` 接受；合法选项：{sorted(legal)}")
+
+
+def test_tasks_running_sees_beyond_the_ten_item_display_window(tmp_path, monkeypatch):
+    """`tasks.running()` 必须看到**全部**在跑的任务，而不是展示用的最近 10 条。
+
+    `purge --chat` 的闸门用它判「有没有长任务在飞」。此前闸门调 `tasks.status()`——那个函数
+    是给展示用的，只回最近 10 条：长任务被 10 条更新的任务挤出窗口后，闸门就失明了。
+    改回 `status()` 或给它加 `[:10]`，本用例变红。
+    """
+    import json
+
+    from agent_wechat import tasks
+
+    f = tmp_path / "tasks.json"
+    monkeypatch.setattr(paths, "HOME_DIR", tmp_path)
+    monkeypatch.setattr(tasks, "TASKS_FILE", f)
+
+    # `status()` 每次都会 `_load_locked()` 重读磁盘，所以夹具必须**落到文件里**。
+    recs = {f"done{i}": {"task_id": f"done{i}", "status": "succeeded", "started_at": 1000 + i}
+            for i in range(11)}                       # 11 条更新的、已结束的，占满窗口
+    # 运行中的记录要过 `_harvest` 两道：pid 还活着、心跳不过期（否则被收割成 failed）。
+    import os
+    import time as _t
+    recs["long"] = {"task_id": "long", "status": "running", "started_at": 1,
+                    "pid": os.getpid(), "updated_at": int(_t.time())}
+    f.write_text(json.dumps(recs), encoding="utf-8")
+
+    shown = tasks.status()
+    assert len(shown) == 10 and "long" not in {t["task_id"] for t in shown}, \
+        "前提：status() 的 10 条窗口确实看不到它"
+
+    running = tasks.running()
+    assert [t["task_id"] for t in running] == ["long"], \
+        "running() 必须读全量，不能被展示窗口截断"

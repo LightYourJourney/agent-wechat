@@ -473,3 +473,69 @@ def test_delete_chat_recomputes_embedded_from_actual_rows(_temp_index):
     got = con.execute("SELECT embedded FROM vector_meta WHERE model_id='m'").fetchone()[0]
     assert left == 1, "前提：只该剩下 keeper 那一行"
     assert got == left, f"embedded 必须等于删除后的真实行数 {left}（重算），实际 {got}"
+
+
+def test_tombstone_covers_the_same_rows_that_get_deleted(_temp_index):
+    """**墓碑与删除必须覆盖同一批行**，否则就是「删了但没挡」——下次 `--full` 复活。
+
+    此前 `exclusions.add_from_messages` 单独写 `chat_md5=?`，而 `delete_chat` 用并集
+    `(chat_md5=? OR chat_id IN (真名, 退化))`：`chat_md5` 与 `chat_id` 不符的历史行会被删、
+    却进不了墓碑。实测（2 行，一行 md5 不符）：删 2 条、墓碑 1 条、重扫复活 1 条。
+
+    现在两边共用 `store.chat_identity()` 一个来源。
+    """
+    con = _temp_index
+    real = "wxid_testacct01_ab12"
+    cm = messages.md5_of(real)
+
+    def row(mk, row_md5, lid, content):
+        return {"msg_key": mk, "account": "a", "chat_md5": row_md5, "chat_id": real,
+                "shard": "message_0.db", "local_id": lid, "server_id": lid,
+                "ts": 900 + lid, "msg_type": 1, "sender_id": None, "sender_name": None,
+                "is_self": 0, "content": content, "media_hint": None}
+
+    store.upsert_batch(con, [
+        row(f"a|{cm}|message_0.db|1", cm, 1, "正常那行"),
+        row("a|othermd5|message_0.db|2", "othermd5", 2, "md5 与 chat_id 不符"),
+    ])
+    con.execute("BEGIN IMMEDIATE")
+    tombstoned = exclusions.add_from_messages(con, "a", real)
+    deleted = store.delete_chat(con, account="a", chat_id=real)
+    con.commit()
+
+    assert deleted["messages"] == 2, "并集谓词应删掉两行"
+    assert tombstoned == 2, f"墓碑必须与删除同覆盖（实际 {tombstoned}，删除 {deleted['messages']}）"
+    keys = {r[0] for r in con.execute("SELECT msg_key FROM exclusions.excluded")}
+    for mk in (f"a|{cm}|message_0.db|1", "a|othermd5|message_0.db|2"):
+        assert mk in keys, f"{mk} 被删了却没进墓碑——下次 --full 会复活"
+
+
+def test_only_chat_id_tables_cover_the_degraded_form(_temp_index):
+    """`display_names` / `fact_claim` 只有 `chat_id` 列，也必须覆盖退化形态。
+
+    这两张表此前**没有任何断言**：把 `chat_identity().chat_id_args` 换成只认真名
+    （或把参数顺序对调），全域测试仍绿——退化那批行会被静默漏删。
+    """
+    con = _temp_index
+    real = "wxid_testacct01_ab12"
+    cm = messages.md5_of(real)
+    deg = messages.degraded_chat_id(cm)
+
+    con.execute("INSERT INTO display_names(account, chat_id, member_key, display_name)"
+                " VALUES(?,?,?,?)", ("a", deg, "", "退化形态的显示名"))
+    con.execute("INSERT INTO fact_claim(claim_id, account, chat_id, claim, status,"
+                " created_at, updated_at) VALUES(?,?,?,?,?,?,?)",
+                ("c-deg", "a", deg, "退化形态下的主张", "candidate", 1, 1))
+
+    counts = store.chat_row_counts(con, "a", real)
+    assert counts["display_names"] == 1, "退化形态的 display_names 没被数到"
+    assert counts["claims"] == 1, "退化形态的 fact_claim 没被数到"
+
+    con.commit()                       # 先把上面的 INSERT 提交掉，再开删除事务
+    con.execute("BEGIN IMMEDIATE")
+    deleted = store.delete_chat(con, account="a", chat_id=real)
+    con.commit()
+    assert deleted["display_names"] == 1 and deleted["claims"] == 1
+    for table, col in (("display_names", "chat_id"), ("fact_claim", "chat_id")):
+        left = con.execute(f"SELECT count(*) FROM {table} WHERE {col}=?", (deg,)).fetchone()[0]
+        assert left == 0, f"{table} 里还留着退化形态那一行"
