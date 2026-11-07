@@ -187,11 +187,10 @@ def test_delete_chat_covers_both_chat_id_forms(_temp_index):
     deg = messages.degraded_chat_id(cm)
 
     def row(lid, cid, content):
-        return {"msg_key": f"a|{cm}|message_0.db|{lid}", "account": "a", "chat_md5": cm,
-                "chat_id": cid, "shard": "message_0.db", "local_id": lid,
-                "server_id": lid, "ts": 500 + lid, "msg_type": 1, "sender_id": None,
-                "sender_name": None, "is_self": 0, "content": content,
-                "media_hint": None}
+        return messages.make_row(account="a", chat_md5=cm, chat_id=cid,
+                                 shard="message_0.db", local_id=lid, ts=500 + lid,
+                                 msg_type=1, sender_id=None, sender_name=None,
+                                 is_self=0, content=content, media_hint=None)
 
     store.upsert_batch(con, [row(1, real, "真名那条"), row(2, deg, "退化那条")])
 
@@ -488,15 +487,17 @@ def test_tombstone_covers_the_same_rows_that_get_deleted(_temp_index):
     real = "wxid_testacct01_ab12"
     cm = messages.md5_of(real)
 
-    def row(mk, row_md5, lid, content):
-        return {"msg_key": mk, "account": "a", "chat_md5": row_md5, "chat_id": real,
-                "shard": "message_0.db", "local_id": lid, "server_id": lid,
-                "ts": 900 + lid, "msg_type": 1, "sender_id": None, "sender_name": None,
-                "is_self": 0, "content": content, "media_hint": None}
-
+    # `msg_key` 由 `make_row` 从 (account, chat_md5, shard, local_id) 派生——
+    # 「md5 与 chat_id 不符」那行靠传不同的 `chat_md5` 表达，不必手写 msg_key。
     store.upsert_batch(con, [
-        row(f"a|{cm}|message_0.db|1", cm, 1, "正常那行"),
-        row("a|othermd5|message_0.db|2", "othermd5", 2, "md5 与 chat_id 不符"),
+        messages.make_row(account="a", chat_md5=cm, chat_id=real, shard="message_0.db",
+                          local_id=1, ts=901, msg_type=1, sender_id=None,
+                          sender_name=None, is_self=0, content="正常那行",
+                          media_hint=None),
+        messages.make_row(account="a", chat_md5="othermd5", chat_id=real,
+                          shard="message_0.db", local_id=2, ts=902, msg_type=1,
+                          sender_id=None, sender_name=None, is_self=0,
+                          content="md5 与 chat_id 不符", media_hint=None),
     ])
     con.execute("BEGIN IMMEDIATE")
     tombstoned = exclusions.add_from_messages(con, "a", real)

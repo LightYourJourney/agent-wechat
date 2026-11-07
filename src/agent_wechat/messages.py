@@ -11,8 +11,56 @@ WCDB 压缩），本模块讲**本地** messages 行。此前「一行 messages�
 """
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 from typing import TypedDict
+
+# ---------- 会话身份：同一会话的全部 id 形态 ----------
+
+@dataclasses.dataclass(frozen=True)
+class ChatIdentity:
+    """一个会话在索引里的**全部**形态。所有按会话过滤的地方都从这里取判据。
+
+    索引里同一个 `chat_md5` 可能同时有真名与退化 `md5:<hex>` 两种 `chat_id`（见
+    `degraded_chat_id` 与 upsert 的 EA-012 注释）。逐处各写一份曾是 P0 缺陷的直接成因：
+    计数、删除、写墓碑三处都漏掉退化那批，而核查继承了同一个盲区，对着残留正文报 ✅。
+
+    **放在本模块而不是 `store`**：判据只用到 `chat_md5` / `degraded_chat_id` 这两个
+    本模块自己定义的东西，不碰任何 schema；而本模块的「不 import 任何项目模块」约束
+    正是它作为归属层的理由——放 `store` 里会让 `exclusions` 只能靠函数内惰性导入
+    来绕过 `exclusions ↔ store` 的环，那是在回避分层问题，不是在修它。
+
+    **不要按位置解包**：早先返回 `(where, args)` 四元组、调用方靠 `a[3]` 取退化 id，
+    把第 3/4 项对调后全部测试仍绿——判据的顺序没有任何东西锁着。
+    """
+    account: str
+    md5: str
+    chat_id: str
+    degraded_id: str
+
+    @classmethod
+    def of(cls, account: str, chat_id: str) -> "ChatIdentity":
+        md5 = chat_md5(chat_id)
+        return cls(account=account, md5=md5, chat_id=chat_id,
+                   degraded_id=degraded_chat_id(md5))
+
+    @property
+    def messages_args(self) -> tuple:
+        return (self.account, self.md5, self.chat_id, self.degraded_id)
+
+    @property
+    def chat_id_args(self) -> tuple:
+        return (self.account, self.chat_id, self.degraded_id)
+
+    @property
+    def messages_where(self) -> str:
+        return "(chat_md5=? OR chat_id IN (?, ?))"
+
+    @property
+    def chat_id_where(self) -> str:
+        """**只有 `chat_id` 列**的表（`display_names` / `fact_claim`）的 WHERE 尾段。"""
+        return "chat_id IN (?, ?)"
+
 
 # ---------- 列清单 ----------
 
