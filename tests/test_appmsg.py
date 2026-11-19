@@ -543,6 +543,9 @@ def test_secret_value_separator_set_covers_semicolon_and_comma():
     "http://x/y?token=DEADBEEF",
     "http://x/y?a=1;token=DEAD",             # 分隔符 ; 是既有实测
     "http://x/y?a=1,passphrase=DEAD",        # 分隔符 , 同上
+    "http://x/y?X-Amz-Security-Token=DEAD",  # 参数名带 `-`：曾在 `-` 处断开放行
+    "http://x/y?access-token=DEAD",
+    "http://x/y?a=1&sig.token=DEAD",         # 参数名带 `.`
 ])
 def test_credential_param_names_are_dropped(url):
     """参数名以 key/token/passphrase/aeskey 结尾的一律算凭据，**不管前面有无限定词**。

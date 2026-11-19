@@ -72,8 +72,9 @@ def _harvest(rec: dict, now: int) -> dict:
     return rec
 
 
-def _read() -> dict[str, dict] | None:
-    """读 + 解析 + 收割。文件不存在 → {}（稳定空表）；读不动/解不开/根不是对象 → None。"""
+def snapshot() -> dict[str, dict] | None:
+    """读 + 解析 + 收割（**纯内存、不写盘**——`doctor` 靠这一点保持只读）。
+    文件不存在 → {}（稳定空表）；读不动/解不开/根不是对象 → None。"""
     try:
         raw = json.loads(TASKS_FILE.read_text())
     except FileNotFoundError:
@@ -154,7 +155,7 @@ def _load_locked() -> None:
     """
     global _tasks
     _sweep_stale_tmp()
-    disk = _read()
+    disk = snapshot()
     if disk is not None:
         _tasks = disk
 
@@ -169,7 +170,7 @@ def _persist_locked(changed: dict[str, dict]) -> None:
     ENOENT 窗口。读不动时以内存视图为准照常写——下一次落盘就把坏文件修好。
     """
     paths.ensure_home_dirs()          # 收口闸：HOME 指进容器时在这里拒绝（复审补）
-    disk = _read()
+    disk = snapshot()
     merged = disk if disk is not None else dict(_tasks)
     merged.update(changed)
     tmp = TASKS_FILE.with_name(f"{TASKS_FILE.name}.{os.getpid()}.tmp")

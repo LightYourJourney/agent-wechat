@@ -146,7 +146,8 @@ class SchemaMigrationError(AgentWeChatError):
 
 
 class ScopeDenied(AgentWeChatError):
-    """该会话在用户声明的**读取范围**之外（`AGENT_WECHAT_DENY`）。"""
+    """该会话在用户声明的**读取范围**之外（`AGENT_WECHAT_DENY`），或已被 `purge --chat`
+    销毁而拒绝重新导出它的媒体。"""
 
 
 class DerivedInputError(AgentWeChatError):

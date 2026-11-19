@@ -102,10 +102,15 @@ def refuse_if_newer(con: sqlite3.Connection, *, scope: str, latest: int,
     """
     cur = version_if_table_exists(con, scope, table)
     if cur > latest:
-        raise errors.SchemaMigrationError(
-            f"索引库版本过新：{scope} 已到 v{cur}，本程序只认到 v{latest}",
-            hint="升级 agent-wechat 到匹配的版本；或从备份恢复旧库。"
-                 "不要用旧版程序继续写这个库")
+        raise _too_new(scope, cur, latest)
+
+
+def _too_new(scope: str, cur: int, latest: int) -> errors.SchemaMigrationError:
+    """「库比程序新」的唯一一份文案：三处拒绝点（入口闸、快路径、写锁内重读）共用。"""
+    return errors.SchemaMigrationError(
+        f"索引库版本过新：{scope} 已到 v{cur}，本程序只认到 v{latest}",
+        hint="升级 agent-wechat 到匹配的版本；或从备份恢复旧库。"
+             "不要用旧版程序继续写这个库")
 
 
 def _stamp(con: sqlite3.Connection, scope: str, version: int,
@@ -160,9 +165,7 @@ def apply(con: sqlite3.Connection, *, scope: str,
             f"读取 schema 版本失败：{scope}：{errors.redact(str(exc))}",
             hint="确认索引库可读、且没有别的进程正在写它") from exc
     if cur > latest:
-        raise errors.SchemaMigrationError(
-            f"索引库版本过新：{scope} 已到 v{cur}，本程序只认到 v{latest}",
-            hint="升级 agent-wechat 到匹配的版本；或从备份恢复旧库")
+        raise _too_new(scope, cur, latest)
     if cur == latest and cur != 0:
         return cur
 
@@ -170,9 +173,7 @@ def apply(con: sqlite3.Connection, *, scope: str,
         con.execute("BEGIN IMMEDIATE")
         cur = stored_version(con, scope, table)      # 写锁内重读：并发安全
         if cur > latest:
-            raise errors.SchemaMigrationError(
-                f"索引库版本过新：{scope} 已到 v{cur}，本程序只认到 v{latest}",
-                hint="升级 agent-wechat 到匹配的版本；或从备份恢复旧库")
+            raise _too_new(scope, cur, latest)
         if cur == 0:
             _stamp(con, scope, baseline, table)
             cur = baseline

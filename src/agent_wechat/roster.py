@@ -113,14 +113,15 @@ def parse_members(blob: bytes | None) -> list[tuple[str, str | None]]:
     return out
 
 
-def _display(group_nick: str | None, contact: tuple[str, str] | None, key: str) -> str:
+def _display(group_nick: str | None, contact: tuple[str | None, str | None] | None,
+             key: str) -> str:
     """群昵称 → 备注 → 昵称 → username。**全项目唯一一份这条规则。**"""
     remark, nick = contact or ("", "")
     return group_nick or remark or nick or key
 
 
 def build_rows(groups: dict[str, list[tuple[str, str | None]]],
-               contacts: dict[str, tuple[str, str]]) -> list[RosterRow]:
+               contacts: dict[str, tuple[str | None, str | None]]) -> list[RosterRow]:
     """算出全部 `display_names` 行：群成员 + 私聊。
 
     `groups`: `{chat_id: parse_members(ext_buffer) 的结果}`

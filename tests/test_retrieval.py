@@ -181,6 +181,23 @@ def test_denied_chat_is_filtered_and_refused(tmp_path, monkeypatch):
         retrieval.get_context(_key(CHAT_B, 1), account=ACCT)
 
 
+def test_deny_is_applied_before_truncation_and_not_counted(tmp_path, monkeypatch):
+    """拒读在截断**之前**生效、且不计入 `candidates`。
+
+    此前先截到 limit 再滤：`limit=1` 而第一名在被拒会话里时答 0 条；`candidates`
+    还把被拒会话的命中数了进去——等于透露那个会话里有几条匹配。
+    """
+    _env(tmp_path, monkeypatch, with_vector=False)
+    with store.open() as con:
+        store.upsert_batch(con, [_row(CHAT_A, 10, "共同关键词甲"),
+                                 _row(CHAT_B, 11, "共同关键词乙"),    # 更新 → 排第一
+                                 _row(CHAT_B, 12, "共同关键词丙")])
+    monkeypatch.setenv("AGENT_WECHAT_DENY", CHAT_B)
+    res = retrieval.search_messages("共同关键词", account=ACCT, mode="keyword", limit=1)
+    assert [h["msg_key"] for h in res["hits"]] == [_key(CHAT_A, 10)]
+    assert res["candidates"] == 1
+
+
 # ---------------------------------------------------------------- 两阶段披露
 
 def test_context_returns_full_text_and_neighbours(tmp_path, monkeypatch):

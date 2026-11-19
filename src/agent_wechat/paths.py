@@ -53,8 +53,8 @@ def container_verdict(p: str | pathlib.Path) -> bool | None:
     写闸门（`refuse_container_out` / `ensure_home_dirs`）必须按 `is not False` 判——
     R2-A-008（P1）实测：判不出来时返回 False，会让 `ensure_home_dirs` 把数据目录**建进
     容器**。读路径保留 False 语义（`in_wechat_container` 是它的薄壳），两件事分开。
-    """
-    """`p` 解析后是否落在**微信容器的可写范围**之内。
+
+    判的是 `p` 解析后是否落在**微信容器的可写范围**之内。
 
     范围（两段，`container_bundle()` 为一端）：
     - `…/com.tencent.xinWeChat` 本身及其**全部子路径**——不只是 `Data` / `Documents`：
@@ -75,9 +75,9 @@ def container_verdict(p: str | pathlib.Path) -> bool | None:
     只在「真的指同一目录」时为真，在区分大小写的卷上不会误伤（那时两种拼写是两个目录，
     且容器通常根本不存在）。
 
-    判不出来（符号链接环 / 权限不足）返回 False：这种路径在随后的实际写入里会自己失败，
-    在这里谎报「在容器里」是错诊断。**写闸门不依赖这个 False**——`ensure_home_dirs` /
-    `refuse_container_out` 另做一步「能不能证明自己在容器外」（R2-A-008，P1）。
+    判不出来（符号链接环 / 权限不足 / 代理对）返回 **None**（见开头）：读路径经
+    `in_wechat_container` 收成 False——那种路径在随后的实际写入里会自己失败，谎报「在容器
+    里」是错诊断；写闸门按 `is not False` 判，判不出来即拒绝（R2-A-008，P1）。
     """
     try:
         resolved = pathlib.Path(p).resolve(strict=False)
@@ -167,6 +167,25 @@ def refuse_container_out(p: str | pathlib.Path) -> None:
                  "例如 ~/Desktop/wechat-export")
 
 
+def _tighten_home_mode() -> None:
+    """把**已存在**的数据目录收紧到 0700（SECURITY：「全目录 0700」）。
+
+    `mkdir(mode=0o700)` 只管新建：`AGENT_WECHAT_HOME` 指向一个既有的 0755 目录时，里面的
+    明文索引（sqlite 建的文件是 0644）对本机其他用户可读。父目录 0700 即可挡住其下全部
+    文件，故只收紧这一层。**不碰 `$HOME` 及其祖先**：把它们 chmod 掉是越权的副作用。
+    收紧失败（目录不归本用户）不抛——`doctor` 会把权限问题报出来。
+    """
+    try:
+        if HOME_DIR.stat().st_mode & 0o077 == 0:
+            return
+        home = pathlib.Path.home().resolve()
+        if HOME_DIR.resolve() in (home, *home.parents):
+            return
+        os.chmod(HOME_DIR, 0o700)
+    except OSError:
+        pass
+
+
 def ensure_home_dirs() -> None:
     """确保数据目录存在（0700）并排除出 Time Machine（幂等，失败静默）。
 
@@ -199,6 +218,7 @@ def ensure_home_dirs() -> None:
         raise HomeUnavailable(
             f"数据目录不可用：{HOME_DIR}",
             hint=f"{exc}；请检查 AGENT_WECHAT_HOME 指向的位置是否可用") from exc
+    _tighten_home_mode()
     if not _tm_exclusion_checked:
         _tm_exclusion_checked = True
         if shutil.which("tmutil") is not None:
@@ -302,8 +322,9 @@ def launch_agents_dir() -> pathlib.Path:
     """launchd 用户级目录：**真实家目录**下的 `~/Library/LaunchAgents`。
 
     **刻意不跟随 `AGENT_WECHAT_HOME` / `HOME_DIR`**：launchd 只扫描真实家目录，
-    写到别处不会被加载。这是本模块里唯一一处合法使用 `Path.home()` 的地方——
-    其余路径都由 `HOME_DIR` 派生。测试 monkeypatch 本函数来隔离。
+    写到别处不会被加载。与 `CONTAINER` / `HOME_DIR` 的默认值、`whisper_model_candidates`、
+    `_tighten_home_mode` 一样，是本模块里**确实指向用户主目录**的少数几处——
+    本工具自己的产物路径都由 `HOME_DIR` 派生。测试 monkeypatch 本函数来隔离。
     """
     return pathlib.Path.home() / "Library" / "LaunchAgents"
 

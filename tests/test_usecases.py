@@ -378,6 +378,7 @@ def test_export_task_carries_skipped_rows_beside_rows(tmp_path, monkeypatch):
             yield victim_rows + keep_rows, []      # 微信库里那两条「还在」
 
         audit_marks: dict = {}
+        _drift: list = []        # 真实 reader 的漂移账本：runner 跑完会经 on_reader 收它
 
     monkeypatch.setattr(reader, "MessageReader", _R)
 
@@ -420,6 +421,59 @@ def test_media_export_wires_single_chat_and_passes_limit_through(stub, monkeypat
                     "force": False, "con": None, "with_cdn": False}
     assert res.chat_id == "wxid_target" and res.out_dir == "/default/media"
     assert res.report.image.ok == 1
+
+
+def test_media_export_absolutizes_a_relative_out_dir(stub, monkeypatch, tmp_path):
+    """显式相对 out_dir 必须先绝对化（同 chat_export / message_media）：信封的 out_dir
+    回到 MCP 客户端，相对路径它用不了。"""
+    from agent_wechat import media
+    _unique(stub)
+    seen: dict = {}
+
+    def fake_export_media(account, chat_ids, *, kinds, months, out_dir, max_files,
+                          force=False, progress=None, con=None, with_cdn=False):
+        seen["out_dir"] = out_dir
+        return media.MediaReport(out_dir=str(out_dir))
+
+    monkeypatch.setattr(media, "export_media", fake_export_media)
+    monkeypatch.chdir(tmp_path)
+    usecases.media_export("张三", kinds=["image"], out_dir="rel/out")
+    assert seen["out_dir"] == (tmp_path / "rel" / "out").resolve()
+
+
+def test_media_export_refuses_a_purged_chat(stub, monkeypatch):
+    """被 `purge --chat` 立过碑的会话拒绝重导媒体：媒体按磁盘目录取件、不经排除清单，
+    放行会把刚删掉的明文写回来（SECURITY「不会因重导复活」）。拒绝必须发生在任何取件之前。"""
+    import sqlite3
+    from agent_wechat import exclusions, media
+    _unique(stub)
+    called = []
+    monkeypatch.setattr(media, "derive_keys", lambda a: called.append(1))   # 图片取件的第一步
+
+    paths.HOME_DIR.mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(":memory:")
+    con.execute("ATTACH DATABASE ? AS exclusions", (str(exclusions.path()),))
+    con.executescript(exclusions.SCHEMA)
+    cm = messages.chat_md5("wxid_target")
+    exclusions.add(con, [(messages.row_key("acct", cm, "message_0.db", 1), "acct", cm)])
+    con.commit()
+    con.close()
+
+    with pytest.raises(errors.ScopeDenied, match="purge --chat"):
+        usecases.media_export("张三", kinds=["image"])
+    assert called == [], "拒绝必须先于任何取件"
+    assert not media.export_root().exists(), "拒绝必须先于建输出目录"
+
+
+def test_account_status_rejects_an_unknown_explicit_account(monkeypatch):
+    """显式 account 不在本机账号目录里 → 报错（通用约定）；此前答 `key_ready: false`，
+    把 agent 引向「重新 bootstrap」。"""
+    from types import SimpleNamespace
+    monkeypatch.setattr(account, "status", lambda: SimpleNamespace(
+        running=True, pid=1, current="wxid_testacct01_ab12", accounts=["wxid_testacct01_ab12"]))
+    monkeypatch.setattr(paths, "account_dirs", lambda: ["wxid_testacct01_ab12"])
+    with pytest.raises(errors.AccountNotFound, match="wxid_abc123def456"):
+        usecases.account_status("wxid_abc123def456")
 
 
 def test_media_export_opens_index_for_video(stub, monkeypatch):

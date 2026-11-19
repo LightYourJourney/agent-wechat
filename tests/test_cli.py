@@ -2554,3 +2554,33 @@ def test_ui_reports_a_bad_port_in_one_line(monkeypatch, capsys):
     err = capsys.readouterr().err
     assert "无法在端口 -1 上启动工作台" in err
     assert "Traceback" not in err
+
+
+def test_cli_status_prints_the_same_index_notes_as_mcp(tmp_path, monkeypatch, capsys):
+    """CLI `status` 与 MCP `get_account_status` 同一份索引自检：库读不出来时 CLI 也要说。"""
+    from types import SimpleNamespace
+
+    from agent_wechat import exclusions
+    monkeypatch.setattr(account, "status", lambda: SimpleNamespace(
+        running=True, pid=999, current=None, accounts=[]))
+    monkeypatch.setattr(paths, "time_machine_excluded", lambda: None)
+    store.DB_PATH.write_bytes("这不是数据库".encode())
+    exclusions.path_for(store.DB_PATH).write_bytes(b"")
+
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["status"])
+    assert ei.value.code == 0
+    assert "索引库: 索引库读不出来" in capsys.readouterr().out
+
+
+def test_vector_status_has_the_same_keys_with_or_without_an_index(capsys):
+    """没有索引时的零值字典曾少了 `by_reason`：同一条命令的 JSON 形状随有无索引而变。"""
+    from agent_wechat import vector
+    assert not store.DB_PATH.exists()
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["vector-status"])
+    assert ei.value.code == 0
+    empty = json.loads(capsys.readouterr().out)
+    with store.open() as con:
+        real = vector.freshness(con, None)
+    assert set(empty) == set(real)

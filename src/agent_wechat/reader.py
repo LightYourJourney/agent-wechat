@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import html
 import sqlite3
 import zlib
 from collections.abc import Callable, Iterator, Mapping
@@ -62,7 +63,16 @@ def _decode_content(raw, ct_flag) -> str | None:
     if ct_flag == 4:
         if _ZSTD is None:
             raise DependencyMissing("缺少 zstandard：uv add zstandard")
-        return _ZSTD.decompress(raw).decode("utf-8", "replace")
+        try:
+            # `decompressobj` 而不是 `decompress`：后者遇到头部不带内容长度的合法帧直接抛
+            # 「could not determine content size」。
+            return _ZSTD.decompressobj().decompress(raw).decode("utf-8", "replace")
+        except zstandard.ZstdError as exc:
+            # core 只抛项目异常（ARCHITECTURE）：裸 ZstdError 会以 traceback 穿到入口。
+            raise errors.DecryptError(
+                f"消息正文解压失败（zstd）：{exc}",
+                hint="该条消息在微信库里可能已损坏；等微信完成同步后重试，仍失败请附带此信息反馈"
+            ) from exc
     return raw.decode("utf-8", "replace")
 
 
@@ -74,7 +84,14 @@ def _media_hint(t: int, content: str | None) -> str | None:
     if t == messages.TYPE_TEXT or t in (messages.TYPE_SYSTEM, messages.TYPE_REVOKE):
         return None
     if t == messages.TYPE_APPMSG and content and "<title>" in content:
-        title = content.split("<title>", 1)[1].split("</title>", 1)[0].strip()
+        raw = content.split("<title>", 1)[1].split("</title>", 1)[0].strip()
+        # 这是 XML 的文本节点：CDATA 去壳（内容按字面），否则做实体反转义——此前
+        # `Q&amp;A` 原样入库，FTS 搜「Q&A」搜不到、展示也带着 `&amp;`。不走
+        # `appmsg.parse`：这里是逐行导出的热路径，为一个标题解析整段 XML 不划算。
+        if raw.startswith("<![CDATA[") and raw.endswith("]]>"):
+            title = raw[len("<![CDATA["):-len("]]>")].strip()
+        else:
+            title = html.unescape(raw)
         return messages.appmsg_hint(title)
     return f"[{_type_name(t)}]"
 
@@ -303,7 +320,7 @@ class MessageReader:
         名册的**规则**不在这里——`roster.build_rows` 是全项目唯一那份。
         """
         groups: dict[str, list[tuple[str, str | None]]] = {}
-        contacts: dict[str, tuple[str, str]] = {}
+        contacts: dict[str, tuple[str | None, str | None]] = {}
         with self._open("contact/contact.db") as con:
             # 源一：群成员与群昵称（`name2id` 被下一条 SQL 的 JOIN 用到，属同一个源）
             try:
@@ -322,8 +339,8 @@ class MessageReader:
             # 源二：全部联系人（私聊行 + 群成员的名字来源）
             try:
                 self._check("roster", "contact/contact.db", con, only="contact")
-                # **不带 limit**：`_contacts_all_cached()` 走的是 contacts(limit=5000)，
-                # 而真实 contact 表有 12,782 行——拿它当名册会静默漏掉一半人（spec §2.6）。
+                # **不带 limit**：真实 contact 表有 12,782 行——任何窗口都会让名册静默漏人
+                # （spec §2.6；`_contacts_all_cached()` 当年取前 5000 行就是这么漏的）。
                 for u, remark, nick in con.execute(
                         "SELECT username, remark, nick_name FROM contact "
                         "WHERE COALESCE(delete_flag,0)=0"):

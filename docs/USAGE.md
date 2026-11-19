@@ -436,6 +436,9 @@ agent-wechat media export --chat filehelper --kinds image --months 2026-09 --lim
 # 导到别处（--out 是持久明文目录，用完自行清理；微信目录始终只读）
 agent-wechat media export --chat 小李 --out /tmp/media-out
 
+# 被 `purge --chat` 销毁过的会话会被拒绝（不把删掉的明文写回来）；确需导出先解除墓碑：
+#   agent-wechat purge --chat 小李 --undo --yes
+
 # 存量历史回填「消息 → 媒体文件」映射（全量重扫该账号分片，幂等；本机实测 22.6 秒）
 agent-wechat media rebuild-refs
 #   已回填 21880 条媒体引用…

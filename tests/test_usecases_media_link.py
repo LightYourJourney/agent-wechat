@@ -45,10 +45,14 @@ class _FakeCtx:
     def resolve(self, contact):
         return self._chat
 
+    def drift(self):
+        """真实 `ChatContext.drift()` 的形状：`Degradation` 元组（reader 已构造的那一支）。"""
+        return usecases.collect_degradations(self.reader)
+
     def degradations(self):
         """真实 `ChatContext.degradations()` 的形状：**信封 dict**，不是 `Degradation`。
 
-        生产路径已经不走它了（走 `collect_degradations(ctx.reader)`）；留着是为了让「用错
+        生产路径已经不走它了（走 `ctx.drift()`）；留着是为了让「用错
         出口」这个回归在变异时表现为真缺陷（dict 流进声明为 Degradation 的字段），
         而不是「夹具缺个方法」。
         """

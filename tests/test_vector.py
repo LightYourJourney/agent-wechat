@@ -811,3 +811,22 @@ def test_semantic_search_rejects_an_empty_query():
         vector.semantic_search("   ", account="acct")
     with pytest.raises(errors.SearchInputError):
         vector.semantic_search("", account="acct")
+
+
+def test_a_held_write_lock_surfaces_as_vector_error_not_bare_sqlite(env):
+    """另一条写入方占着锁时，增量段的失败必须是 `VectorError`（带中文原因与指引）。
+
+    此前只有 rebuild 段包了异常：增量段的 `database is locked` 以裸 `OperationalError`
+    逃出 core，`sync._sync_vector` 只接项目异常，整次同步被记成 failed。
+    """
+    import sqlite3
+    store.upsert_batch(env, [mk_row("acct", "chatA", 1, "第一条消息")])
+    holder = sqlite3.connect(store.DB_PATH, timeout=0)
+    holder.execute("BEGIN IMMEDIATE")
+    try:
+        with pytest.raises(vector.VectorError, match="向量索引写入失败") as ei:
+            vector.build_index(embedder=FakeEmbedder())
+        assert "写锁" in (ei.value.hint or "")
+    finally:
+        holder.rollback()
+        holder.close()

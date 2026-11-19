@@ -494,6 +494,14 @@ def build_index(accounts: Sequence[str] | None = None, rebuild: bool = False,
         total = con.execute("SELECT count(*) FROM vec_messages").fetchone()[0]
         _write_meta(con, embedded=total, skipped=prev_skipped + skipped)
         return {"embedded_this_run": embedded, "skipped_this_run": skipped}
+    except sqlite3.Error as exc:
+        # 增量段（建 meta、逐批写向量、推水位线）的裸 sqlite3 异常此前直接逃出 core：
+        # 两条构建并发时后者拿到的是英文 `database is locked`，而 `sync._sync_vector`
+        # 只接项目异常——整次同步被记成 failed 而不是 vector_unavailable。
+        raise VectorError(
+            f"向量索引写入失败：{redact(str(exc))}",
+            hint="多半是另一条向量构建或同步正持有写锁——等它结束后重跑（不带 rebuild 会从"
+                 "水位线续跑）；若没有别的任务在跑，确认数据目录可写、磁盘有空间") from exc
     finally:
         con.close()
 

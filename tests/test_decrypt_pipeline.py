@@ -62,6 +62,19 @@ def test_decrypt_pipeline(fake_wechat_db, tmp_path, monkeypatch):
     assert n == 10 and last[0] == "消息9"
 
 
+def test_decrypt_reads_only_the_first_page_for_the_salt(fake_wechat_db, tmp_path, monkeypatch):
+    """取盐只读第 1 页：整文件 `read_bytes()` 会让峰值内存随分片大小增长（USAGE 宣称恒定）。"""
+    enc, passphrase = fake_wechat_db
+    monkeypatch.setattr(keys.paths, "HOME_DIR", tmp_path / "home")
+
+    def no_whole_file_reads(self):
+        raise AssertionError(f"整文件读入：{self}")
+
+    monkeypatch.setattr(pathlib.Path, "read_bytes", no_whole_file_reads)
+    with decrypt.decrypted(enc, passphrase) as plain:
+        assert plain.exists()
+
+
 def test_wrong_key_fails(fake_wechat_db, tmp_path, monkeypatch):
     enc, _ = fake_wechat_db
     monkeypatch.setattr(keys.paths, "HOME_DIR", tmp_path / "home")

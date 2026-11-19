@@ -125,6 +125,11 @@ class ChatContext:
 
     def resolve(self, contact: str) -> str | NeedConfirm:
         """contact → 唯一 chat_id；歧义返回候选，未命中抛 ContactNotFound。"""
+        if reader.is_chat_id(contact):
+            # 已是 chat_id 就不构造 reader：构造它要读 passphrase 缓存，缓存不在就抛——
+            # 那会让「只读索引」的用例（get_message_context、工作台 /api/media）仅仅因为
+            # 调用方给了 contact 就离不开微信密钥，而 `resolve_one` 对 chat_id 本来就原样返回。
+            return contact
         chat_id, cands = self.reader.resolve_one(contact)
         if chat_id:
             return chat_id
@@ -142,6 +147,11 @@ class ChatContext:
         """
         return self.resolve(contact) if contact else None
 
+    def drift(self) -> tuple[Degradation, ...]:
+        """同 `degradations` 的取舍（没构造过 reader 就没有可报的），但给 `Degradation` 元组
+        ——结果类型里装的是它（转换成信封归入口层）。"""
+        return collect_degradations(self._reader) if self._reader is not None else ()
+
     def degradations(self) -> list[dict]:
         """本次调用见过的降级，信封形状（search/semantic 的出口，Ruling 13）。
 
@@ -150,10 +160,7 @@ class ChatContext:
         reader 是有代价的——它会读 passphrase 缓存，缓存没了就抛（`purge --keys` 之后
         检索仍然可用），把一条本来能用的检索打翻。
         """
-        if self._reader is None:
-            return []
-        return [{"capability": d.capability, "effect": d.effect}
-                for d in collect_degradations(self._reader)]
+        return [d.envelope() for d in self.drift()]
 
 
 # 能力 → 降级后用户**少了什么**（人话）。用户不需要知道表名（spec §7）：
@@ -178,6 +185,10 @@ class Degradation:
     missing_columns: tuple[str, ...]
     effect: str
     drift: bool = True      # EA-095：False = 非漂移成因（未回填 / 覆盖不足），CLI 不加「结构不符」后缀
+
+    def envelope(self) -> dict[str, str]:
+        """对外信封里的形状（MCP / 任务记录 / sync 结果）：只给能力与「少了什么」，不给表名。"""
+        return {"capability": self.capability, "effect": self.effect}
 
 
 def collect_degradations(rdr: reader.MessageReader) -> tuple[Degradation, ...]:
@@ -261,11 +272,8 @@ def _display_or_id(ctx: ChatContext, chat_id: str) -> str:
 
 # ---------- 工具用例（每个工具一个函数） ----------
 
-def account_status(account: str | None = None) -> dict:
-    """账号/密钥/索引规模快照。account 省略即当前登录账号（不校验目录是否存在）。"""
-    st = acc_mod.status()
-    acct = account or st.current
-    ready = bool(acct and keys.load_cached_hex(paths.bare_wxid(acct)))
+def index_snapshot() -> tuple[dict, list[str]]:
+    """索引规模 + 自检说明（`get_account_status` 与 CLI `status` 共用的那一半）。只读、不建库。"""
     index = {"messages": 0, "chats": 0, "last_ts": None}
     schema_notes: list[str] = []
     # EA-025：**只读诊断不许建库**。`store.open()` 会 executescript(SCHEMA)——HOME 空的
@@ -296,6 +304,19 @@ def account_status(account: str | None = None) -> dict:
             # 四处同立场）。计数仍按零呈现（形状不变），但这条说明必须带上。
             schema_notes = [f"索引库读不出来（{errors.redact(str(exc))}）——"
                             "index 计数按零呈现；删除 index.db 后重跑一次导出可重建"]
+    return index, schema_notes
+
+
+def account_status(account: str | None = None) -> dict:
+    """账号/密钥/索引规模快照。account 省略即当前登录账号。
+
+    **显式给了 account 就校验目录**（与其它工具同一条通用约定）：此前不校验，名字打错时
+    答 `key_ready: false`，把 agent 引向「重新 bootstrap」——修错了方向。
+    """
+    st = acc_mod.status()
+    acct = acc_mod.resolve_account(account) if account else st.current
+    ready = bool(acct and keys.load_cached_hex(paths.bare_wxid(acct)))
+    index, schema_notes = index_snapshot()
     return {"wechat_running": st.running, "current_account": st.current,
             "accounts": st.accounts, "key_ready": ready, "index": index,
             "schema_notes": schema_notes}
@@ -363,6 +384,13 @@ def export_history(contact: str | None = None, full: bool = False,
         return plan
 
     def _run(tid: str) -> int:
+        def note_reader(r: reader.MessageReader) -> None:
+            # 与 CLI `export` 同一份降级：漂移记在导出用的那个 reader 上（spec §6 的
+            # `username_pool`）。此前只有 CLI 接了它，MCP 任务记录里没有这一条。
+            found = [d.envelope() for d in collect_degradations(r)]
+            if found:
+                tasks.update(tid, degraded=found)
+
         # 计数契约的两半（spec §5.4）：返回值只数**实际入库**的行，被排除挡下的另计并以
         # `skipped` 随任务记录带回 MCP 信封（与 vector 任务同名字段——`tasks.status()`
         # 原样透出，入口不需要再翻译）。只修 `rows` 那一半的话，agent 见数少了却不知道
@@ -372,7 +400,8 @@ def export_history(contact: str | None = None, full: bool = False,
                                  # progress 的入参正是**已入库行数**，与终值同口径；
                                  # 终值由 tasks._run 用返回值覆盖（既有语义保留）。
                                  progress=lambda n: tasks.update(tid, rows=n),
-                                 on_skipped=lambda n: tasks.update(tid, skipped=n))
+                                 on_skipped=lambda n: tasks.update(tid, skipped=n),
+                                 on_reader=note_reader)
 
     # chat_id/full 一并记进任务元数据（tasks.json 已发布字段），与旧 export.start_task 一致；
     # 两者同时是**准入键**（F1，T7 复审）：缺了 full，「增量在跑时要求全量」会被静默吸收、
@@ -456,8 +485,10 @@ def media_export(contact: str, *, kinds: list[str], months: list[str] | None = N
                 # 本任务修的就是这个缺陷）。其余类型照常导。
                 index_note = errors.redact(str(exc))
                 kinds_to_export = [k for k in kinds if k not in ("video", "sticker")]
+        # 显式 out_dir 走 `_resolve_out` 绝对化（同 chat_export / message_media）：相对路径
+        # 会原样回到信封的 out_dir 里，MCP 客户端拿它没用。
         report = media.export_media(ctx.account, [chat_id], kinds=kinds_to_export, months=months,
-                                    out_dir=out_dir,
+                                    out_dir=_resolve_out(out_dir) if out_dir else None,
                                     max_files=clamp_limit(limit),   # 不再硬卡 2000
                                     force=force,
                                     con=con, with_cdn=with_cdn)
@@ -742,14 +773,13 @@ def message_media(contact: str, *, keys: Sequence[str] | None = None,
             continue
         bucket = by_kind.setdefault(s.kind, {})
         bucket[s.status] = bucket.get(s.status, 0) + 1
-    # 走 `collect_degradations(ctx.reader)` 而不是 `ctx.degradations()`：后者是 search/
-    # semantic 的**信封形状**出口（dict），而本结果类型的元素是 `Degradation`（同
-    # recent_messages 的口径，转换归入口层）。reader 在这行之前必然已构造——`ctx.resolve`
-    # 走的就是它——所以这里不会为报降级白读一次库（那正是 ctx.degradations 的顾虑）。
+    # 走 `ctx.drift()`（`Degradation` 元组，同 recent_messages 的口径）而不是直接
+    # `collect_degradations(ctx.reader)`：contact 已是 chat_id 时 `ctx.resolve` 不构造
+    # reader，为报降级去构造它会读 passphrase 缓存——缓存不在就把这个只读索引的用例打翻。
     return MessageMediaResult(chat_id=chat_id, out_dir=str(out_root),
                               states=states, counts=counts, by_kind=by_kind,
                               truncated=truncated,
-                              degraded=tuple(degraded) + collect_degradations(ctx.reader))
+                              degraded=tuple(degraded) + ctx.drift())
 
 
 def _decode_extra(msg_type: int, payload: bytes) -> "msgextra.Extra | None":
@@ -1626,7 +1656,7 @@ def moments_export(contact: str | None = None, *, months: list[str] | None = Non
     do_fetch = fetch if fetch is not None else sns_media.fetch
 
     out_root = media.ensure_tree(
-        pathlib.Path(out_dir) if out_dir else moments.export_root())
+        _resolve_out(out_dir) if out_dir else moments.export_root())
     report = moments.MomentsReport()
     kept: list[moments.SnsPost] = []
     lo = hi = None

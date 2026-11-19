@@ -54,7 +54,7 @@ uv run pytest tests/ -q          # 运行测试
   而它的失效可以是完全静默的
 - **门禁的单一入口是 `scripts/check.sh`**（五步：运行时 import 环 / vulture 候选集不超基线 /
   `pytest` / `scan --all` / 钩子自检；任一步失败即非 0 并指明是哪一步、哪一条）。
-  `pre-commit` 只跑第①步（0.07 s），全量在 `pre-push`（~70 s）。手工跑：`bash scripts/check.sh`
+  `pre-commit` 只跑第①步（0.07 s），全量在 `pre-push`（本机实测 133–156 s，绝大部分是 pytest）。手工跑：`bash scripts/check.sh`
   （加 `--fast` 只做结构检查）。vulture 的基线在 `security/gate-baseline.txt`，
   **只许放存量条目**——新增候选要么修掉、要么走一次显式的基线更新（别在提交里顺手加行）
 - **账号标识一律用占位符**：真实 wxid（本机账号目录名、联系人 username）不得入库，

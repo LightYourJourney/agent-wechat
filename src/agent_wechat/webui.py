@@ -160,7 +160,9 @@ async function loadTimeline(reset) {
   cursor = res.next_cursor;
   $('older').disabled = !cursor;
 }
-$('account').addEventListener('change', loadChats);
+$('account').addEventListener('change', () => { cursor = null; loadChats(); });
+// 换会话即从第一页重载：游标属于某一个会话，沿用它会把新会话的结果接在旧行后面。
+$('chat').addEventListener('change', () => loadTimeline(true));
 $('loadChats').addEventListener('click', loadChats);
 $('search').addEventListener('click', doSearch);
 $('older').addEventListener('click', () => loadTimeline(false));
@@ -254,7 +256,7 @@ class _Handler(BaseHTTPRequestHandler):
         if path.path.startswith("/api/"):
             qs = urllib.parse.parse_qs(path.query)
             try:
-                _json(self, 200, _route(path.path, qs))
+                _json(self, 200, _strip_paths(_route(path.path, qs)))
             except errors.AgentWeChatError as exc:
                 _json(self, 400, {"error": str(exc), "hint": exc.hint})
             return
@@ -295,11 +297,21 @@ class _Handler(BaseHTTPRequestHandler):
     do_PATCH = do_PUT                        # type: ignore[assignment]
 
 
-def _strip_paths(data: dict) -> dict:
-    """最小披露：浏览器只看到文件名与状态，不拿到本机绝对路径。"""
-    for m in data.get("messages", []) or []:
-        if m.get("path"):
-            m["path"] = os.path.basename(str(m["path"]))
+_PATH_KEYS = ("path", "out_dir")
+
+
+def _strip_paths(data):
+    """最小披露：浏览器只看到文件名，不拿到本机绝对路径。**在 API 出口对所有响应递归做**。
+
+    此前只在 `/api/media` 一条路由上、按一种响应形状（`messages[].path`）做——而那条路由
+    交来的是 `asdict(MessageMediaResult)`（`states[].path` + `out_dir`），绝对路径原样发给
+    了浏览器。按形状认键的写法换一个路由、换一个结果类型就会再漏，所以改成键名驱动。"""
+    if isinstance(data, dict):
+        return {k: (os.path.basename(v.rstrip("/")) if k in _PATH_KEYS and isinstance(v, str)
+                    else _strip_paths(v))
+                for k, v in data.items()}
+    if isinstance(data, list):
+        return [_strip_paths(v) for v in data]
     return data
 
 
@@ -373,8 +385,7 @@ def _route(path: str, qs: dict) -> dict:
         if not (key and chat):
             raise errors.SearchInputError("media 需要 key 与 chat")
         res = usecases.message_media(chat, keys=[key], account=acct, limit=1)
-        data = dataclasses.asdict(res) if dataclasses.is_dataclass(res) else dict(res)
-        return _strip_paths(data)
+        return dataclasses.asdict(res) if dataclasses.is_dataclass(res) else dict(res)
     if path == "/api/diagnostics":
         info = sync.diagnose(acct)
         return {"wechat": info["wechat"], "schema": info["schema"],

@@ -242,8 +242,10 @@ CREATE TABLE watermark (
 - **增量**：导出游标为 `WHERE local_id > max_local_id`（按 id 而非时间——同秒消息不会漏）
 - **断点续传**：水位线与消息写入在**同一事务**；任意时刻被杀，重跑自动从断点继续，
   最多重复处理一批（被幂等 upsert 吸收），不丢数据
-- **幂等修正**：`ON CONFLICT(msg_key) DO UPDATE ... WHERE content IS NOT excluded.content`
-  ——重扫时仅内容变化的行被更新（吸收撤回/编辑），无写放大
+- **幂等修正**：`ON CONFLICT(msg_key) DO UPDATE ... WHERE` `content` / `sender_name` /
+  `msg_type` / `chat_id` 任一不同——重扫时只有这几列变化的行被更新（吸收撤回/编辑、
+  发送者名与会话名的修正），无写放大。`chat_id` 有一条单向约束：退化名 `md5:<hex>`
+  **只许修好、不许写坏**（好名字不会被一次临时读不出名字的回看覆盖回 `md5:`）
 
 ## 5. 数据解码规则（微信原始数据 → 本地字段）
 
@@ -439,7 +441,8 @@ CREATE TABLE IF NOT EXISTS audit_cursor (
 ```sql
 CREATE TABLE IF NOT EXISTS pending_reembed (
     msg_key    TEXT PRIMARY KEY,
-    changed_at INTEGER NOT NULL
+    changed_at INTEGER NOT NULL,
+    reason     TEXT NOT NULL DEFAULT 'content'    -- main v5 起
 ) WITHOUT ROWID;
 ```
 

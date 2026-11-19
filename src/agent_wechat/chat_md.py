@@ -220,15 +220,13 @@ def _appmsg_lines(a: AppMsg, ref_anchor: str | None) -> list[str]:
         head += "：" + _esc_md(a.title)
     out = [f"**{head}**"]
     if a.quote is not None:
-        # displayname 为空是 0.81% 的常态：补一个**显式的**「未署名」，不猜名字，
-        # 也不留空 —— 留空的行看起来像渲染坏了。
-        who = _esc_md(a.quote.displayname) or "（未署名）"
+        who = _esc_md(a.quote.displayname) or chat_text.QUOTE_UNSIGNED
         out.append(f"> **{who}**：{_esc_md(a.quote.content)}")
         if not ref_anchor:
             # **不用 `> ` 前缀**：这条是「没有跳转目标」的元说明，不是被引用的内容。
             # 若它也写成 blockquote，用例里的 `"> " in out` 就会被这一行满足，
             # 于是「引用退化成 blockquote」这半个断言永远红不了（实测确认过）。
-            out.append("（原消息不在本次范围内，无法跳转 —— 以上是引用自带的原文。）")
+            out.append(f"（{chat_text.QUOTE_UNRESOLVED}）")
     if a.link is not None:
         url, title = a.link.url, a.link.title or a.link.url
         if url:
@@ -245,11 +243,9 @@ def _appmsg_lines(a: AppMsg, ref_anchor: str | None) -> list[str]:
         if a.link.des:
             out.append(_esc_md(a.link.des))
     if a.file is not None:
-        bits = [b for b in (a.file.title, a.file.fileext) if b]
-        if a.file.totallen:
-            bits.append(f"{a.file.totallen} 字节")
-        if bits:
-            out.append("文件名：" + _esc_md(" · ".join(bits)))
+        line = chat_text.file_summary(a.file.title, a.file.fileext, a.file.totallen)
+        if line:
+            out.append("文件名：" + _esc_md(line))
     if a.transfer is not None:
         out.append(_transfer_line(a.transfer))
     for k, v in a.fields:
@@ -260,7 +256,7 @@ def _appmsg_lines(a: AppMsg, ref_anchor: str | None) -> list[str]:
 def _message_lines(m: ViewMsg, prefix: str, out_dir: str) -> list[str]:
     """单条消息。`is_self` 决定「我（自己）」与「别人」的标题 —— 与 HTML 的
     `self` / `other` 同一件事（Markdown 没有对齐，只能用标记）。"""
-    who = "我" if m.is_self else (m.sender or "（未知发送者）")
+    who = chat_text.sender_label(m.is_self, m.sender)
     tag = "（自己）" if m.is_self else ""
     out = [f"## {_esc_md(who)}{tag} · {chat_text.when(m.ts)} · {_t(m.kind)}", ""]
     # appmsg 的 `text` 是 `[appmsg: 标题]` 形态的提示，解析成功时与下面的结构化块逐字重复。

@@ -445,3 +445,24 @@ def test_time_machine_excluded_reports_none_when_it_cannot_tell(tmp_path, monkey
     got = paths.time_machine_excluded()
     assert got == "[Excluded] /x", got
     assert seen.get("text") is True, "`text=True` 被关掉会返回 bytes"
+
+
+def test_an_existing_loose_data_dir_is_tightened_to_0700(tmp_path, monkeypatch):
+    """`AGENT_WECHAT_HOME` 指向既有 0755 目录时也要收紧（`mkdir(mode=)` 只管新建）。"""
+    home = tmp_path / "aw"
+    home.mkdir(mode=0o755)
+    home.chmod(0o755)
+    monkeypatch.setattr(paths, "HOME_DIR", home)
+    monkeypatch.setattr(paths, "_tm_exclusion_checked", True)
+    paths.ensure_home_dirs()
+    assert home.stat().st_mode & 0o777 == 0o700
+
+
+def test_the_user_home_itself_is_never_chmodded(tmp_path, monkeypatch):
+    """数据目录误指到 `$HOME` 时不得顺手把主目录收紧——那是越权的副作用。"""
+    tmp_path.chmod(0o755)
+    monkeypatch.setattr(paths.pathlib.Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.setattr(paths, "HOME_DIR", tmp_path)
+    monkeypatch.setattr(paths, "_tm_exclusion_checked", True)
+    paths.ensure_home_dirs()
+    assert tmp_path.stat().st_mode & 0o777 == 0o755

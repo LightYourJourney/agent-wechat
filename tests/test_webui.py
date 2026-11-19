@@ -224,10 +224,19 @@ def test_derived_list_and_delete_via_post(srv):
 
 
 def test_media_paths_are_reduced_to_basenames():
-    data = {"messages": [{"msg_key": "k",
-                      "path": "/" + "Users/example/secret/a.png"}]}
+    # 形状照抄 `/api/media` 真实交来的 asdict(MessageMediaResult)：states[] + out_dir。
+    data = {"chat_id": CHAT, "out_dir": "/" + "Users/example/secret/media",
+            "states": [{"msg_key": "k", "status": "exported",
+                        "path": "/" + "Users/example/secret/a.png"}]}
     out = webui._strip_paths(data)
-    assert out["messages"][0]["path"] == "a.png"
+    assert out["states"][0]["path"] == "a.png"
+    assert out["out_dir"] == "media"
+
+
+def test_media_route_does_not_leak_absolute_paths(srv):
+    res, raw = _req(srv, f"/api/media?account={ACCT}&chat={CHAT}&key={_key(1)}")
+    assert res.status == 200, raw
+    assert str(srv.tmp) not in raw.decode()
 
 
 def test_responses_do_not_leak_absolute_paths(srv):
@@ -243,3 +252,14 @@ def test_responses_do_not_leak_absolute_paths(srv):
 def test_server_refuses_non_loopback_bind():
     with pytest.raises(errors.ScopeDenied):
         webui.create_server("0.0.0.0", 0)
+
+
+def test_context_with_a_chat_id_contact_needs_no_wechat_key(srv):
+    """contact 已是 chat_id 时不得构造 reader：本环境没有 passphrase 缓存，构造即抛。
+
+    MCP `get_message_context` 的 contact 是必填——此前只要给了它（哪怕是 wxid），这个
+    只读索引的工具就离不开微信密钥，而 CLI 不带 `--contact` 时完全不需要。
+    """
+    from agent_wechat import usecases
+    res = usecases.message_context(_key(1), contact=CHAT, account=ACCT)
+    assert res["chat_id"] == CHAT

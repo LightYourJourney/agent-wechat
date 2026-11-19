@@ -155,7 +155,10 @@ _SECRET_SEG = re.compile(r"(aeskey|passphrase|token|key)$", re.I)
 # `?key=`/`&aeskey=`/`?token=` 拦得住，`&filekey=`/`?filekey=`/`&fileuploadtoken=`
 # 全部漏）。把 `filekey` 补进备选表是打地鼠——下一类复合名照漏。
 # 判「什么叫像密钥的名字」的规则全项目只应有**一份**，就是 `_SECRET_SEG`。
-_SECRET_PARAM = re.compile(r"[?&;,]([A-Za-z0-9_]+)=")
+#
+# 参数名字符集含 `-` 与 `.`：只认 `[A-Za-z0-9_]` 时 `?X-Amz-Security-Token=` /
+# `?access-token=` / `&sig.token=` 会在 `-`/`.` 处断开、整体放行（实测）。
+_SECRET_PARAM = re.compile(r"[?&;,]([A-Za-z0-9_.\-]+)=")
 
 
 def _has_credential_param(value: str) -> bool:

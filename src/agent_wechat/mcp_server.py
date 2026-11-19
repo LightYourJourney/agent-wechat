@@ -114,8 +114,7 @@ def get_recent_messages(contact: str, limit: int = 50,
         return _need_confirm(res)
     return {"chat_id": res.chat_id, "display": res.display,
             "messages": [_msg_dict(m) for m in res.messages],
-            "degraded": [d if isinstance(d, dict)
-                         else {"capability": d.capability, "effect": d.effect}
+            "degraded": [d if isinstance(d, dict) else d.envelope()
                          for d in res.degraded]}   # EA-013：两种形态都收
 
 
@@ -253,7 +252,9 @@ def export_chat_media(contact: str, kinds: str = "image,voice,video",
     """导出某会话的媒体文件到本机（图片解密 / 语音转 WAV / 视频复制），返回计数与输出目录。
 
     contact 可以是 username（wxid / xxx@chatroom）或展示名（备注/昵称），歧义返回
-    need_confirm 让用户消歧，不要猜。kinds/months 为逗号分隔字符串（kinds:
+    need_confirm 让用户消歧，不要猜。被 `purge --chat` 销毁过的会话一律返回 error
+    （不重导已删内容；要导须用户先在 CLI `purge --chat … --undo --yes`）。
+    kinds/months 为逗号分隔字符串（kinds:
     image,voice,video；months: YYYY-MM，可多个）。产物落 out_dir 指向的输出根
     （默认 ~/.agent-wechat/media，目录 0700），用文件系统工具自行取用——信封不回传
     文件清单（大结果膨胀上下文）。历史媒体大多未被微信保留，counts 里的 missing
@@ -346,8 +347,7 @@ def get_message_media(contact: str, keys: str | None = None, months: str | None 
                "counts": res.counts, "by_kind": res.by_kind, "truncated": res.truncated,
                "messages": [{"msg_key": s.msg_key, "time": s.ts, "kind": s.kind,
                              "status": s.status, "path": s.path} for s in res.states],
-               "degraded": [{"capability": d.capability, "effect": d.effect}
-                            for d in res.degraded]}
+               "degraded": [d.envelope() for d in res.degraded]}
     if not res.states and not usecases.index_ready():
         # 与 search_history 同一个道理（文案是 MCP 专属渲染，故留在这里）：索引里一条消息
         # 都没有时，上面那份信封（counts 全 0、messages 为空、degraded 为空）与「这个会话
@@ -447,8 +447,7 @@ def export_chat(contact: str, months: str | None = None, limit: int = 500,
             "files": list(res.files), "counts": res.counts,
             "truncated": res.truncated, "unparsed": res.unparsed,
             "rejected": res.rejected,
-            "degraded": [{"capability": d.capability, "effect": d.effect}
-                         for d in res.degraded]}
+            "degraded": [d.envelope() for d in res.degraded]}
 
 
 @server.tool()
@@ -468,7 +467,8 @@ def get_message_parts(contact: str, keys: str, account: str | None = None) -> di
     **空答案有三种成因，信封只分得出其中两种**（别宣称「靠这几个键就能分清」）：
     ① **未回填**（账号级）→ `degraded` + `hint` 指出，重跑 `appmsg rebuild` 可补救；
     ② 这条消息本来就不是 appmsg；
-    ③ **回填之后才导出进索引的消息**——它的行不在 `msg_parts` 里，于是 `parts` 空、
+    ③ **回填之后才到微信的消息**（或载荷本身为空的 appmsg）——回填扫的是微信库、不是
+    索引库，与消息何时导出无关。它的行不在 `msg_parts` 里，于是 `parts` 空、
     `unparsed`/`rejected` 为 0、`degraded` 为空，**与 ② 逐字节相同**（`backfilled` 是
     **账号级**的，答案是**按 key** 的）。出路同样是重跑 `agent-wechat appmsg rebuild`
     （幂等）——这正是 spec 裁定 5 那条「快照」在 `parts` 上的对应物（那边只写了
@@ -479,7 +479,7 @@ def get_message_parts(contact: str, keys: str, account: str | None = None) -> di
 
     keys 为逗号分隔的 msg_key（取自 get_recent_messages / search_history / semantic_search
     返回的 msg_key 字段），只答**属于 contact 那个会话**的 key：别的会话的 key、以及
-    msg_parts 里没有的 key（消息没导出、不是 appmsg）都静默略过——答案里没有某个 key，
+    msg_parts 里没有的 key（回填之后才到的消息、不是 appmsg）都静默略过——答案里没有某个 key，
     不等于它不是 appmsg。contact 歧义返回 need_confirm，未命中返回 error。
 
     每条含 kind（数字 type）与 kind_name（中文名，含义未确认的类型回落成 `appmsg:<type>`，

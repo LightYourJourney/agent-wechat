@@ -55,6 +55,12 @@ def cmd_status(args: argparse.Namespace) -> int:
         # EA-054（F2 修法）：印**只读查询**到的真实状态（与 purge 的核查同源）。查不出来时
         # 不印——「判不出来」与「没排除」是两件事，混成一行正是本仓在消灭的那种假象。
         print(f"备份排除: {tm}")
+    # 索引库的自检说明（触发器漂移 / 库读不出来 / 排除清单缺失）与 MCP `get_account_status`
+    # 同一份：此前只有 MCP 拿得到，index.db 坏了 CLI `status` 一句都不提。
+    from . import usecases
+    _, notes = usecases.index_snapshot()
+    for note in notes:
+        print(f"索引库: {note}")
     return 0
 
 
@@ -258,7 +264,8 @@ def cmd_vector_status(args: argparse.Namespace) -> int:
     if not store.DB_PATH.exists():
         # 只读诊断不许「看一次就建库」（与 `status` 同一条规矩）：没有索引就答零。
         info = {"model": vector.MODEL_ID, "embedded": 0, "skipped": 0,
-                "watermark": {}, "pending": 0, "failed": 0, "max_attempts": 0}
+                "watermark": {}, "pending": 0, "failed": 0, "max_attempts": 0,
+                "by_reason": {}}    # 键集与 `vector.freshness` 一致：有没有索引，形状不变
     else:
         with store.open() as con:
             info = vector.freshness(con, args.account)
@@ -303,7 +310,8 @@ def cmd_derived(args: argparse.Namespace) -> int:
         res = derived.engine_status()
     elif args.derived_cmd == "ingest":
         res = derived.ingest(args.account, args.chat,
-                             kinds=tuple(args.kinds.split(",")) if args.kinds else ("ocr", "asr"),
+                             kinds=(tuple(k.strip() for k in args.kinds.split(",") if k.strip())
+                                    if args.kinds else ("ocr", "asr")),
                              limit=args.limit, force=args.force,
                              allow_all=args.all)
     elif args.derived_cmd == "list":
@@ -328,7 +336,7 @@ def cmd_memory(args: argparse.Namespace) -> int:
     from . import derived
     if args.memory_cmd == "add":
         res = derived.add_claim(args.account, args.text,
-                                evidence=[k for k in args.evidence.split(",") if k],
+                                evidence=[k.strip() for k in args.evidence.split(",") if k.strip()],
                                 chat_id=args.chat, note=args.note)
     elif args.memory_cmd == "list":
         res = derived.list_claims(args.account, status=args.status, limit=args.limit)

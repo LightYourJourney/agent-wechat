@@ -122,9 +122,15 @@ def decrypted(db: pathlib.Path, passphrase: bytes):
     td = pathlib.Path(tempfile.mkdtemp(prefix=f"awdec-{os.getpid()}-", dir=tmp_dir()))
     try:
         snap = snapshot(db, td)
-        page1 = snap.read_bytes()[:keys.PAGE_SZ]
+        # 只读第 1 页（盐在里面）：此前 `read_bytes()[:PAGE_SZ]` 把整个分片读进内存再切，
+        # 几百 MB 的库就是几百 MB 的峰值（USAGE 宣称内存占用与库大小无关）。
+        page1 = keys.read_page1(snap)
+        if page1 is None:
+            raise DecryptError(f"{db.name}: 快照读不出来，无法解密",
+                               hint="确认 AGENT_WECHAT_HOME 下的 tmp/ 可读写后重试")
         if len(page1) < keys.PAGE_SZ:
-            raise DecryptError(f"{db.name}: 文件不足一页，无法解密")
+            raise DecryptError(f"{db.name}: 文件不足一页，无法解密",
+                               hint="该库可能正被微信初始化或已损坏；等微信同步完成后重试")
         enc_key = keys.derive_key(passphrase, page1[:keys.SALT_SZ])
 
         out = td / "plain.db"
@@ -162,7 +168,10 @@ def decrypted(db: pathlib.Path, passphrase: bytes):
             # **折行**，第二处回显因此留下密钥的前缀（实测 62/64 位）——而 redact 只认「恰好
             # 64 位连续 hex」，残段会一路进对外信封。回显块正是藏残段的地方；首行
             # （`Parse error near line N: near "…"`）已带够定位信息。
-            raise DecryptError(f"sqlcipher 解密失败: {_first_line(r.stderr)}")
+            raise DecryptError(
+                f"sqlcipher 解密失败: {_first_line(r.stderr)}",
+                hint="最常见的成因是密钥与库不匹配（微信重新登录过）：跑 "
+                     "`agent-wechat status --verify-keys` 核对，不通过就重新 `agent-wechat bootstrap`")
         yield out
     finally:
         try:

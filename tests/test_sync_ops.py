@@ -420,3 +420,14 @@ def test_tasks_running_sees_beyond_the_ten_item_display_window(tmp_path, monkeyp
     running = tasks.running()
     assert [t["task_id"] for t in running] == ["long"], \
         "running() 必须读全量，不能被展示窗口截断"
+
+
+def test_doctor_counts_tasks_with_the_same_reaper_as_get_task_status(tmp_path, monkeypatch):
+    """pid 还活着、但心跳超过 24h 的 running 记录：`get_task_status` 收割成 failed，
+    doctor 也必须这么数——此前 doctor 自己重写了判据（只看 pid），同一条任务两边说法相反。"""
+    _env(tmp_path, monkeypatch)
+    stale = int(time.time()) - tasks.STALE_RUNNING_SECONDS - 60
+    tasks.TASKS_FILE.write_text(json.dumps({"t": {
+        "task_id": "t", "status": "running", "pid": os.getpid(),
+        "started_at": stale, "updated_at": stale}}), encoding="utf-8")
+    assert sync.diagnose(ACCT)["tasks"] == {"running": 0, "failed": 1}

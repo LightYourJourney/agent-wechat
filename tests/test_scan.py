@@ -699,6 +699,26 @@ def test_staged_forged_header_with_a_real_cr_survives_the_git_boundary(scan, tmp
     assert any(fake in text for _rel, _n, text in hits), hits
 
 
+@pytest.mark.parametrize("config", [
+    ("diff.external", "true"),          # 外部 diff 吞掉全部暂存行 → 曾静默退 0
+    ("diff.mnemonicPrefix", "true"),    # `b/` 变 `i/` → 路径解析不出 → 曾每次误拦
+])
+def test_staged_diff_shape_is_immune_to_user_git_config(scan, tmp_path, monkeypatch, config):
+    """用户的 git 配置不得改写 `--staged` 读到的 diff 形状（security/README：fail-closed）。"""
+    import subprocess as sp
+    repo = tmp_path / "r"
+    repo.mkdir()
+    sp.run(["git", "init", "-q"], cwd=repo, check=True)
+    sp.run(["git", "config", *config], cwd=repo, check=True)
+    fake = "wx" + "id_" + "cfgprobe9x7q2m"
+    (repo / "f.py").write_text(fake + "\n", encoding="utf-8")
+    sp.run(["git", "add", "-A"], cwd=repo, check=True)
+    monkeypatch.setattr(scan, "REPO_ROOT", repo)
+
+    hits = scan.staged_added_lines()
+    assert ("f.py", 1, fake) in hits, hits
+
+
 def test_staged_special_newlines_cannot_forge_a_diff_header(scan, tmp_path, monkeypatch):
     """EA-008：`str.splitlines()` 认 **10** 个换行字符，而 git 的 diff 只以 `\n` 分行。
 

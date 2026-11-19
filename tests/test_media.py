@@ -2869,6 +2869,19 @@ def test_cdn_redirect_is_refused_for_a_missing_or_foreign_host():
                                     "http://evil.example/b") is None
 
 
+@pytest.mark.parametrize("url", ["ftp://vweixinf.tc.qq.com/a", "file://vweixinf.tc.qq.com/a"])
+def test_cdn_fetch_refuses_non_http_schemes_on_an_allowlisted_host(url, monkeypatch):
+    """主机在白名单内也不放行非 http(s)：默认 opener 带着 FTP/File handler，
+    发送方写的 `ftp://` / `file://` 曾能走到 opener（SECURITY 例外只放行 HTTP 取件）。"""
+    opened = []
+    monkeypatch.setattr(media, "_cdn_opener",
+                        lambda: type("O", (), {"open": lambda self, *a, **k: opened.append(a)})())
+    assert media._fetch_cdn_bytes(url, "0" * 32) == (None, "refused")
+    assert opened == []
+    req = urllib.request.Request("http://vweixinf.tc.qq.com/a")
+    assert media._AllowlistedRedirect().redirect_request(req, None, 302, "", {}, url) is None
+
+
 def test_cdn_redirect_follows_an_allowlisted_target():
     """白名单内的跳转要真的交给父类（返回一个新 Request）；删掉 `super()` 那行会变成
     拒绝一切跳转——CDN 上常见的 302 会直接失败。"""

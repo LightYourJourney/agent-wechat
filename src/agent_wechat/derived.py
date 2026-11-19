@@ -27,7 +27,7 @@ import subprocess
 import time
 import uuid
 
-from . import errors, exclusions, media, messages, paths, store
+from . import errors, exclusions, media, messages, paths, search, store
 
 MAX_FILE_BYTES = 20 * 1024 * 1024
 MIN_FREE_BYTES = 50 * 1024 * 1024
@@ -258,8 +258,7 @@ def _kind_of(msg_type: int) -> str | None:
     return _KIND_BY_TYPE.get(msg_type)
 
 
-def _media_path(con: sqlite3.Connection, row: sqlite3.Row,
-                out_root: pathlib.Path) -> pathlib.Path | None:
+def _media_path(row: sqlite3.Row, out_root: pathlib.Path) -> pathlib.Path | None:
     kind = _MEDIA_KIND.get(_kind_of(row["msg_type"]) or "", "")
     return media.exported_path(
         out_root, chat_md5=row["chat_md5"], kind=kind, ts=row["ts"],
@@ -311,14 +310,18 @@ def ingest(account: str, chat: str | None = None, *,
         result["skipped"][reason] = result["skipped"].get(reason, 0) + 1
 
     with _lock():
-        if _free_bytes() < MIN_FREE_BYTES:
+        free = _free_bytes()
+        # 0 = 探测失败（未知），与 sync 同一口径放行：当成「磁盘满」会报出一句错话。
+        if free and free < MIN_FREE_BYTES:
             raise errors.HomeUnavailable(
-                "磁盘可用空间不足 50 MB，派生任务已停止",
+                f"磁盘可用空间不足 {MIN_FREE_BYTES // (1024 * 1024)} MB，派生任务已停止",
                 hint="清理磁盘后重试（识别结果要写索引库）")
         with store.open() as con:
             if con.execute("SELECT 1 FROM sqlite_master WHERE name='derived_text'"
                            ).fetchone() is None:
-                raise errors.DerivedInputError("派生表不存在（索引库版本过低）")
+                raise errors.DerivedInputError(
+                    "派生表不存在（索引库版本过低）",
+                    hint="用当前版本跑一次 `agent-wechat sync` 或导出，索引库会自动升级")
             for kind, eng in engines.items():
                 try:
                     available = bool(eng.available())
@@ -351,7 +354,7 @@ def ingest(account: str, chat: str | None = None, *,
                         existing["status"], "exists")
                     skip(reason)
                     continue
-                path = _media_path(con, row, out_root)
+                path = _media_path(row, out_root)
                 if path is None or not path.exists():
                     skip("media_not_exported")
                     continue
@@ -483,14 +486,12 @@ def search_derived(query: str, *, account: str, chat_id: str | None = None,
     if not query or not query.strip():
         raise errors.DerivedInputError("检索串不能为空")
     limit = max(1, min(int(limit), 100))
-    base = ("SELECT d.derivation_id, d.msg_key, d.chat_id, d.kind, d.text,"
-            " d.engine, m.ts,"
-            " COALESCE(dn.display_name, m.sender_name, m.sender_id) AS sender,"
-            " m.is_self"
-            " FROM derived_text d"
-            " JOIN messages m ON m.msg_key = d.msg_key"
-            f" {store._SENDER_JOIN}"
-            " WHERE d.account = ? AND d.status != 'deleted'")
+    # 投影与 JOIN 两路（FTS / LIKE）共用：此前各写一份，改一处就得记得改另一处。
+    cols = ("SELECT d.derivation_id, d.msg_key, d.chat_id, d.kind, d.text, d.engine, m.ts,"
+            f" {store._SENDER_EXPR} AS sender, m.is_self")
+    joins = f" JOIN messages m ON m.msg_key = d.msg_key {store._SENDER_JOIN}"
+    base = (cols + " FROM derived_text d" + joins
+            + " WHERE d.account = ? AND d.status != 'deleted'")
     args: list[object] = [account]
     if chat_id:
         base += " AND d.chat_id = ?"
@@ -500,18 +501,16 @@ def search_derived(query: str, *, account: str, chat_id: str | None = None,
         if len(query.strip()) >= 3:
             try:
                 rows = con.execute(
-                    "SELECT d.derivation_id, d.msg_key, d.chat_id, d.kind, d.text,"
-                    " d.engine, m.ts,"
-                    " COALESCE(dn.display_name, m.sender_name, m.sender_id) AS sender,"
-                    " m.is_self"
-                    " FROM derived_fts JOIN derived_text d ON d.rowid = derived_fts.rowid"
-                    " JOIN messages m ON m.msg_key = d.msg_key"
-                    f" {store._SENDER_JOIN}"
-                    " WHERE derived_fts MATCH ? AND d.account = ?"
+                    cols + " FROM derived_fts JOIN derived_text d"
+                    " ON d.rowid = derived_fts.rowid" + joins
+                    + " WHERE derived_fts MATCH ? AND d.account = ?"
                     " AND d.status != 'deleted'"
                     + (" AND d.chat_id = ?" if chat_id else "")
                     + " ORDER BY rank LIMIT ?",
-                    (query, *args, limit)).fetchall()
+                    # 与关键词路（search.py）同一份转义：包成短语做 trigram 子串匹配。
+                    # 裸串交给 MATCH 时 `world hello` 按 AND 命中、`hel*` 走前缀语法、
+                    # `a-b` 直接语法错——同一个查询在两路给出不同答案。
+                    (search._fts_safe(query), *args, limit)).fetchall()
             except sqlite3.OperationalError:
                 rows = []       # FTS 表缺失/不可用：走 LIKE；其它 sqlite 错误照旧抛
         if not rows:                     # 1-2 字或 FTS 不可用：LIKE 兜底
@@ -572,12 +571,15 @@ def add_claim(account: str, claim: str, *, evidence: list[str],
     return get_claim(claim_id)
 
 
+_CLAIM_ID_HINT = "用 `agent-wechat memory list --account <账号>` 查看现有主张的 id"
+
+
 def get_claim(claim_id: str) -> dict:
     with store.open() as con:
         row = con.execute("SELECT * FROM fact_claim WHERE claim_id=?",
                           (claim_id,)).fetchone()
         if row is None:
-            raise errors.DataNotFound(f"找不到主张 {claim_id}")
+            raise errors.DataNotFound(f"找不到主张 {claim_id}", hint=_CLAIM_ID_HINT)
         ev = con.execute(
             "SELECT msg_key, role FROM fact_evidence WHERE claim_id=?"
             " ORDER BY created_at", (claim_id,)).fetchall()
@@ -596,7 +598,7 @@ def set_claim_status(claim_id: str, status: str, *, conflicts_with: str | None =
         row = con.execute("SELECT status FROM fact_claim WHERE claim_id=?",
                           (claim_id,)).fetchone()
         if row is None:
-            raise errors.DataNotFound(f"找不到主张 {claim_id}")
+            raise errors.DataNotFound(f"找不到主张 {claim_id}", hint=_CLAIM_ID_HINT)
         current = row["status"]
         if status != current and status not in _TRANSITIONS.get(current, set()):
             raise errors.DerivedInputError(
@@ -608,7 +610,7 @@ def set_claim_status(claim_id: str, status: str, *, conflicts_with: str | None =
                 raise errors.DerivedInputError("主张不能与自己冲突")
             if con.execute("SELECT 1 FROM fact_claim WHERE claim_id=?",
                            (conflicts_with,)).fetchone() is None:
-                raise errors.DataNotFound(f"冲突主张 {conflicts_with} 不存在")
+                raise errors.DataNotFound(f"冲突主张 {conflicts_with} 不存在", hint=_CLAIM_ID_HINT)
         con.execute(
             "UPDATE fact_claim SET status=?, conflicts_with=COALESCE(?, conflicts_with),"
             " note=COALESCE(?, note), updated_at=? WHERE claim_id=?",
@@ -624,7 +626,8 @@ def list_claims(account: str, *, status: str | None = None,
     args: list[object] = [account]
     if status:
         if status not in CLAIM_STATUSES:
-            raise errors.DerivedInputError(f"未知状态：{status}")
+            raise errors.DerivedInputError(
+                f"未知状态：{status}", hint=f"可用：{', '.join(CLAIM_STATUSES)}")
         where.append("status = ?")
         args.append(status)
     args.append(limit)

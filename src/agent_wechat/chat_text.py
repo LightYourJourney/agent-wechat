@@ -99,6 +99,24 @@ if TYPE_CHECKING:
 # 媒体类型的中文名。未确认的 kind 兜底成 kind 本身（**不猜**，spec §2.9 的规矩）。
 KIND_LABEL = {"image": "图片", "voice": "语音", "video": "视频", "sticker": "贴纸"}
 
+# 引用块的两句措辞：displayname 为空是 0.81% 的常态——补一个**显式的**「未署名」，不猜
+# 名字，也不留空（留空渲染成「引用 ：」，看起来像坏了）；回指不到时说清楚原文从哪来。
+QUOTE_UNSIGNED = "（未署名）"
+QUOTE_UNRESOLVED = "原消息不在本次范围内，无法跳转 —— 以上是引用自带的原文。"
+
+
+def sender_label(is_self: bool, sender: str | None) -> str:
+    """消息标题里的「谁发的」：自己 → 我；没有名字 → 显式的「未知发送者」。"""
+    return "我" if is_self else (sender or "（未知发送者）")
+
+
+def file_summary(title: str | None, ext: str | None, totallen: int | None) -> str | None:
+    """文件块那一行（文件名 · 扩展名 · N 字节）；三者都没有 → None（不印空行）。"""
+    bits = [b for b in (title, ext) if b]
+    if totallen:
+        bits.append(f"{totallen} 字节")
+    return " · ".join(bits) if bits else None
+
 # `exportable` / `gone` 的占位**分开措辞**：丙 R17 —— 池化这两个状态会制造误读
 # （「本机有但你没导出」与「本机找不到」是两件事，前者可挽回、后者不能）。
 # video 的那一条不得让人以为 mp4 本体还在：丙实测 `resolve_video` 命中缩略图时也返回成功。

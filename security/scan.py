@@ -473,7 +473,12 @@ def staged_added_lines(diff_text: str | None = None) -> list[tuple[str, int, str
     存在性检查——**不警告就是静默退 0**，与「装了但从没拦过」不可区分。只警告，
     **不改退出码**：二进制文件不构成泄漏证据。
     """
-    diff = _git("diff", "--cached", "--unified=0", "--no-color") if diff_text is None else diff_text
+    # 钉死 diff 的输出形状，不让用户配置改写它：`diff.external` / `GIT_EXTERNAL_DIFF` 会让
+    # 暂存行一行不出（静默退 0，fail-open）；`.gitattributes` 的 `-diff` 让文本按二进制只给
+    # 一行；`diff.mnemonicPrefix` 把 `b/` 换成 `i/`，路径解析不出来、每次提交都被误拦。
+    diff = (_git("diff", "--cached", "--unified=0", "--no-color", "--no-ext-diff",
+                 "--no-textconv", "--src-prefix=a/", "--dst-prefix=b/")
+            if diff_text is None else diff_text)
     out = []
     path = None
     lineno = 0

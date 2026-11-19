@@ -829,7 +829,8 @@ def chat_export_dir(chat_id: str) -> pathlib.Path:
 
 def plan_chat(resolved: list[dict]) -> ChatPlan:
     """**纯只读**：只算将删什么，一个字节都不动。`resolved` 是
-    `[{"account":…, "chat_id":…, "chat_md5":…}, …]`（解析由 cli 层做，见 Task 7）。
+    `[{"account":…, "chat_id":…}, …]`（`usecases.purge_chat_targets` 的返回契约：**不带**
+    `chat_md5`，EA-092——本模块就地派生，见下文 F7）。
 
     **多条 entry 是常态，不是异常**：CLI 的 `--chat` 收的是一个**会话名**，而
     `usecases.purge_chat_targets` 把它解析成「每个索引里有它的账号各一条」——跨账号 purge

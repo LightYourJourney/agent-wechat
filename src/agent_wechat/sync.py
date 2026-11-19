@@ -228,22 +228,19 @@ def diagnose(account: str | None = None) -> dict:
     free = _free_bytes()
     out["disk"] = {"free_bytes": free}
     if free and free < MIN_FREE_BYTES:
-        out["problems"].append("磁盘可用空间低于 200 MB")
+        out["problems"].append(f"磁盘可用空间低于 {MIN_FREE_BYTES // (1024 * 1024)} MB")
 
-    # **直接读注册表文件**，不走 `tasks.status()`：后者会顺手清扫陈旧 `.tmp`（写操作），
-    # 而 doctor 承诺只读。这里只在内存里统计 running/failed。
-    try:
-        raw = json.loads(tasks.TASKS_FILE.read_text())
-        recs = [r for r in raw.values() if isinstance(r, dict)]
-        out["tasks"] = {
-            "running": sum(1 for r in recs if r.get("status") == "running"
-                           and paths.pid_alive(r.get("pid"))),
-            "failed": sum(1 for r in recs if r.get("status") == "failed"),
-        }
-    except FileNotFoundError:
-        pass
-    except (OSError, ValueError):
+    # 走 `tasks.snapshot()`（读 + 解析 + 收割，**纯内存、无写入**），不走 `tasks.status()`：
+    # 后者会顺手清扫陈旧 `.tmp`（写操作），而 doctor 承诺只读。此前这里自己重写了一份
+    # 收割判据、漏了 24h 陈旧兜底——同一条任务 doctor 报 running、get_task_status 报 failed。
+    recs = tasks.snapshot()
+    if recs is None:
         out["problems"].append("任务注册表读不出来")
+    else:
+        out["tasks"] = {
+            "running": sum(1 for r in recs.values() if r.get("status") == "running"),
+            "failed": sum(1 for r in recs.values() if r.get("status") == "failed"),
+        }
 
     if not store.DB_PATH.exists():
         return out
@@ -380,7 +377,8 @@ def run_sync(account: str | None = None, *, full: bool = False,
             free = _free_bytes()
             if free and free < MIN_FREE_BYTES:
                 raise _Abort(DISK_LOW,
-                             f"磁盘可用空间不足（{free // (1024 * 1024)} MB < 200 MB）",
+                             f"磁盘可用空间不足（{free // (1024 * 1024)} MB"
+                             f" < {MIN_FREE_BYTES // (1024 * 1024)} MB）",
                              "清理磁盘后重试；同步会在写库前停止")
             try:
                 keys.get_passphrase(acct)
@@ -395,8 +393,7 @@ def run_sync(account: str | None = None, *, full: bool = False,
                 res.exported = export.run_export(
                     acct, full=full,
                     on_reader=lambda r: res.degraded.extend(
-                        {"capability": d.capability, "effect": d.effect}
-                        for d in usecases.collect_degradations(r)),
+                        d.envelope() for d in usecases.collect_degradations(r)),
                     on_skipped=lambda n: skipped_rows.__setitem__("n", n))
                 res.skipped = skipped_rows["n"]
                 stats.update(exported=res.exported, skipped=res.skipped)
@@ -524,9 +521,9 @@ def launchd_plist(*, account: str | None = None,
     <key>RunAtLoad</key>
     <false/>
     <key>StandardOutPath</key>
-    <string>{paths.HOME_DIR / "sync.launchd.out.log"}</string>
+    <string>{paths.HOME_DIR / LAUNCHD_LOGS[0]}</string>
     <key>StandardErrorPath</key>
-    <string>{paths.HOME_DIR / "sync.launchd.err.log"}</string>
+    <string>{paths.HOME_DIR / LAUNCHD_LOGS[1]}</string>
 </dict>
 </plist>
 """

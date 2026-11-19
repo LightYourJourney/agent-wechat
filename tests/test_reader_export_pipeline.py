@@ -509,6 +509,26 @@ def test_appmsg_title_containing_colon_newline_is_untouched(msgs):
     assert "alpha" in msgs[ROOM][5].content and "beta" in msgs[ROOM][5].content
 
 
+@pytest.mark.parametrize("xml_title,expected", [
+    ("Q&amp;A", "[appmsg: Q&A]"),                       # XML 实体：此前原样入库
+    ("<![CDATA[周报 & 总结]]>", "[appmsg: 周报 & 总结]"),  # CDATA：去壳、内容按字面
+    ("<![CDATA[a &amp; b]]>", "[appmsg: a &amp; b]"),   # CDATA 里不做反转义
+])
+def test_appmsg_title_is_xml_decoded(xml_title, expected):
+    from agent_wechat import reader as reader_mod
+    xml = f"<msg><appmsg><title>{xml_title}</title><type>5</type></appmsg></msg>"
+    assert reader_mod._media_hint(messages.TYPE_APPMSG, xml) == expected
+
+
+def test_zstd_frames_without_content_size_decode_and_garbage_is_a_project_error():
+    import zstandard
+    from agent_wechat import errors, reader as reader_mod
+    frame = zstandard.ZstdCompressor(write_content_size=False).compress("正文".encode())
+    assert reader_mod._decode_content(frame, 4) == "正文"
+    with pytest.raises(errors.DecryptError, match="解压失败"):
+        reader_mod._decode_content(b"garbage", 4)
+
+
 # ---------- export ----------
 
 def test_export_full_idempotent(env):

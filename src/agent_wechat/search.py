@@ -1,4 +1,7 @@
-"""检索层：FTS5 trigram（≥3 字精确子串）+ LIKE 兜底（1-2 字）。向量检索为后续增强。"""
+"""关键词检索：FTS5 trigram（≥3 字精确子串）+ LIKE 兜底（1-2 字）。
+
+语义检索在 `vector.py`，三路融合（关键词 / 语义 / 派生文本）在 `retrieval.py`。
+"""
 from __future__ import annotations
 
 import sqlite3

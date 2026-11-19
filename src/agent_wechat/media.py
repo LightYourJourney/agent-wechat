@@ -28,13 +28,12 @@ import subprocess
 import tempfile
 import urllib.error
 from collections.abc import Sequence
-import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
-from . import decrypt, errors, messages, paths, store
+from . import decrypt, errors, exclusions, messages, paths, store
 from . import keys as keys_mod
 
 # 可选依赖：缺 pilk 只意味着语音出原始 .slk（能力级降级），不是导入失败。
@@ -837,6 +836,25 @@ def _refs_absence_note(kind: str, con, account: str, chat_ids, *,
                 f"（{name}按 media_refs 索引归属）")
 
 
+def _refuse_purged(account: str, chat_ids: list[str]) -> None:
+    """被 `purge --chat` 立过碑的会话拒绝重导媒体（SECURITY「不会因重导复活」）。
+
+    媒体按磁盘目录与 `media_*.db` 取件、不经排除清单，放行就会把刚删掉的图片/语音明文从
+    微信本机副本原样写回来。逐条过滤做不到（图片按目录枚举，没有 msg_key），所以按会话
+    整体拦；代价是 purge 之后新到的媒体也要先 undo 才导得出。拦在本函数而不是用例层：
+    `chat_ids` 是列表，哪个调用方都绕不过去。走 `standalone()`：清单文件不在时给内存
+    空表，只读检查不落盘。
+    """
+    with exclusions.standalone() as xcon:
+        for chat_id in chat_ids:
+            tombs = exclusions.count_chat(xcon, account, messages.chat_md5(chat_id))
+            if tombs:
+                raise errors.ScopeDenied(
+                    f"会话 {chat_id} 已被 purge --chat 销毁（排除清单 {tombs} 条），"
+                    "拒绝重新导出它的媒体",
+                    hint="确需导出：先 `agent-wechat purge --chat <会话> --undo --yes` 解除墓碑")
+
+
 def export_media(account: str, chat_ids: list[str], *, kinds: list[str],
                  months: list[str] | None = None, out_dir: pathlib.Path | None = None,
                  max_files: int = 2000, progress=None, force: bool = False,
@@ -853,7 +871,10 @@ def export_media(account: str, chat_ids: list[str], *, kinds: list[str],
     `with_cdn`（默认 False）：贴纸**本机那份是加密的**（两轮 spike 均未破，spec 附录 C/E.4），
     故只有显式打开它才从微信 CDN 取件。**不开则贴纸一条都不导、一次网络请求都不发**
     （`SECURITY.md` 的零网络承诺）。
+
+    被 `purge --chat` 销毁过的会话**整体拒绝**（`ScopeDenied`），在任何取件与建目录之前。
     """
+    _refuse_purged(account, chat_ids)
     report = MediaReport()
     out_root = ensure_tree(pathlib.Path(out_dir) if out_dir else export_root())
     report.out_dir = str(out_root)
@@ -883,12 +904,14 @@ def export_media(account: str, chat_ids: list[str], *, kinds: list[str],
     def full() -> bool:
         return produced >= max_files
 
-    def bump() -> int:
-        """计一个已落盘的媒体文件，返回累计数（Ruling 18：语音与图片/视频同一个口径——
-        `max_files` 必须也管住语音，否则一个有几千条语音的会话会无视 `--limit`）。"""
+    def bump() -> None:
+        """计一个已落盘的媒体文件并报进度（Ruling 18：语音与图片/视频同一个口径——
+        `max_files` 必须也管住语音，否则一个有几千条语音的会话会无视 `--limit`）。
+        进度回调收在这里：此前每个落盘点各写一遍「计数 + 回调」，缩略图那一支就漏了回调。"""
         nonlocal produced
         produced += 1
-        return produced
+        if progress:
+            progress(produced)
 
     if "image" in kinds:
         try:
@@ -953,9 +976,7 @@ def export_media(account: str, chat_ids: list[str], *, kinds: list[str],
                                 report.image.failed += 1     # 落盘失败（Ruling 20）
                                 continue
                         report.image.ok += 1
-                        produced += 1
-                        if progress:
-                            progress(produced)
+                        bump()
     if "video" in kinds:
         # 两条路（spec §4.7）：
         # - 给了索引连接（`con`）→ **refs 驱动**：按每个会话的 video 消息取其 file_key，再用
@@ -1030,9 +1051,7 @@ def export_media(account: str, chat_ids: list[str], *, kinds: list[str],
                         report.video.thumb += 1
                     else:
                         report.video.ok += 1
-                    done = bump()
-                    if progress:
-                        progress(done)
+                    bump()
         # 两处的 `con is None` 不可省：refs 路径已经处理过的调用不该再落进账号级枚举。
         if con is None and len(chat_ids) == 1:
             cm = messages.md5_of(chat_ids[0])
@@ -1073,9 +1092,7 @@ def export_media(account: str, chat_ids: list[str], *, kinds: list[str],
                             continue
                         mp4_stems.add(f.stem.removesuffix("_raw"))
                         report.video.ok += 1
-                        produced += 1
-                        if progress:
-                            progress(produced)
+                        bump()
                     for f in _safe_iter(month_dir, "*_thumb.jpg"):
                         if f.stem.removesuffix("_thumb") in mp4_stems:
                             continue               # 有本体的不再存缩略图
@@ -1102,16 +1119,15 @@ def export_media(account: str, chat_ids: list[str], *, kinds: list[str],
                             report.video.missing += 1    # 同上：缩略图也 write 不出来
                             continue
                         report.video.thumb += 1
-                        produced += 1
+                        bump()                # 缩略图同样占 limit、同样报进度
         elif con is None and len(chat_ids) > 1:
             report.degraded.append("视频为账号级枚举，无法归属具体会话；请逐个会话导出")
     if "voice" in kinds:
         if _PILK is None:
             report.degraded.append("pilk 不可用：语音导出为原始 .slk（`uv add pilk` 后可转 WAV）")
-        _export_voices(account, chat_ids, out_root, report, want, full, bump, progress,
-                       already)
+        _export_voices(account, chat_ids, out_root, report, want, full, bump, already)
     if "sticker" in kinds:
-        _export_stickers(account, chat_ids, out_root, report, want, full, bump, progress,
+        _export_stickers(account, chat_ids, out_root, report, want, full, bump,
                          already, con, with_cdn=with_cdn)
     return report
 
@@ -1201,16 +1217,29 @@ class _AllowlistedRedirect(urllib.request.HTTPRedirectHandler):
     与 `sns_media._AllowlistedRedirect` 同一手法，但**判据不同**，故**不能复用**。两个障碍：
     ① 贴纸 URL 的 scheme 是 **http**，被 `https_allowed` 的 scheme 那半条挡死；
     ② `vweixinf.tc.qq.com` 不在其白名单里（`wxapp.tc.qq.com` 在）。
-    **不是「域不对」**——那是把理由说错了。本处的白名单只判 host 后缀、**不管 scheme**；
-    scheme 的限制是既知代价（spec R10）：实测 `vweixinf.tc.qq.com` 的证书对主机名无效，
-    而另一个 host 的 https 未测，故当前一律用 XML 给的 http。
+    **不是「域不对」**——那是把理由说错了。本处的判据（`_cdn_url_allowed`）是 host 后缀
+    + scheme ∈ {http, https}，**不强制 https**：那是既知代价（spec R10）——实测
+    `vweixinf.tc.qq.com` 的证书对主机名无效，而另一个 host 的 https 未测，故当前一律用
+    XML 给的 http。
     """
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        host = urllib.parse.urlsplit(newurl).hostname or ""
-        if not host.endswith(_CDN_ALLOWED):
+        if not _cdn_url_allowed(newurl):
             return None
         return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _cdn_url_allowed(url: str) -> bool:
+    """首跳与每一跳重定向共用的判据：scheme 只许 http/https、host 在白名单后缀内。
+
+    只判 host 时，发送方写的 `ftp://x.tc.qq.com/…` / `file://x.tc.qq.com/…` 也能走到
+    opener（默认 opener 带着 `FTPHandler` / `FileHandler`）——零网络例外只放行了 HTTP 取件。
+    畸形 URL 走 `moments.split_url`（全项目那一份容错解析，返回 None）同样判「不放行」。
+    """
+    from . import moments           # 函数内导入：moments 在模块级依赖本模块
+    parts = moments.split_url(url)
+    return (parts is not None and parts.scheme in ("http", "https")
+            and (parts.hostname or "").endswith(_CDN_ALLOWED))
 
 
 def _cdn_opener() -> urllib.request.OpenerDirector:
@@ -1297,13 +1326,9 @@ def _fetch_cdn_bytes(url: str, expect_md5: str, *, timeout: float = 15.0
     故这是一次零成本的完整性校验：不符即失败、**绝不落盘**。它同时覆盖「下载内容不对」
     与「服务端换了内容」两种失败。**这也意味着 md5 缺失时不会下载**（spec §2.2 记其覆盖 100%）。
     """
-    try:
-        # **畸形 URL 会让 `urlsplit` 抛 `ValueError`**——放进同一道网里，别让它逃出 core。
-        host = urllib.parse.urlsplit(url).hostname or ""
-    except ValueError:
-        return None, "refused"           # 畸形 URL：同样是「不会去取」
-    if not host.endswith(_CDN_ALLOWED):
-        return None, "refused"           # 白名单外：一次请求都不发（跨跳由 handler 复查）
+    if not _cdn_url_allowed(url):
+        # 白名单外 / 非 http(s) / 畸形 URL：一次请求都不发（跨跳由 handler 复查）
+        return None, "refused"
     try:
         with _cdn_opener().open(url, timeout=timeout) as resp:
             if resp.status != 200:
@@ -1320,7 +1345,7 @@ def _fetch_cdn_bytes(url: str, expect_md5: str, *, timeout: float = 15.0
 
 def _export_stickers(account: str, chat_ids: list[str], out_root: pathlib.Path,
                      report: MediaReport, want: set[str] | None, is_full, bump,
-                     progress, already, con: sqlite3.Connection | None,
+                     already, con: sqlite3.Connection | None,
                      *, with_cdn: bool = False) -> None:
     """贴纸：按 `media_refs` 归属 → **从 CDN 取明文图** → 落盘。
 
@@ -1476,12 +1501,10 @@ def _export_stickers(account: str, chat_ids: list[str], out_root: pathlib.Path,
                 report.sticker.failed += 1
                 continue
         report.sticker.ok += 1
-        done = bump()
-        if progress:
-            progress(done)
+        bump()
 
 
-def _export_voices(account, chat_ids, out_root, report, want, is_full, bump, progress,
+def _export_voices(account, chat_ids, out_root, report, want, is_full, bump,
                    already) -> None:
     """语音：Name2Id rowid → VoiceInfo(chat_name_id, create_time) → pilk 解码 24kHz WAV。
     pilk 缺失 → 原始 .slk（微信原始形态，`\\x02` 前缀保留）。单库打不开则跳过该分片、
@@ -1501,7 +1524,7 @@ def _export_voices(account, chat_ids, out_root, report, want, is_full, bump, pro
                 con.text_factory = bytes
                 try:
                     _export_voices_from(con, chat_ids, out_root, report,
-                                        want, is_full, bump, progress, already)
+                                        want, is_full, bump, already)
                 finally:
                     con.close()
         except (errors.AgentWeChatError, sqlite3.Error, OSError) as exc:
@@ -1519,7 +1542,7 @@ def _export_voices(account, chat_ids, out_root, report, want, is_full, bump, pro
 
 
 def _export_voices_from(con, chat_ids, out_root, report, want, is_full, bump,
-                        progress, already) -> None:
+                        already) -> None:
     name2id = {u.decode("utf-8", "replace") if isinstance(u, bytes) else u: rid
                for rid, u in con.execute("SELECT rowid, user_name FROM Name2Id")}
     for chat in chat_ids:
@@ -1572,6 +1595,4 @@ def _export_voices_from(con, chat_ids, out_root, report, want, is_full, bump,
                     report.voice.failed += 1
                     continue
                 report.voice.raw_only += 1
-            done = bump()
-            if progress:
-                progress(done)
+            bump()

@@ -191,6 +191,15 @@ def search_messages(query: str, *, account: str, chat_id: str | None = None,
         except errors.DerivedInputError:
             derived_hits = []
 
+    # 拒读会话在**融合与截断之前**滤掉：先截到 limit 再滤，`limit=1` 时会因为第一名在
+    # 被拒会话里而答 0 条（放行会话里明明有命中）；`candidates` 也会把被拒会话的命中数
+    # 数进去——等于透露「那个会话里有几条匹配」。
+    denied = denied_chat_ids()
+    if denied:
+        keyword_hits = [h for h in keyword_hits if h["chat_id"] not in denied]
+        semantic_hits = [h for h in semantic_hits if h["chat_id"] not in denied]
+        derived_hits = [h for h in derived_hits if h["chat_id"] not in denied]
+
     if mode == "hybrid":
         ordered, deduped_total = fuse(keyword_hits, semantic_hits, derived_hits, limit)
     else:
@@ -201,13 +210,10 @@ def search_messages(query: str, *, account: str, chat_id: str | None = None,
                             "ranks": {mode: len(ordered) + 1}, "score": None})
         deduped_total = len({h["msg_key"] for h in source})
 
-    denied = denied_chat_ids()
-    selected = [e for e in ordered if e["hit"]["chat_id"] not in denied]
-
     hits: list[dict] = []
     used = 0
     clipped = False
-    for entry in selected:
+    for entry in ordered:
         remaining = TOTAL_CHARS - used
         if remaining <= 0:
             break
@@ -226,8 +232,8 @@ def search_messages(query: str, *, account: str, chat_id: str | None = None,
 
     return {
         "mode": mode, "total": len(hits), "candidates": deduped_total,
-        "truncated": clipped or len(hits) < len(selected)
-                     or deduped_total > len(selected),
+        "truncated": clipped or len(hits) < len(ordered)
+                     or deduped_total > len(ordered),
         "budget": {"limit": limit, "snippet_chars": SNIPPET_CHARS,
                    "total_chars": TOTAL_CHARS, "used_chars": used,
                    "approx_tokens": math.ceil(used / CHARS_PER_TOKEN),

@@ -217,7 +217,7 @@ def test_export_task_is_visible_through_get_task_status(monkeypatch, tmp_path):
     # 桩不接就成 `TypeError`→任务 failed，而本测试问的是**登记/持久化/查询**这条链。
     monkeypatch.setattr(export, "run_export",
                         lambda acct, chat_id=None, full=False, on_skipped=None,
-                        progress=None: 3)
+                        progress=None, on_reader=None: 3)
 
     res = _call(mcp_server.export_full_history)
     for _ in range(200):                      # 后台线程，等待完成
@@ -237,7 +237,8 @@ def test_export_progress_is_wired_to_rows(monkeypatch, tmp_path):
     monkeypatch.setattr(tasks, "TASKS_FILE", tmp_path / "tasks.json")
     monkeypatch.setattr(account, "resolve_account", lambda a: "acct")
 
-    def fake_export(acct, chat_id=None, full=False, on_skipped=None, progress=None):
+    def fake_export(acct, chat_id=None, full=False, on_skipped=None, progress=None,
+                    on_reader=None):
         progress(7)                       # 跑动中的进度快照
         return None                       # 无终值 → 进度值本身即答案
 
@@ -249,6 +250,32 @@ def test_export_progress_is_wired_to_rows(monkeypatch, tmp_path):
             break
         time.sleep(0.01)
     assert st["status"] == "done" and st["rows"] == 7, st
+
+
+def test_export_task_carries_reader_degradations(monkeypatch, tmp_path):
+    """CLI `export` 把导出 reader 上的漂移打到 stderr；MCP 任务记录此前没有这一条
+    ——同一次导出，两个入口一个说「群发送者名降级了」、一个什么都不说。"""
+    from agent_wechat import usecases
+    monkeypatch.setattr(tasks, "TASKS_FILE", tmp_path / "tasks.json")
+    monkeypatch.setattr(account, "resolve_account", lambda a: "acct")
+    monkeypatch.setattr(usecases, "collect_degradations", lambda r: (usecases.Degradation(
+        capability="sender_name", db="contact/contact.db", table="username_pool",
+        missing_columns=("x",), drift=True, effect="群发送者名降级"),))
+
+    def fake_export(acct, chat_id=None, full=False, on_skipped=None, progress=None,
+                    on_reader=None):
+        on_reader(object())
+        return 1
+
+    monkeypatch.setattr(export, "run_export", fake_export)
+    res = _call(mcp_server.export_full_history)
+    for _ in range(200):
+        st = _call(mcp_server.get_task_status, task_id=res["task_id"])
+        if st["status"] != "running":
+            break
+        time.sleep(0.01)
+    assert st["status"] == "done", st
+    assert st["degraded"] == [{"capability": "sender_name", "effect": "群发送者名降级"}]
 
 
 def test_msg_dict_marks_self_as_me():

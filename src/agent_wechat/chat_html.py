@@ -105,14 +105,12 @@ def _media_block(m: MediaRefState, prefix: str, out_dir: str) -> str:
 
 def _quote_block(q: appmsg.Quote, ref_anchor: str | None) -> str:
     """引用：`ref_anchor` 有值整块可点跳，没有则内联显示原文。**原文两种情况都印。**"""
-    # displayname 为空是 0.81% 的常态：补一个**显式的**「未署名」—— 不猜名字，也不留空
-    # （留空渲染成「引用 ：」，看起来像坏了）。正文为空（0.56%）则照原样留空。
-    who = _esc(q.displayname) or "（未署名）"
+    # displayname 为空时的占位见 `chat_text.QUOTE_UNSIGNED`。正文为空（0.56%）则照原样留空。
+    who = _esc(q.displayname) or chat_text.QUOTE_UNSIGNED
     body = _esc(q.content)             # 为空是 0.56% 的常态，不编占位文案
     inner = f'<div class="src">引用 {who}：</div>{body}'
     if not ref_anchor:
-        inner += ('<div class="src">原消息不在本次范围内，无法跳转 —— '
-                  "以上是引用自带的原文。</div>")
+        inner += f'<div class="src">{chat_text.QUOTE_UNRESOLVED}</div>'
         return f'<div class="q">{inner}</div>'
     return f'<a href="#{_esc(ref_anchor)}"><div class="q">{inner}</div></a>'
 
@@ -148,11 +146,9 @@ def _appmsg_block(a: AppMsg, ref_anchor: str | None) -> str:
         if a.link.des:
             inner.append(f"<div>{_esc(a.link.des)}</div>")
     if a.file is not None:
-        bits = [b for b in (a.file.title, a.file.fileext) if b]
-        if a.file.totallen:
-            bits.append(f"{a.file.totallen} 字节")
-        if bits:
-            inner.append("<div>" + _esc(" · ".join(bits)) + "</div>")
+        line = chat_text.file_summary(a.file.title, a.file.fileext, a.file.totallen)
+        if line:
+            inner.append("<div>" + _esc(line) + "</div>")
     if a.transfer is not None:
         inner.append(f"<div>{_transfer_block(a.transfer)}</div>")
     if a.fields:
@@ -179,7 +175,7 @@ def _extra_block(x: msgextra.Extra) -> str:
 
 def _msg_block(m: ViewMsg, prefix: str, out_dir: str) -> str:
     """单条消息。`is_self` 决定 `self` / `other` —— 左右对齐与「谁发的」都由它派生。"""
-    who = "我" if m.is_self else (m.sender or "（未知发送者）")
+    who = chat_text.sender_label(m.is_self, m.sender)
     cls = "self" if m.is_self else "other"
     inner = [f'<div class="meta"><span class="who">{_esc(who)}</span>'
              f'<span class="when">{chat_text.when(m.ts)}</span>'

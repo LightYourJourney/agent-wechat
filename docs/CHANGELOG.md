@@ -3,6 +3,53 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 风格，
 版本号语义为 0.x 阶段（API 可能变动）。
 
+### 整仓双轴审查的修复（2026-11-20）
+
+整仓 Standards / Spec 两轴、四组并行审查之后的修复。只列**用户可见**的行为变更。
+
+**行为变更**
+
+- **被 `purge --chat` 销毁过的会话拒绝 `media export` / `export_chat_media`**：媒体按磁盘目录
+  取件、不经排除清单，此前重导会把刚删掉的图片/语音明文从微信本机副本写回来。确需导出先
+  `purge --chat <会话> --undo --yes`（代价：purge 之后新到的媒体也要先 undo）。
+- **`get_account_status` 校验显式给出的账号**：目录不存在时报错（附已知账号），与其它工具
+  同一条通用约定。此前答 `key_ready: false`，会把人引向「重新 bootstrap」。
+
+**修复**
+
+- **工作台 `/api/media` 泄露本机绝对路径**：路径脱敏只认 `messages[].path`，而这条路由交来的
+  是 `states[].path` 与 `out_dir`。现在两者都只剩文件名。
+- **工作台时间线换会话不重置**：换会话后沿用上一个会话的分页游标；现在换会话即从第一页重载。
+- **contact 已是 chat_id 时不再要求微信密钥**：`get_message_context`（contact 必填）与工作台
+  `/api/media` 此前一给 contact 就构造 reader、读 passphrase 缓存，缓存不在就失败。
+- **`AGENT_WECHAT_DENY` 在截断之前生效**：此前先截到 `limit` 再滤，`limit=1` 时可能答 0 条；
+  `candidates` 还把被拒会话的命中数了进去。
+- **派生文本（OCR/ASR）检索与关键词检索同一语义**：此前原始串直接交给 FTS——`world hello`
+  按 AND 命中、`hel*` 按前缀命中，`a-b` 语法错后静默改走 LIKE。
+- **appmsg 凭据参数过滤**：参数名带 `-` / `.` 的（`X-Amz-Security-Token=`、`access-token=`、
+  `sig.token=`）此前整体放行。
+- **贴纸 CDN 取件只许 http/https**：此前只核主机后缀，`ftp://` / `file://` 也能走到 opener。
+- **`scan --staged` 不受用户 git 配置影响**：`diff.external` 曾让暂存行一行不出（静默放行），
+  `diff.mnemonicPrefix` 曾让每次提交都被误拦。
+- **向量构建的写锁冲突**此前以英文 `database is locked` 裸异常逃出，`sync` 记成 `failed`；
+  现在是带指引的 `VectorError`，`sync` 记为 `vector_unavailable`。
+- **解密只读第 1 页取盐**：此前把整个分片读进内存再切。
+- **appmsg 标题做 XML 解码**：`Q&amp;A` / CDATA 标题此前原样入库（FTS 搜不到）。头部不带
+  内容长度的 zstd 帧现在能解；坏帧给项目异常而不是裸 `ZstdError`。
+- **既有的数据目录收紧到 0700**：此前 `AGENT_WECHAT_HOME` 指向既有 0755 目录时不收紧
+  （不碰 `$HOME` 及其祖先）。
+- **MCP 导出任务带上表结构降级**：CLI `export` 打到 stderr 的那几条，现在也随
+  `get_task_status` 的 `degraded` 返回；CLI `status` 也印出索引库自检说明（此前只有 MCP 有）。
+- `doctor` 的在跑任务数与 `get_task_status` 用同一份收割判据（此前漏了 24h 陈旧兜底）。
+- 派生任务的磁盘探测失败不再被报成「不足 50 MB」；`media export` / `moments export` 的
+  相对 `--out` 先绝对化；`vector-status` 无索引时补齐 `by_reason` 键；视频缩略图也报进度。
+
+**文档**
+
+- 订正多处与代码不符的宣称（`TOOLS.md` 的 EA-057、msg_key 示例、分片失败时的水位线；
+  `DATA_MODEL.md` 的 upsert 守卫与 `pending_reembed.reason`；`TROUBLESHOOTING.md` 的迁移版本；
+  门禁耗时）。`SECURITY.md` 写明 `purge --chat` 不覆盖的一处（`chat index` 总目录页）。
+
 ### 公开发布后的修复（2026-10-30 ~ 11-01）
 
 四轮审查（读改动对规范 / 验证文档宣称 / 深读实现 / 属性测试与 fuzz）之后的修复。

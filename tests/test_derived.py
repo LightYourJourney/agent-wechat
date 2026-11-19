@@ -172,6 +172,20 @@ def test_edit_updates_search_and_delete_leaves_a_tombstone(tmp_path, monkeypatch
     assert row["text"] == "", "删除必须清空正文"
 
 
+def test_fts_query_is_a_substring_phrase_like_keyword_search(tmp_path, monkeypatch):
+    """派生路与关键词路（search.py）同一语义：子串短语，不是 FTS 语法。
+
+    此前原始串直接交给 MATCH：`world hello` 按 AND 命中、`hel*` 按前缀命中，
+    同一查询在关键词路是 0 命中——融合检索里两路答案互相矛盾。
+    """
+    _env(tmp_path, monkeypatch)
+    derived.ingest(ACCT, CHAT, ocr=FakeOcr("hello big world"), asr=FakeAsr())
+    assert derived.search_derived("big world", account=ACCT)["total"] == 1
+    assert derived.search_derived("world hello", account=ACCT)["total"] == 0
+    assert derived.search_derived("hel*", account=ACCT)["total"] == 0
+    assert derived.search_derived("a-b NOT x", account=ACCT)["total"] == 0
+
+
 def test_short_query_falls_back_to_like(tmp_path, monkeypatch):
     _env(tmp_path, monkeypatch)
     derived.ingest(ACCT, CHAT, ocr=FakeOcr("爬山"), asr=FakeAsr())
@@ -283,6 +297,13 @@ def test_disk_low_stops_ingest(tmp_path, monkeypatch):
     monkeypatch.setattr(derived, "_free_bytes", lambda: 1)
     with pytest.raises(errors.HomeUnavailable):
         derived.ingest(ACCT, CHAT, ocr=FakeOcr(), asr=FakeAsr())
+
+
+def test_unknown_free_space_is_not_reported_as_disk_full(tmp_path, monkeypatch):
+    """`_free_bytes()` 探测失败返回 0 =「未知」：与 sync 同口径放行，不报「不足 50 MB」。"""
+    _env(tmp_path, monkeypatch)
+    monkeypatch.setattr(derived, "_free_bytes", lambda: 0)
+    assert derived.ingest(ACCT, CHAT, ocr=FakeOcr(), asr=FakeAsr())["counts"]
 
 
 def test_derived_show_includes_engine_source_and_quality(tmp_path, monkeypatch):
