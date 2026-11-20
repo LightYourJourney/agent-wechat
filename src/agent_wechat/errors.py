@@ -49,7 +49,7 @@ class AgentWeChatError(RuntimeError):
     hint 只在有可执行修复动作时携带；消息本身已含指引就不重复。
     """
 
-    def __init__(self, message: str, hint: str | None = None):
+    def __init__(self, message: str, hint: str | None = None) -> None:
         super().__init__(message)
         self.hint = hint
 
@@ -120,7 +120,7 @@ class SchemaDrift(AgentWeChatError):
 
     def __init__(self, capability: str, db: str, table: str,
                  missing_columns: tuple[str, ...] = (), *,
-                 detail: str | None = None, hint: str | None = None):
+                 detail: str | None = None, hint: str | None = None) -> None:
         """`detail` / `hint` 可覆盖（EA-105）：有一种形态**不是结构漂移**——库文件损坏
         （`file is not a database`）。复用本类型可以（降级策略相同），但默认文案会说
         「表不存在 / 微信升级」并把用户指向 `inspect`，对损坏的库是**错诊断**。"""

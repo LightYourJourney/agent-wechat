@@ -12,19 +12,27 @@
 - **被 `purge --chat` 销毁过的会话拒绝 `media export` / `export_chat_media`**：媒体按磁盘目录
   取件、不经排除清单，此前重导会把刚删掉的图片/语音明文从微信本机副本写回来。确需导出先
   `purge --chat <会话> --undo --yes`（代价：purge 之后新到的媒体也要先 undo）。
+- **`get_account_status` / CLI `status` 的索引自检改为只读**：不再就地迁移索引库（旧版本库
+  只提示「跑一次导出或 sync 会自动升级」），另一个进程持写锁时也不再等满 timeout 后
+  把「忙」报成「库坏了」并建议删库。
 - **`get_account_status` 校验显式给出的账号**：目录不存在时报错（附已知账号），与其它工具
   同一条通用约定。此前答 `key_ready: false`，会把人引向「重新 bootstrap」。
 - **`purge --chat` 一并删除默认导出根的总目录页**（`media/index.html`，仅当它列着该会话）：
   此前 `media/<md5>/` 删掉后，那一页仍留着会话 id 与条数。重跑 `chat index` 即重建。
+  该页是符号链接时**不删**（删名字不删内容），核查会把它报成残留；读不出来时拒绝并点名对象。
 - **微信密钥改为首次解密时才读**：此前构造 reader 就要密钥，只读本地索引的路径要在每个
   调用方各自绕开；缓存不在时仍报同一个错，只是时机挪到第一次读微信库。
 - **`AGENT_WECHAT_DENY` 下推到三路检索的取数查询**（关键词 SQL / 向量 KNN / 派生文本 SQL）：
   此前取回候选后才滤，被拒会话的命中会占满每路候选窗、把放行会话挤掉。
+- **`AGENT_WECHAT_DENY` 现在也覆盖退化 `chat_id`**：同一会话在索引里可能同时是真名与
+  `md5:<hex>` 两种形态，此前只比 `chat_id`，退化那一批照常出现在检索结果与
+  `get_message_context` 里。
 
 **修复**
 
 - **工作台 `/api/media` 泄露本机绝对路径**：路径脱敏只认 `messages[].path`，而这条路由交来的
-  是 `states[].path` 与 `out_dir`。现在两者都只剩文件名。
+  是 `states[].path` 与 `out_dir`。现在两者都只剩文件名（只截绝对路径，相对逻辑路径不动），
+  错误信封里的容器/数据目录前缀也换成末段。
 - **工作台时间线换会话不重置**：换会话后沿用上一个会话的分页游标；现在换会话即从第一页重载。
 - **contact 已是 chat_id 时不再要求微信密钥**：`get_message_context`（contact 必填）与工作台
   `/api/media` 此前一给 contact 就构造 reader、读 passphrase 缓存，缓存不在就失败。
@@ -36,7 +44,7 @@
   `sig.token=`）此前整体放行。
 - **贴纸 CDN 取件只许 http/https**：此前只核主机后缀，`ftp://` / `file://` 也能走到 opener。
 - **`scan --staged` 不受用户 git 配置影响**：`diff.external` 曾让暂存行一行不出（静默放行），
-  `diff.mnemonicPrefix` 曾让每次提交都被误拦。
+  `diff.mnemonicPrefix` 曾让每次提交都被误拦，`.gitattributes` 的 `-diff` 曾把文本当二进制跳过。
 - **向量构建的写锁冲突**此前以英文 `database is locked` 裸异常逃出，`sync` 记成 `failed`；
   现在是带指引的 `VectorError`，`sync` 记为 `vector_unavailable`。
 - **解密只读第 1 页取盐**：此前把整个分片读进内存再切。
@@ -50,7 +58,10 @@
 - 补齐全部函数签名的类型注解（CONTRIBUTING §6）；`purge` 核查结果的文案移到 CLI 层
   （展示归入口层）。
 - 派生任务的磁盘探测失败不再被报成「不足 50 MB」；`media export` / `moments export` 的
-  相对 `--out` 先绝对化；`vector-status` 无索引时补齐 `by_reason` 键；视频缩略图也报进度。
+  相对 `--out` 先绝对化；`vector-status` 无索引时补齐 `by_reason` 键；`media export` 的
+  视频缩略图也走同一个计数出口（此前绕过 `bump()`，不占 `--limit` 口径的进度）；
+  `agent-wechat derived ingest --kinds "ocr, asr"` / `memory add --evidence "a, b"` 里的空格
+  不再让取值报错。
 
 **文档**
 

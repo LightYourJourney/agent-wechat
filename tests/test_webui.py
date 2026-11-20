@@ -263,3 +263,19 @@ def test_context_with_a_chat_id_contact_needs_no_wechat_key(srv):
     from agent_wechat import usecases
     res = usecases.message_context(_key(1), contact=CHAT, account=ACCT)
     assert res["chat_id"] == CHAT
+
+
+def test_error_envelopes_do_not_carry_absolute_paths(tmp_path, monkeypatch):
+    """错误文案是自由文本，按键名截不住——两个已知根要换成末段（工作台在浏览器里）。"""
+    monkeypatch.setattr(paths, "HOME_DIR", tmp_path / "home")
+    text = f"数据目录不可用：{tmp_path / 'home'}"
+    assert str(tmp_path) not in webui._scrub_abs_paths(text)
+    assert webui._scrub_abs_paths(None) is None
+
+
+def test_strip_paths_keeps_relative_paths(srv):
+    """`path` 键下的相对逻辑路径（媒体页的 `../image/…`）不许截成 basename。"""
+    data = {"states": [{"path": "../image/2026-09/a.jpg"}], "out_dir": "/abs/dir"}
+    out = webui._strip_paths(data)
+    assert out["states"][0]["path"] == "../image/2026-09/a.jpg"
+    assert out["out_dir"] == "dir"

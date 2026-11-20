@@ -24,7 +24,8 @@ from typing import TYPE_CHECKING
 
 from . import account as acc_mod
 from . import (appmsg, chatview, errors, exclusions, export, keys, media, messages,
-                msgextra, paths, reader, retrieval, search, store, tasks, vector)
+                migrations, msgextra, paths, reader, retrieval, search, store, tasks,
+                vector)
 # 模板模块名与下面的用例函数 `chat_index()` **同名**：这里起别名，否则函数定义会遮蔽
 # 模块名（`index_html.render` 那处引用会变成调用函数自身）。
 from . import chat_index as index_html
@@ -113,7 +114,7 @@ class ChatContext:
     （contact.db 只解密一次），两个入口也不再各自构造 MessageReader。
     """
 
-    def __init__(self, account: str | None = None):
+    def __init__(self, account: str | None = None) -> None:
         self.account = acc_mod.resolve_account(account)
         self._reader: reader.MessageReader | None = None
 
@@ -285,16 +286,31 @@ def index_snapshot() -> tuple[dict, list[str]]:
     elif (store.DB_PATH.exists()
             and exclusions.path_for(store.DB_PATH).exists()):
         try:
-            with store.open() as con:
+            # **只读连接，不走 `store.open()`**：那个会 executescript(SCHEMA) 并在旧库上
+            # 跑迁移——诊断命令变成写操作，而 `status` 是故障时最先跑的那条；另一个进程
+            # 正持写锁时它会等满 timeout，然后把「忙」报成「库坏了」，还附一句「删掉
+            # index.db」。这里只读，版本落后只如实提示。
+            con = sqlite3.connect(f"file:{store.DB_PATH}?mode=ro", uri=True)
+            try:
+                version = migrations.version_if_table_exists(con, scope=migrations.SCOPE_MAIN)
+                if 0 < version < store.SCHEMA_VERSION:
+                    schema_notes.append(
+                        f"索引库版本 v{version}，本程序是 v{store.SCHEMA_VERSION}——"
+                        "跑一次导出或 sync 会自动升级（status 只读，不升级）")
                 index = store.counts(con)
                 # EA-077：触发器体是「OLD 库 + 新代码」的静默失配面——自检报出来（不改库）。
-                schema_notes = store.schema_drift_notes(con)
+                schema_notes += store.schema_drift_notes(con)
+            finally:
+                con.close()
         except (errors.AgentWeChatError, sqlite3.Error, OSError) as exc:
             # F10（T7 复审）：读不了 ≠ 空索引——把「库坏了」说成「还没导出过」正是本仓
             # 到处在消灭的形态（message_media / chat_export / message_parts / chat_index
             # 四处同立场）。计数仍按零呈现（形状不变），但这条说明必须带上。
-            schema_notes = [f"索引库读不出来（{errors.redact(str(exc))}）——"
-                            "index 计数按零呈现；删除 index.db 后重跑一次导出可重建"]
+            stale = " database is locked" in str(exc) or "database is busy" in str(exc)
+            schema_notes = [
+                f"索引库读不出来（{errors.redact(str(exc))}）——index 计数按零呈现；"
+                + ("多半是别的进程正持写锁（导出 / 构建 / 另一个 MCP server），等它结束再试"
+                   if stale else "删除 index.db 后重跑一次导出可重建")]
     return index, schema_notes
 
 

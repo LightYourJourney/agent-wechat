@@ -40,7 +40,7 @@ class WxIsaac64:
 
     __slots__ = ("_mm", "_aa", "_bb", "_cc", "_rsl", "_cnt")
 
-    def __init__(self, seed: int):
+    def __init__(self, seed: int) -> None:
         self._mm = [0] * 256
         self._aa = self._bb = self._cc = 0
         self._rsl = [0] * 256

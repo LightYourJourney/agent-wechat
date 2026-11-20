@@ -527,6 +527,10 @@ def test_zstd_frames_without_content_size_decode_and_garbage_is_a_project_error(
     assert reader_mod._decode_content(frame, 4) == "正文"
     with pytest.raises(errors.DecryptError, match="解压失败"):
         reader_mod._decode_content(b"garbage", 4)
+    # 截断帧：`decompressobj` 只吐半截、不抛——必须由 `eof` 判据拦下（静默入库半截正文
+    # 正是这个仓库在消灭的那类「成功但有保留」）。
+    with pytest.raises(errors.DecryptError, match="帧不完整"):
+        reader_mod._decode_content(frame[:-3], 4)
 
 
 # ---------- export ----------

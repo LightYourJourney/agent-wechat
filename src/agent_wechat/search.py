@@ -21,8 +21,12 @@ _RECENT_COLUMNS = (messages.column_list(*messages.ROW_COLUMNS, prefix="m.")
                    .replace("m.sender_name", store._SENDER_EXPR + " AS sender_name"))
 
 
-def _fts_safe(q: str) -> str:
-    """FTS5 字符串转义：包成双引号短语（trigram 支持子串短语匹配）。"""
+def fts_phrase(q: str) -> str:
+    """FTS5 字符串转义：包成双引号短语（trigram 支持子串短语匹配）。
+
+    **公开**：`derived.search_derived` 的 FTS 支路也走它（同一个查询在两路必须给同一语义），
+    所以它是全项目唯一一份转义，而不只是本模块的内部函数。
+    """
     return '"' + q.replace('"', '""') + '"'
 
 
@@ -54,14 +58,17 @@ def _runtime_failure(msg: str) -> errors.IndexUnavailable:
 def search(query: str, chat_id: str | None = None, limit: int = 20,
            account: str | None = None, *,
            after_ts: int | None = None, before_ts: int | None = None,
-           exclude_chats: Collection[str] = ()) -> dict:
+           exclude_chats: Collection[str] = (),
+           exclude_md5s: Collection[str] = ()) -> dict:
     """返回 {"hits": [...], "mode": "fts"|"like", "total": n, "degraded": [...]}。
 
     account 必传：检索严格限定该账号的数据（多账号索引隔离）。
     时间窗：`after_ts` 含下界、`before_ts` 不含上界（与 `messages_in_range` /
     `media.month_bounds` 同口径）——这是 Phase 05 给统一检索加的参数，默认不限。
-    `exclude_chats`：在 SQL 里排除的会话（`AGENT_WECHAT_DENY`）。必须在取数时排除而不是
-    取回后再滤：先按 `LIMIT` 取再滤，被拒会话的命中会占满候选、把放行会话挤出去。
+    `exclude_chats` / `exclude_md5s`：在 SQL 里排除的会话（`AGENT_WECHAT_DENY`）与它们的
+    `chat_md5`。必须在取数时排除而不是取回后再滤：先按 `LIMIT` 取再滤，被拒会话的命中会
+    占满候选、把放行会话挤出去。**两个都要**：同一会话在索引里可能同时是真名与退化 id
+    `md5:<hex>` 两种 `chat_id`，只比 `chat_id` 会漏掉退化那一批。
     """
     if not account:
         raise SearchInputError("search 需要显式 account（多账号索引隔离）")
@@ -85,6 +92,9 @@ def search(query: str, chat_id: str | None = None, limit: int = 20,
     if exclude_chats:
         where.append(f"m.chat_id NOT IN ({','.join('?' * len(exclude_chats))})")
         args.extend(exclude_chats)
+    if exclude_md5s:
+        where.append(f"m.chat_md5 NOT IN ({','.join('?' * len(exclude_md5s))})")
+        args.extend(exclude_md5s)
     w = " AND ".join(where)
 
     notes: list[dict] = []
@@ -97,7 +107,7 @@ def search(query: str, chat_id: str | None = None, limit: int = 20,
                    f"{store._SENDER_JOIN} "
                    f"WHERE messages_fts MATCH ? AND {w} "
                    f"ORDER BY m.ts DESC LIMIT ?")
-            rows = con.execute(sql, [_fts_safe(query), *args, limit]).fetchall()
+            rows = con.execute(sql, [fts_phrase(query), *args, limit]).fetchall()
         except sqlite3.OperationalError as exc:
             # EA-013：只吞「**确认可降级**」的那一种，且把降级说出来（mode 不再是 fts）。
             # 此前吞掉**全部** OperationalError：索引损坏与将来的 SQL 拼装错误都静默成

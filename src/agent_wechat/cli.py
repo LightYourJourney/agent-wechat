@@ -910,7 +910,7 @@ def _render_residue(rep: purge.ResidueReport) -> None:
         print("  ✅ 计划内路径已清空，未发现残留")
 
 
-def _render_degradations(degraded: Iterable[object]) -> None:
+def _render_degradations(degraded: Iterable[usecases.Degradation | dict | str]) -> None:
     """降级说明走 stderr：成功但有保留，不该污染 stdout（spec §7）。
 
     三种形状都要收：`recent` 给 `usecases.Degradation`（dataclass；只有 `drift=True`
@@ -980,8 +980,10 @@ def _render_chat_plan(plan: purge.ChatPlan, query: str) -> None:
               f"解密后的图/视频/语音，及可直接打开的 chat/index.html"
               f"{'' if exists else '（不存在）'}")
     if plan.index_page is not None:
-        print(f"  总目录页  {plan.index_page}   列着该会话，一并删除"
-              "（重跑 `agent-wechat chat index` 即重建，不含已删会话）")
+        print(f"  总目录页  {plan.index_page}   列着该会话，"
+              + ("**是符号链接，不会删除**（删名字不删内容）——请自行处理"
+                 if plan.index_page.is_symlink()
+                 else "一并删除（重跑 `agent-wechat chat index` 即重建，不含已删会话）"))
     print(f"  随后列入永久排除：{sum(e.tombstone for e in plan.entries):,} 条"
           "（**新消息不受影响**，照常进索引）")
     # 这段警告不是客套：`moments/` 是一份 HTML 装所有人，没有按会话切分的目录结构，删掉

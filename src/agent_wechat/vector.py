@@ -167,7 +167,7 @@ class FastEmbedEmbedder:
     加锁：MCP 里建索引跑在后台线程、查询跑在主线程，共享一个实例。
     """
 
-    def __init__(self, local_files_only: bool = False):
+    def __init__(self, local_files_only: bool = False) -> None:
         self._local_only = local_files_only
         self._model = None
         self._lock = threading.Lock()

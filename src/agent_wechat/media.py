@@ -850,17 +850,31 @@ def _refuse_purged(account: str, chat_ids: list[str]) -> None:
     媒体按磁盘目录与 `media_*.db` 取件、不经排除清单，放行就会把刚删掉的图片/语音明文从
     微信本机副本原样写回来。逐条过滤做不到（图片按目录枚举，没有 msg_key），所以按会话
     整体拦；代价是 purge 之后新到的媒体也要先 undo 才导得出。拦在本函数而不是用例层：
-    `chat_ids` 是列表，哪个调用方都绕不过去。走 `standalone()`：清单文件不在时给内存
-    空表，只读检查不落盘。
+    `chat_ids` 是列表，哪个调用方都绕不过去。走 `standalone(store.DB_PATH)`：清单的位置
+    必须与墓碑的**写入端**（`store.connect()` 的 ATTACH）用同一个推导——默认的
+    `exclusions.path()` 在生产上恰好相等，但 `DB_PATH` 被重定向时两者会分叉，这道闸就会
+    读到另一份（空的）清单而放行。清单文件不在时给内存空表，只读检查不落盘。
     """
-    with exclusions.standalone() as xcon:
-        for chat_id in chat_ids:
-            tombs = exclusions.count_chat(xcon, account, messages.chat_md5(chat_id))
-            if tombs:
-                raise errors.ScopeDenied(
-                    f"会话 {chat_id} 已被 purge --chat 销毁（排除清单 {tombs} 条），"
-                    "拒绝重新导出它的媒体",
-                    hint="确需导出：先 `agent-wechat purge --chat <会话> --undo --yes` 解除墓碑")
+    try:
+        with exclusions.standalone(store.DB_PATH) as xcon:
+            found = [(c, exclusions.count_chat(xcon, account, messages.chat_md5(c)))
+                     for c in chat_ids]
+    except (sqlite3.Error, OSError) as exc:
+        # 清单读不出来（0 字节的文件、缺表、库损坏）就判不出「这个会话是不是被销毁过」——
+        # 按 fail-closed 拒绝：放行的代价是把已删内容写回盘上，而这条闸存在的唯一理由就是
+        # 不让它发生。裸 sqlite 异常不许穿出 core（`exclusions.standalone()` 只兜住
+        # 连接/ATTACH，查询失败它兜不住）。
+        raise errors.IndexUnavailable(
+            f"排除清单读不出来，拒绝导出媒体：{errors.redact(str(exc))}",
+            hint="检查数据目录下的 exclusions.db 是否可读；它损坏时可先 `purge --excluded` "
+                 "看一眼，必要时删掉它并重跑一次导出重建（会丢失已销毁会话的墓碑）"
+        ) from exc
+    for chat_id, tombs in found:
+        if tombs:
+            raise errors.ScopeDenied(
+                f"会话 {chat_id} 已被 purge --chat 销毁（排除清单 {tombs} 条），"
+                "拒绝重新导出它的媒体",
+                hint="确需导出：先 `agent-wechat purge --chat <会话> --undo --yes` 解除墓碑")
 
 
 def export_media(account: str, chat_ids: list[str], *, kinds: list[str],

@@ -50,7 +50,7 @@ def path_for(db_path: pathlib.Path) -> pathlib.Path:
 
 
 @contextlib.contextmanager
-def standalone() -> Iterator[sqlite3.Connection]:
+def standalone(db_path: pathlib.Path | None = None) -> Iterator[sqlite3.Connection]:
     """只连排除清单本身的连接：`:memory:` + `ATTACH DATABASE ? AS exclusions`。
 
     给**不能走 `store.open()`** 的场合用——`store.connect()` 会 `ensure_home_dirs()` 并把整个
@@ -60,8 +60,12 @@ def standalone() -> Iterator[sqlite3.Connection]:
 
     清单文件不存在时给一张**空表**（在内存里建同一份 schema），而不是让 ATTACH 顺手把它
     建出来——一条只读的查询不该在用户磁盘上落新文件。
+
+    `db_path`：**必须与 `store.connect()` 同一个推导时传进来**（`exclusions.path_for(DB_PATH)`）。
+    默认的 `path()`（`HOME_DIR/exclusions.db`）在生产上恰好相等，但 `store.DB_PATH` 可被
+    重定向（测试、以及将来任何多库布局）——那时两者分叉，读到的是另一份清单。
     """
-    p = path()
+    p = path_for(db_path) if db_path is not None else path()
     try:
         con = sqlite3.connect(":memory:")
         if p.exists():

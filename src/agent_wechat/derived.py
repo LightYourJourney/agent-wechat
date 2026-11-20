@@ -482,10 +482,12 @@ def delete_derived(derivation_id: str, *, now: int | None = None) -> dict:
 
 
 def search_derived(query: str, *, account: str, chat_id: str | None = None,
-                   limit: int = 20, exclude_chats: Collection[str] = ()) -> dict:
+                   limit: int = 20, exclude_chats: Collection[str] = (),
+                   exclude_md5s: Collection[str] = ()) -> dict:
     """在派生文本里检索，返回带 `msg_key` 的证据片段（供 retrieve 融合与 CLI 使用）。
 
-    `exclude_chats`（`AGENT_WECHAT_DENY`）在 SQL 里排除，理由同 `search.search`。"""
+    `exclude_chats` / `exclude_md5s`（`AGENT_WECHAT_DENY`）在 SQL 里排除，理由与「两个都要」
+    见 `search.search`。"""
     if not query or not query.strip():
         raise errors.DerivedInputError("检索串不能为空")
     limit = max(1, min(int(limit), 100))
@@ -501,6 +503,10 @@ def search_derived(query: str, *, account: str, chat_id: str | None = None,
     if exclude_chats:
         filt += f" AND d.chat_id NOT IN ({','.join('?' * len(exclude_chats))})"
         args.extend(exclude_chats)
+    if exclude_md5s:
+        # 派生表的 `chat_id` 可能停在退化形态 `md5:<hex>`，只比 chat_id 会漏掉那一批。
+        filt += f" AND m.chat_md5 NOT IN ({','.join('?' * len(exclude_md5s))})"
+        args.extend(exclude_md5s)
     base = cols + " FROM derived_text d" + joins + " WHERE d.account = ?" + filt
     with store.open() as con:
         rows: list[sqlite3.Row] = []
@@ -514,7 +520,7 @@ def search_derived(query: str, *, account: str, chat_id: str | None = None,
                     # 与关键词路（search.py）同一份转义：包成短语做 trigram 子串匹配。
                     # 裸串交给 MATCH 时 `world hello` 按 AND 命中、`hel*` 走前缀语法、
                     # `a-b` 直接语法错——同一个查询在两路给出不同答案。
-                    (search._fts_safe(query), *args, limit)).fetchall()
+                    (search.fts_phrase(query), *args, limit)).fetchall()
             except sqlite3.OperationalError:
                 rows = []       # FTS 表缺失/不可用：走 LIKE；其它 sqlite 错误照旧抛
         if not rows:                     # 1-2 字或 FTS 不可用：LIKE 兜底

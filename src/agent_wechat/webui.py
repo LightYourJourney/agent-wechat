@@ -160,7 +160,14 @@ async function loadTimeline(reset) {
   cursor = res.next_cursor;
   $('older').disabled = !cursor;
 }
-$('account').addEventListener('change', () => { cursor = null; loadChats(); });
+$('account').addEventListener('change', () => {
+  // 换账号 = 换一份数据：时间线与游标都属于上一个账号，留着会让「加载更早」把新账号的
+  // 第一页接在旧账号的行后面。
+  cursor = null;
+  $('timeline').replaceChildren();
+  $('older').disabled = true;
+  loadChats();
+});
 // 换会话即从第一页重载：游标属于某一个会话，沿用它会把新会话的结果接在旧行后面。
 $('chat').addEventListener('change', () => loadTimeline(true));
 $('loadChats').addEventListener('click', loadChats);
@@ -191,7 +198,7 @@ def _origin_ok(origin: str | None, port: int) -> bool:
 
 
 class _State:
-    def __init__(self, port: int):
+    def __init__(self, port: int) -> None:
         self.port = port
         self.csrf = secrets.token_hex(16)
 
@@ -258,7 +265,8 @@ class _Handler(BaseHTTPRequestHandler):
             try:
                 _json(self, 200, _strip_paths(_route(path.path, qs)))
             except errors.AgentWeChatError as exc:
-                _json(self, 400, {"error": str(exc), "hint": exc.hint})
+                _json(self, 400, {"error": _scrub_abs_paths(str(exc)),
+                                  "hint": _scrub_abs_paths(exc.hint)})
             return
         _json(self, 404, {"error": "not found"})
 
@@ -301,18 +309,37 @@ _PATH_KEYS = ("path", "out_dir")
 
 
 def _strip_paths(data: object) -> object:
-    """最小披露：浏览器只看到文件名，不拿到本机绝对路径。**在 API 出口对所有响应递归做**。
+    """最小披露：浏览器只看到文件名，不拿到本机绝对路径。**成功响应**在 API 出口递归做。
 
     此前只在 `/api/media` 一条路由上、按一种响应形状（`messages[].path`）做——而那条路由
     交来的是 `asdict(MessageMediaResult)`（`states[].path` + `out_dir`），绝对路径原样发给
-    了浏览器。按形状认键的写法换一个路由、换一个结果类型就会再漏，所以改成键名驱动。"""
+    了浏览器。按形状认键的写法换一个路由、换一个结果类型就会再漏，所以改成键名驱动。
+
+    **只截绝对路径**：`path` / `out_dir` 这两个键名下也可能放相对的逻辑路径（媒体页里的
+    `../image/…`），截成 basename 会改写展示数据。错误信封不是这种结构，走
+    `_scrub_abs_paths`。
+    """
     if isinstance(data, dict):
-        return {k: (os.path.basename(v.rstrip("/")) if k in _PATH_KEYS and isinstance(v, str)
+        return {k: (os.path.basename(v.rstrip("/"))
+                    if k in _PATH_KEYS and isinstance(v, str) and os.path.isabs(v)
                     else _strip_paths(v))
                 for k, v in data.items()}
     if isinstance(data, list):
         return [_strip_paths(v) for v in data]
     return data
+
+
+def _scrub_abs_paths(text: str | None) -> str | None:
+    """错误信封里的自由文本：把两个已知根（微信容器、数据目录）换成它们的末段。
+
+    错误信息是给人读的，不能按键名截——但 `DataNotFound(f"{db} 不存在")` 这类文案会带
+    **绝对路径**，而工作台是浏览器里的页面。只换前缀，其余路径结构原样保留。
+    """
+    if not text:
+        return text
+    for root in (paths.XWECHAT_FILES, paths.HOME_DIR):
+        text = text.replace(str(root), root.name)
+    return text
 
 
 def _account(qs: dict) -> str:

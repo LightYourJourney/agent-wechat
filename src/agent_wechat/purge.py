@@ -821,14 +821,23 @@ def _index_page_listing(md5s: set[str]) -> pathlib.Path | None:
 
     那一页按 `chat_md5` 列出每个已导出会话（会话 id、条数、指向 `<md5>/chat/` 的链接）：
     `media/<md5>/` 删掉之后，这一行还留着会话 id 与条数。整页由 `chat index` 从磁盘现状
-    重新生成，所以删掉它没有损失——重跑一次即重建（不含已删会话）。**只认普通文件**：
-    链接删掉的是名字不是内容，正是本模块到处在防的 false-clean。自定义 `--out` 根本模块
-    无从得知，不在范围内（SECURITY.md 写明）。
+    重新生成，所以删掉它没有损失——重跑一次即重建（不含已删会话）。自定义 `--out` 根本
+    模块无从得知，不在范围内（SECURITY.md 写明）。
+
+    **符号链接也进计划**（`execute_chat` 不删它）：删链接只是删名字、内容还在别处，正是本
+    模块到处在防的 false-clean。让它进删除面，核查才会把它报成残留，而不是静默放过。
+    读不出来（EACCES 等）**同样不静默**：判不出「列没列着该会话」，按 fail-closed 拒绝，
+    并用一条点明对象的文案（别落进 `plan_chat` 兜底那句「读取索引失败」）。
     """
     page = media.export_root() / "index.html"
-    if page.is_symlink() or not page.is_file():
+    if not page.is_file():
         return None
-    text = page.read_text(encoding="utf-8", errors="replace")
+    try:
+        text = page.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        raise errors.PurgeRefused(
+            f"总目录页读不出来，未生成销毁计划：{page}（{exc}）",
+            hint="确认该文件可读（它由 `chat index` 生成，删掉后重跑即重建）") from exc
     return page if any(m in text for m in md5s) else None
 
 
@@ -1124,8 +1133,9 @@ def execute_chat(plan: ChatPlan) -> tuple[ChatReport, ...]:
         #「当前被挡住的条数」是核查那一侧的事（`ChatResidue.tombstone_written`），
         # 它读的是排除清单的实际条数——核查才是证明不可逆性的那个字段。
         out.append(ChatReport(e.account, deleted, written, removed))
-    if plan.index_page is not None:
+    if plan.index_page is not None and not plan.index_page.is_symlink():
         # 失败不抛（同导出目录的「部分失败继续」）：核查会把还在的那一页列进 leftover。
+        # 符号链接**不删**：删名字不删内容（见 `_index_page_listing`），留给核查去报。
         with contextlib.suppress(FileNotFoundError, OSError):
             plan.index_page.unlink()
     return tuple(out)
@@ -1208,7 +1218,8 @@ def undo_chat(targets: list[dict], *, apply: bool = False) -> tuple[UndoEntry, .
     `:memory:` + ATTACH，清单文件不存在时给一张**内存里的空表**，一个字节都不落盘。
     """
     try:
-        with exclusions.standalone() as con:
+        # 同上：位置与墓碑写入端同源（`store.connect()` 的 ATTACH 用 `path_for(DB_PATH)`）。
+        with exclusions.standalone(store.DB_PATH) as con:
             per = []
             for t in targets:
                 md5 = messages.chat_md5(t["chat_id"])      # 就地派生，理由见 docstring

@@ -90,7 +90,7 @@ class SyncResult:
 class _Abort(Exception):
     """内部分流：带状态与指引，由 `run_sync` 统一收成 SyncResult。"""
 
-    def __init__(self, status: str, detail: str, hint: str | None = None):
+    def __init__(self, status: str, detail: str, hint: str | None = None) -> None:
         super().__init__(detail)
         self.status, self.detail, self.hint = status, detail, hint
 

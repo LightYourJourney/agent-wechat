@@ -477,7 +477,7 @@ def staged_added_lines(diff_text: str | None = None) -> list[tuple[str, int, str
     # 暂存行一行不出（静默退 0，fail-open）；`.gitattributes` 的 `-diff` 让文本按二进制只给
     # 一行；`diff.mnemonicPrefix` 把 `b/` 换成 `i/`，路径解析不出来、每次提交都被误拦。
     diff = (_git("diff", "--cached", "--unified=0", "--no-color", "--no-ext-diff",
-                 "--no-textconv", "--src-prefix=a/", "--dst-prefix=b/")
+                 "--no-textconv", "--text", "--src-prefix=a/", "--dst-prefix=b/")
             if diff_text is None else diff_text)
     out = []
     path = None

@@ -719,6 +719,22 @@ def test_staged_diff_shape_is_immune_to_user_git_config(scan, tmp_path, monkeypa
     assert ("f.py", 1, fake) in hits, hits
 
 
+def test_staged_text_marked_binary_by_gitattributes_is_still_scanned(scan, tmp_path, monkeypatch):
+    """`.gitattributes` 的 `-diff` 会把文本当二进制、只给一行 `Binary files … differ`——
+    没有可扫的行就等于静默放行。`--text` 把每一行都要回来。"""
+    import subprocess as sp
+    repo = tmp_path / "r"
+    repo.mkdir()
+    sp.run(["git", "init", "-q"], cwd=repo, check=True)
+    (repo / ".gitattributes").write_text("*.py -diff\n")
+    fake = "wx" + "id_" + "attrprobe9x7q2m"
+    (repo / "f.py").write_text(fake + "\n", encoding="utf-8")
+    sp.run(["git", "add", "-A"], cwd=repo, check=True)
+    monkeypatch.setattr(scan, "REPO_ROOT", repo)
+
+    assert ("f.py", 1, fake) in scan.staged_added_lines()
+
+
 def test_staged_special_newlines_cannot_forge_a_diff_header(scan, tmp_path, monkeypatch):
     """EA-008：`str.splitlines()` 认 **10** 个换行字符，而 git 的 diff 只以 `\n` 分行。
 

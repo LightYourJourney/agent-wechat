@@ -174,8 +174,13 @@ def _tighten_home_mode() -> None:
     明文索引（sqlite 建的文件是 0644）对本机其他用户可读。父目录 0700 即可挡住其下全部
     文件，故只收紧这一层。**不碰 `$HOME` 及其祖先**：把它们 chmod 掉是越权的副作用。
     收紧失败（目录不归本用户）不抛——`doctor` 会把权限问题报出来。
+
+    **数据目录本身是符号链接时不动**：`os.chmod` 跟着链接改的是**目标**（`AGENT_WECHAT_HOME`
+    指向某个共享目录时，会把那个目录一起收紧——那不是我们的目录）。
     """
     try:
+        if HOME_DIR.is_symlink():
+            return
         if HOME_DIR.stat().st_mode & 0o077 == 0:
             return
         home = pathlib.Path.home().resolve()

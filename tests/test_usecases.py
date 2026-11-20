@@ -452,7 +452,10 @@ def test_media_export_refuses_a_purged_chat(stub, monkeypatch):
 
     paths.HOME_DIR.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(":memory:")
-    con.execute("ATTACH DATABASE ? AS exclusions", (str(exclusions.path()),))
+    # 清单的位置与墓碑写入端同源：`store.connect()` ATTACH 的是 `path_for(DB_PATH)`
+    # （本夹具把它指到 tmp_path，`HOME_DIR` 在 tmp_path/home——两者在这里确实分叉）。
+    con.execute("ATTACH DATABASE ? AS exclusions",
+                (str(exclusions.path_for(store.DB_PATH)),))
     con.executescript(exclusions.SCHEMA)
     cm = messages.chat_md5("wxid_target")
     exclusions.add(con, [(messages.row_key("acct", cm, "message_0.db", 1), "acct", cm)])
@@ -857,3 +860,20 @@ def test_out_path_too_long_is_a_project_error(tmp_path):
     with pytest.raises(errors.MediaOutputError) as ei:
         usecases.chat_index(out_dir=str(too_long), account="acct")
     assert "File name too long" in str(ei.value)
+
+
+def test_media_export_refuses_when_the_exclusion_list_is_unreadable(stub, monkeypatch, tmp_path):
+    """exclusions.db 存在但没表（0 字节即可）→ 判不出「是否被销毁过」→ fail-closed。
+
+    此前这条闸会漏出裸 `sqlite3.OperationalError: no such table`：CLI 印 traceback、
+    MCP 回「内部错误」，而 `--kinds image/voice` 根本不打开索引库，这里是首个读清单的路径。
+    """
+    from agent_wechat import exclusions, media
+    _unique(stub)
+    paths.HOME_DIR.mkdir(parents=True, exist_ok=True)
+    exclusions.path_for(store.DB_PATH).parent.mkdir(parents=True, exist_ok=True)
+    exclusions.path_for(store.DB_PATH).write_bytes(b"")          # 有文件、无表
+    monkeypatch.setattr(media, "derive_keys", lambda a: None)
+
+    with pytest.raises(errors.IndexUnavailable, match="排除清单读不出来"):
+        usecases.media_export("张三", kinds=["image"])

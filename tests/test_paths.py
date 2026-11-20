@@ -466,3 +466,16 @@ def test_the_user_home_itself_is_never_chmodded(tmp_path, monkeypatch):
     monkeypatch.setattr(paths, "_tm_exclusion_checked", True)
     paths.ensure_home_dirs()
     assert tmp_path.stat().st_mode & 0o777 == 0o755
+
+
+def test_a_symlinked_data_dir_is_not_chmodded_through(tmp_path, monkeypatch):
+    """`AGENT_WECHAT_HOME` 是符号链接时不许顺着链接改目标的权限（那不是我们的目录）。"""
+    target = tmp_path / "shared"
+    target.mkdir(mode=0o755)
+    target.chmod(0o755)
+    link = tmp_path / "aw"
+    link.symlink_to(target)
+    monkeypatch.setattr(paths, "HOME_DIR", link)
+    monkeypatch.setattr(paths, "_tm_exclusion_checked", True)
+    paths.ensure_home_dirs()
+    assert target.stat().st_mode & 0o777 == 0o755

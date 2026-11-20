@@ -68,9 +68,17 @@ def _decode_content(raw: bytes | str | None, ct_flag: int | None) -> str | None:
         if _ZSTD is None:
             raise DependencyMissing("缺少 zstandard：uv add zstandard")
         try:
-            # `decompressobj` 而不是 `decompress`：后者遇到头部不带内容长度的合法帧直接抛
-            # 「could not determine content size」。
-            return _ZSTD.decompressobj().decompress(raw).decode("utf-8", "replace")
+            # `decompressobj` 而不是 `decompress`：后者遇到头部不带内容长度的**合法**帧直接抛
+            # 「could not determine content size」。代价是截断帧它只吐半截、**不抛**——所以
+            # 还要看 `eof`：没有走到帧尾就是坏数据，不许把半截正文当正文静默入库。
+            dobj = _ZSTD.decompressobj()
+            out = dobj.decompress(raw)
+            if not dobj.eof:
+                raise errors.DecryptError(
+                    "消息正文解压失败（zstd 帧不完整：数据被截断）",
+                    hint="该条消息在微信库里可能已损坏；等微信完成同步后重试，"
+                         "仍失败请附带这条提示反馈")
+            return out.decode("utf-8", "replace")
         except zstandard.ZstdError as exc:
             # core 只抛项目异常（ARCHITECTURE）：裸 ZstdError 会以 traceback 穿到入口。
             raise errors.DecryptError(
@@ -121,7 +129,7 @@ def _db_matches(pattern: str, rel: str) -> bool:
 class MessageReader:
     """按账号读取消息。只读微信目录；解密副本用后即焚。"""
 
-    def __init__(self, acct: str):
+    def __init__(self, acct: str) -> None:
         self.acct = acct
         # passphrase **惰性**取（见 `passphrase`）：构造 reader 不碰密钥缓存。
         self._passphrase: bytes | None = None

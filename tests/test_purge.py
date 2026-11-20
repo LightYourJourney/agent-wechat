@@ -1140,6 +1140,44 @@ def test_purge_chat_removes_the_index_page_that_lists_the_chat(tmp_path):
     assert not page.exists()
     assert not purge.verify_chat(plan).leftover
 
+    # 幂等：连跑两次结果一致（第二次没有页可删，也就没有新计划项）
+    page.write_text(f'<a href="{VICTIM_MD5}/chat/index.html">{VICTIM}</a>')
+    purge.execute_chat(purge.plan_chat([{"account": "a", "chat_id": VICTIM}]))
+    assert purge.plan_chat([{"account": "a", "chat_id": VICTIM}]).index_page is None
+
+
+def test_a_symlinked_index_page_is_reported_not_silently_skipped(tmp_path):
+    """总目录页是符号链接时**不删**（删名字不删内容），但必须进删除面并在核查里报出来。"""
+    home = tmp_path / "home"; home.mkdir(parents=True)
+    with store.open() as con:
+        store.upsert_batch(con, [_victim_row(1)])
+    real = tmp_path / "elsewhere.html"
+    real.write_text(f'<a href="{VICTIM_MD5}/chat/index.html">{VICTIM}</a>')
+    page = home / "media" / "index.html"
+    page.parent.mkdir(parents=True)
+    page.symlink_to(real)
+
+    plan = purge.plan_chat([{"account": "a", "chat_id": VICTIM}])
+    assert plan.index_page == page, "列着该会话的符号链接页必须进删除面"
+    purge.execute_chat(plan)
+    assert page.is_symlink() and real.exists(), "删链接不删内容——两条都不该动"
+    assert any("总目录页" in x for x in purge.verify_chat(plan).leftover)
+
+
+def test_an_unreadable_index_page_fails_closed_with_its_own_message(tmp_path, monkeypatch):
+    """读不出总目录页就判不出它列没列着该会话 → 拒绝，且文案点明对象（不是「读取索引失败」）。"""
+    from agent_wechat import errors as errs
+    home = tmp_path / "home"; home.mkdir(parents=True)
+    with store.open() as con:
+        store.upsert_batch(con, [_victim_row(1)])
+    page = home / "media" / "index.html"
+    page.parent.mkdir(parents=True)
+    page.write_text("x")
+    monkeypatch.setattr(purge.pathlib.Path, "read_text",
+                        lambda *a, **k: (_ for _ in ()).throw(OSError("EACCES")))
+    with pytest.raises(errs.PurgeRefused, match="总目录页"):
+        purge.plan_chat([{"account": "a", "chat_id": VICTIM}])
+
 
 def test_plan_chat_does_not_report_a_dangling_export_symlink_as_removed(tmp_path):
     """`media/<md5>` 是**悬空符号链接**时：`rmtree` 跟随它、抛 `FileNotFoundError`，

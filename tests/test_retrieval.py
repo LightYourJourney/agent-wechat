@@ -198,19 +198,77 @@ def test_deny_is_applied_before_truncation_and_not_counted(tmp_path, monkeypatch
     assert res["candidates"] == 1
 
 
-@pytest.mark.parametrize("mode", ["keyword", "semantic"])
-def test_denied_hits_cannot_crowd_out_the_candidate_window(tmp_path, monkeypatch, mode):
-    """拒读必须下推到取数查询里：被拒会话的命中占满每路 `limit×4` 的候选窗时，
+def test_denied_keyword_hits_cannot_crowd_out_the_candidate_window(tmp_path, monkeypatch):
+    """关键词路：被拒会话的命中占满 `limit×4` 的候选窗（SQL 的 LIMIT 由时间倒序决定），
     放行会话的那条仍要答出来。取回后再滤（哪怕在截断之前）这里答 0 条。"""
     _env(tmp_path, monkeypatch, with_vector=False)
     n = retrieval.CANDIDATE_FACTOR + 2
     with store.open() as con:
         store.upsert_batch(con, [_row(CHAT_A, 20, "爬山去不去")]
                            + [_row(CHAT_B, 30 + i, f"爬山{i}号") for i in range(n)])
-    vector.build_index(accounts=[ACCT], embedder=TopicEmbedder())
     monkeypatch.setenv("AGENT_WECHAT_DENY", CHAT_B)
-    res = retrieval.search_messages("爬山", account=ACCT, mode=mode, limit=1)
+    res = retrieval.search_messages("爬山", account=ACCT, mode="keyword", limit=1)
     assert [h["chat_id"] for h in res["hits"]] == [CHAT_A], res
+
+
+class _RankedEmbedder:
+    """CHAT_B 的行与查询**同向**（距离 0），CHAT_A 的行**明显更远**。
+
+    语义路的 KNN 取 `k = candidates × 3` 条：被拒会话的行数要多于 k，才能真的把它们
+    挤满——不能靠「所有向量同距、赌 tie 的次序」，那样删掉下推也照样过。"""
+
+    def _vec(self, text: str) -> list[float]:
+        v = [0.0] * vector.DIM
+        v[0] = 1.0
+        if "远" in text:
+            v[1] = 1.0                   # 与查询的方向偏离 → 余弦距离更大
+        return v
+
+    def embed(self, texts):
+        return [self._vec(t) for t in texts]
+
+    def embed_query(self, text):
+        return self._vec(text)
+
+
+def test_denied_semantic_hits_cannot_crowd_out_the_candidate_window(tmp_path, monkeypatch):
+    """语义路：被拒会话的命中挤满 KNN 的 k 条时，放行会话的那条仍要答出来。"""
+    _env(tmp_path, monkeypatch, with_vector=False)
+    n = 15                                   # > k (= candidates 4 × 3)
+    with store.open() as con:
+        store.upsert_batch(con, [_row(CHAT_A, 20, "远一点的爬山")]
+                           + [_row(CHAT_B, 30 + i, f"爬山{i}号") for i in range(n)])
+    vector.build_index(accounts=[ACCT], embedder=_RankedEmbedder())
+    monkeypatch.setenv("AGENT_WECHAT_DENY", CHAT_B)
+    monkeypatch.setattr(vector, "default_embedder", lambda: _RankedEmbedder())
+    res = retrieval.search_messages("爬山", account=ACCT, mode="semantic", limit=1)
+    assert [h["chat_id"] for h in res["hits"]] == [CHAT_A], res
+
+
+def test_deny_also_covers_the_degraded_chat_id_form(tmp_path, monkeypatch):
+    """同一会话在索引里可能同时是真名与退化 `md5:<hex>` 两种 `chat_id`。
+
+    `AGENT_WECHAT_DENY` 只写会话 id——若只比 `chat_id`，退化那一批照常出现在检索结果与
+    `get_context` 里，读取范围就静默漏掉半个会话。判据必须按 `chat_md5` 取并集。
+    """
+    _env(tmp_path, monkeypatch, with_vector=False)
+    cm = hashlib.md5(CHAT_B.encode()).hexdigest()      # 退化行的 md5 与真名行**同一个**
+    degraded = messages.degraded_chat_id(cm)
+    # 真实形态：chat_md5 与真名行相同，只有 chat_id 停在 `md5:<hex>`（`_row` 会按 chat 重算
+    # md5，所以这里直接造行）。
+    row = messages.make_row(
+        account=ACCT, chat_md5=cm, chat_id=degraded, shard="message_0.db", local_id=41,
+        ts=T0 + 41, msg_type=1, sender_id=None, sender_name=None, is_self=0,
+        content="共同关键词乙", media_hint=None)
+    with store.open() as con:
+        store.upsert_batch(con, [_row(CHAT_A, 40, "共同关键词甲"), row])
+    monkeypatch.setenv("AGENT_WECHAT_DENY", CHAT_B)
+
+    res = retrieval.search_messages("共同关键词", account=ACCT, mode="keyword")
+    assert [h["chat_id"] for h in res["hits"]] == [CHAT_A], res
+
+    with pytest.raises(errors.ScopeDenied):
+        retrieval.get_context(messages.row_key(ACCT, cm, "message_0.db", 41), account=ACCT)
 
 
 # ---------------------------------------------------------------- 两阶段披露

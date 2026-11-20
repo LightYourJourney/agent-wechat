@@ -9,6 +9,7 @@ import json
 import os
 import re
 import pathlib
+import sqlite3
 from types import SimpleNamespace
 
 import pytest
@@ -2584,3 +2585,24 @@ def test_vector_status_has_the_same_keys_with_or_without_an_index(capsys):
     with store.open() as con:
         real = vector.freshness(con, None)
     assert set(empty) == set(real)
+
+
+def test_index_snapshot_is_read_only_and_reports_an_old_version(tmp_path):
+    """`status` 的自检只读：旧版本库只提示「跑导出自会升级」，不在这里写（更不迁移）。
+
+    此前它走 `store.open()`——诊断命令会 executescript(SCHEMA) 并跑迁移，另一个进程持写锁
+    时还要等满 timeout，然后把「忙」报成「库坏了」并建议删库。
+    """
+    from agent_wechat import migrations, usecases
+    with store.open():
+        pass                                  # 建到当前版本
+    con = sqlite3.connect(store.DB_PATH)
+    con.execute(f"UPDATE {migrations.VERSION_TABLE} SET version=2 WHERE scope='main'")
+    con.commit(); con.close()
+
+    _, notes = usecases.index_snapshot()
+    assert any("自动升级" in n for n in notes), notes
+    con = sqlite3.connect(store.DB_PATH)
+    assert con.execute(f"SELECT version FROM {migrations.VERSION_TABLE}"
+                       " WHERE scope='main'").fetchone()[0] == 2, "只读：版本不许被就地升级"
+    con.close()
