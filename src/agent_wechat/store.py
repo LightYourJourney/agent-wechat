@@ -472,9 +472,36 @@ def index_unavailable(exc: BaseException) -> errors.IndexUnavailable:
     hint = ("索引库可能损坏、数据目录不可写或正被另一个进程写锁住；"
             "确认磁盘空间与目录权限、且没有其它导出在跑，"
             "仍失败则可删除 index.db 后重跑一次导出")
-    if isinstance(exc, sqlite3.OperationalError) and "locked" in msg:
+    if is_lock_error(exc):
         hint = "数据库被锁住——稍后重试，或确认没有其它导出 / 向量构建在跑"
     return errors.IndexUnavailable(f"本地检索库不可用：{errors.redact(msg)}", hint=hint)
+
+
+def is_lock_error(exc: BaseException) -> bool:
+    """这次 sqlite 失败是不是「被别的写者挡住」。
+
+    判据只此一份：`index_unavailable` 用它挑 hint，只读诊断用它把「忙」与「坏」分开报
+    ——后者此前自己拼 `" database is locked"` / `"database is busy"` 两个字面量。
+    """
+    return "locked" in str(exc) or "busy" in str(exc)
+
+
+@contextlib.contextmanager
+def open_readonly(db_path: pathlib.Path | None = None) -> Iterator[sqlite3.Connection]:
+    """**只读**连接的 owner：`file:…?mode=ro`，退出时真正 close。
+
+    给只读诊断用（CLI/MCP `status` 的自检、`doctor`）：`open()` 会 executescript(SCHEMA)
+    并在旧库上跑迁移，把诊断变成写操作；另一个进程持写锁时它还要等满 timeout，然后把
+    「忙」报成「库坏了」。这里只读，版本落后由调用方如实提示。
+    """
+    try:
+        con = sqlite3.connect(f"file:{db_path or DB_PATH}?mode=ro", uri=True)
+    except (sqlite3.Error, OSError) as exc:
+        raise index_unavailable(exc) from exc
+    try:
+        yield con
+    finally:
+        con.close()
 
 
 @contextlib.contextmanager

@@ -58,17 +58,16 @@ def _runtime_failure(msg: str) -> errors.IndexUnavailable:
 def search(query: str, chat_id: str | None = None, limit: int = 20,
            account: str | None = None, *,
            after_ts: int | None = None, before_ts: int | None = None,
-           exclude_chats: Collection[str] = (),
-           exclude_md5s: Collection[str] = ()) -> dict:
+           exclude_chats: Collection[str] = ()) -> dict:
     """返回 {"hits": [...], "mode": "fts"|"like", "total": n, "degraded": [...]}。
 
     account 必传：检索严格限定该账号的数据（多账号索引隔离）。
     时间窗：`after_ts` 含下界、`before_ts` 不含上界（与 `messages_in_range` /
     `media.month_bounds` 同口径）——这是 Phase 05 给统一检索加的参数，默认不限。
-    `exclude_chats` / `exclude_md5s`：在 SQL 里排除的会话（`AGENT_WECHAT_DENY`）与它们的
-    `chat_md5`。必须在取数时排除而不是取回后再滤：先按 `LIMIT` 取再滤，被拒会话的命中会
-    占满候选、把放行会话挤出去。**两个都要**：同一会话在索引里可能同时是真名与退化 id
-    `md5:<hex>` 两种 `chat_id`，只比 `chat_id` 会漏掉退化那一批。
+    `exclude_chats`：在 SQL 里排除的会话（`AGENT_WECHAT_DENY`），按它们的 `chat_md5` 判。
+    必须在取数时排除而不是取回后再滤：先按 `LIMIT` 取再滤，被拒会话的命中会占满候选、
+    把放行会话挤出去。**判 md5 而不是 chat_id**：同一会话在索引里可能同时是真名与退化 id
+    `md5:<hex>` 两种 `chat_id`，而两者共享同一个 `chat_md5`——比 md5 一个谓词就覆盖两种形态。
     """
     if not account:
         raise SearchInputError("search 需要显式 account（多账号索引隔离）")
@@ -90,11 +89,8 @@ def search(query: str, chat_id: str | None = None, limit: int = 20,
         where.append("m.ts < ?")
         args.append(int(before_ts))
     if exclude_chats:
-        where.append(f"m.chat_id NOT IN ({','.join('?' * len(exclude_chats))})")
-        args.extend(exclude_chats)
-    if exclude_md5s:
-        where.append(f"m.chat_md5 NOT IN ({','.join('?' * len(exclude_md5s))})")
-        args.extend(exclude_md5s)
+        where.append(f"m.chat_md5 NOT IN ({','.join('?' * len(exclude_chats))})")
+        args.extend(messages.chat_md5(c) for c in exclude_chats)
     w = " AND ".join(where)
 
     notes: list[dict] = []

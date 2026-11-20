@@ -850,7 +850,8 @@ distance / untrusted`。**没有 `content`**——完整正文用 §15。
 
 **返回**：`chat_id / msg_key / messages[{msg_key,time,sender,is_self,content,untrusted}] /
 untrusted / notice`。只返回**同账号同会话**；被 `purge --chat` 销毁的消息**拒绝返回**
-（`{"error": "该消息已被销毁…"}`）。会话在 `AGENT_WECHAT_DENY` 里时拒绝（该变量只约束本工具与 §14，不改变其它工具）。
+（`{"error": "该消息已被销毁…"}`）。会话在 `AGENT_WECHAT_DENY` 里时拒绝（**按会话的 `chat_md5` 判**，因此真名与退化
+`md5:<hex>` 两种形态一并拒绝；该变量只约束本工具与 §14，不改变其它工具）。
 
 ## 附：本地工作台与工具的关系
 

@@ -857,8 +857,16 @@ def _refuse_purged(account: str, chat_ids: list[str]) -> None:
     """
     try:
         with exclusions.standalone(store.DB_PATH) as xcon:
-            found = [(c, exclusions.count_chat(xcon, account, messages.chat_md5(c)))
-                     for c in chat_ids]
+            for chat_id in chat_ids:
+                # `ScopeDenied` 不是 sqlite 错误，下面的 except 不收它——留在 try 里不必
+                # 先把所有会话的条数查完再判。
+                tombs = exclusions.count_chat(xcon, account, messages.chat_md5(chat_id))
+                if tombs:
+                    raise errors.ScopeDenied(
+                        f"会话 {chat_id} 已被 purge --chat 销毁（排除清单 {tombs} 条），"
+                        "拒绝重新导出它的媒体",
+                        hint="确需导出：先 `agent-wechat purge --chat <会话> --undo --yes`"
+                             " 解除墓碑")
     except (sqlite3.Error, OSError) as exc:
         # 清单读不出来（0 字节的文件、缺表、库损坏）就判不出「这个会话是不是被销毁过」——
         # 按 fail-closed 拒绝：放行的代价是把已删内容写回盘上，而这条闸存在的唯一理由就是
@@ -869,12 +877,6 @@ def _refuse_purged(account: str, chat_ids: list[str]) -> None:
             hint="检查数据目录下的 exclusions.db 是否可读；它损坏时可先 `purge --excluded` "
                  "看一眼，必要时删掉它并重跑一次导出重建（会丢失已销毁会话的墓碑）"
         ) from exc
-    for chat_id, tombs in found:
-        if tombs:
-            raise errors.ScopeDenied(
-                f"会话 {chat_id} 已被 purge --chat 销毁（排除清单 {tombs} 条），"
-                "拒绝重新导出它的媒体",
-                hint="确需导出：先 `agent-wechat purge --chat <会话> --undo --yes` 解除墓碑")
 
 
 def export_media(account: str, chat_ids: list[str], *, kinds: list[str],

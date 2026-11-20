@@ -468,10 +468,14 @@ def staged_added_lines(diff_text: str | None = None) -> list[tuple[str, int, str
     `--allow` 只会退出 2；手抄又会让 `--verify-allowlist` 永远红。工具自相矛盾：
     `--all` 说干净、`--staged` 说 47 个未登记。放在这里，所有调用方一并继承。
 
-    **二进制文件会点名警告**（终审 Important 2）：git 对二进制不给 `---`/`+++`、也不给
-    hunk，只给一行 `Binary files … differ`，于是它既没有可扫的行、也无从触发上面那条
-    存在性检查——**不警告就是静默退 0**，与「装了但从没拦过」不可区分。只警告，
-    **不改退出码**：二进制文件不构成泄漏证据。
+    **二进制文件会点名警告**（终审 Important 2）：不带 `--text` 时 git 对二进制不给
+    `---`/`+++`、也不给 hunk，只给一行 `Binary files … differ`，于是它既没有可扫的行、
+    也无从触发上面那条存在性检查——**不警告就是静默退 0**，与「装了但从没拦过」不可区分。
+    只警告，**不改退出码**：二进制文件不构成泄漏证据。
+
+    **`--text` 之后生产路径上这条路基本不再触发**（git 把二进制也按文本吐行），留下的
+    判据是给 `diff_text=` 的字符串输入与老 git 形态的：那两种情况下二进制行仍然只有
+    一行——没有它就静默放过。
     """
     # 钉死 diff 的输出形状，不让用户配置改写它：`diff.external` / `GIT_EXTERNAL_DIFF` 会让
     # 暂存行一行不出（静默退 0，fail-open）；`.gitattributes` 的 `-diff` 让文本按二进制只给
@@ -511,6 +515,10 @@ def staged_added_lines(diff_text: str | None = None) -> list[tuple[str, int, str
             continue
         m = _BINARY.match(line)
         if m is not None:
+            # 带 `--text` 之后 git 不再产出这一行——但**输入不止来自 `_git`**（`diff_text=`
+            # 是公开参数，测试与将来的调用方会喂字符串），而且真二进制经过 `--text` 现在
+            # 会给出一堆可扫的正文行。两种形态都要如实说：没被检查的，点名；被当文本
+            # 硬扫的，告知「命不命中的判据是它按 UTF-8 解码后的样子」。
             bpath = _b_side_path(m.group(1))
             if bpath is not None:
                 print("scan: ⚠️ %s 是二进制文件——它**一行都没被检查**"

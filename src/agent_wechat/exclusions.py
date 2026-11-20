@@ -64,6 +64,10 @@ def standalone(db_path: pathlib.Path | None = None) -> Iterator[sqlite3.Connecti
     `db_path`：**必须与 `store.connect()` 同一个推导时传进来**（`exclusions.path_for(DB_PATH)`）。
     默认的 `path()`（`HOME_DIR/exclusions.db`）在生产上恰好相等，但 `store.DB_PATH` 可被
     重定向（测试、以及将来任何多库布局）——那时两者分叉，读到的是另一份清单。
+
+    **不把默认值改成 `path_for(store.DB_PATH)`**：那要 import `store`（`store` 已 import
+    本模块，成环），且 `store.DB_PATH` 在 import 期绑定——测试靠 monkeypatch `paths.HOME_DIR`
+    重定向，默认值跟着 import 期常量走会读到真实数据目录。
     """
     p = path_for(db_path) if db_path is not None else path()
     try:

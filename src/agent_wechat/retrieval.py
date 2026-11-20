@@ -57,19 +57,19 @@ def denied_chat_ids() -> frozenset[str]:
     return frozenset(x.strip() for x in raw.split(",") if x.strip())
 
 
-def denied_chat_md5s() -> frozenset[str]:
-    """拒读会话的 `chat_md5` 集合。
+def _denied_md5(chat_id: str) -> bool:
+    """这个 `chat_id` 的会话是否被拒读。
 
-    **必须与 `chat_id` 一起比**：同一会话在索引里可以同时有真名与退化 id `md5:<hex>` 两种
-    `chat_id`（`messages.chat_md5` 两侧共用同一个解析），只比 `chat_id` 时退化那一批照常
-    返回——读取范围就这样静默漏掉半个会话。
+    **按 `chat_md5` 判，不按 `chat_id` 字面比**：同一会话在索引里可以同时有真名与退化 id
+    `md5:<hex>` 两种 `chat_id`，而两者共享同一个 `chat_md5`（`messages.chat_md5` 两侧共用
+    同一个解析）——只比 `chat_id` 时退化那一批照常返回，读取范围就静默漏掉半个会话。
     """
-    return frozenset(messages.chat_md5(c) for c in denied_chat_ids())
+    return messages.chat_md5(chat_id) in {
+        messages.chat_md5(c) for c in denied_chat_ids()}
 
 
 def _ensure_allowed(chat_id: str | None) -> None:
-    if chat_id and (chat_id in denied_chat_ids()
-                    or messages.chat_md5(chat_id) in denied_chat_md5s()):
+    if chat_id and _denied_md5(chat_id):
         raise errors.ScopeDenied(
             f"会话 {chat_id} 不在读取范围内（AGENT_WECHAT_DENY）",
             hint="从 AGENT_WECHAT_DENY 里去掉它，或改用其它会话")
@@ -137,11 +137,10 @@ def fuse(keyword_hits: list[dict], semantic_hits: list[dict],
 
 def _keyword(query: str, *, account: str, chat_id: str | None, limit: int,
              after_ts: int | None, before_ts: int | None,
-             exclude_chats: frozenset[str],
-             exclude_md5s: frozenset[str]) -> tuple[list[dict], list[dict]]:
+             exclude_chats: frozenset[str]) -> tuple[list[dict], list[dict]]:
     res = search.search(query, chat_id=chat_id, limit=limit, account=account,
                         after_ts=after_ts, before_ts=before_ts,
-                        exclude_chats=exclude_chats, exclude_md5s=exclude_md5s)
+                        exclude_chats=exclude_chats)
     return res.get("hits", []), res.get("degraded", [])
 
 
@@ -189,7 +188,6 @@ def search_messages(query: str, *, account: str, chat_id: str | None = None,
     # 的命中也会先占满每路 limit×4 的候选窗，把放行会话挤出去；`candidates` 还会把它们
     # 数进去——等于透露「那个会话里有几条匹配」。
     denied = denied_chat_ids()
-    denied_md5s = denied_chat_md5s()
 
     keyword_hits: list[dict] = []
     semantic_hits: list[dict] = []
@@ -197,8 +195,7 @@ def search_messages(query: str, *, account: str, chat_id: str | None = None,
     if mode in ("keyword", "hybrid"):
         keyword_hits, notes = _keyword(query, account=account, chat_id=chat_id,
                                        limit=candidates, after_ts=after_ts,
-                                       before_ts=before_ts, exclude_chats=denied,
-                                       exclude_md5s=denied_md5s)
+                                       before_ts=before_ts, exclude_chats=denied)
         degraded.extend(notes)
     if mode in ("semantic", "hybrid"):
         semantic_hits, notes = _semantic(query, account=account, chat_id=chat_id,
@@ -210,8 +207,7 @@ def search_messages(query: str, *, account: str, chat_id: str | None = None,
         # 派生文本（OCR/ASR）作为第三路；它是**旁证**，不取代原消息。
         try:
             dres = derived.search_derived(query, account=account, chat_id=chat_id,
-                                          limit=candidates, exclude_chats=denied,
-                                          exclude_md5s=denied_md5s)
+                                          limit=candidates, exclude_chats=denied)
             derived_hits = [h for h in dres["hits"]
                             if after_ts is None or h["ts"] >= after_ts]
             derived_hits = [h for h in derived_hits

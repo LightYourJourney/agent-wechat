@@ -708,11 +708,11 @@ def _exclusion_count() -> tuple[int | None, str | None]:
     「排除清单保留：N 条」判的是 `ex_count is not None`，把哨兵丢了就会对着一份不存在的
     清单说「保留 0 条、重建索引后仍生效」。
     """
-    from . import exclusions
+    from . import exclusions, store
     try:
-        if not exclusions.path().exists():   # 哨兵：缺失不是 0 条（见 docstring 末段）
+        if not exclusions.path_for(store.DB_PATH).exists():   # 哨兵：缺失不是 0 条（见 docstring 末段）
             return None, None
-        with exclusions.standalone() as con:
+        with exclusions.standalone(store.DB_PATH) as con:
             return exclusions.count(con), None
     except Exception as exc:
         return None, str(exc)   # 读不出来要报出来，但这句提示不该把销毁本身弄成失败
@@ -1034,9 +1034,9 @@ def _render_chat_residue(res: purge.ChatResidue) -> str:
 def _cmd_purge_excluded() -> int:
     """列出排除清单的规模（按会话分组）。**不打印会话名**——那要查索引，而这条命令可能在
     `purge --index` 之后跑、索引已经不在了（spec §3）。"""
-    from . import exclusions
+    from . import exclusions, store
     try:
-        with exclusions.standalone() as con:
+        with exclusions.standalone(store.DB_PATH) as con:
             rows = exclusions.by_chat(con)
     except (sqlite3.Error, OSError, errors.AgentWeChatError) as exc:
         # 读不出来**不能**报「0 条」：那是「一条都没被挡」的意思，与事实相反，而用户正是

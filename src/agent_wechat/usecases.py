@@ -290,8 +290,7 @@ def index_snapshot() -> tuple[dict, list[str]]:
             # 跑迁移——诊断命令变成写操作，而 `status` 是故障时最先跑的那条；另一个进程
             # 正持写锁时它会等满 timeout，然后把「忙」报成「库坏了」，还附一句「删掉
             # index.db」。这里只读，版本落后只如实提示。
-            con = sqlite3.connect(f"file:{store.DB_PATH}?mode=ro", uri=True)
-            try:
+            with store.open_readonly() as con:
                 version = migrations.version_if_table_exists(con, scope=migrations.SCOPE_MAIN)
                 if 0 < version < store.SCHEMA_VERSION:
                     schema_notes.append(
@@ -300,13 +299,11 @@ def index_snapshot() -> tuple[dict, list[str]]:
                 index = store.counts(con)
                 # EA-077：触发器体是「OLD 库 + 新代码」的静默失配面——自检报出来（不改库）。
                 schema_notes += store.schema_drift_notes(con)
-            finally:
-                con.close()
         except (errors.AgentWeChatError, sqlite3.Error, OSError) as exc:
             # F10（T7 复审）：读不了 ≠ 空索引——把「库坏了」说成「还没导出过」正是本仓
             # 到处在消灭的形态（message_media / chat_export / message_parts / chat_index
             # 四处同立场）。计数仍按零呈现（形状不变），但这条说明必须带上。
-            stale = " database is locked" in str(exc) or "database is busy" in str(exc)
+            stale = store.is_lock_error(exc)
             schema_notes = [
                 f"索引库读不出来（{errors.redact(str(exc))}）——index 计数按零呈现；"
                 + ("多半是别的进程正持写锁（导出 / 构建 / 另一个 MCP server），等它结束再试"
@@ -1267,7 +1264,7 @@ def purge_chat_targets(contact: str, account: str | None = None) -> list[dict] |
                     "UNION SELECT account FROM exclusions.excluded WHERE chat_md5=? "
                     "ORDER BY account", (chat_id, md5)).fetchall()
         else:
-            with exclusions.standalone() as con:
+            with exclusions.standalone(store.DB_PATH) as con:
                 rows = con.execute(
                     "SELECT account FROM exclusions.excluded WHERE chat_md5=? "
                     "ORDER BY account", (md5,)).fetchall()

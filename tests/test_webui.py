@@ -269,8 +269,8 @@ def test_error_envelopes_do_not_carry_absolute_paths(tmp_path, monkeypatch):
     """错误文案是自由文本，按键名截不住——两个已知根要换成末段（工作台在浏览器里）。"""
     monkeypatch.setattr(paths, "HOME_DIR", tmp_path / "home")
     text = f"数据目录不可用：{tmp_path / 'home'}"
-    assert str(tmp_path) not in webui._scrub_abs_paths(text)
-    assert webui._scrub_abs_paths(None) is None
+    out = webui._strip_paths({"error": text, "hint": None})
+    assert str(tmp_path) not in out["error"] and out["hint"] is None
 
 
 def test_strip_paths_keeps_relative_paths(srv):

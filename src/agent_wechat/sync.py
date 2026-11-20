@@ -247,72 +247,66 @@ def diagnose(account: str | None = None) -> dict:
         return out
 
     try:
-        con = sqlite3.connect(f"file:{store.DB_PATH}?mode=ro", uri=True)
-    except (sqlite3.Error, OSError) as exc:
-        out["problems"].append(f"索引库打不开：{exc}")
-        return out
-    try:
-        def has(name: str) -> bool:
-            return con.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
-                (name,)).fetchone() is not None
+        with store.open_readonly() as con:
+            def has(name: str) -> bool:
+                return con.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                    (name,)).fetchone() is not None
 
-        out["index"]["exists"] = True
-        try:
-            v = migrations.version_if_table_exists(con, migrations.SCOPE_MAIN)
-        except sqlite3.Error:
-            v = None
-        if v:
-            out["schema"].update(version=v, pending=v < store.SCHEMA_VERSION)
-            if v > store.SCHEMA_VERSION:
-                out["problems"].append("索引库版本高于本程序（需升级程序或恢复备份）")
-        if has("messages"):
-            out["fts"]["messages"] = con.execute(
-                "SELECT count(*) FROM messages").fetchone()[0]
-        if has("messages_fts_docsize") and out["fts"]["messages"] is not None:
-            out["fts"]["indexed"] = con.execute(
-                "SELECT count(*) FROM messages_fts_docsize").fetchone()[0]
-            out["fts"]["desync"] = (out["fts"]["indexed"] != out["fts"]["messages"])
-            if out["fts"]["desync"]:
-                out["problems"].append("FTS 索引与消息表行数不一致（重跑一次导出即可重建）")
-        names = {r[0] for r in con.execute(
-            "SELECT name FROM sqlite_master WHERE type='trigger'")}
-        required = {*store.FTS_TRIGGER_NAMES, "msg_reembed_au"}
-        out["fts"]["triggers_ok"] = required <= names
-        if not out["fts"]["triggers_ok"]:
-            out["problems"].append("FTS/重嵌触发器缺失")
-        if has("watermark"):
-            row = con.execute(
-                "SELECT count(*), count(DISTINCT account) FROM watermark").fetchone()
-            out["watermarks"] = {"rows": row[0], "accounts": row[1]}
-        if has("audit_cursor"):
-            out["audit"]["cursors"] = con.execute(
-                "SELECT count(*) FROM audit_cursor").fetchone()[0]
-        out["dirty"] = store.reembed_queue_stats(con, account)
-        if (out["dirty"].get("pending") or 0) > 0:
-            out["problems"].append(
-                f"重嵌队列有 {out['dirty']['pending']} 条积压（跑一次 vector-build 或 sync）")
-        if (out["dirty"].get("failed") or 0) > 0:
-            out["problems"].append(
-                f"{out['dirty']['failed']} 条重嵌失败（见 attempts / last_error）")
-        if has("vector_meta"):
-            row = con.execute(
-                "SELECT embedded FROM vector_meta WHERE model_id=?",
-                (vector.MODEL_ID,)).fetchone()
-            foreign = con.execute(
-                "SELECT 1 FROM vector_meta WHERE model_id!=? LIMIT 1",
-                (vector.MODEL_ID,)).fetchone()
-            out["vector"].update(indexed=bool(row and int(row[0]) > 0),
-                                 embedded=int(row[0]) if row else 0,
-                                 model_matches=foreign is None)
-            if foreign is not None:
-                out["problems"].append("向量索引由其它模型构建（需 rebuild）")
-        if has("sync_state") and account:
-            out["sync_state"] = store.load_sync_state(con, account)
-    except (sqlite3.Error, OSError) as exc:
+            out["index"]["exists"] = True
+            try:
+                v = migrations.version_if_table_exists(con, migrations.SCOPE_MAIN)
+            except sqlite3.Error:
+                v = None
+            if v:
+                out["schema"].update(version=v, pending=v < store.SCHEMA_VERSION)
+                if v > store.SCHEMA_VERSION:
+                    out["problems"].append("索引库版本高于本程序（需升级程序或恢复备份）")
+            if has("messages"):
+                out["fts"]["messages"] = con.execute(
+                    "SELECT count(*) FROM messages").fetchone()[0]
+            if has("messages_fts_docsize") and out["fts"]["messages"] is not None:
+                out["fts"]["indexed"] = con.execute(
+                    "SELECT count(*) FROM messages_fts_docsize").fetchone()[0]
+                out["fts"]["desync"] = (out["fts"]["indexed"] != out["fts"]["messages"])
+                if out["fts"]["desync"]:
+                    out["problems"].append("FTS 索引与消息表行数不一致（重跑一次导出即可重建）")
+            names = {r[0] for r in con.execute(
+                "SELECT name FROM sqlite_master WHERE type='trigger'")}
+            required = {*store.FTS_TRIGGER_NAMES, "msg_reembed_au"}
+            out["fts"]["triggers_ok"] = required <= names
+            if not out["fts"]["triggers_ok"]:
+                out["problems"].append("FTS/重嵌触发器缺失")
+            if has("watermark"):
+                row = con.execute(
+                    "SELECT count(*), count(DISTINCT account) FROM watermark").fetchone()
+                out["watermarks"] = {"rows": row[0], "accounts": row[1]}
+            if has("audit_cursor"):
+                out["audit"]["cursors"] = con.execute(
+                    "SELECT count(*) FROM audit_cursor").fetchone()[0]
+            out["dirty"] = store.reembed_queue_stats(con, account)
+            if (out["dirty"].get("pending") or 0) > 0:
+                out["problems"].append(
+                    f"重嵌队列有 {out['dirty']['pending']} 条积压（跑一次 vector-build 或 sync）")
+            if (out["dirty"].get("failed") or 0) > 0:
+                out["problems"].append(
+                    f"{out['dirty']['failed']} 条重嵌失败（见 attempts / last_error）")
+            if has("vector_meta"):
+                row = con.execute(
+                    "SELECT embedded FROM vector_meta WHERE model_id=?",
+                    (vector.MODEL_ID,)).fetchone()
+                foreign = con.execute(
+                    "SELECT 1 FROM vector_meta WHERE model_id!=? LIMIT 1",
+                    (vector.MODEL_ID,)).fetchone()
+                out["vector"].update(indexed=bool(row and int(row[0]) > 0),
+                                     embedded=int(row[0]) if row else 0,
+                                     model_matches=foreign is None)
+                if foreign is not None:
+                    out["problems"].append("向量索引由其它模型构建（需 rebuild）")
+            if has("sync_state") and account:
+                out["sync_state"] = store.load_sync_state(con, account)
+    except (errors.AgentWeChatError, sqlite3.Error, OSError) as exc:
         out["problems"].append(f"索引库读取出错：{exc}")
-    finally:
-        con.close()
     return out
 
 

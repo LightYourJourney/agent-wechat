@@ -482,12 +482,11 @@ def delete_derived(derivation_id: str, *, now: int | None = None) -> dict:
 
 
 def search_derived(query: str, *, account: str, chat_id: str | None = None,
-                   limit: int = 20, exclude_chats: Collection[str] = (),
-                   exclude_md5s: Collection[str] = ()) -> dict:
+                   limit: int = 20, exclude_chats: Collection[str] = ()) -> dict:
     """在派生文本里检索，返回带 `msg_key` 的证据片段（供 retrieve 融合与 CLI 使用）。
 
-    `exclude_chats` / `exclude_md5s`（`AGENT_WECHAT_DENY`）在 SQL 里排除，理由与「两个都要」
-    见 `search.search`。"""
+    `exclude_chats`（`AGENT_WECHAT_DENY`）在 SQL 里排除，按 `chat_md5` 判，理由见
+    `search.search`。"""
     if not query or not query.strip():
         raise errors.DerivedInputError("检索串不能为空")
     limit = max(1, min(int(limit), 100))
@@ -501,12 +500,10 @@ def search_derived(query: str, *, account: str, chat_id: str | None = None,
         filt += " AND d.chat_id = ?"
         args.append(chat_id)
     if exclude_chats:
-        filt += f" AND d.chat_id NOT IN ({','.join('?' * len(exclude_chats))})"
-        args.extend(exclude_chats)
-    if exclude_md5s:
-        # 派生表的 `chat_id` 可能停在退化形态 `md5:<hex>`，只比 chat_id 会漏掉那一批。
-        filt += f" AND m.chat_md5 NOT IN ({','.join('?' * len(exclude_md5s))})"
-        args.extend(exclude_md5s)
+        # 按 `chat_md5` 判：派生表的 `chat_id` 可能停在退化形态 `md5:<hex>`，两种形态共享
+        # 同一个 md5，一个谓词覆盖两者（同 `search.search`）。
+        filt += f" AND m.chat_md5 NOT IN ({','.join('?' * len(exclude_chats))})"
+        args.extend(messages.chat_md5(c) for c in exclude_chats)
     base = cols + " FROM derived_text d" + joins + " WHERE d.account = ?" + filt
     with store.open() as con:
         rows: list[sqlite3.Row] = []
