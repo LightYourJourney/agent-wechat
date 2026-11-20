@@ -558,7 +558,8 @@ def _build_parser() -> argparse.ArgumentParser:
     return ap
 
 
-def _report_unregistered(hits, allow, args) -> int:
+def _report_unregistered(hits: list[tuple[str, int, str, str]], allow: set[str],
+                         args: argparse.Namespace) -> int:
     """「命中汇报 + `--show-values` 警告 + 退出码」三件事（EA-044：两条路径此前各写一份）。
 
     行为逐字节不变；抽它的理由不是行数，而是**改一处即漂移**（改 `--staged` 那条忘了改

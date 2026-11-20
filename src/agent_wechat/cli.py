@@ -5,6 +5,7 @@ import argparse
 import json
 import sqlite3
 import sys
+from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
 from . import account, bootstrap, decrypt, errors, keys, paths
@@ -17,6 +18,7 @@ if TYPE_CHECKING:
     # purge 同理（它的 import 链带起 vector→sqlite_vec）：此处只为 _render_* 的签名取类型，
     # 真身仍在 cmd_purge 里惰性 import，冷启动不为它买单。
     from . import purge
+    from . import reader
 
 
 def _need_confirm(contact: str, nc: usecases.NeedConfirm) -> int:
@@ -153,7 +155,7 @@ def cmd_inspect(args: argparse.Namespace) -> int:
     return 0
 
 
-def _decode(v):
+def _decode(v: object) -> object:
     """bytes 尽力解码为 str，失败保留 repr 摘要。"""
     if isinstance(v, bytes):
         try:
@@ -163,7 +165,7 @@ def _decode(v):
     return v
 
 
-def _shorten(v, limit: int = 80):
+def _shorten(v: object, limit: int = 80) -> str:
     if isinstance(v, bytes):
         return f"<{len(v)}B:{v[:16].hex()}...>" if len(v) > 16 else f"<{len(v)}B:{v.hex()}>"
     s = str(v)
@@ -215,7 +217,7 @@ def cmd_export(args: argparse.Namespace) -> int:
 
     degraded: list = []
 
-    def note_reader(r) -> None:
+    def note_reader(r: reader.MessageReader) -> None:
         """导出只返回行数，而漂移记在它用的那份 reader 上（spec §6 的 `username_pool`）。"""
         degraded.extend(usecases.collect_degradations(r))
 
@@ -908,7 +910,7 @@ def _render_residue(rep: purge.ResidueReport) -> None:
         print("  ✅ 计划内路径已清空，未发现残留")
 
 
-def _render_degradations(degraded) -> None:
+def _render_degradations(degraded: Iterable[object]) -> None:
     """降级说明走 stderr：成功但有保留，不该污染 stdout（spec §7）。
 
     三种形状都要收：`recent` 给 `usecases.Degradation`（dataclass；只有 `drift=True`
@@ -977,6 +979,9 @@ def _render_chat_plan(plan: purge.ChatPlan, query: str) -> None:
         print(f"  导出物  {d}   {_human_size(size) if exists else '—':>10}   "
               f"解密后的图/视频/语音，及可直接打开的 chat/index.html"
               f"{'' if exists else '（不存在）'}")
+    if plan.index_page is not None:
+        print(f"  总目录页  {plan.index_page}   列着该会话，一并删除"
+              "（重跑 `agent-wechat chat index` 即重建，不含已删会话）")
     print(f"  随后列入永久排除：{sum(e.tombstone for e in plan.entries):,} 条"
           "（**新消息不受影响**，照常进索引）")
     # 这段警告不是客套：`moments/` 是一份 HTML 装所有人，没有按会话切分的目录结构，删掉
@@ -1009,6 +1014,19 @@ def _render_chat_reports(reports: tuple[purge.ChatReport, ...]) -> None:
         # 报告就只剩一片 ✅，而东西还在。退出码也读它（见 _cmd_purge_chat）。
         print("    导出物已删除" if r.export_removed
               else "    ❌ 导出物未能删除（那个名字还在磁盘上）")
+
+
+def _render_chat_residue(res: purge.ChatResidue) -> str:
+    """核查结果的文案（展示归入口层：此前是 `ChatResidue.render()`，住在 core 里）。"""
+    lines = [f"  ❌ 计划内仍未删除：{x}" for x in res.leftover]
+    lines += [f"  ❌ 导出目录仍在：{d}" for d in res.export_dirs]
+    if res.tombstone_ok:
+        lines.append(f"  ✅ 排除清单：{res.tombstone_written} 条（不可逆性已建立）")
+    else:
+        lines.append(
+            f"  ❌ 不可逆性未建立：排除清单只有 {res.tombstone_written} 条，"
+            f"本次应写 {res.tombstone_expected} 条——**被删内容下次导出会回来**")
+    return "\n".join(lines)
 
 
 def _cmd_purge_excluded() -> int:
@@ -1094,7 +1112,7 @@ def _cmd_purge_chat(args: argparse.Namespace) -> int:
           "（**索引文件不会因此变小**，要回收空间得 purge --index 或重跑 export）")
     res = purge.verify_chat(plan)
     print("\n核查：")
-    print(res.render())
+    print(_render_chat_residue(res))
     # 判据从「报告」与「核查」两侧各取一份。**今天前两项与后两项互为冗余**（实测：摘掉
     # `not res.export_still_there` 没有任何测试会红），不是四条独立判据——别按「四处缺一不可」
     # 记账。两份都留着是因为它们回答的是不同的问题：`export_removed` 是「这一条报了什么」，

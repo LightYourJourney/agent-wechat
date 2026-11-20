@@ -11,7 +11,8 @@ def run_export(acct: str, chat_id: str | None = None, full: bool = False,
                progress: Callable[[int], None] | None = None,
                on_reader: Callable[[reader.MessageReader], None] | None = None,
                on_skipped: Callable[[int], None] | None = None,
-               _reader_factory=None, audit_rows: int | None = None) -> int:
+               _reader_factory: Callable[[str], reader.MessageReader] | None = None,
+               audit_rows: int | None = None) -> int:
     """全量/增量导出。恒定内存：reader 流式产批 → store 批量幂等 upsert。
 
     **返回值 = 未被排除的行数**（= 实际入库行数，spec §5.4 的计数契约）。加了排除清单之后

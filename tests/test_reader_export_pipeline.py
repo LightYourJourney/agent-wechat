@@ -1040,7 +1040,7 @@ def test_refresh_does_not_write_when_roster_is_empty(env, monkeypatch):
 
 # ---------- 结构漂移 ----------
 # 这几条自造漂移树，所以要把 XWECHAT_FILES 指过去；`env` 负责另一半环境——
-# passphrase 缓存（`MessageReader.__init__` 就要用，缺了连构造都过不去）。
+# passphrase 缓存（`MessageReader` 首次解密就要用）。
 # env 先指到合成目录，测试体再指到漂移树，后者生效。
 
 def test_db_matches_wildcard_needs_a_real_path_segment():

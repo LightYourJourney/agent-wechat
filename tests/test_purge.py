@@ -12,7 +12,7 @@ import uuid
 import pytest
 import sqlite_vec
 
-from agent_wechat import (decrypt, errors, exclusions, keys, messages, paths, purge,
+from agent_wechat import (cli, decrypt, errors, exclusions, keys, messages, paths, purge,
                           store, tasks, vector)
 
 # 导入时取值：此刻 autouse fixture 尚未 patch，paths.HOME_DIR 就是真实路径。
@@ -899,7 +899,7 @@ def test_verify_chat_flags_a_missing_tombstone(tmp_path, monkeypatch):
     purge.execute_chat(plan)
     res = purge.verify_chat(plan)
     assert res.tombstone_ok is False
-    assert "不可逆性未建立" in res.render()
+    assert "不可逆性未建立" in cli._render_chat_residue(res)
 
 
 def test_execute_chat_refuses_when_lock_is_held(tmp_path):
@@ -1011,7 +1011,7 @@ def test_verify_chat_counts_only_this_chats_exclusions(tmp_path, monkeypatch):
     res = purge.verify_chat(plan)
     assert res.tombstone_written == 0, "别的会话的 2 条不能算进本次"
     assert res.tombstone_ok is False
-    assert "不可逆性未建立" in res.render()
+    assert "不可逆性未建立" in cli._render_chat_residue(res)
 
 
 def test_execute_chat_is_idempotent_and_tolerates_missing_export(tmp_path):
@@ -1118,7 +1118,27 @@ def test_plan_chat_shares_one_export_dir_across_accounts(tmp_path):
     assert not media.exists()
     res = purge.verify_chat(plan)
     assert res.export_still_there is False
-    assert "导出目录仍在" not in res.render()
+    assert "导出目录仍在" not in cli._render_chat_residue(res)
+
+
+def test_purge_chat_removes_the_index_page_that_lists_the_chat(tmp_path):
+    """`chat index` 的总目录页列着该会话（会话 id + 条数）时随删除面一并删掉——
+    `media/<md5>/` 没了而那一行还在，是 purge 之后唯一残留的会话痕迹。
+    没列着它的总目录页不动（那是别的会话的目录，不归本次删）。"""
+    home = tmp_path / "home"; home.mkdir(parents=True)
+    with store.open() as con:
+        store.upsert_batch(con, [_victim_row(1)])
+    page = home / "media" / "index.html"
+    page.parent.mkdir(parents=True)
+    page.write_text(f'<a href="{"0" * 32}/chat/index.html">别人</a>')
+    assert purge.plan_chat([{"account": "a", "chat_id": VICTIM}]).index_page is None
+
+    page.write_text(f'<a href="{VICTIM_MD5}/chat/index.html">{VICTIM}</a>')
+    plan = purge.plan_chat([{"account": "a", "chat_id": VICTIM}])
+    assert plan.index_page == page
+    purge.execute_chat(plan)
+    assert not page.exists()
+    assert not purge.verify_chat(plan).leftover
 
 
 def test_plan_chat_does_not_report_a_dangling_export_symlink_as_removed(tmp_path):
@@ -1141,7 +1161,7 @@ def test_plan_chat_does_not_report_a_dangling_export_symlink_as_removed(tmp_path
     assert os.path.lexists(link), "前提：rmtree 没能删掉这个悬空链接"
     res = purge.verify_chat(plan)
     assert res.export_still_there is True
-    assert str(link) in res.render()
+    assert str(link) in cli._render_chat_residue(res)
 
 
 def test_execute_chat_allows_a_tree_internal_link(tmp_path):
@@ -1961,13 +1981,13 @@ def test_residue_render_shows_leftovers_and_the_tombstone_verdict(tmp_path):
     left = purge.ChatResidue(
         leftover=(str(tmp_path / "left"),), tombstone_written=0, tombstone_expected=2,
         export_dirs=(tmp_path / "exp",))
-    text = left.render()
+    text = cli._render_chat_residue(left)
     assert "计划内仍未删除" in text and str(tmp_path / "left") in text
     assert "导出目录仍在" in text and str(tmp_path / "exp") in text
     assert "不可逆性未建立" in text
     ok = purge.ChatResidue(leftover=(), tombstone_written=2, tombstone_expected=2,
                            export_dirs=())
-    assert "不可逆性已建立" in ok.render()
+    assert "不可逆性已建立" in cli._render_chat_residue(ok)
 
 
 def test_execute_refuses_a_symlinked_file_artifact_even_when_the_target_is_inside(

@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Collection
 
 from . import errors, messages, store
 from .errors import SearchInputError
@@ -52,12 +53,15 @@ def _runtime_failure(msg: str) -> errors.IndexUnavailable:
 
 def search(query: str, chat_id: str | None = None, limit: int = 20,
            account: str | None = None, *,
-           after_ts: int | None = None, before_ts: int | None = None) -> dict:
+           after_ts: int | None = None, before_ts: int | None = None,
+           exclude_chats: Collection[str] = ()) -> dict:
     """返回 {"hits": [...], "mode": "fts"|"like", "total": n, "degraded": [...]}。
 
     account 必传：检索严格限定该账号的数据（多账号索引隔离）。
     时间窗：`after_ts` 含下界、`before_ts` 不含上界（与 `messages_in_range` /
     `media.month_bounds` 同口径）——这是 Phase 05 给统一检索加的参数，默认不限。
+    `exclude_chats`：在 SQL 里排除的会话（`AGENT_WECHAT_DENY`）。必须在取数时排除而不是
+    取回后再滤：先按 `LIMIT` 取再滤，被拒会话的命中会占满候选、把放行会话挤出去。
     """
     if not account:
         raise SearchInputError("search 需要显式 account（多账号索引隔离）")
@@ -78,6 +82,9 @@ def search(query: str, chat_id: str | None = None, limit: int = 20,
     if before_ts is not None:
         where.append("m.ts < ?")
         args.append(int(before_ts))
+    if exclude_chats:
+        where.append(f"m.chat_id NOT IN ({','.join('?' * len(exclude_chats))})")
+        args.extend(exclude_chats)
     w = " AND ".join(where)
 
     notes: list[dict] = []

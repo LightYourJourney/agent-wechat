@@ -14,6 +14,12 @@
   `purge --chat <会话> --undo --yes`（代价：purge 之后新到的媒体也要先 undo）。
 - **`get_account_status` 校验显式给出的账号**：目录不存在时报错（附已知账号），与其它工具
   同一条通用约定。此前答 `key_ready: false`，会把人引向「重新 bootstrap」。
+- **`purge --chat` 一并删除默认导出根的总目录页**（`media/index.html`，仅当它列着该会话）：
+  此前 `media/<md5>/` 删掉后，那一页仍留着会话 id 与条数。重跑 `chat index` 即重建。
+- **微信密钥改为首次解密时才读**：此前构造 reader 就要密钥，只读本地索引的路径要在每个
+  调用方各自绕开；缓存不在时仍报同一个错，只是时机挪到第一次读微信库。
+- **`AGENT_WECHAT_DENY` 下推到三路检索的取数查询**（关键词 SQL / 向量 KNN / 派生文本 SQL）：
+  此前取回候选后才滤，被拒会话的命中会占满每路候选窗、把放行会话挤掉。
 
 **修复**
 
@@ -41,6 +47,8 @@
 - **MCP 导出任务带上表结构降级**：CLI `export` 打到 stderr 的那几条，现在也随
   `get_task_status` 的 `degraded` 返回；CLI `status` 也印出索引库自检说明（此前只有 MCP 有）。
 - `doctor` 的在跑任务数与 `get_task_status` 用同一份收割判据（此前漏了 24h 陈旧兜底）。
+- 补齐全部函数签名的类型注解（CONTRIBUTING §6）；`purge` 核查结果的文案移到 CLI 层
+  （展示归入口层）。
 - 派生任务的磁盘探测失败不再被报成「不足 50 MB」；`media export` / `moments export` 的
   相对 `--out` 先绝对化；`vector-status` 无索引时补齐 `by_reason` 键；视频缩略图也报进度。
 
@@ -48,7 +56,8 @@
 
 - 订正多处与代码不符的宣称（`TOOLS.md` 的 EA-057、msg_key 示例、分片失败时的水位线；
   `DATA_MODEL.md` 的 upsert 守卫与 `pending_reembed.reason`；`TROUBLESHOOTING.md` 的迁移版本；
-  门禁耗时）。`SECURITY.md` 写明 `purge --chat` 不覆盖的一处（`chat index` 总目录页）。
+  门禁耗时）。`SECURITY.md` 写明 `purge --chat` 不覆盖的一处（自定义 `--out` 根下的
+  `chat index` 总目录页）。
 
 ### 公开发布后的修复（2026-10-30 ~ 11-01）
 

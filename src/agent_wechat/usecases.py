@@ -125,11 +125,6 @@ class ChatContext:
 
     def resolve(self, contact: str) -> str | NeedConfirm:
         """contact → 唯一 chat_id；歧义返回候选，未命中抛 ContactNotFound。"""
-        if reader.is_chat_id(contact):
-            # 已是 chat_id 就不构造 reader：构造它要读 passphrase 缓存，缓存不在就抛——
-            # 那会让「只读索引」的用例（get_message_context、工作台 /api/media）仅仅因为
-            # 调用方给了 contact 就离不开微信密钥，而 `resolve_one` 对 chat_id 本来就原样返回。
-            return contact
         chat_id, cands = self.reader.resolve_one(contact)
         if chat_id:
             return chat_id
@@ -148,18 +143,14 @@ class ChatContext:
         return self.resolve(contact) if contact else None
 
     def drift(self) -> tuple[Degradation, ...]:
-        """同 `degradations` 的取舍（没构造过 reader 就没有可报的），但给 `Degradation` 元组
-        ——结果类型里装的是它（转换成信封归入口层）。"""
+        """本次调用见过的降级（`Degradation` 元组——结果类型里装的是它，转成信封归入口层）。
+
+        没构造过 reader 说明这次调用没碰微信的库（检索走的是本地索引），没有可报的。
+        """
         return collect_degradations(self._reader) if self._reader is not None else ()
 
     def degradations(self) -> list[dict]:
-        """本次调用见过的降级，信封形状（search/semantic 的出口，Ruling 13）。
-
-        **只报已经构造出来的 reader 上的漂移**：没构造过 reader 说明这次调用没碰微信的库
-        （检索走的是本地索引），也就没有「静默变少」可言。反过来，为了报降级去构造一个
-        reader 是有代价的——它会读 passphrase 缓存，缓存没了就抛（`purge --keys` 之后
-        检索仍然可用），把一条本来能用的检索打翻。
-        """
+        """同 `drift`，信封形状（search/semantic 的出口，Ruling 13）。"""
         return [d.envelope() for d in self.drift()]
 
 
@@ -431,7 +422,7 @@ class MediaExportResult:
 
 
 def media_export(contact: str, *, kinds: list[str], months: list[str] | None = None,
-                 out_dir=None, limit: int = 500, force: bool = False,
+                 out_dir: str | None = None, limit: int = 500, force: bool = False,
                  account: str | None = None,
                  with_cdn: bool = False) -> MediaExportResult | NeedConfirm:
     """媒体导出用例：会话消歧 + 交 media.export_media。kinds/months 由入口解析成列表。
@@ -664,7 +655,8 @@ def _resolve_out(out_dir: str | None) -> pathlib.Path:
 def message_media(contact: str, *, keys: Sequence[str] | None = None,
                   months: list[str] | None = None, limit: int = 200,
                   out_dir: str | None = None, account: str | None = None,
-                  _ctx=None, _con=None) -> MessageMediaResult | NeedConfirm:
+                  _ctx: ChatContext | None = None,
+                  _con: sqlite3.Connection | None = None) -> MessageMediaResult | NeedConfirm:
     """消息 → 媒体状态（spec §4.1 的四态）。
 
     keys=None → 该会话**所有媒体类型的消息**（msg_type ∈ {3,43,34,47}），受 limit 约束
@@ -773,9 +765,7 @@ def message_media(contact: str, *, keys: Sequence[str] | None = None,
             continue
         bucket = by_kind.setdefault(s.kind, {})
         bucket[s.status] = bucket.get(s.status, 0) + 1
-    # 走 `ctx.drift()`（`Degradation` 元组，同 recent_messages 的口径）而不是直接
-    # `collect_degradations(ctx.reader)`：contact 已是 chat_id 时 `ctx.resolve` 不构造
-    # reader，为报降级去构造它会读 passphrase 缓存——缓存不在就把这个只读索引的用例打翻。
+    # `Degradation` 元组，同 recent_messages 的口径（转换归入口层）。
     return MessageMediaResult(chat_id=chat_id, out_dir=str(out_root),
                               states=states, counts=counts, by_kind=by_kind,
                               truncated=truncated,
@@ -1569,7 +1559,7 @@ def semantic_search(query: str, contact: str | None = None, limit: int = 10,
             # 索引的机器上，`_display_or_id` 只接 SchemaDrift 会让整个工具 100% 失败
             # （错误文案还把用户引向唯一需要 sudo 的 bootstrap），而兄弟工具
             # `search_history` 同一时刻照常出结果。读不到就不富化：`display` 回落裸
-            # chat_id——回落要**自证**（F1，T8 复审）：no-key 时 reader 根本没构造出来，
+            # chat_id——回落要**自证**（F1，T8 复审）：no-key 时 reader 在解密前就抛了，
             # `ctx.degradations()` 里不会有 roster 那条（条目原注释此处被复验证伪）。
             h["display"] = h["chat_id"]
             fell_back = True
@@ -1629,8 +1619,10 @@ class MomentsExportResult:
 
 
 def moments_export(contact: str | None = None, *, months: list[str] | None = None,
-                   with_media: bool = False, limit: int = 500, out_dir=None,
-                   account: str | None = None, fetch=None) -> "MomentsExportResult | NeedConfirm":
+                   with_media: bool = False, limit: int = 500, out_dir: str | None = None,
+                   account: str | None = None,
+                   fetch: Callable[[moments.SnsMedia], bytes] | None = None
+                   ) -> "MomentsExportResult | NeedConfirm":
     """朋友圈导出用例：解析 →（可选）下载解密 → 渲染 HTML。
 
     `with_media=False`（默认）时**全程零网络**——这是零网络红线上本次新增的例外开关，
@@ -1708,8 +1700,9 @@ def moments_export(contact: str | None = None, *, months: list[str] | None = Non
 _HEX32 = re.compile(r"^[0-9a-fA-F]{32}\Z")
 
 
-def _resolve_media(p: "moments.SnsPost", out_root, report, with_media: bool,
-                   do_fetch) -> "moments.SnsPost":
+def _resolve_media(p: "moments.SnsPost", out_root: pathlib.Path,
+                   report: "moments.MomentsReport", with_media: bool,
+                   do_fetch: Callable[[moments.SnsMedia], bytes]) -> "moments.SnsPost":
     """逐条媒体决定「下载并落盘」还是「标注未下载」。单条失败只计数，不外抛。"""
     from . import moments, sns_media
     out = []

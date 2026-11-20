@@ -19,6 +19,7 @@ from __future__ import annotations
 import math
 import os
 import re
+from collections.abc import Mapping
 
 from . import derived, errors, exclusions, search, store, vector
 
@@ -122,18 +123,22 @@ def fuse(keyword_hits: list[dict], semantic_hits: list[dict],
 
 
 def _keyword(query: str, *, account: str, chat_id: str | None, limit: int,
-             after_ts: int | None, before_ts: int | None) -> tuple[list[dict], list[dict]]:
+             after_ts: int | None, before_ts: int | None,
+             exclude_chats: frozenset[str]) -> tuple[list[dict], list[dict]]:
     res = search.search(query, chat_id=chat_id, limit=limit, account=account,
-                        after_ts=after_ts, before_ts=before_ts)
+                        after_ts=after_ts, before_ts=before_ts,
+                        exclude_chats=exclude_chats)
     return res.get("hits", []), res.get("degraded", [])
 
 
 def _semantic(query: str, *, account: str, chat_id: str | None, limit: int,
-              after_ts: int | None, before_ts: int | None) -> tuple[list[dict], list[dict]]:
+              after_ts: int | None, before_ts: int | None,
+              exclude_chats: frozenset[str]) -> tuple[list[dict], list[dict]]:
     try:
         res = vector.semantic_search(query, chat_id=chat_id, limit=limit,
                                      account=account,
-                                     after_ts=after_ts, before_ts=before_ts)
+                                     after_ts=after_ts, before_ts=before_ts,
+                                     exclude_chats=exclude_chats)
         return res.get("hits", []), []
     except (errors.VectorError, ImportError) as exc:
         # 可选组件缺失/未安装/未索引：**明确降级**，不把整次检索打挂。
@@ -164,6 +169,10 @@ def search_messages(query: str, *, account: str, chat_id: str | None = None,
     limit = max(1, min(int(limit), MAX_LIMIT))
     _ensure_allowed(chat_id)
     candidates = min(limit * CANDIDATE_FACTOR, MAX_LIMIT)
+    # 拒读会话在**三路取数的 SQL / KNN 里**就排除：取回后再滤（哪怕在截断之前），被拒会话
+    # 的命中也会先占满每路 limit×4 的候选窗，把放行会话挤出去；`candidates` 还会把它们
+    # 数进去——等于透露「那个会话里有几条匹配」。
+    denied = denied_chat_ids()
 
     keyword_hits: list[dict] = []
     semantic_hits: list[dict] = []
@@ -171,34 +180,25 @@ def search_messages(query: str, *, account: str, chat_id: str | None = None,
     if mode in ("keyword", "hybrid"):
         keyword_hits, notes = _keyword(query, account=account, chat_id=chat_id,
                                        limit=candidates, after_ts=after_ts,
-                                       before_ts=before_ts)
+                                       before_ts=before_ts, exclude_chats=denied)
         degraded.extend(notes)
     if mode in ("semantic", "hybrid"):
         semantic_hits, notes = _semantic(query, account=account, chat_id=chat_id,
                                          limit=candidates, after_ts=after_ts,
-                                         before_ts=before_ts)
+                                         before_ts=before_ts, exclude_chats=denied)
         degraded.extend(notes)
     derived_hits: list[dict] = []
     if mode == "hybrid":
         # 派生文本（OCR/ASR）作为第三路；它是**旁证**，不取代原消息。
         try:
             dres = derived.search_derived(query, account=account, chat_id=chat_id,
-                                          limit=candidates)
+                                          limit=candidates, exclude_chats=denied)
             derived_hits = [h for h in dres["hits"]
                             if after_ts is None or h["ts"] >= after_ts]
             derived_hits = [h for h in derived_hits
                             if before_ts is None or h["ts"] < before_ts]
         except errors.DerivedInputError:
             derived_hits = []
-
-    # 拒读会话在**融合与截断之前**滤掉：先截到 limit 再滤，`limit=1` 时会因为第一名在
-    # 被拒会话里而答 0 条（放行会话里明明有命中）；`candidates` 也会把被拒会话的命中数
-    # 数进去——等于透露「那个会话里有几条匹配」。
-    denied = denied_chat_ids()
-    if denied:
-        keyword_hits = [h for h in keyword_hits if h["chat_id"] not in denied]
-        semantic_hits = [h for h in semantic_hits if h["chat_id"] not in denied]
-        derived_hits = [h for h in derived_hits if h["chat_id"] not in denied]
 
     if mode == "hybrid":
         ordered, deduped_total = fuse(keyword_hits, semantic_hits, derived_hits, limit)
@@ -288,7 +288,7 @@ def get_context(msg_key: str, *, account: str, before: int = 2, after: int = 2) 
             (account, row["chat_id"], row["ts"], row["ts"], row["local_id"], after)
         ).fetchall()
 
-    def _out(r) -> dict:
+    def _out(r: Mapping) -> dict:
         return {"msg_key": r["msg_key"], "time": r["ts"],
                 "sender": r["sender"] or "?",
                 "is_self": bool(r["is_self"]),

@@ -6,10 +6,12 @@
 """
 from __future__ import annotations
 
+import http.client
 import re
 import time
 import urllib.parse
 import urllib.request
+from typing import IO
 
 from . import errors, moments
 
@@ -198,7 +200,9 @@ class _AllowlistedRedirect(urllib.request.HTTPRedirectHandler):
     （消息只含类型名，不会把攻击者指定的主机回显出去）。
     """
 
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
+    def redirect_request(self, req: urllib.request.Request, fp: IO[bytes], code: int,
+                         msg: str, headers: http.client.HTTPMessage,
+                         newurl: str) -> urllib.request.Request | None:
         if not https_allowed(newurl):
             return None
         return super().redirect_request(req, fp, code, msg, headers, newurl)
@@ -224,7 +228,8 @@ def _default_opener() -> urllib.request.OpenerDirector:
 
 
 def fetch(m: moments.SnsMedia, *, timeout: float = 20.0, attempts: int = 3,
-          sleep: float = 2.0, opener=None) -> bytes:
+          sleep: float = 2.0,
+          opener: urllib.request.OpenerDirector | None = None) -> bytes:
     """下载并解密一条媒体，返回明文。失败重试 `attempts` 次后抛 `SnsMediaError`。
 
     异常消息**只含类型名**，绝不回显 URL / token / key。

@@ -190,7 +190,7 @@ def _persist_locked(changed: dict[str, dict]) -> None:
         ) from exc
 
 
-def start(kind: str, runner: Callable[[str], int | None], **fields) -> str:
+def start(kind: str, runner: Callable[[str], int | None], **fields: object) -> str:
     """登记任务并在后台线程执行 runner(task_id)。runner 的返回值写 rows 终值。
 
     **准入控制（EA-122）**：同 kind、且 `_IDENTITY_KEYS` 里区分目标的字段全部与调用方
@@ -280,7 +280,7 @@ def _run(task_id: str, runner: Callable[[str], int | None]) -> None:
             pass
 
 
-def update(task_id: str, **fields) -> None:
+def update(task_id: str, **fields: object) -> None:
     """就地更新任务字段（供 runner 上报**进度**：rows = 本轮已处理行数，单调递增）。
 
     未知 id 静默忽略：runner 可能在任务被清理后仍在跑（或记录属于别的注册表文件）。

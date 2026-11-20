@@ -48,11 +48,11 @@ _OS = {"replace": "replace", "unlink": "meta", "mkdir": "meta", "chmod": "meta",
 _SUBPROC = ("run", "Popen", "call", "check_output")
 
 class _V(ast.NodeVisitor):
-    def __init__(self, rel):
+    def __init__(self, rel: str) -> None:
         self.rel, self.stack, self.out = rel, [], []
         # 模块级别名（如 `_run = subprocess.run`）：调用点按规范 API 名入表。
         self.aliases = {}
-    def visit_Module(self, n):
+    def visit_Module(self, n: ast.Module) -> None:
         for node in n.body:
             if isinstance(node, ast.Assign) and len(node.targets) == 1:
                 t, v = node.targets[0], node.value
@@ -61,7 +61,7 @@ class _V(ast.NodeVisitor):
                         and v.attr in _SUBPROC):
                     self.aliases[t.id] = "subprocess." + v.attr
         self.generic_visit(n)
-    def visit_FunctionDef(self, n):
+    def visit_FunctionDef(self, n: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
         self.stack.append(n.name)
         if n.name == "fetch" and self.rel == "sns_media.py":
             self.out.append(Site(self.rel, n.lineno, "fetch", "network", "fetch"))
@@ -71,9 +71,9 @@ class _V(ast.NodeVisitor):
         self.generic_visit(n)
         self.stack.pop()
     visit_AsyncFunctionDef = visit_FunctionDef
-    def _add(self, n, api, kind):
+    def _add(self, n: ast.AST, api: str, kind: str) -> None:
         self.out.append(Site(self.rel, n.lineno, api, kind, ".".join(self.stack) or "<module>"))
-    def visit_Call(self, n):
+    def visit_Call(self, n: ast.Call) -> None:
         f = n.func
         if isinstance(f, ast.Attribute):
             api = f.attr
@@ -123,7 +123,7 @@ def iter_sites(root: pathlib.Path = SRC) -> list[Site]:
         sites += v.out
     return sites
 
-def expand(sites) -> list[dict]:
+def expand(sites: list[Site]) -> list[dict]:
     rows = []
     counts = collections.Counter((s.rel, s.line, s.api) for s in sites)
     seen = collections.Counter()
@@ -185,7 +185,7 @@ def check(path: pathlib.Path, root: pathlib.Path = SRC) -> int:
     print(f"✅ 边界表一致：枚举 {len(derived)} / 表 {len(table_map)} / 差集 0")
     return 0
 
-def main(argv=None):
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--emit", action="store_true")
     ap.add_argument("--write", type=pathlib.Path)

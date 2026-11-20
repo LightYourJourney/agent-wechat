@@ -392,7 +392,7 @@ def iter_posts(account: str, *, chat_filter: str | None = None,
     yield from out
 
 
-def _dec(v) -> str:
+def _dec(v: object) -> str:
     if v is None:
         return ""
     return v.decode("utf-8", "replace") if isinstance(v, bytes) else str(v)

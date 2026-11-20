@@ -226,7 +226,7 @@ class _Handler(BaseHTTPRequestHandler):
     server_version = "agent-wechat-ui"
     sys_version = ""
 
-    def log_message(self, *args):            # noqa: D401 — 不写访问日志（查询串敏感）
+    def log_message(self, *args: object) -> None:            # noqa: D401 — 不写访问日志（查询串敏感）
         return
 
     @property
@@ -300,7 +300,7 @@ class _Handler(BaseHTTPRequestHandler):
 _PATH_KEYS = ("path", "out_dir")
 
 
-def _strip_paths(data):
+def _strip_paths(data: object) -> object:
     """最小披露：浏览器只看到文件名，不拿到本机绝对路径。**在 API 出口对所有响应递归做**。
 
     此前只在 `/api/media` 一条路由上、按一种响应形状（`messages[].path`）做——而那条路由
@@ -365,7 +365,7 @@ def _route(path: str, qs: dict) -> dict:
                                  limit=_limit(qs))
     if path == "/api/search":
         # 直接用 core retrieval + 显式 chat_id：工作台是**索引只读**的，不能因为
-        # 展示名解析去要微信密钥（usecase 的 contact 解析会构造 MessageReader）。
+        # 展示名解析去要微信密钥（usecase 的 contact 解析遇到展示名要解密 contact.db）。
         return retrieval.search_messages(
             _one(qs, "q"), account=acct,
             chat_id=_one(qs, "chat") or None,

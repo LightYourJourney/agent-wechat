@@ -55,7 +55,7 @@ class BootstrapProgress:
     warning: str | None = None      # kind="warn"（EA-005：属主未归还等非致命降级）
 
 
-def _terminate_capture(proc) -> None:
+def _terminate_capture(proc: subprocess.Popen) -> None:
     """收尾：**只向本次捕获的 lldb 进程组**发信号（EA-004）。
 
     此前无条件 `pkill -9 -x lldb`——按**名字**杀，会连带杀掉用户自己的 lldb 会话（或以
@@ -76,7 +76,7 @@ def _terminate_capture(proc) -> None:
         pass          # 最后兜底也失败：清理是尽力而为，不因它把引导打挂（A 矩阵 73）
 
 
-def _read_capture(proc, deadline: float) -> str:
+def _read_capture(proc: subprocess.Popen, deadline: float) -> str:
     """读 lldb 的输出直到 deadline 或捕获到 passphrase（EA-052）。
 
     用 `select` + `os.read` 而不是 `readline`：**半行**输入（lldb 的输出没有换行就停住）

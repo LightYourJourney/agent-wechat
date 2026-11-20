@@ -9,6 +9,7 @@ import os
 import sqlite3
 import threading
 import time
+from collections.abc import Collection
 from typing import Callable, Mapping, Sequence
 
 import sqlite_vec
@@ -171,7 +172,7 @@ class FastEmbedEmbedder:
         self._model = None
         self._lock = threading.Lock()
 
-    def _ensure(self):
+    def _ensure(self) -> object:
         if self._model is None:
             from fastembed import TextEmbedding
             # **本模块是 `HOME_DIR/models` 的 owner，闸门就得在这里**（EA-003 的收口项）：
@@ -527,7 +528,8 @@ def _delete_vec(con: sqlite3.Connection, rowid: int) -> None:
     con.execute("DELETE FROM vec_messages WHERE msg_rowid=?", (rowid,))
 
 
-def _write_vec(con: sqlite3.Connection, row, vec, *, preview: str) -> None:
+def _write_vec(con: sqlite3.Connection, row: Mapping, vec: Sequence[float], *,
+               preview: str) -> None:
     """单行向量写入：先删后插（vec0 的 UPDATE 语义不在我们依赖的契约里）。
 
     `preview` 与全量构建一致——存的是**上文前缀**（`_build_account` 的 `(prev or "")[:80]`），
@@ -540,7 +542,7 @@ def _write_vec(con: sqlite3.Connection, row, vec, *, preview: str) -> None:
         row["account"], row["ts"], preview[:80]))
 
 
-def _prev_text(con: sqlite3.Connection, row) -> str | None:
+def _prev_text(con: sqlite3.Connection, row: Mapping) -> str | None:
     """当前数据里，该消息之前最近一条**可嵌入**消息的正文（`doc_text` 的上文来源）。
 
     全量构建在内存里累积 prev；队列消费只有零散几条，必须回查。上限 `DIRTY_PREV_SCAN`：
@@ -558,7 +560,7 @@ def _prev_text(con: sqlite3.Connection, row) -> str | None:
     return None
 
 
-def _next_embed_key(con: sqlite3.Connection, row) -> str | None:
+def _next_embed_key(con: sqlite3.Connection, row: Mapping) -> str | None:
     """同一会话里**紧随其后**的第一条可嵌入消息。
 
     它的 `doc_text` 前缀来自这一条——所以本条被改写时，下一条的向量也过时了。
@@ -576,7 +578,8 @@ def _next_embed_key(con: sqlite3.Connection, row) -> str | None:
     return None
 
 
-def _queued_keys(con: sqlite3.Connection, accounts, limit: int) -> list[str]:
+def _queued_keys(con: sqlite3.Connection, accounts: Sequence[str] | None,
+                 limit: int) -> list[str]:
     if accounts is None:
         return store.queued_reembed(con, None, limit)
     keys: list[str] = []
@@ -736,8 +739,12 @@ _SELECT_MSGS = ("SELECT " + (
 def semantic_search(query: str, chat_id: str | None = None, limit: int = 10,
                     account: str = "", embedder: FastEmbedEmbedder | None = None, *,
                     after_ts: int | None = None,
-                    before_ts: int | None = None) -> dict:
+                    before_ts: int | None = None,
+                    exclude_chats: Collection[str] = ()) -> dict:
     """KNN 语义检索。account 必传（多账号隔离，与 search.search 规则一致）。
+
+    `exclude_chats`（`AGENT_WECHAT_DENY`）下推进 KNN：每个会话一条 `acct_chat != ?`。
+    **不能写成 `NOT IN`**——实测 sqlite-vec 对分区键的 `NOT IN` 静默返回空集，`!=` 才对。
 
     先 KNN 取 rowid 与 distance，再单独查 messages —— 不用 JOIN+LIMIT
     （sqlite-vec issue #96：JOIN 与标准 LIMIT 子句在 KNN 下不兼容）。
@@ -778,6 +785,9 @@ def semantic_search(query: str, chat_id: str | None = None, limit: int = 10,
             # 否则该会话永远过滤不到任何消息（静默返回空）
             sql += " AND acct_chat = ?"
             args.append(messages.acct_chat(account, messages.chat_md5(chat_id)))
+        for denied in exclude_chats:
+            sql += " AND acct_chat != ?"
+            args.append(messages.acct_chat(account, messages.chat_md5(denied)))
         rows = con.execute(sql, args).fetchall()
         if not rows:
             return {"mode": "semantic", "model": MODEL_ID, "total": 0, "hits": []}

@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+import sqlite3
 from dataclasses import dataclass
 
 
@@ -71,13 +72,13 @@ class ProbeResult:
     missing_columns: tuple[str, ...] = ()
 
 
-def _text(v):
+def _text(v: object) -> object:
     """PRAGMA 的返回值走连接的 `text_factory`：reader 的库连接统一是 bytes
     （库内 TEXT 含非 UTF-8 字节，docs/schema-4.1.13.md:71）。列名是文本，归一化后再比。"""
     return v.decode("utf-8", "replace") if isinstance(v, bytes) else v
 
 
-def probe(con, req: Requirement, table: str | None = None) -> ProbeResult:
+def probe(con: sqlite3.Connection, req: Requirement, table: str | None = None) -> ProbeResult:
     """该连接下的库是否满足这条声明。
 
     `table` 用于通配声明（`Msg_*`）：真名由调用方从 sqlite_master 拿到后传进来。

@@ -12,7 +12,7 @@ import dataclasses
 import html
 import sqlite3
 import zlib
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, asdict
 
 from . import (appmsg, decrypt, errors, keys, media, messages, msgextra,
@@ -54,7 +54,11 @@ class Message:
         return asdict(self)
 
 
-def _decode_content(raw, ct_flag) -> str | None:
+# `media_refs` 的一行：(msg_key, kind, file_key, extra)。前向扫描与回看共用（见 `_batched`）。
+RefRow = tuple[str, str, str | None, str | None]
+
+
+def _decode_content(raw: bytes | str | None, ct_flag: int | None) -> str | None:
     """WCDB 压缩列解码：CT=0 明文，CT=4 zstd。"""
     if raw is None:
         return None
@@ -96,7 +100,7 @@ def _media_hint(t: int, content: str | None) -> str | None:
     return f"[{_type_name(t)}]"
 
 
-def _s(v) -> str | None:
+def _s(v: object) -> str | None:
     if v is None:
         return None
     return v.decode("utf-8", "replace") if isinstance(v, bytes) else str(v)
@@ -119,7 +123,8 @@ class MessageReader:
 
     def __init__(self, acct: str):
         self.acct = acct
-        self.passphrase = keys.get_passphrase(acct)
+        # passphrase **惰性**取（见 `passphrase`）：构造 reader 不碰密钥缓存。
+        self._passphrase: bytes | None = None
         self.self_wxid = paths.bare_wxid(acct)
         self._contacts_all: list[dict] | None = None   # 实例级缓存，见 _contacts_all_cached
         self._roster_map_cache: dict[tuple[str, str], str] | None = None
@@ -150,8 +155,21 @@ class MessageReader:
             self._contacts_all = self.contacts(limit=None)   # **必须显式传 None**：不传就是默认 200
         return self._contacts_all
 
+    @property
+    def passphrase(self) -> bytes:
+        """第一次真正要解密时才读密钥缓存。
+
+        此前在 `__init__` 里读：构造 reader 就需要密钥，于是只碰本地索引的用例（contact 已是
+        chat_id 的 `get_message_context`、工作台 `/api/media`、只为收降级而访问 `ctx.reader`）
+        也得在每个调用方各自绕开构造——同一条规则守在 N 处，下一个调用方照漏。缓存不在时
+        照旧抛 `KeyNotFound`，只是时机挪到首次 `_open`。
+        """
+        if self._passphrase is None:
+            self._passphrase = keys.get_passphrase(self.acct)
+        return self._passphrase
+
     @contextlib.contextmanager
-    def _open(self, rel: str):
+    def _open(self, rel: str) -> Iterator[sqlite3.Connection]:
         db = paths.db_storage(self.acct) / rel
         if not db.exists():
             raise DataNotFound(f"{db} 不存在")
@@ -413,7 +431,9 @@ class MessageReader:
         return [r[0].decode() for r in con.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'Msg_%' ORDER BY name")]
 
-    def _decode_row(self, lid, ltype, sender, ts, mc, ct, md5hex, chat_map, n2i,
+    def _decode_row(self, lid: int, ltype: int, sender: int | None, ts: int,
+                    mc: bytes | str | None, ct: int | None, md5hex: str,
+                    chat_map: Mapping[str, str], n2i: Mapping[int, str],
                     sticker_names: Mapping[str, str] | None = None) -> Message:
         """单行解码：压缩、类型掩码、群前缀、媒体提示。所有读取路径共用此函数。"""
         chat_id = chat_map.get(md5hex) or messages.degraded_chat_id(md5hex)
@@ -464,8 +484,9 @@ class MessageReader:
                        sender_name=sender_name, is_self=(sender_u == self.self_wxid),
                        content=body, media_hint=hint, sticker_md5=sticker_md5)
 
-    def _read_rows(self, con, table, shard, md5hex, chat_map, n2i,
-                   order_desc=False, limit=None,
+    def _read_rows(self, con: sqlite3.Connection, table: str, shard: str, md5hex: str,
+                   chat_map: Mapping[str, str], n2i: Mapping[int, str],
+                   order_desc: bool = False, limit: int | None = None,
                    sticker_names: Mapping[str, str] | None = None) -> list[Message]:
         sql = (f"SELECT local_id, local_type, real_sender_id, create_time, "
                f"message_content, WCDB_CT_message_content FROM '{table}'")
@@ -512,8 +533,10 @@ class MessageReader:
             return []
         return self._apply_roster(chat_id, pieces)[-limit:]
 
-    def _export_piece(self, row, *, shard: str, md5hex: str, chat_map, n2i,
-                      sticker_names):
+    def _export_piece(self, row: tuple, *, shard: str, md5hex: str,
+                      chat_map: Mapping[str, str], n2i: Mapping[int, str],
+                      sticker_names: Mapping[str, str] | None
+                      ) -> tuple[messages.MessageRow, RefRow | None]:
         """一行源数据 → `(messages 行, media_ref 或 None)`。
 
         **前向扫描与回看共用**：两条路径若各写一份 refs 提取，导出与回看对同一条
@@ -541,15 +564,17 @@ class MessageReader:
             sender_name=m.sender_name, is_self=1 if m.is_self else 0,
             content=m.content, media_hint=m.media_hint), ref
 
-    def _batched(self, src_rows, *, batch: int, shard: str, md5hex: str,
-                 chat_map, n2i, sticker_names):
+    def _batched(self, src_rows: Iterable[tuple], *, batch: int, shard: str, md5hex: str,
+                 chat_map: Mapping[str, str], n2i: Mapping[int, str],
+                 sticker_names: Mapping[str, str] | None
+                 ) -> Iterator[tuple[list[messages.MessageRow], list[RefRow]]]:
         """源行 → `(messages 行批次, refs 批次)`。**前向扫描与回看共用**：
 
         以前两条路径各写一份解码 + 分批循环，改一处忘另一处就会让「导出」与「回看」
         对同一条消息产出不同的 media_refs（贴纸的 `file_key` 位放 md5 尤其容易走偏）。
         """
         rows: list[messages.MessageRow] = []
-        refs: list[tuple[str, str, str | None, str | None]] = []
+        refs: list[RefRow] = []
         for row in src_rows:
             out, ref = self._export_piece(
                 row, shard=shard, md5hex=md5hex, chat_map=chat_map,
@@ -567,7 +592,8 @@ class MessageReader:
                  batch: int | None = None, *,
                  audit_cursors: Mapping[tuple[str, str], int] | None = None,
                  audit_rows: int = 0,
-                 audit_sink: Callable[[list, list], None] | None = None):
+                 audit_sink: Callable[[list, list], None] | None = None
+                 ) -> Iterator[tuple[list[messages.MessageRow], list[RefRow]]]:
         """全量流式导出（生成器）。逐分片→逐表→按批 yield。
 
         resume: {(shard, chat_md5): 已导出的 max(local_id)}（来自 store.load_export_watermarks；

@@ -255,7 +255,7 @@ def test_server_refuses_non_loopback_bind():
 
 
 def test_context_with_a_chat_id_contact_needs_no_wechat_key(srv):
-    """contact 已是 chat_id 时不得构造 reader：本环境没有 passphrase 缓存，构造即抛。
+    """contact 已是 chat_id 时不得去读密钥：本环境没有 passphrase 缓存，读即抛。
 
     MCP `get_message_context` 的 contact 是必填——此前只要给了它（哪怕是 wxid），这个
     只读索引的工具就离不开微信密钥，而 CLI 不带 `--contact` 时完全不需要。

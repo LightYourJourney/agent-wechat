@@ -753,6 +753,8 @@ class ChatEntry:
 @dataclass(frozen=True)
 class ChatPlan:
     entries: tuple[ChatEntry, ...]
+    # 默认导出根的 `chat index` 总目录页——**列着本会话时**才进删除面（见 `_index_page_listing`）。
+    index_page: pathlib.Path | None = None
 
 
 @dataclass(frozen=True)
@@ -768,7 +770,7 @@ class ChatResidue:
     leftover: tuple[str, ...]        # 核查后仍在的表/路径
     tombstone_written: int
     tombstone_expected: int
-    export_dirs: tuple[pathlib.Path, ...]   # 核查时**仍在**的导出目录（去重）；render() 要印它们
+    export_dirs: tuple[pathlib.Path, ...]   # 核查时**仍在**的导出目录（去重）；核查文案（`cli._render_chat_residue`）要印它们
 
     @property
     def export_still_there(self) -> bool:
@@ -780,19 +782,6 @@ class ChatResidue:
     def tombstone_ok(self) -> bool:
         return self.tombstone_written >= self.tombstone_expected
 
-    def render(self) -> str:
-        lines = []
-        for x in self.leftover:
-            lines.append(f"  ❌ 计划内仍未删除：{x}")
-        for d in self.export_dirs:
-            lines.append(f"  ❌ 导出目录仍在：{d}")
-        if self.tombstone_ok:
-            lines.append(f"  ✅ 排除清单：{self.tombstone_written} 条（不可逆性已建立）")
-        else:
-            lines.append(
-                f"  ❌ 不可逆性未建立：排除清单只有 {self.tombstone_written} 条，"
-                f"本次应写 {self.tombstone_expected} 条——**被删内容下次导出会回来**")
-        return "\n".join(lines)
 
 
 def name_there(p: pathlib.Path) -> bool:
@@ -827,6 +816,22 @@ def chat_export_dir(chat_id: str) -> pathlib.Path:
     return media.export_root() / messages.chat_md5(chat_id)
 
 
+def _index_page_listing(md5s: set[str]) -> pathlib.Path | None:
+    """默认导出根的总目录页（`chat index` 写的 `media/index.html`）若列着这些会话，返回它。
+
+    那一页按 `chat_md5` 列出每个已导出会话（会话 id、条数、指向 `<md5>/chat/` 的链接）：
+    `media/<md5>/` 删掉之后，这一行还留着会话 id 与条数。整页由 `chat index` 从磁盘现状
+    重新生成，所以删掉它没有损失——重跑一次即重建（不含已删会话）。**只认普通文件**：
+    链接删掉的是名字不是内容，正是本模块到处在防的 false-clean。自定义 `--out` 根本模块
+    无从得知，不在范围内（SECURITY.md 写明）。
+    """
+    page = media.export_root() / "index.html"
+    if page.is_symlink() or not page.is_file():
+        return None
+    text = page.read_text(encoding="utf-8", errors="replace")
+    return page if any(m in text for m in md5s) else None
+
+
 def plan_chat(resolved: list[dict]) -> ChatPlan:
     """**纯只读**：只算将删什么，一个字节都不动。`resolved` 是
     `[{"account":…, "chat_id":…}, …]`（`usecases.purge_chat_targets` 的返回契约：**不带**
@@ -859,6 +864,7 @@ def plan_chat(resolved: list[dict]) -> ChatPlan:
             entries.append(ChatEntry(
                 item["account"], item["chat_id"], md5, counts, counts["messages"],
                 d, exists, _tree_size(d) if exists and not d.is_symlink() else 0))
+        index_page = _index_page_listing({e.chat_md5 for e in entries})
     except (sqlite3.Error, OSError, errors.IndexUnavailable, errors.SchemaMigrationError) as exc:
         # 索引打不开/读不了（损坏、权限、被别的进程占着）时，裸 `sqlite3.DatabaseError` /
         # `sqlite3.OperationalError` 会一路逃到 CLI 的 `except AgentWeChatError` 之外——
@@ -873,7 +879,7 @@ def plan_chat(resolved: list[dict]) -> ChatPlan:
             hint="确认 index.db 可读、且没有别的进程正在写它（导出任务 / MCP server）；"
                  "库损坏（file is not a database 等）时先 purge --index 删掉再重跑 export"
         ) from _root_cause(exc)
-    return ChatPlan(tuple(entries))
+    return ChatPlan(tuple(entries), index_page)
 
 
 def _write_tombstone(con: sqlite3.Connection, account: str, chat_id: str) -> int:
@@ -1118,6 +1124,10 @@ def execute_chat(plan: ChatPlan) -> tuple[ChatReport, ...]:
         #「当前被挡住的条数」是核查那一侧的事（`ChatResidue.tombstone_written`），
         # 它读的是排除清单的实际条数——核查才是证明不可逆性的那个字段。
         out.append(ChatReport(e.account, deleted, written, removed))
+    if plan.index_page is not None:
+        # 失败不抛（同导出目录的「部分失败继续」）：核查会把还在的那一页列进 leftover。
+        with contextlib.suppress(FileNotFoundError, OSError):
+            plan.index_page.unlink()
     return tuple(out)
 
 
@@ -1154,6 +1164,8 @@ def verify_chat(plan: ChatPlan) -> ChatResidue:
         # errno 里），那也要翻成 PurgeRefused，不许裸穿、更不许被吞成「不在」。
         surviving = tuple(dict.fromkeys(
             e.export_dir for e in plan.entries if name_there(e.export_dir)))
+        if plan.index_page is not None and name_there(plan.index_page):
+            leftover.append(f"总目录页 {plan.index_page}")
     except (sqlite3.Error, OSError, errors.IndexUnavailable, errors.SchemaMigrationError) as exc:   # EA-074：connect 段已翻过一次
         # 同 plan_chat：读不了库时不许裸 sqlite3.Error 逃到 CLI。而且**「核查不了」必须与
         # 「核查通过」区分开**——静默返回一个空 leftover 就是对着未知状态报 ✅。

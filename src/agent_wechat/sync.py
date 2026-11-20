@@ -24,6 +24,7 @@ import shutil
 import sqlite3
 import sys
 import time
+from collections.abc import Iterator
 
 from . import account as account_mod
 from . import errors, export, keys, migrations, paths, store, tasks, vector
@@ -95,7 +96,7 @@ class _Abort(Exception):
 
 
 @contextlib.contextmanager
-def _sync_lock():
+def _sync_lock() -> Iterator[None]:
     """**全局**非阻塞排他锁。被占用时抛 `SyncBusy`（不是故障，是并发）。"""
     paths.ensure_home_dirs()
     lock = paths.HOME_DIR / LOCK_NAME

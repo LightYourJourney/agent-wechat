@@ -198,6 +198,21 @@ def test_deny_is_applied_before_truncation_and_not_counted(tmp_path, monkeypatch
     assert res["candidates"] == 1
 
 
+@pytest.mark.parametrize("mode", ["keyword", "semantic"])
+def test_denied_hits_cannot_crowd_out_the_candidate_window(tmp_path, monkeypatch, mode):
+    """拒读必须下推到取数查询里：被拒会话的命中占满每路 `limit×4` 的候选窗时，
+    放行会话的那条仍要答出来。取回后再滤（哪怕在截断之前）这里答 0 条。"""
+    _env(tmp_path, monkeypatch, with_vector=False)
+    n = retrieval.CANDIDATE_FACTOR + 2
+    with store.open() as con:
+        store.upsert_batch(con, [_row(CHAT_A, 20, "爬山去不去")]
+                           + [_row(CHAT_B, 30 + i, f"爬山{i}号") for i in range(n)])
+    vector.build_index(accounts=[ACCT], embedder=TopicEmbedder())
+    monkeypatch.setenv("AGENT_WECHAT_DENY", CHAT_B)
+    res = retrieval.search_messages("爬山", account=ACCT, mode=mode, limit=1)
+    assert [h["chat_id"] for h in res["hits"]] == [CHAT_A], res
+
+
 # ---------------------------------------------------------------- 两阶段披露
 
 def test_context_returns_full_text_and_neighbours(tmp_path, monkeypatch):

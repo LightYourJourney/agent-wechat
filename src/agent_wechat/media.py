@@ -26,10 +26,12 @@ import sqlite3
 import stat
 import subprocess
 import tempfile
+import http.client
 import urllib.error
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 import urllib.request
 from dataclasses import dataclass, field
+from typing import IO
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
@@ -150,7 +152,8 @@ def _attach_dats(account: str) -> list[pathlib.Path]:
     return _safe_iter(paths.XWECHAT_FILES / account / "msg/attach", "*/*/Img/*.dat")
 
 
-def _scan_dats(dats, limit: int = 200) -> tuple[int | None, pathlib.Path | None]:
+def _scan_dats(dats: Sequence[pathlib.Path], limit: int = 200
+               ) -> tuple[int | None, pathlib.Path | None]:
     """扫样本 dat 一次，返回 `(xor_key, 首个 V2 样本)`。
 
     - xor_key：**尾部两字节**（EA-086：不整文件读）b[-2]^0xFF == b[-1]^0xD9（JPEG EOI）
@@ -810,7 +813,8 @@ def exported_path(out_root: pathlib.Path, *, chat_md5: str, kind: str, ts: int,
 _REFS_NOTE_NAME = {"video": "视频", "sticker": "贴纸"}
 
 
-def _refs_absence_note(kind: str, con, account: str, chat_ids, *,
+def _refs_absence_note(kind: str, con: sqlite3.Connection | None, account: str,
+                       chat_ids: Sequence[str], *,
                        empty_hint: str = "", history_clause: str = "") -> str | None:
     """「一条都没导出」的三种成因 + 「索引读不了」的降级文案（EA-089：视频/贴纸共用）。
 
@@ -836,6 +840,10 @@ def _refs_absence_note(kind: str, con, account: str, chat_ids, *,
                 f"（{name}按 media_refs 索引归属）")
 
 
+# `export_media` 内的「产物已存在吗」判据：(chat_md5, kind, 月份, 基准名) → bool。
+AlreadyFn = Callable[[str, str, str, str], bool]
+
+
 def _refuse_purged(account: str, chat_ids: list[str]) -> None:
     """被 `purge --chat` 立过碑的会话拒绝重导媒体（SECURITY「不会因重导复活」）。
 
@@ -857,7 +865,8 @@ def _refuse_purged(account: str, chat_ids: list[str]) -> None:
 
 def export_media(account: str, chat_ids: list[str], *, kinds: list[str],
                  months: list[str] | None = None, out_dir: pathlib.Path | None = None,
-                 max_files: int = 2000, progress=None, force: bool = False,
+                 max_files: int = 2000, progress: Callable[[int], None] | None = None,
+                 force: bool = False,
                  con: sqlite3.Connection | None = None,
                  with_cdn: bool = False) -> MediaReport:
     """按会话导出媒体。图片解密（MediaKeyError → 能力级降级不抛）；语音见 Task 3；视频明文复制
@@ -1223,7 +1232,9 @@ class _AllowlistedRedirect(urllib.request.HTTPRedirectHandler):
     XML 给的 http。
     """
 
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
+    def redirect_request(self, req: urllib.request.Request, fp: IO[bytes], code: int,
+                         msg: str, headers: http.client.HTTPMessage,
+                         newurl: str) -> urllib.request.Request | None:
         if not _cdn_url_allowed(newurl):
             return None
         return super().redirect_request(req, fp, code, msg, headers, newurl)
@@ -1344,8 +1355,9 @@ def _fetch_cdn_bytes(url: str, expect_md5: str, *, timeout: float = 15.0
 
 
 def _export_stickers(account: str, chat_ids: list[str], out_root: pathlib.Path,
-                     report: MediaReport, want: set[str] | None, is_full, bump,
-                     already, con: sqlite3.Connection | None,
+                     report: MediaReport, want: set[str] | None,
+                     is_full: Callable[[], bool], bump: Callable[[], None],
+                     already: AlreadyFn, con: sqlite3.Connection | None,
                      *, with_cdn: bool = False) -> None:
     """贴纸：按 `media_refs` 归属 → **从 CDN 取明文图** → 落盘。
 
@@ -1504,8 +1516,10 @@ def _export_stickers(account: str, chat_ids: list[str], out_root: pathlib.Path,
         bump()
 
 
-def _export_voices(account, chat_ids, out_root, report, want, is_full, bump,
-                   already) -> None:
+def _export_voices(account: str, chat_ids: list[str], out_root: pathlib.Path,
+                   report: MediaReport, want: set[str] | None,
+                   is_full: Callable[[], bool], bump: Callable[[], None],
+                   already: AlreadyFn) -> None:
     """语音：Name2Id rowid → VoiceInfo(chat_name_id, create_time) → pilk 解码 24kHz WAV。
     pilk 缺失 → 原始 .slk（微信原始形态，`\\x02` 前缀保留）。单库打不开则跳过该分片、
     在 report.degraded 里公告一次，不中断。
@@ -1541,8 +1555,10 @@ def _export_voices(account, chat_ids, out_root, report, want, is_full, bump,
             continue
 
 
-def _export_voices_from(con, chat_ids, out_root, report, want, is_full, bump,
-                        already) -> None:
+def _export_voices_from(con: sqlite3.Connection, chat_ids: list[str],
+                        out_root: pathlib.Path, report: MediaReport, want: set[str] | None,
+                        is_full: Callable[[], bool], bump: Callable[[], None],
+                        already: AlreadyFn) -> None:
     name2id = {u.decode("utf-8", "replace") if isinstance(u, bytes) else u: rid
                for rid, u in con.execute("SELECT rowid, user_name FROM Name2Id")}
     for chat in chat_ids:

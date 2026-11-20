@@ -19,6 +19,7 @@ from __future__ import annotations
 import contextlib
 import fcntl
 import os
+from collections.abc import Collection
 from typing import Iterator
 import pathlib
 import shutil
@@ -481,8 +482,10 @@ def delete_derived(derivation_id: str, *, now: int | None = None) -> dict:
 
 
 def search_derived(query: str, *, account: str, chat_id: str | None = None,
-                   limit: int = 20) -> dict:
-    """在派生文本里检索，返回带 `msg_key` 的证据片段（供 retrieve 融合与 CLI 使用）。"""
+                   limit: int = 20, exclude_chats: Collection[str] = ()) -> dict:
+    """在派生文本里检索，返回带 `msg_key` 的证据片段（供 retrieve 融合与 CLI 使用）。
+
+    `exclude_chats`（`AGENT_WECHAT_DENY`）在 SQL 里排除，理由同 `search.search`。"""
     if not query or not query.strip():
         raise errors.DerivedInputError("检索串不能为空")
     limit = max(1, min(int(limit), 100))
@@ -490,12 +493,15 @@ def search_derived(query: str, *, account: str, chat_id: str | None = None,
     cols = ("SELECT d.derivation_id, d.msg_key, d.chat_id, d.kind, d.text, d.engine, m.ts,"
             f" {store._SENDER_EXPR} AS sender, m.is_self")
     joins = f" JOIN messages m ON m.msg_key = d.msg_key {store._SENDER_JOIN}"
-    base = (cols + " FROM derived_text d" + joins
-            + " WHERE d.account = ? AND d.status != 'deleted'")
+    filt = " AND d.status != 'deleted'"
     args: list[object] = [account]
     if chat_id:
-        base += " AND d.chat_id = ?"
+        filt += " AND d.chat_id = ?"
         args.append(chat_id)
+    if exclude_chats:
+        filt += f" AND d.chat_id NOT IN ({','.join('?' * len(exclude_chats))})"
+        args.extend(exclude_chats)
+    base = cols + " FROM derived_text d" + joins + " WHERE d.account = ?" + filt
     with store.open() as con:
         rows: list[sqlite3.Row] = []
         if len(query.strip()) >= 3:
@@ -503,9 +509,7 @@ def search_derived(query: str, *, account: str, chat_id: str | None = None,
                 rows = con.execute(
                     cols + " FROM derived_fts JOIN derived_text d"
                     " ON d.rowid = derived_fts.rowid" + joins
-                    + " WHERE derived_fts MATCH ? AND d.account = ?"
-                    " AND d.status != 'deleted'"
-                    + (" AND d.chat_id = ?" if chat_id else "")
+                    + " WHERE derived_fts MATCH ? AND d.account = ?" + filt
                     + " ORDER BY rank LIMIT ?",
                     # 与关键词路（search.py）同一份转义：包成短语做 trigram 子串匹配。
                     # 裸串交给 MATCH 时 `world hello` 按 AND 命中、`hel*` 走前缀语法、

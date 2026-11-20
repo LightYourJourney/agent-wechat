@@ -18,6 +18,7 @@ import shutil
 import sqlite3
 import subprocess
 import tempfile
+from collections.abc import Iterator
 
 from . import errors, keys, paths
 from .errors import DecryptError, HomeUnavailable
@@ -115,7 +116,7 @@ def snapshot(db: pathlib.Path, td: pathlib.Path) -> pathlib.Path:
 
 
 @contextlib.contextmanager
-def decrypted(db: pathlib.Path, passphrase: bytes):
+def decrypted(db: pathlib.Path, passphrase: bytes) -> Iterator[pathlib.Path]:
     """上下文管理器：yield 解密后的明文库路径，退出时自动清理临时文件。"""
     ensure_home_dirs()
     # 目录名带 **pid**（EA-019）：崩溃后的残留靠它判活（`sweep_stale_tempdirs`）。
