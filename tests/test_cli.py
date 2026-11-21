@@ -2132,11 +2132,14 @@ def test_core_index_hints_name_no_entry_specific_commands():
     （为什么不用端到端：今天没有 CLI 入口会真抛这条——`search`/`chat index` 在缺表时
     走 EA-013/EA-033 的降级返回 0；等 T6 修好 EA-013 后可把这条升级成端到端。）
     """
-    import inspect
+    import pathlib
 
     from agent_wechat import usecases
 
-    hints = re.findall(r'hint="索引库可能损坏；[^"]*"', inspect.getsource(usecases))
+    # `usecases` 2026-11-21 拆成包：`getsource` 只读得到一个 `__init__.py`，得扫整个目录。
+    src = "\n".join(p.read_text(encoding="utf-8")
+                     for p in sorted(pathlib.Path(usecases.__file__).parent.glob("*.py")))
+    hints = re.findall(r'hint="索引库可能损坏；[^"]*"', src)
     assert len(hints) == 4, f"四条核心 hint，实际 {len(hints)}"
     for h in hints:
         assert "export_full_history" not in h and "agent-wechat" not in h, h

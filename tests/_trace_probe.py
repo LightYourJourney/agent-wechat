@@ -18,11 +18,22 @@ _mod = importlib.import_module(f"agent_wechat.{os.environ['AW_TRACE_MODULE']}")
 # 模块在 import 期就已加载，`__file__` 此刻是绝对路径；两种写法都收，免得
 # editable 安装与直接 `src/` 布局下 `co_filename` 的分辨率不同。
 _names = {_mod.__file__, os.path.realpath(_mod.__file__)}
+# **包也要收**：`usecases` 2026-11-21 拆成六个子模块后，代码行落在
+# `usecases/chat.py` 之类的地方，`__init__` 里只剩重导出——只比 `__file__` 的探针
+# 会永远报 MISS（不是「用例没覆盖」，是探针看得太窄）。
+_pkg_dir = (os.path.realpath(_mod.__path__[0])
+            if hasattr(_mod, "__path__") else None)
 hits: set[int] = set()
 
 
+def _in_target(filename: str) -> bool:
+    if filename in _names:
+        return True
+    return bool(_pkg_dir) and os.path.realpath(filename).startswith(_pkg_dir + os.sep)
+
+
 def _tracer(frame: types.FrameType, event: str, _arg: object) -> object:
-    if frame.f_code.co_filename not in _names:
+    if not _in_target(frame.f_code.co_filename):
         return None                      # 别的文件不进逐行模式（否则慢一个数量级）
     if event == "line":
         hits.add(frame.f_lineno)

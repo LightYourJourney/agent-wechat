@@ -141,7 +141,7 @@ agent-wechat/
 │   ├── search.py          检索路由
 │   ├── vector.py          向量索引与语义检索
 │   ├── tasks.py           长任务注册表
-│   ├── usecases.py        用例层（两个入口共享的入口策略）
+│   ├── usecases/          用例层（包：_core / chat / media / memory / retrieve / moments）
 │   ├── purge.py           数据销毁（CLI 专属）
 │   ├── exclusions.py      会话销毁的排除清单（唯一不可重建的产物）
 │   ├── webui.py           本地只读工作台（Phase 07，仅 loopback）

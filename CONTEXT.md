@@ -49,7 +49,7 @@
 
 ## 入口用例（usecases）
 MCP 与 CLI 两个入口共享的一层：参数归一化、账号/会话解析、结果形状只在此实现一次。
-出处：`usecases.py`。
+出处：`usecases/__init__.py`（重导出面）。
 
 ## 上文前缀
 向量入库文本的确定性前缀，形如 `[2025-09-10 张三] 上文: … | 正文`——用前一条消息给
@@ -78,4 +78,4 @@ MCP 与 CLI 两个入口共享的一层：参数归一化、账号/会话解析�
 `get_task_status` 仍答得上来）。`rows` 有**两个写入方**：运行中 `tasks.update(rows=)`
 写进度（本轮已处理行数，单调递增），跑完由 runner 返回值覆盖为终值。载入时把遗留的
 `running` 收割为 `failed`（无 `interrupted` 枚举值）。**任务登记归 usecases**，core 模块
-只提供管道（`export.run_export` / `vector.build_index`）。出处：`tasks.py`、`usecases.py`。
+只提供管道（`export.run_export` / `vector.build_index`）。出处：`tasks.py`、`usecases/memory.py`。

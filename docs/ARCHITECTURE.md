@@ -48,7 +48,13 @@ src/agent_wechat/
 ├── search.py       检索路由：trigram FTS / LIKE 兜底
 ├── vector.py       向量索引与语义检索（唯一接触 fastembed 与 sqlite-vec 的隔离带）
 ├── tasks.py        长任务注册表：后台线程 + 进度落盘 + 中断回收（不认识任何具体任务）
-├── usecases.py     用例层：两个入口共享的入口策略（参数归一化、账号/会话解析、结果形状）
+├── usecases/       用例层（包）：两个入口共享的入口策略（参数归一化、账号/会话解析、结果形状）
+│   ├── _core.py    共享底座：limit 归一化、结果类型、ChatContext、降级收集
+│   ├── chat.py     账号状态 / 联系人 / 时间线 / 导出 / 会话导出与总目录页
+│   ├── media.py    媒体导出、按消息查媒体状态、appmsg 部件解码
+│   ├── memory.py   按会话销毁目标、回填（媒体引用 / 部件 / 位置名片）
+│   ├── retrieve.py 检索、上下文、向量构建与长任务
+│   └── moments.py  朋友圈导出
 ├── purge.py        数据销毁：清单 → 计划 → 执行 → 核查（只做 CLI，不进 MCP）
 ├── exclusions.py   被销毁会话的排除清单（`exclusions.db` 的墓碑；**唯一不可重建的产物**，
 │                   由 `store.connect()` ATTACH 进来，写入端的拦截判据与写入同事务）
@@ -67,7 +73,7 @@ src/agent_wechat/
 分层规则：**核心层不 import MCP SDK**；`mcp_server.py` 与 `cli.py` 是同一批核心函数
 的两个入口，保证 Agent 与 CLI 行为一致、测试无需起 MCP。
 
-入口策略只实现一次、放在 `usecases.py`：每个工具一个用例函数，独占 limit 归一化
+入口策略只实现一次、放在 `usecases/`（包级重导出，外部仍写 `usecases.xxx`）：每个工具一个用例函数，独占 limit 归一化
 （下界一律 1，上界按 TOOLS.md 文档化的区间）、contact → chat_id 解析（歧义返回
 `NeedConfirm` 候选、未命中抛 `ContactNotFound`）与结果形状；入口只负责参数编组与
 渲染（MCP 翻成 `{"error"}/{"need_confirm"}` 信封，CLI 翻成 stdout/stderr + 退出码）。

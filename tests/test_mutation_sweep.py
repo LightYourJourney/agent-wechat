@@ -80,9 +80,10 @@ def test_identical_segments_in_one_function_get_distinct_fingerprints():
 
 def test_real_modules_have_no_fingerprint_collisions():
     """B 阶段的前提：模块清单里每个位点都有唯一指纹。"""
-    from scripts.mutation_sweep import DEFAULT_MODULES, _src_root
+    from scripts.mutation_sweep import DEFAULT_MODULES, _read_module, _src_root
+    root = _src_root()
     for m in DEFAULT_MODULES:
-        sites = iter_sites((_src_root() / f"{m}.py").read_text(encoding="utf-8"))
+        sites = iter_sites(_read_module(root, m))
         fps = [fingerprint(m, s) for s in sites]
         assert len(set(fps)) == len(fps), f"{m}: 指纹碰撞 {len(fps) - len(set(fps))} 处"
 

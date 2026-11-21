@@ -141,6 +141,22 @@ def _src_root() -> pathlib.Path:
     return pathlib.Path(__file__).resolve().parents[1] / "src" / "agent_wechat"
 
 
+def _read_module(root: pathlib.Path, name: str) -> str:
+    """读一个模块的源码：单文件（`x.py`）或**包**（`x/*.py` 全部拼接）。
+
+    2026-11-21 `usecases` 从单文件拆成包之后，只认 `{name}.py` 的工具会直接
+    FileNotFoundError——「这步没跑起来」与「没有变异点」在输出上必须分开（同
+    check_vulture 的教训），所以这里省掉的是「找不到文件」，不是「找到了但为空」。
+    """
+    single = root / f"{name}.py"
+    if single.is_file():
+        return single.read_text(encoding="utf-8")
+    pkg = root / name
+    if pkg.is_dir():
+        return "\n".join(sorted(f.read_text(encoding="utf-8") for f in pkg.glob("*.py")))
+    raise FileNotFoundError(f"模块既不是 {single} 也不是目录 {pkg}")
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--census", action="store_true")
@@ -150,7 +166,7 @@ def main(argv: list[str] | None = None) -> int:
     mods = a.dry_run or DEFAULT_MODULES
     rows = []
     for m in mods:
-        src = (root / f"{m}.py").read_text(encoding="utf-8")
+        src = _read_module(root, m)
         sites = iter_sites(src)
         rows.append({"module": m, "n": len(sites),
                      "fps": [fingerprint(m, s) for s in sites]})

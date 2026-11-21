@@ -140,7 +140,7 @@ def test_messages_in_range_filters_and_reports_not_truncated(con):
 
     **初稿这条写错过，值得记下来**：原写 `after_ts=1004` 期望 `["m5","m6","m7"]`，
     那**只有独占下界才成立**（含下界会多带回 m4）。而独占下界与本仓三处已落地事实矛盾：
-    `search.py:39` 同名参数用 `>=`、`usecases.py:460` 的月份筛选是
+    `search.py:39` 同名参数用 `>=`、`usecases/media.py` 的 `_month_clause` 是
     `(m.ts >= ? AND m.ts < ?)`、`tests/test_media.py:143` 把 `month_bounds` 钉成
     `[lo, hi)`「下界含、相邻月首尾相接无缝隙」。**而 T6 把 `month_bounds` 的值直接喂给
     `after_ts`/`before_ts`** —— 照初稿写就是给 `chat export --months` 的**每月第一秒开一个
@@ -223,6 +223,12 @@ class _Ctx:
     def degradations(self):
         return []
 
+    def drift(self):
+        """`message_media` 的降级出口（`Degradation` 元组）。真 `ChatContext` 有它；
+        本夹具替掉 ChatContext 后必须一并给出，否则 chat_export → message_media 的
+        那条线会 AttributeError。"""
+        return ()
+
 
 @pytest.fixture()
 def chat_env(tmp_path, monkeypatch):
@@ -287,7 +293,7 @@ def test_chat_export_degrades_loudly_when_msg_parts_is_empty(con, chat_env, caps
 
 
 def test_chat_export_passes_limit_and_ctx_to_message_media(con, chat_env, monkeypatch):
-    """EA-026②：`chat_export → message_media` 的**实参现场**（`usecases.py:750-751`）此前零覆盖
+    """EA-026②：`chat_export → message_media` 的**实参现场**（`usecases/chat.py` 的 `chat_export` 调 `message_media` 那处）此前零覆盖
     ——把 `limit=len(keys) or 1` 改成 `limit=1`、或删掉 `_ctx=ctx`，全仓测试**全绿**。
     用 spy 收实参钉住这两个变异。
     """
