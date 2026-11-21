@@ -265,12 +265,30 @@ def test_context_with_a_chat_id_contact_needs_no_wechat_key(srv):
     assert res["chat_id"] == CHAT
 
 
+def test_message_content_is_never_rewritten_by_path_scrubbing(srv):
+    """工作台是**只读**的：正文/片段里出现本机路径也不许改写。
+
+    回归对象：`_strip_paths` 一度对所有字符串替换「已知根」，于是正文
+    `我的资料在 /Users/…/.agent-wechat` 在页面上变成 `我的资料在 .agent-wechat`——
+    展示层篡改聊天内容。夹具必须让内容**含有**数据目录路径，否则这条测不出来。
+    """
+    home = str(store.DB_PATH.parent)
+    with store.open() as con:
+        con.execute("UPDATE messages SET content=? WHERE local_id=1",
+                    (f"备份在 {home}/media 里",))
+        con.commit()
+
+    res, raw = _req(srv, f"/api/evidence?account={ACCT}&key={_key(1)}")
+    assert _json(res, raw)["messages"][0]["content"] == f"备份在 {home}/media 里"
+
+
 def test_error_envelopes_do_not_carry_absolute_paths(tmp_path, monkeypatch):
     """错误文案是自由文本，按键名截不住——两个已知根要换成末段（工作台在浏览器里）。"""
     monkeypatch.setattr(paths, "HOME_DIR", tmp_path / "home")
-    text = f"数据目录不可用：{tmp_path / 'home'}"
-    out = webui._strip_paths({"error": text, "hint": None})
-    assert str(tmp_path) not in out["error"] and out["hint"] is None
+    text = f"数据目录不可用：{paths.HOME_DIR}"
+    out = webui._scrub_abs_paths(text)
+    assert str(paths.HOME_DIR) not in out
+    assert webui._scrub_abs_paths(None) is None
 
 
 def test_strip_paths_keeps_relative_paths(srv):

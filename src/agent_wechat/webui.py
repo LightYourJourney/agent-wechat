@@ -265,9 +265,10 @@ class _Handler(BaseHTTPRequestHandler):
             try:
                 _json(self, 200, _strip_paths(_route(path.path, qs)))
             except errors.AgentWeChatError as exc:
-                # 信封形状与 MCP 侧同一份（`errors.to_payload`，含 redact），再过一遍
-                # 路径遮蔽：错误文案是自由文本，会带容器/数据目录的绝对路径。
-                _json(self, 400, _strip_paths(errors.to_payload(exc)))
+                # 信封形状与 MCP 侧同一份（`errors.to_payload`，含 redact）；文案里的本机
+                # 路径另行遮蔽——那是本工具自己的话，不是聊天内容。
+                payload = errors.to_payload(exc)
+                _json(self, 400, {k: _scrub_abs_paths(v) for k, v in payload.items()})
             return
         _json(self, 404, {"error": "not found"})
 
@@ -312,16 +313,15 @@ _PATH_KEYS = ("path", "out_dir")
 def _strip_paths(data: object) -> object:
     """最小披露：浏览器只看到文件名与相对路径，不拿到本机绝对路径。**API 出口递归做一次**。
 
-    两种形态一起收，因为它们是同一个承诺（「页面不泄露本机路径」）的两面：
-    · 路径键（`path` / `out_dir`）下的**绝对**路径 → 只剩文件名；相对的逻辑路径
-      （媒体页里的 `../image/…`）原样保留，截了就是改写展示数据；
-    · 其余字符串里的**已知根**（微信容器、数据目录）→ 换成末段。错误信封是自由文本，
-      按键名截不住（`DataNotFound(f"{db} 不存在")` 这类文案），只能换前缀。
+    **只认路径键**（`path` / `out_dir`）：那是本工具自己产出的路径。
+    · **绝对**路径 → 只剩文件名；相对的逻辑路径（媒体页里的 `../image/…`）原样保留，
+      截了就是改写展示数据。
 
-    此前分两套机制：成功响应走键名递归、错误信封走一个单独的 `_scrub_abs_paths`，而成功
-    响应里的 `degraded` 自由文本两头都不管。合成一处后，出口只调这一个函数。
+    **不对普通字符串做任何替换**。曾经把已知根（数据目录、微信容器）从所有字符串里换掉，
+    结果连**消息正文与检索片段**一起改了——正文里写着数据目录的地方在页面上少了前缀。
+    工作台是只读的，展示层不许改写聊天内容，哪怕那是本机路径。错误信封另走
+    `_scrub_abs_paths`（那是本工具自己的文案，不是用户内容）。
     """
-    roots = (str(paths.XWECHAT_FILES), str(paths.HOME_DIR))
     if isinstance(data, dict):
         return {k: (_basename(v) if k in _PATH_KEYS
                     and isinstance(v, str) and os.path.isabs(v)
@@ -329,10 +329,20 @@ def _strip_paths(data: object) -> object:
                 for k, v in data.items()}
     if isinstance(data, list):
         return [_strip_paths(v) for v in data]
-    if isinstance(data, str):
-        for root in roots:
-            data = data.replace(root, os.path.basename(root))
     return data
+
+
+def _scrub_abs_paths(text: str | None) -> str | None:
+    """本工具**自己的**文案里的绝对路径 → 换成已知根的末段。
+
+    只给错误信封用（`DataNotFound(f"{db} 不存在")` 这类），**不得**用在聊天内容上
+    ——见 `_strip_paths` 的说明。
+    """
+    if not text:
+        return text
+    for root in (paths.XWECHAT_FILES, paths.HOME_DIR):
+        text = text.replace(str(root), os.path.basename(str(root)))
+    return text
 
 
 def _basename(path: str) -> str:
