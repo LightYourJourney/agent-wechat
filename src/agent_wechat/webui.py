@@ -296,7 +296,12 @@ class _Handler(BaseHTTPRequestHandler):
             derivation_id = str(body.get("derivation_id") or "")
             _json(self, 200, derived.delete_derived(derivation_id))
         except (ValueError, errors.AgentWeChatError) as exc:
-            _json(self, 400, {"error": str(exc)})
+            # 与 GET 分支同一个信封：项目异常走 `to_payload`（含 redact 与 hint），
+            # 裸 `ValueError`（json 解析失败）没有 hint，手工包一条。两条路各写一份
+            # 形状就会漂——GET 那份曾经漏过 redact。
+            payload = (errors.to_payload(exc) if isinstance(exc, errors.AgentWeChatError)
+                       else {"error": errors.redact(str(exc))})
+            _json(self, 400, {k: _scrub_abs_paths(v) for k, v in payload.items()})
 
     def do_PUT(self) -> None:                # noqa: N802
         if self._reject_host():

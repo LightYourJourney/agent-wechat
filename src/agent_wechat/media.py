@@ -911,250 +911,294 @@ def export_media(account: str, chat_ids: list[str], *, kinds: list[str],
     except OSError:
         loose = True
     if loose:
-        report.degraded.append(f"输出目录权限未能收紧到 0700（明文媒体可能被他人读到）：{out_root}")
-    want = set(months) if months else None
-    produced = 0
+        report.degraded.append(
+            f"输出目录权限未能收紧到 0700（明文媒体可能被他人读到）：{out_root}")
+    st = _ExportState(account, out_root, report, set(months) if months else None,
+                      max_files, force, progress)
+    # 四条 kind 分支各自成函数（此前是一个 64 复杂度的函数）：分支体原样搬过去，判据与
+    # 计数收进 `_ExportState`，这里的顺序与条件与拆分前逐字对应。
+    if "image" in kinds:
+        _export_images(st, chat_ids)
+    if "video" in kinds:
+        _export_videos(st, chat_ids, con)
+    if "voice" in kinds:
+        if _PILK is None:
+            report.degraded.append(
+                "pilk 不可用：语音导出为原始 .slk（`uv add pilk` 后可转 WAV）")
+        _export_voices(account, chat_ids, out_root, report, st.want, st.full, st.bump,
+                       st.already)
+    if "sticker" in kinds:
+        _export_stickers(account, chat_ids, out_root, report, st.want, st.full, st.bump,
+                         st.already, con, with_cdn=with_cdn)
+    return report
 
-    def already(cm: str, kind: str, mon: str, base: str) -> bool:
+
+class _ExportState:
+    """`export_media` 四条分支共用的状态与判据（拆那个 64 复杂度的函数时抽出来的）。
+
+    只装**跨分支共享**的东西：输出根、报告、进度计数与三个判据。各分支自己的逻辑留在
+    各自的 `_export_*` 里——把这个对象做成「什么都能干」的服务类会把复杂度换个地方藏。
+    """
+
+    def __init__(self, account: str, out_root: pathlib.Path, report: MediaReport,
+                 want: set[str] | None, max_files: int, force: bool,
+                 progress: Callable[[int], None] | None) -> None:
+        self.account = account
+        self.out_root = out_root
+        self.report = report
+        self.want = want
+        self.max_files = max_files
+        self.force = force
+        self.progress = progress
+        self.produced = 0
+
+    def already(self, cm: str, kind: str, mon: str, base: str) -> bool:
         """目标文件已在 → 本轮跳过。**在解密之前判**——省掉的正是真正的开销。
 
         候选名与读侧 `exported_path` 同源（见 `_out_candidates`）：判定比读侧严格就会
         出现「读侧说已导出、写侧说没有」的漂移。
         """
-        if force:
+        if self.force:
             return False
-        return any(_out_path(out_root, cm, kind, mon, s, e).exists()
+        return any(_out_path(self.out_root, cm, kind, mon, s, e).exists()
                    for s, e in _out_candidates(kind, base))
 
-    def full() -> bool:
-        return produced >= max_files
+    def full(self) -> bool:
+        return self.produced >= self.max_files
 
-    def bump() -> None:
+    def bump(self) -> None:
         """计一个已落盘的媒体文件并报进度（Ruling 18：语音与图片/视频同一个口径——
-        `max_files` 必须也管住语音，否则一个有几千条语音的会话会无视 `--limit`）。
-        进度回调收在这里：此前每个落盘点各写一遍「计数 + 回调」，缩略图那一支就漏了回调。"""
-        nonlocal produced
-        produced += 1
-        if progress:
-            progress(produced)
+        `max_files` 必须也管住语音，否则一个有几千条语音的会话会无视 `--limit`）。"""
+        self.produced += 1
+        if self.progress:
+            self.progress(self.produced)
 
-    if "image" in kinds:
-        try:
-            mk = derive_keys(account)
-        except errors.MediaKeyError as exc:
-            mk = None
-            report.degraded.append(f"图片解密不可用：{exc}")
-        if mk is not None:
-            if not mk.aes_verified:
-                # EA-020：样本里没有 V2 dat（3.x 遗留/迁移数据）——xor 那半照旧能用，
-                # 但 aes 那半**没被验证过**。不公告的话用户看到的是「失败 N」而毫无线索，
-                # 会去怀疑文件损坏或磁盘。
-                report.degraded.append(
-                    "图片密钥只验了 xorKey（样本里没有 V2 dat，aesKey 未经验证）："
-                    "V2 图片可能解不开，失败会计入 image.failed")
-            for chat in chat_ids:
-                cm = messages.md5_of(chat)
-                base = paths.XWECHAT_FILES / account / "msg/attach" / cm
-                if not base.is_dir():
+
+def _export_images(st: _ExportState, chat_ids: list[str]) -> None:
+    try:
+        mk = derive_keys(st.account)
+    except errors.MediaKeyError as exc:
+        mk = None
+        st.report.degraded.append(f"图片解密不可用：{exc}")
+    if mk is not None:
+        if not mk.aes_verified:
+            # EA-020：样本里没有 V2 dat（3.x 遗留/迁移数据）——xor 那半照旧能用，
+            # 但 aes 那半**没被验证过**。不公告的话用户看到的是「失败 N」而毫无线索，
+            # 会去怀疑文件损坏或磁盘。
+            st.report.degraded.append(
+                "图片密钥只验了 xorKey（样本里没有 V2 dat，aesKey 未经验证）："
+                "V2 图片可能解不开，失败会计入 image.failed")
+        for chat in chat_ids:
+            cm = messages.md5_of(chat)
+            base = paths.XWECHAT_FILES / st.account / "msg/attach" / cm
+            if not base.is_dir():
+                continue
+            for month_dir in _safe_iter(base):
+                if not month_dir.is_dir():
                     continue
-                for month_dir in _safe_iter(base):
-                    if not month_dir.is_dir():
+                mon = month_dir.name
+                if st.want is not None and mon not in st.want:
+                    continue
+                img_dir = month_dir / "Img"
+                if not img_dir.is_dir():
+                    continue
+                wxgf_warned = False
+                for dat in _safe_iter(img_dir, "*.dat"):
+                    if st.already(cm, "image", mon, dat.stem):
+                        st.report.image.skipped += 1
                         continue
-                    mon = month_dir.name
-                    if want is not None and mon not in want:
+                    if st.full():
+                        st.report.truncated = True
+                        st.report.image.remaining += 1
                         continue
-                    img_dir = month_dir / "Img"
-                    if not img_dir.is_dir():
-                        continue
-                    wxgf_warned = False
-                    for dat in _safe_iter(img_dir, "*.dat"):
-                        if already(cm, "image", mon, dat.stem):
-                            report.image.skipped += 1
-                            continue
-                        if full():
-                            report.truncated = True
-                            report.image.remaining += 1
-                            continue
-                        try:
-                            buf = decrypt_dat(dat.read_bytes(), mk)
-                        except (errors.DecryptError, OSError):
-                            # 后半是 Ruling 9：文件在但读不了（权限/导出中途被微信重写）算
-                            # failed（导出失败），裸 OSError 不得逃出 core 层。
-                            report.image.failed += 1
-                            continue
-                        ext = detect_ext(buf)
-                        if ext is None:
-                            report.image.failed += 1
-                            continue
-                        if ext == "wxgf":
-                            # 转码成功时 jpeg 已由 ffmpeg 直写 out_root 下的终路径
-                            converted = _wxgf_to_jpeg(
-                                buf, _dest(out_root, cm, "image", mon, dat.stem, "jpg"))
-                        else:
-                            converted = False
-                        if not converted:
-                            if ext == "wxgf" and not wxgf_warned:
-                                report.degraded.append(
-                                    "wxgf 图未转 JPEG（无 ffmpeg 或转码失败），存原容器")
-                                wxgf_warned = True
-                            if save_artifact(out_root, cm, "image", mon, dat.stem, ext, buf) is None:
-                                report.image.failed += 1     # 落盘失败（Ruling 20）
-                                continue
-                        report.image.ok += 1
-                        bump()
-    if "video" in kinds:
-        # 两条路（spec §4.7）：
-        # - 给了索引连接（`con`）→ **refs 驱动**：按每个会话的 video 消息取其 file_key，再用
-        #   resolve_video 逐个定位本体。视频树是账号级的（`msg/video/{月}`，没有会话维度），
-        #   只有经索引才知道某条视频属于哪个会话——多会话归属由此成立，产物落
-        #   `out_root/{chat_md5}/video/{月}/`。
-        # - 没给（`con=None`）→ 退回**账号级枚举**（下面的实现，本任务之前唯一的路）：整个调用
-        #   只枚举一次，恰好一个会话时才归属；多会话无从归属——按会话循环会把同一批文件重复
-        #   写进 N 个目录、计数翻 N 倍。用例层只在**索引打不开**时走到这里（并带一条 degraded
-        #   公告）；tests/test_media.py 的 15 处直接调用是这条路的回归网。
-        if con is not None:
-            refs_by_chat: dict[str, list[tuple[int, str]]] = {}
-            note: str | None = None
-            try:
-                refs_by_chat = store.media_refs_by_chat(con, account, chat_ids, kind="video")
-                if not refs_by_chat:
-                    # 「一条都没导出」有三种成因，修法各不相同（spec §4.7），必须分开说：
-                    # 计数一律走**不 join messages** 的 count_media_refs——`media rebuild-refs`
-                    # 只写 refs 不写 messages，join 出来的空会把后两种混成一种，还会把用户
-                    # 导向错误的修法。
-                    # 三种成因（EA-089 抽成共用实现）：视频侧与抽取消前逐字一致；
-                    # 贴纸侧情形 1 与其余情形对齐（补了「本次未导出任何贴纸」一句，
-                    # 复审 F7b），语义不变。
-                    #   情形 1：该账号一条视频引用都没有（索引建在 media_refs 之前，或建时本机没有视频）；
-                    #   情形 3：这些会话**有**引用但 join 不出消息（rebuild-refs 写不出消息）；
-                    #   情形 2：引用在别处——这些会话确实没有视频引用（索引本身可用）。
-                    note = _refs_absence_note(
-                        "video", con, account, chat_ids,
-                        empty_hint="，或建索引时本机没有视频消息",
-                        history_clause="（`export_full_history` / CLI `export`）"
-                                       "——它同时写入消息与媒体引用。")
-            except (sqlite3.Error, OSError) as exc:
-                # 索引读不了 = 归属无从谈起：**如实降级**产出 0 条。裸 sqlite3.Error 逃出 core
-                # 层会击穿错误契约，而静默返回 0 会把「索引坏了」说成「本机没有视频」。
-                note = (f"视频索引读不了（{errors.redact(str(exc))}），本次未导出任何视频"
-                        "（视频按 media_refs 索引归属）")
-            if note:
-                report.degraded.append(note)
-            for chat in chat_ids:
-                cm = messages.md5_of(chat)
-                for _msg_key, ts, file_key in refs_by_chat.get(chat, ()):
-                    if want is not None and month_of(ts) not in want:
-                        continue                     # 月份外的条目本来就不导出，不算「因上限收手」
-                    if already(cm, "video", month_of(ts), file_key):
-                        report.video.skipped += 1
-                        continue
-                    # 上限检查排在月份过滤之后（与语音同一个口径）：只有**本会导出**的条目
-                    # 被上限挡下，truncated 才成立；反过来的话 `--limit` 恰好用尽时会把一条
-                    # 本来就跳过的条目当成「已提前收手」，那是假话。
-                    if full():
-                        report.truncated = True
-                        report.video.remaining += 1
-                        continue
-                    got = resolve_video(account, ts, file_key)
-                    if got is None:
-                        report.video.missing += 1        # 有 ref 但本体不在磁盘（被清理）
-                        continue
-                    src, is_thumb = got
                     try:
-                        buf = src.read_bytes()
-                    except OSError:
-                        report.video.missing += 1        # 文件在、拿不到本体（Ruling 9）
+                        buf = decrypt_dat(dat.read_bytes(), mk)
+                    except (errors.DecryptError, OSError):
+                        # 后半是 Ruling 9：文件在但读不了（权限/导出中途被微信重写）算
+                        # failed（导出失败），裸 OSError 不得逃出 core 层。
+                        st.report.image.failed += 1
                         continue
-                    # 名字逐字取自**源文件**（`{K}.mp4` / `{K}_raw.mp4` / `{K}_thumb.jpg`），与
-                    # 账号级枚举那条路一致：`media.exported_path` 正是按这三个名字探测的，改成
-                    # `{K}.jpg` 会让它找不到缩略图，机器上既有的产物也会被误报成「未导出」。
-                    if save_artifact(out_root, cm, "video", month_of(ts),
-                             src.stem, src.suffix[1:], buf) is None:
-                        report.video.missing += 1        # 落盘失败 → 同归口（Ruling 20）
+                    ext = detect_ext(buf)
+                    if ext is None:
+                        st.report.image.failed += 1
                         continue
-                    if is_thumb:
-                        report.video.thumb += 1
+                    if ext == "wxgf":
+                        # 转码成功时 jpeg 已由 ffmpeg 直写 out_root 下的终路径
+                        converted = _wxgf_to_jpeg(
+                            buf, _dest(st.out_root, cm, "image", mon, dat.stem, "jpg"))
                     else:
-                        report.video.ok += 1
-                    bump()
-        # 两处的 `con is None` 不可省：refs 路径已经处理过的调用不该再落进账号级枚举。
-        if con is None and len(chat_ids) == 1:
-            cm = messages.md5_of(chat_ids[0])
-            vbase = paths.XWECHAT_FILES / account / "msg/video"
-            # 不在入口判 full()：此刻只是「上限已到」，还没看见任何条目——真要有视频被跳过，
-            # 下面两个循环里的逐项检查会如实置位 truncated（此处置位会把「一个视频都没剩」
-            # 也说成「已提前收手」）。
-            if vbase.is_dir():
-                for month_dir in _safe_iter(vbase):
-                    if not month_dir.is_dir():
-                        continue
-                    mon = month_dir.name
-                    if want is not None and mon not in want:
-                        continue
-                    # 本轮的「本体有着落」集合：不只是**写进盘的**，已存在的、被上限挡下的也算。
-                    # 缩略图的唯一意义是补没有本体的视频；本体有着落还写一份只是冗余文件、白吃
-                    # `--limit`。被上限挡下的必须一并记：它的本体已计进 remaining，这里不记的话
-                    # 同一视频的缩略图会再计一次，remaining 就比「真正还差的文件数」多报。
-                    # 缺失（读不到 / 写不出）**不记**：那时缩略图是唯一的退路，必须照写。
-                    mp4_stems = set()
-                    for f in _safe_iter(month_dir, "*.mp4"):
-                        if already(cm, "video", mon, f.stem):
-                            report.video.skipped += 1
-                            mp4_stems.add(f.stem.removesuffix("_raw"))
+                        converted = False
+                    if not converted:
+                        if ext == "wxgf" and not wxgf_warned:
+                            st.report.degraded.append(
+                                "wxgf 图未转 JPEG（无 ffmpeg 或转码失败），存原容器")
+                            wxgf_warned = True
+                        if save_artifact(st.out_root, cm, "image", mon, dat.stem, ext, buf) is None:
+                            st.report.image.failed += 1     # 落盘失败（Ruling 20）
                             continue
-                        if full():
-                            report.truncated = True
-                            report.video.remaining += 1
-                            mp4_stems.add(f.stem.removesuffix("_raw"))
-                            continue
-                        try:
-                            buf = f.read_bytes()
-                        except OSError:
-                            report.video.missing += 1    # 文件在、拿不到本体（Ruling 9）
-                            continue
-                        if save_artifact(out_root, cm, "video", mon, f.stem, "mp4", buf) is None:
-                            report.video.missing += 1    # 落盘失败 → 与读不到本体同归口（Ruling 20）
-                            continue
-                        mp4_stems.add(f.stem.removesuffix("_raw"))
-                        report.video.ok += 1
-                        bump()
-                    for f in _safe_iter(month_dir, "*_thumb.jpg"):
-                        if f.stem.removesuffix("_thumb") in mp4_stems:
-                            continue               # 有本体的不再存缩略图
-                        # 基准名必须是**裸 file_key**：`_out_candidates` 的候选集是围绕它
-                        # 设计的（`{K}.mp4` / `{K}_raw.mp4` / `{K}_thumb.jpg`）。传 `{K}_thumb`
-                        # 会得到 `{K}_thumb_thumb.jpg` 这种永不存在的名字 —— 本行于是永不命中，
-                        # 缩略图每轮重写并吃 `--limit`（Task 3 落地后还会让 remaining 恒 >0）。
-                        if already(cm, "video", mon, f.stem.removesuffix("_thumb")):
-                            report.video.skipped += 1
-                            continue
-                        # 顺序有意义：先判「本来就不导出」再判上限。反过来的话，`--limit`
-                        # 恰好用尽时会把一条**本来就跳过**的缩略图当成「因上限跳过」，
-                        # truncated 就成了假话。
-                        if full():
-                            report.truncated = True
-                            report.video.remaining += 1
-                            continue
-                        try:
-                            buf = f.read_bytes()
-                        except OSError:
-                            report.video.missing += 1    # 缩略图也拿不到：同样的归口
-                            continue
-                        if save_artifact(out_root, cm, "video", mon, f.stem, "jpg", buf) is None:
-                            report.video.missing += 1    # 同上：缩略图也 write 不出来
-                            continue
-                        report.video.thumb += 1
-                        bump()                # 缩略图同样占 limit、同样报进度
-        elif con is None and len(chat_ids) > 1:
-            report.degraded.append("视频为账号级枚举，无法归属具体会话；请逐个会话导出")
-    if "voice" in kinds:
-        if _PILK is None:
-            report.degraded.append("pilk 不可用：语音导出为原始 .slk（`uv add pilk` 后可转 WAV）")
-        _export_voices(account, chat_ids, out_root, report, want, full, bump, already)
-    if "sticker" in kinds:
-        _export_stickers(account, chat_ids, out_root, report, want, full, bump,
-                         already, con, with_cdn=with_cdn)
-    return report
+                    st.report.image.ok += 1
+                    st.bump()
+
+
+def _export_videos(st: _ExportState, chat_ids: list[str],
+                   con: sqlite3.Connection | None) -> None:
+    # 两条路（spec §4.7）：
+    # - 给了索引连接（`con`）→ **refs 驱动**：按每个会话的 video 消息取其 file_key，再用
+    #   resolve_video 逐个定位本体。视频树是账号级的（`msg/video/{月}`，没有会话维度），
+    #   只有经索引才知道某条视频属于哪个会话——多会话归属由此成立，产物落
+    #   `out_root/{chat_md5}/video/{月}/`。
+    # - 没给（`con=None`）→ 退回**账号级枚举**（下面的实现，本任务之前唯一的路）：整个调用
+    #   只枚举一次，恰好一个会话时才归属；多会话无从归属——按会话循环会把同一批文件重复
+    #   写进 N 个目录、计数翻 N 倍。用例层只在**索引打不开**时走到这里（并带一条 degraded
+    #   公告）；tests/test_media.py 的 15 处直接调用是这条路的回归网。
+    if con is not None:
+        _export_videos_from_refs(st, chat_ids, con)
+    else:
+        _export_videos_by_account_scan(st, chat_ids, can_place=len(chat_ids) == 1)
+
+
+def _export_videos_from_refs(st: _ExportState, chat_ids: list[str],
+                            con: sqlite3.Connection) -> None:
+    """refs 驱动：按 media_refs 归属（多会话都成立），产物落 `{chat_md5}/video/{月}/`。"""
+    refs_by_chat: dict[str, list[tuple[int, str]]] = {}
+    note: str | None = None
+    try:
+        refs_by_chat = store.media_refs_by_chat(con, st.account, chat_ids, kind="video")
+        if not refs_by_chat:
+            # 「一条都没导出」有三种成因，修法各不相同（spec §4.7），必须分开说：
+            # 计数一律走**不 join messages** 的 count_media_refs——`media rebuild-refs`
+            # 只写 refs 不写 messages，join 出来的空会把后两种混成一种，还会把用户
+            # 导向错误的修法。
+            # 三种成因（EA-089 抽成共用实现）：视频侧与抽取消前逐字一致；
+            # 贴纸侧情形 1 与其余情形对齐（补了「本次未导出任何贴纸」一句，
+            # 复审 F7b），语义不变。
+            #   情形 1：该账号一条视频引用都没有（索引建在 media_refs 之前，或建时本机没有视频）；
+            #   情形 3：这些会话**有**引用但 join 不出消息（rebuild-refs 写不出消息）；
+            #   情形 2：引用在别处——这些会话确实没有视频引用（索引本身可用）。
+            note = _refs_absence_note(
+                "video", con, st.account, chat_ids,
+                empty_hint="，或建索引时本机没有视频消息",
+                history_clause="（`export_full_history` / CLI `export`）"
+                               "——它同时写入消息与媒体引用。")
+    except (sqlite3.Error, OSError) as exc:
+        # 索引读不了 = 归属无从谈起：**如实降级**产出 0 条。裸 sqlite3.Error 逃出 core
+        # 层会击穿错误契约，而静默返回 0 会把「索引坏了」说成「本机没有视频」。
+        note = (f"视频索引读不了（{errors.redact(str(exc))}），本次未导出任何视频"
+                "（视频按 media_refs 索引归属）")
+    if note:
+        st.report.degraded.append(note)
+    for chat in chat_ids:
+        cm = messages.md5_of(chat)
+        for _msg_key, ts, file_key in refs_by_chat.get(chat, ()):
+            if st.want is not None and month_of(ts) not in st.want:
+                continue                     # 月份外的条目本来就不导出，不算「因上限收手」
+            if st.already(cm, "video", month_of(ts), file_key):
+                st.report.video.skipped += 1
+                continue
+            # 上限检查排在月份过滤之后（与语音同一个口径）：只有**本会导出**的条目
+            # 被上限挡下，truncated 才成立；反过来的话 `--limit` 恰好用尽时会把一条
+            # 本来就跳过的条目当成「已提前收手」，那是假话。
+            if st.full():
+                st.report.truncated = True
+                st.report.video.remaining += 1
+                continue
+            got = resolve_video(st.account, ts, file_key)
+            if got is None:
+                st.report.video.missing += 1        # 有 ref 但本体不在磁盘（被清理）
+                continue
+            src, is_thumb = got
+            try:
+                buf = src.read_bytes()
+            except OSError:
+                st.report.video.missing += 1        # 文件在、拿不到本体（Ruling 9）
+                continue
+            # 名字逐字取自**源文件**（`{K}.mp4` / `{K}_raw.mp4` / `{K}_thumb.jpg`），与
+            # 账号级枚举那条路一致：`media.exported_path` 正是按这三个名字探测的，改成
+            # `{K}.jpg` 会让它找不到缩略图，机器上既有的产物也会被误报成「未导出」。
+            if save_artifact(st.out_root, cm, "video", month_of(ts),
+                     src.stem, src.suffix[1:], buf) is None:
+                st.report.video.missing += 1        # 落盘失败 → 同归口（Ruling 20）
+                continue
+            if is_thumb:
+                st.report.video.thumb += 1
+            else:
+                st.report.video.ok += 1
+            st.bump()
+# 两处的 `con is None` 不可省：refs 路径已经处理过的调用不该再落进账号级枚举。
+
+
+def _export_videos_by_account_scan(st: _ExportState, chat_ids: list[str], *,
+                                   can_place: bool) -> None:
+    """账号级枚举：整个账号的 `msg/video` 只扫一次，只有单会话时能归属。"""
+    if not can_place:
+        st.report.degraded.append("视频为账号级枚举，无法归属具体会话；请逐个会话导出")
+        return
+    cm = messages.md5_of(chat_ids[0])
+    vbase = paths.XWECHAT_FILES / st.account / "msg/video"
+    # 不在入口判 full()：此刻只是「上限已到」，还没看见任何条目——真要有视频被跳过，
+    # 下面两个循环里的逐项检查会如实置位 truncated（此处置位会把「一个视频都没剩」
+    # 也说成「已提前收手」）。
+    if vbase.is_dir():
+        for month_dir in _safe_iter(vbase):
+            if not month_dir.is_dir():
+                continue
+            mon = month_dir.name
+            if st.want is not None and mon not in st.want:
+                continue
+            # 本轮的「本体有着落」集合：不只是**写进盘的**，已存在的、被上限挡下的也算。
+            # 缩略图的唯一意义是补没有本体的视频；本体有着落还写一份只是冗余文件、白吃
+            # `--limit`。被上限挡下的必须一并记：它的本体已计进 remaining，这里不记的话
+            # 同一视频的缩略图会再计一次，remaining 就比「真正还差的文件数」多报。
+            # 缺失（读不到 / 写不出）**不记**：那时缩略图是唯一的退路，必须照写。
+            mp4_stems = set()
+            for f in _safe_iter(month_dir, "*.mp4"):
+                if st.already(cm, "video", mon, f.stem):
+                    st.report.video.skipped += 1
+                    mp4_stems.add(f.stem.removesuffix("_raw"))
+                    continue
+                if st.full():
+                    st.report.truncated = True
+                    st.report.video.remaining += 1
+                    mp4_stems.add(f.stem.removesuffix("_raw"))
+                    continue
+                try:
+                    buf = f.read_bytes()
+                except OSError:
+                    st.report.video.missing += 1    # 文件在、拿不到本体（Ruling 9）
+                    continue
+                if save_artifact(st.out_root, cm, "video", mon, f.stem, "mp4", buf) is None:
+                    st.report.video.missing += 1    # 落盘失败 → 与读不到本体同归口（Ruling 20）
+                    continue
+                mp4_stems.add(f.stem.removesuffix("_raw"))
+                st.report.video.ok += 1
+                st.bump()
+            for f in _safe_iter(month_dir, "*_thumb.jpg"):
+                if f.stem.removesuffix("_thumb") in mp4_stems:
+                    continue               # 有本体的不再存缩略图
+                # 基准名必须是**裸 file_key**：`_out_candidates` 的候选集是围绕它
+                # 设计的（`{K}.mp4` / `{K}_raw.mp4` / `{K}_thumb.jpg`）。传 `{K}_thumb`
+                # 会得到 `{K}_thumb_thumb.jpg` 这种永不存在的名字 —— 本行于是永不命中，
+                # 缩略图每轮重写并吃 `--limit`（Task 3 落地后还会让 remaining 恒 >0）。
+                if st.already(cm, "video", mon, f.stem.removesuffix("_thumb")):
+                    st.report.video.skipped += 1
+                    continue
+                # 顺序有意义：先判「本来就不导出」再判上限。反过来的话，`--limit`
+                # 恰好用尽时会把一条**本来就跳过**的缩略图当成「因上限跳过」，
+                # truncated 就成了假话。
+                if st.full():
+                    st.report.truncated = True
+                    st.report.video.remaining += 1
+                    continue
+                try:
+                    buf = f.read_bytes()
+                except OSError:
+                    st.report.video.missing += 1    # 缩略图也拿不到：同样的归口
+                    continue
+                if save_artifact(st.out_root, cm, "video", mon, f.stem, "jpg", buf) is None:
+                    st.report.video.missing += 1    # 同上：缩略图也 write 不出来
+                    continue
+                st.report.video.thumb += 1
+                st.bump()                # 缩略图同样占 limit、同样报进度
 
 
 def _wav_bytes(pcm: bytes, rate: int = 24000) -> bytes:

@@ -297,3 +297,17 @@ def test_strip_paths_keeps_relative_paths(srv):
     out = webui._strip_paths(data)
     assert out["states"][0]["path"] == "../image/2026-09/a.jpg"
     assert out["out_dir"] == "dir"
+
+
+def test_post_error_envelope_has_the_same_shape_as_get(srv):
+    """GET 与 POST 的错误信封必须是同一份（`to_payload` + 路径遮蔽）。
+
+    回归对象：POST 分支曾手写 `{"error": str(exc)}`——没有 `redact`、没有 `hint`，
+    与 GET 那份两套形状；下一次谁在这里抛一个带密钥或路径的异常就漏了。
+    """
+    headers = {"Origin": f"http://127.0.0.1:{srv.port}", "X-AW-CSRF": srv.csrf}
+    res, body = _req(srv, "/api/derived/delete", method="POST", headers=headers,
+                     body={"derivation_id": "nope"})
+    data = _json(res, body)
+    assert res.status == 400 and "error" in data
+    assert data.get("hint"), "项目异常必须带下一步指引（与 GET 同一份信封）"

@@ -178,15 +178,6 @@ def sticker_display(md5: str, name: str | None) -> str:
     return (f"{STICKER_PREFIX}{name[:60]}]" if name else f"{STICKER_ID_PREFIX}{md5[:8]}]")
 
 
-def is_sticker_display(text: str) -> bool:
-    return text.startswith((STICKER_PREFIX, STICKER_ID_PREFIX))
-
-
-def sticker_name_of(text: str) -> str | None:
-    """解析端：有名字返回名字；短 ID 形态返回 None。"""
-    return text[len(STICKER_PREFIX):-1] if text.startswith(STICKER_PREFIX) else None
-
-
 # ---------- 行 ----------
 
 def acct_chat(account: str, chat_md5: str) -> str:

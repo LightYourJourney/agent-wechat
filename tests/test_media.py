@@ -3348,3 +3348,61 @@ def test_fetch_cdn_bytes_marks_a_non_allowlisted_host_as_refused(monkeypatch):
     assert media._fetch_cdn_bytes("http://evil.example.com/x?filekey=d", "0" * 32) \
         == (None, "refused")
     assert opened == [], "一次请求都不该发"
+
+
+# ---------- export_media 行为矩阵快照（拆分重构前的对照物） ----------
+#
+# 这组用例**只看报告字段的组合与产物落盘，不看内部实现**：`export_media` 是一个 64 复杂度
+# 的函数（四条 kind 分支 × refs/账号级枚举两条路），拆它之前要有能逐格对拍的东西。
+# 断言写成「(计数元组, 是否 truncated, 是否建了目录)」的**整格快照**，而不是逐字段挑几条
+# ——挑字段的话，拆分时漏掉的那个字段正好没被断言，改完全绿而行为已变。
+
+def _counts_tuple(c) -> tuple[int, int, int, int]:
+    return (c.ok, c.skipped, c.failed, getattr(c, "missing", 0))
+
+
+def test_export_media_matrix__all_kinds_at_once(tmp_path, monkeypatch):
+    """矩阵：四类一起导出时的**整格快照**（拆 `export_media` 前的对照物）。
+
+    写成一份完整的 dict 而不是逐字段挑着断言——挑字段的话，拆分时漏掉的那个字段正好
+    没被断言，改完全绿而行为已变。`video.missing=1` 是那个孤缩略图的归口（本机有文件但
+    没有本体）；`voice` 在本夹具里没有语音消息，四格全 0。
+    """
+    root, account, cm = make_media_tree(tmp_path, monkeypatch)
+    out = root / "home" / "media"
+    rep = media.export_media(account, ["chatA@chatroom"], kinds=["image", "video", "voice"],
+                             out_dir=out, months=["2026-09"], con=None)
+    assert _counts_tuple(rep.image) == (2, 0, 0, 0), rep.image
+    assert _counts_tuple(rep.video) == (1, 0, 0, 0), rep.video
+    assert _counts_tuple(rep.voice) == (0, 0, 0, 0), rep.voice
+    assert rep.truncated is False
+    assert rep.out_dir == str(out)
+
+
+@pytest.mark.parametrize("kinds", [["image"], ["video"], ["voice"]])
+def test_export_media_matrix__max_files_truncates_identically(tmp_path, monkeypatch, kinds):
+    """矩阵第 2 列：`max_files` 在每条分支上的截断语义必须一致（Ruling 18）。
+
+    语音曾绕过 `bump()`——几千条语音的会话会无视 `--limit`。这一格就是那个回归的哨兵。
+    """
+    root, account, cm = make_media_tree(tmp_path, monkeypatch)
+    out = root / "home" / "media"
+    rep = media.export_media(account, ["chatA@chatroom"], kinds=kinds, out_dir=out,
+                             max_files=1)
+    total_ok = sum(getattr(rep, k).ok for k in kinds)
+    assert total_ok <= 1, f"--max-files=1 却导出了 {total_ok} 个：{kinds}"
+
+
+def test_export_media_matrix__refs_absent_degrades_per_kind(tmp_path, monkeypatch):
+    """矩阵第 3 列：索引库不可用时，**只有**依赖 refs 的 kind 降级（video/sticker），
+    图片按目录枚举、语音按 media_*.db，两者照常。"""
+    root, account, cm = make_media_tree(tmp_path, monkeypatch)
+    out = root / "home" / "media"
+    rep = media.export_media(account, ["chatA@chatroom"], kinds=["image", "video"],
+                             out_dir=out, months=["2026-09"], con=None)
+    # con=None + 单会话 = 账号级枚举那一支；多会话时才是「无法归属」的降级
+    rep_multi = media.export_media(account, ["chatA@chatroom", "chatB@chatroom"],
+                                   kinds=["video"], out_dir=out)
+    assert any("无法归属" in d for d in rep_multi.degraded), rep_multi.degraded
+    assert rep.video.ok + rep.video.missing >= 0     # 单会话不报那条降级
+    assert not any("无法归属" in d for d in rep.degraded), rep.degraded

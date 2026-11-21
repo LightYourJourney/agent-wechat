@@ -224,6 +224,3 @@ def get_passphrase(account: str) -> bytes:
     return decode_cached_hex(bare, hexstr)
 
 
-def get_passphrase_hex(account: str) -> str:
-    """`get_passphrase` 的十六进制视图（EA-048：文案只留一份，不再各写各的错误消息）。"""
-    return get_passphrase(account).hex()

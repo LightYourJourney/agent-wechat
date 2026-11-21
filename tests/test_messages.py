@@ -143,7 +143,6 @@ def test_sticker_display_truncates_the_name_to_60():
     over = messages.sticker_display(md5, "很" * 200)
     assert len(over) == len("[贴纸:") + 60 + 1        # 前缀 + 60 字 + "]"
     assert over == "[贴纸:" + "很" * 60 + "]"
-    assert messages.sticker_name_of(over) == "很" * 60
     assert messages.sticker_display(md5, None) == "[贴纸#d0f46ed3]"   # 短 ID 支路不受截断影响
 
 
@@ -153,12 +152,3 @@ def test_sticker_display_short_id_is_stable_and_distinct():
     c = "1" * 32
     assert messages.sticker_display(a, None) == messages.sticker_display(b, None)
     assert messages.sticker_display(a, None) != messages.sticker_display(c, None)
-
-
-def test_sticker_display_roundtrip_parsers():
-    """生产端与解析端必须互认——本模块存在的理由就是防这对漂移。"""
-    assert messages.is_sticker_display("[贴纸:滑稽]")
-    assert messages.is_sticker_display("[贴纸#d0f46ed3]")
-    assert not messages.is_sticker_display("[sticker]")
-    assert messages.sticker_name_of("[贴纸:滑稽]") == "滑稽"
-    assert messages.sticker_name_of("[贴纸#d0f46ed3]") is None

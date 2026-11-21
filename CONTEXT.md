@@ -68,8 +68,10 @@ MCP 与 CLI 两个入口共享的一层：参数归一化、账号/会话解析�
 `msg_type=47` 的 `content`：有名 `[贴纸:名称]`，无名 `[贴纸#md5前8位]`（短 ID 让 LLM
 分得清「同一贴纸发了 5 次」与「5 个不同贴纸」）；源 XML 无合法 md5 时保持 `[sticker]`。
 **`media_hint` 不受影响，仍是 `[sticker]`**——两列语义不同。出处：
-`messages.sticker_display` / `messages.is_sticker_display` / `messages.sticker_name_of`、
-`media.extract_sticker_ref`。
+`messages.sticker_display`（唯一的**写入端**）、`messages.STICKER_PREFIX` /
+`STICKER_ID_PREFIX`（两种形态的前缀，写与读共用）、`media.extract_sticker_ref`。
+**没有「解析端」函数**：早先的 `is_sticker_display` / `sticker_name_of` 零生产调用，
+2026-11-21 随代码一起删除——要判断一段 `content` 是不是贴纸显示串，直接用前缀常量比。
 
 ## 任务注册表（tasks）
 长任务的内存记录 + `~/.agent-wechat/tasks.json` 持久化（首次使用时载入，所以重启后
