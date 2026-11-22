@@ -9,6 +9,7 @@ from __future__ import annotations
 import http.client
 import re
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from typing import IO

@@ -10,7 +10,7 @@ import sqlite3
 import threading
 import time
 from collections.abc import Collection
-from typing import Callable, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 import sqlite_vec
 
@@ -172,7 +172,7 @@ class FastEmbedEmbedder:
         self._model = None
         self._lock = threading.Lock()
 
-    def _ensure(self) -> object:
+    def _ensure(self) -> Any:
         if self._model is None:
             from fastembed import TextEmbedding
             # **本模块是 `HOME_DIR/models` 的 owner，闸门就得在这里**（EA-003 的收口项）：
@@ -186,7 +186,7 @@ class FastEmbedEmbedder:
                 raise VectorError(
                     f"模型缓存目录不可用：{MODEL_CACHE_DIR}",
                     hint=f"{exc}；请检查 AGENT_WECHAT_HOME 指向的位置是否可写") from exc
-            kwargs = dict(model_name=MODEL_NAME, cache_dir=str(MODEL_CACHE_DIR))
+            kwargs: dict[str, Any] = dict(model_name=MODEL_NAME, cache_dir=str(MODEL_CACHE_DIR))
             if not self._local_only:
                 try:
                     # 默认先纯离线加载：模型已在本地时绝不发起网络请求（Global Constraint #4：
@@ -366,7 +366,9 @@ def _build_account(con: sqlite3.Connection, acct: str, embedder: FastEmbedEmbedd
                 f"嵌入返回的向量数不足（{len(vecs)} != {len(order)}）：索引不完整。"
                 "重跑一次即可从上次提交处续跑（不带 rebuild）；反复出现再用 rebuild 重建")
         con.executemany(_INSERT_VEC,
-                        [(buf_rows[i][0], sqlite_vec.serialize_float32(v), buf_rows[i][1],
+                        # serialize_float32 注解成 List，实际只做 `pack(*v)`：numpy 数组照收
+                        [(buf_rows[i][0], sqlite_vec.serialize_float32(v),  # pyright: ignore[reportArgumentType]
+                          buf_rows[i][1],
                           acct, buf_rows[i][2], buf_rows[i][3])
                          for i, v in zip(order, vecs)])
         embedded += len(buf_rows)
@@ -497,7 +499,9 @@ def build_index(accounts: Sequence[str] | None = None, rebuild: bool = False,
                 if dirty["embedded"] == 0 and dirty["dropped"] == 0 \
                         and dirty["deferred"] == 0:
                     break          # 队列已空（或只剩失败，留给下一轮/诊断）
-        prev_skipped = _meta(con)["skipped"]
+        meta = _meta(con)
+        assert meta is not None, "_ensure_meta 在本函数开头已写入本模型的 meta 行"
+        prev_skipped = meta["skipped"]
         total = con.execute("SELECT count(*) FROM vec_messages").fetchone()[0]
         _write_meta(con, embedded=total, skipped=prev_skipped + skipped)
         return {"embedded_this_run": embedded, "skipped_this_run": skipped}
@@ -622,7 +626,7 @@ def apply_dirty(con: sqlite3.Connection, *, accounts: Sequence[str] | None = Non
     limit = DIRTY_BATCH if limit is None else limit
     embedder = embedder or default_embedder()
     stats = {"embedded": 0, "dropped": 0, "deferred": 0, "failed": 0}
-    todo: list[tuple[str, object, str, str]] = []      # (key, row, text, preview)
+    todo: list[tuple[str, Mapping, str, str]] = []     # (key, row, text, preview)
 
     try:
         keys = _queued_keys(con, accounts, limit)

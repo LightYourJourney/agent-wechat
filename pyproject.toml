@@ -71,6 +71,7 @@ dev = [
     # 门禁 ② 之前的 lint 步只开 pyflakes（F）规则：未用导入、遮蔽、未定义名这一类**真错**，
     # 不管风格——本仓的排版是有意为之，不让格式化器改写。
     "ruff>=0.17.6",
+    "pyright[nodejs]>=1.1.414",
 ]
 
 [tool.pytest.ini_options]
@@ -93,3 +94,13 @@ select = ["F"]
 [tool.ruff.lint.per-file-ignores]
 # 包级重导出面：`usecases.xxx` 的旧调用点与测试的包级打桩都靠这些名字（见该文件 docstring）
 "src/agent_wechat/usecases/__init__.py" = ["F401"]
+
+[tool.pyright]
+# 门禁 ②″：basic 档、只查 src（check.sh 用 `python -m pyright`，Node 来自 nodejs-wheel）。
+# 注解与实际用法对不上即失败——它不改运行时行为，
+# 但注解是这个仓库给读者的契约，漂了就不如没有。
+include = ["src"]
+typeCheckingMode = "basic"
+pythonVersion = "3.12"
+venvPath = "."
+venv = ".venv"

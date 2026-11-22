@@ -73,7 +73,7 @@ class TesseractOcr:
             self._langs = "chi_sim+eng" if "chi_sim" in names else "eng"
         return self._langs
 
-    def extract(self, path: pathlib.Path) -> tuple[str, float | None]:
+    def extract(self, path: pathlib.Path) -> tuple[str | None, float | None]:
         """TSV 输出同时给文字与逐词置信度；quality 是均值（0–1），没有词时为 None。"""
         out = _run(["tesseract", str(path), "stdout", "-l", self.languages(),
                     "tsv"])       # tesseract 的 TSV 是 configfile 参数，不是 --tsv
@@ -112,7 +112,7 @@ class WhisperCliAsr:
     def version(self) -> str | None:
         return _first_line(["whisper-cli", "--help"])
 
-    def extract(self, path: pathlib.Path) -> tuple[str, float | None]:
+    def extract(self, path: pathlib.Path) -> tuple[str | None, float | None]:
         out = _run(["whisper-cli", "-m", str(self.model), "-f", str(path),
                     "-l", "zh", "-nt"])
         # whisper-cli 在没有语音时会打印 `[BLANK_AUDIO]` 之类的标记，保留原样。

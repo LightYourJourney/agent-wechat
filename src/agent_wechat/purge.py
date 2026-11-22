@@ -307,7 +307,7 @@ def plan(scopes: frozenset[str], all_: bool = False) -> PurgePlan:
                                   hint="请先修正权限（需要读 + 进入权限），再重试")
     # --all 时 items 仍全部列出：计划表要显示 index/keys 的重建代价（spec §3 的 --all 表样）
     items = tuple(_item(a) for a in known_artifacts() if all_ or a.scope in scopes)
-    loose: tuple[pathlib.Path, ...] = ()
+    loose: tuple[LooseEntry, ...] = ()
     if all_:
         known = {a.path for a in known_artifacts()}
         try:

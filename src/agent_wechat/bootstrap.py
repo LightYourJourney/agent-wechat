@@ -98,12 +98,14 @@ def _read_capture(proc: subprocess.Popen, deadline: float) -> str:
     （`text=True` 只是给调用方方便；这里绕开 TextIOWrapper 直接读 fd。）
     """
     buf = ""
+    out = proc.stdout
+    assert out is not None, "Popen 必须以 stdout=PIPE 起（capture_passphrase_lldb 就是这么起的）"
     while time.time() < deadline:
         # 超时不许越过 deadline：固定 3.0 会让「300s 的 timeout」实际超到 303s，
         # 而按秒计的 deadline 承诺在这里就该是准的（EA-052 的测试钉住了这条）。
-        r, _, _ = select.select([proc.stdout], [], [], max(0.0, min(3.0, deadline - time.time())))
+        r, _, _ = select.select([out], [], [], max(0.0, min(3.0, deadline - time.time())))
         if r:
-            chunk = os.read(proc.stdout.fileno(), 65536)
+            chunk = os.read(out.fileno(), 65536)
             if not chunk:
                 if proc.poll() is not None:
                     break

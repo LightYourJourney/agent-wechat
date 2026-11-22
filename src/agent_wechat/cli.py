@@ -141,7 +141,8 @@ def cmd_inspect(args: argparse.Namespace) -> int:
                 "SELECT name, sql FROM sqlite_master WHERE type='table' ORDER BY name"):
             name = _decode(name)
             sql = _decode(sql)
-            if name.startswith("sqlite_"):
+            # 解不成 str 的表名（非 UTF-8）拼不进下面的 SQL，也印不出来：跳过，不抛
+            if not isinstance(name, str) or name.startswith("sqlite_"):
                 continue
             n = con.execute(f"SELECT count(*) FROM '{name}'").fetchone()[0]
             print(f"\n--- {name}  ({n} 行) ---\n{sql}")
@@ -382,8 +383,9 @@ def cmd_sync(args: argparse.Namespace) -> int:
         print(json.dumps(res.to_dict(), ensure_ascii=False, indent=2))
     else:
         print(f"{res.status}：账号 {res.account or '—'}，本轮写入 {res.exported} 行")
-        if (res.vector or {}).get("embedded") is not None:
-            print(f"  向量重嵌 {res.vector.get('embedded', 0)} 条")
+        vec = res.vector or {}
+        if vec.get("embedded") is not None:
+            print(f"  向量重嵌 {vec.get('embedded', 0)} 条")
         if res.detail:
             print(f"详情：{res.detail}", file=sys.stderr)
         if res.hint:

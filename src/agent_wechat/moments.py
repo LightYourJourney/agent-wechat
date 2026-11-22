@@ -209,7 +209,8 @@ def _media_of(m: ET.Element) -> SnsMedia:
         url=(u.text or "").strip() or None if u is not None else None,
         # token/key/enc_idx 是**属性**不是子元素——实测踩过的坑
         token=u.get("token") if u is not None else None,
-        key=_nz(enc_el.get("key")) if encrypted else _nz(u.get("key") if u is not None else None),
+        key=(_nz(enc_el.get("key")) if encrypted and enc_el is not None
+             else _nz(u.get("key") if u is not None else None)),
         enc_idx=u.get("enc_idx") if u is not None else None,
         md5=u.get("md5") if u is not None else None,
         thumb=(th.text or "").strip() or None if th is not None else None,
@@ -331,7 +332,8 @@ def parse_post(tid: str, xml_text: str) -> SnsPost | None:
             is_video_post=(ctype == str(TYPE_VIDEO_POST)),
             media=media,
             comments=_comments_of(root),  # 整个 SnsDataItem：互动在 LocalExtraInfo 下，不在 tlo 内
-            link=SnsLink(cu, _text(tlo, "ContentObject/title")) if _is_external(cu) else None,
+            link=(SnsLink(cu, _text(tlo, "ContentObject/title"))
+                  if cu is not None and _is_external(cu) else None),
             finder=_finder_of(feed) if feed is not None else None,
         )
     except (ET.ParseError, ValueError):

@@ -56,7 +56,8 @@ def moments_export(contact: str | None = None, *, months: list[str] | None = Non
         _resolve_out(out_dir) if out_dir else moments.export_root())
     report = moments.MomentsReport()
     kept: list[moments.SnsPost] = []
-    lo = hi = None
+    lo: int | None = None
+    hi: int | None = None
     for p in moments.iter_posts(ctx.account, chat_filter=author, months=months,
                                 report=report):
         if len(kept) >= cap:
@@ -79,7 +80,7 @@ def moments_export(contact: str | None = None, *, months: list[str] | None = Non
         report.degraded.append(
             f"{report.media_garbage} 条媒体解密后不是已知图片格式（未落盘）")
     report.posts = len(kept)
-    report.window = (lo, hi) if lo is not None else None
+    report.window = (lo, hi) if lo is not None and hi is not None else None
     report.out_dir = str(out_root)
 
     doc = moments_html.render(kept, report)

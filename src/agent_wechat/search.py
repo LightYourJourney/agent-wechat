@@ -78,7 +78,8 @@ def search(query: str, chat_id: str | None = None, limit: int = 20,
     if "\x00" in query:
         # F6：NUL 是**入参**问题（FTS 的 MATCH 会拒它）——按入参拒，不混进「库侧失败」。
         raise SearchInputError("检索串不能包含 NUL 字符")
-    where, args = ["m.account = ?"], [account]
+    where: list[str] = ["m.account = ?"]
+    args: list[object] = [account]
     if chat_id:
         where.append("m.chat_id = ?")
         args.append(chat_id)
@@ -173,7 +174,8 @@ def messages_in_range(chat_id: str, *, account: str,
     此时 `truncated` 仍按 `len(rows) == limit` 算，会是 `False` —— 那是「真的都进来了」而不是错，
     但调用方不该依赖这个巧合。
     """
-    where, args = ["m.account = ?", "m.chat_id = ?"], [account, chat_id]
+    where: list[str] = ["m.account = ?", "m.chat_id = ?"]
+    args: list[object] = [account, chat_id]
     if after_ts is not None:
         where.append("m.ts >= ?")
         args.append(after_ts)

@@ -202,7 +202,7 @@ class _State:
         self.csrf = secrets.token_hex(16)
 
 
-def _json(handler: BaseHTTPRequestHandler, code: int, obj: dict) -> None:
+def _json(handler: BaseHTTPRequestHandler, code: int, obj: object) -> None:
     raw = json.dumps(obj, ensure_ascii=False).encode("utf-8")
     handler.send_response(code)
     handler.send_header("Content-Type", "application/json; charset=utf-8")
@@ -420,7 +420,10 @@ def _route(path: str, qs: dict) -> dict:
         key = _one(qs, "key")
         if not key:
             raise errors.SearchInputError("evidence 需要 key")
-        return usecases.message_context(key, account=acct, before=2, after=2)
+        res = usecases.message_context(key, account=acct, before=2, after=2)
+        # 不给 contact 就不做名字解析，所以不会有 NeedConfirm（也因此不碰微信密钥）
+        assert not isinstance(res, usecases.NeedConfirm)
+        return res
     if path == "/api/derived":
         return derived.list_derived(acct, chat=_one(qs, "chat") or None,
                                     limit=_limit(qs, 100))

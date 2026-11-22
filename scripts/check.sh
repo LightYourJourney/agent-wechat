@@ -3,14 +3,15 @@
 #
 # 用法：scripts/check.sh [--fast]
 #   --fast  只跑快速检查（import 环 + `import mcp` 泄漏），给 pre-commit 用（实测 ~0.07 s）；
-#   不带参数跑全部六步，给 pre-push 用（本机三次连跑 133–156 s，绝大部分是 pytest；
+#   不带参数跑全部七步，给 pre-push 用（本机三次连跑 133–156 s，绝大部分是 pytest；
 #   文件缓存与机器负载会拉大，实测见过 275 s）。
 #   **计时时不要并跑其它 pytest**：SQLite 的 fsync 争用会把墙钟放大到 3 倍以上（实测）。
 #
-# 六步与 spec §7 的对应（②′ 是 spec 之后补的）：
+# 七步与 spec §7 的对应（②′ ②″ 是 spec 之后补的）：
 #   ① 运行时 import 环（scripts/check_import_cycles.py）
 #   ② vulture 候选**集**不超基线（scripts/check_vulture.py；基线 security/gate-baseline.txt）
 #   ②′ ruff 的 pyflakes（F）规则，零告警
+#   ②″ pyright（basic 档），零错误
 #   ③ pytest 全量
 #   ④ security/scan.py --all（占位符/形状扫描）
 #   ⑤ security/scan.py --check-hooks（钩子自检）
@@ -53,6 +54,12 @@ if [ "${1:-}" != "--fast" ]; then
   # ②′ pyflakes 级 lint（规则集见 pyproject 的 [tool.ruff.lint]）：未用导入、遮蔽、未定义名。
   #    只查 src——测试里的「未用」导入多半是共享夹具（pytest 按名注入）。
   step "②′ ruff (F)" "$PY" -m ruff check --no-cache src
+
+  # ②″ pyright basic 档（配置见 pyproject 的 [tool.pyright]），零错误。Node 运行时来自
+  #    `pyright[nodejs]` 的 wheel、pyright 本体随包分发，离线可用；不走 PATH 上的 pyright，
+  #    免得版本随机器漂。`PYRIGHT_PYTHON_IGNORE_WARNINGS=1`：否则包装层每次都去 PyPI 查
+  #    「有没有新版本」——门禁不该有任何外联。
+  step "②″ pyright" env PYRIGHT_PYTHON_IGNORE_WARNINGS=1 "$PY" -m pyright
 
   step "③ pytest" "$PY" -m pytest tests/ -q
   step "④ scan --all" "$PY" security/scan.py --all

@@ -31,7 +31,7 @@ import urllib.error
 from collections.abc import Callable, Sequence
 import urllib.request
 from dataclasses import dataclass, field
-from typing import IO
+from typing import IO, Literal
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
@@ -526,7 +526,7 @@ class MediaReport:
 
 
 FFMPEG_CANDIDATES = ("ffmpeg", "/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/usr/bin/ffmpeg")
-_ffmpeg_cache: str | None | False = False    # False = 未探测
+_ffmpeg_cache: str | None | Literal[False] = False    # False = 未探测
 
 
 def _find_ffmpeg() -> str | None:
@@ -813,7 +813,7 @@ def exported_path(out_root: pathlib.Path, *, chat_md5: str, kind: str, ts: int,
 _REFS_NOTE_NAME = {"video": "视频", "sticker": "贴纸"}
 
 
-def _refs_absence_note(kind: str, con: sqlite3.Connection | None, account: str,
+def _refs_absence_note(kind: str, con: sqlite3.Connection, account: str,
                        chat_ids: Sequence[str], *,
                        empty_hint: str = "", history_clause: str = "") -> str | None:
     """「一条都没导出」的三种成因 + 「索引读不了」的降级文案（EA-089：视频/贴纸共用）。
@@ -1056,7 +1056,7 @@ def _export_videos(st: _ExportState, chat_ids: list[str],
 def _export_videos_from_refs(st: _ExportState, chat_ids: list[str],
                             con: sqlite3.Connection) -> None:
     """refs 驱动：按 media_refs 归属（多会话都成立），产物落 `{chat_md5}/video/{月}/`。"""
-    refs_by_chat: dict[str, list[tuple[int, str]]] = {}
+    refs_by_chat: dict[str, list[tuple[str, int, str]]] = {}
     note: str | None = None
     try:
         refs_by_chat = store.media_refs_by_chat(con, st.account, chat_ids, kind="video")

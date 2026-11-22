@@ -145,7 +145,7 @@ def build(chat_id: str, *, title: str, rows: Sequence[dict], parts: Mapping[str,
             media=media.get(key),
             extra=extras.get(key),
             anchor=anchor_of(key),
-            ref_anchor=anchor_of(target) if target in in_range else None,
+            ref_anchor=anchor_of(target) if target is not None and target in in_range else None,
         ))
     msgs = tuple(out)
     return ChatView(
