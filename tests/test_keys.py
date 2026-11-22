@@ -114,8 +114,8 @@ def test_a_failed_chmod_does_not_leave_a_loosely_permissioned_cache(tmp_path, mo
     文件**在盘上**（本机默认 0644，同机其它用户可读），下一条命令把它当有效缓存读——
     文案说「没写入」，事实是「写了、权限没收敛」。
 
-    现在失败就抹掉它：宁可让用户重跑一次引导，也不留一份权限不明的密钥缓存。
-    删掉 `CACHE_FILE.unlink(...)` 那三行本测试必红。
+    现在 chmod 作用在**临时文件**上、且在 `os.replace` 之前：失败时临时文件被抹掉，
+    正式文件名下从未出现过权限不明的缓存。
     """
     home = tmp_path / "home"
     home.mkdir()
@@ -155,3 +155,28 @@ def test_get_passphrase_reports_a_corrupt_hex_as_bootstrap_repairable(tmp_path, 
         with pytest.raises(errors.KeyNotFound) as ei:
             keys.get_passphrase(ACC)
         assert "损坏" in str(ei.value), bad
+
+
+def test_a_write_killed_midway_leaves_the_existing_cache_intact(tmp_path, monkeypatch):
+    """原地 `write_text` 截断再写：进程在中途被杀就留下半截 JSON，`_load_cache` 把它当成
+    「没有缓存」——**所有账号**的密钥一起丢。写临时文件再 `os.replace` 之后，中断只会
+    留下一个临时文件，正式缓存原样可读。用 KeyboardInterrupt 模拟「`except OSError` 接不住
+    的中断」（SIGKILL 连 `finally` 都不跑，效果只会更差）。
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(paths, "HOME_DIR", home)
+    cache = home / "passphrase.json"
+    monkeypatch.setattr(keys, "CACHE_FILE", cache)
+    cache.write_text(json.dumps({"accounts": {"old": {"passphrase_hex": "aa" * 32}}}))
+
+    real = pathlib.Path.write_text
+
+    def _killed(self, data, *a, **k):
+        real(self, data[: len(data) // 2], *a, **k)
+        raise KeyboardInterrupt
+    monkeypatch.setattr(pathlib.Path, "write_text", _killed)
+    with pytest.raises(KeyboardInterrupt):
+        keys.save_cached_hex("wxid_testacct01", "ab" * 32)
+    monkeypatch.setattr(pathlib.Path, "write_text", real)
+    assert keys.load_cached_hex("old") == "aa" * 32, "既有缓存必须原样可读"

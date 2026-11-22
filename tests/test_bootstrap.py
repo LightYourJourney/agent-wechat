@@ -127,6 +127,35 @@ class _FakeProc:
     def wait(self, timeout=None):
         return 0
 
+    def poll(self):
+        return None                 # 仍在运行（bash 还在等 sleep）
+
+
+def test_terminate_capture_never_pkills_when_bash_was_already_reaped(monkeypatch):
+    """超时路径：`_read_capture` 读到 EOF 时 `poll()` 已回收 bash。此后 `getpgid` 抛
+    ESRCH、macOS 的 `killpg` 报 EPERM（真机实测）——此前两轮都失败，落到按名
+    `pkill -9 -x lldb`，以 root 身份连坐本机所有 lldb。已回收就只对本组补一次 SIGKILL。
+    """
+    import signal as _signal
+
+    class _Reaped(_FakeProc):
+        def poll(self):
+            return 0
+
+    seen = []
+
+    def _killpg(pgid, sig):
+        seen.append((pgid, sig))
+        raise PermissionError(1, "Operation not permitted")
+    monkeypatch.setattr(bootstrap.os, "killpg", _killpg)
+    monkeypatch.setattr(bootstrap.os, "getpgid",
+                        lambda pid: (_ for _ in ()).throw(ProcessLookupError(pid)))
+    monkeypatch.setattr(bootstrap.subprocess, "run",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("不许按名 pkill")))
+
+    bootstrap._terminate_capture(_Reaped(pid=4242))
+    assert seen == [(4242, _signal.SIGKILL)], seen
+
 
 def test_terminate_capture_signals_only_its_own_process_group(monkeypatch):
     """EA-004：收尾此前无条件 `pkill -9 -x lldb`——按**名字**杀，会连坐用户自己的 lldb

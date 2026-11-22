@@ -102,36 +102,21 @@ def save_cached_hex(bare: str, passphrase_hex: str) -> str | None:
     # 代价最高的写入路径**完全不起作用：AGENT_WECHAT_HOME 是相对值时 passphrase.json 照样
     # 落进进程 CWD。ensure_home_dirs 同时负责 mkdir（0700）与备份排除尝试。
     paths.ensure_home_dirs()
+    # **临时文件 + `os.replace`**：此前是 `CACHE_FILE.write_text` 原地截断再写，进程在中途
+    # 被杀（SIGKILL / 断电）就留下半截 JSON——`_load_cache` 把它当「没有缓存」，**所有账号**
+    # 的密钥一起丢，恢复要 sudo 重新引导 + 在微信里重新登录（全项目代价最高的一次恢复）。
+    # 现在任何一步失败，盘上那份既有缓存都原样不动（与 `tasks._persist_locked` 同一写法）；
+    # chmod 在 replace **之前**：落到正式文件名的那一刻权限已是 0600，不存在 0644 的窗口。
+    tmp = CACHE_FILE.with_name(f"{CACHE_FILE.name}.{os.getpid()}.tmp")
     try:
-        CACHE_FILE.write_text(json.dumps(cache, indent=2))
+        tmp.write_text(json.dumps(cache, indent=2))
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, CACHE_FILE)
     except OSError as exc:
-        # R2-A-005（P2）：**写这一步失败**时，盘上通常还是那份**既有有效缓存**
-        # （ENOSPC/EACCES/EINTR 都在落盘前失败）。此前无条件 unlink 会把它删掉——用户
-        # 丢掉一份本来可用的密钥缓存，只为了一次没写成功的更新。只有「已经被写成半截」
-        # （SHORT_WRITE 那类，读回来不是合法 JSON）才抹掉。
-        intact = True
         try:
-            json.loads(CACHE_FILE.read_text())
-        except (OSError, ValueError):
-            intact = False
-        if not intact:
-            try:
-                CACHE_FILE.unlink(missing_ok=True)
-            except OSError:
-                pass                 # 抹不掉也不掩盖原始错误（下面照抛）
-        raise HomeUnavailable(
-            f"无法写入密钥缓存：{CACHE_FILE}",
-            hint=f"{exc}；请检查 AGENT_WECHAT_HOME 指向的位置是否可用") from exc
-    try:
-        os.chmod(CACHE_FILE, 0o600)          # 与 mkdir 的 0700 同属**安全**步骤：失败即不可用
-    except OSError as exc:
-        # F4（T9 复审）：`write_text` 已经成功——「写了但 chmod 失败」不许留下文件：
-        # 那时它带着本机默认权限（0644）躺在盘上，下一条命令会把它当有效缓存读，而文案
-        # 说的是「无法写入」。抹掉它，让用户重跑引导（比留一份权限不明的密钥缓存好）。
-        try:
-            CACHE_FILE.unlink(missing_ok=True)
+            tmp.unlink(missing_ok=True)
         except OSError:
-            pass
+            pass                 # 抹不掉也不掩盖原始错误（下面照抛）
         raise HomeUnavailable(
             f"无法写入密钥缓存：{CACHE_FILE}",
             hint=f"{exc}；请检查 AGENT_WECHAT_HOME 指向的位置是否可用") from exc

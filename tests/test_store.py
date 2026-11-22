@@ -475,3 +475,50 @@ def test_schema_drift_notes_reports_a_missing_trigger(con):
     con.commit()
     notes = store.schema_drift_notes(con)
     assert any(name in n and "不存在" in n for n in notes), notes
+
+
+def test_upsert_heals_degraded_siblings_not_in_this_batch(con):
+    """同一会话里**别的**退化 id 行，在名字解析回来的那一批里一并修正。
+
+    读路径按 `chat_id = ?` 精确筛（search / messages_in_range / message_page /
+    get_context）：退化行若停在 `md5:<hex>`，按联系人检索、会话导出与时间线都会**静默**
+    漏掉它们。前向扫描不会再读到旧行，只靠逐行重扫自愈太慢——所以修正按会话做，
+    不按行做。
+    """
+    from agent_wechat import messages
+
+    real = "wxid_abc123def456"
+    md5v = messages.chat_md5(real)
+    deg = messages.degraded_chat_id(md5v)
+    base = dict(account="acct", chat_md5=md5v, shard="message_0.db", msg_type=1,
+                sender_id=None, sender_name=None, is_self=0, media_hint=None)
+    store.upsert_batch(con, [messages.make_row(chat_id=deg, local_id=1, ts=1,
+                                               content="早先那条", **base)])
+    con.execute("INSERT INTO derived_text(derivation_id, msg_key, account, chat_id, kind,"
+                " text, engine, status, created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                (f"acct|{md5v}|message_0.db|1|ocr", f"acct|{md5v}|message_0.db|1",
+                 "acct", deg, "ocr", "图里的字", "t", "auto", 1))
+    con.commit()
+    # 下一轮：名字回来了，但这一批只含**新**消息
+    store.upsert_batch(con, [messages.make_row(chat_id=real, local_id=2, ts=2,
+                                               content="后来那条", **base)])
+    ids = {r[0] for r in con.execute("SELECT chat_id FROM messages")}
+    assert ids == {real}, ids
+    assert con.execute("SELECT chat_id FROM derived_text").fetchone()[0] == real
+
+
+def test_upsert_heal_never_touches_other_accounts(con):
+    """修正按 `(account, 退化 id)` 定位：另一个账号的同形退化行不许被改名。"""
+    from agent_wechat import messages
+
+    real = "wxid_abc123def456"
+    md5v = messages.chat_md5(real)
+    deg = messages.degraded_chat_id(md5v)
+    base = dict(chat_md5=md5v, shard="message_0.db", msg_type=1, sender_id=None,
+                sender_name=None, is_self=0, media_hint=None)
+    store.upsert_batch(con, [messages.make_row(account="other", chat_id=deg, local_id=1,
+                                               ts=1, content="x", **base)])
+    store.upsert_batch(con, [messages.make_row(account="acct", chat_id=real, local_id=1,
+                                               ts=1, content="y", **base)])
+    got = con.execute("SELECT chat_id FROM messages WHERE account='other'").fetchone()[0]
+    assert got == deg

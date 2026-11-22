@@ -613,6 +613,23 @@ def _filter_excluded(con: sqlite3.Connection, keys: Sequence[str]) -> set[str]:
     return out
 
 
+def _heal_degraded_chat_ids(con: sqlite3.Connection, rows: list[messages.MessageRow]) -> None:
+    """本批里解析出真名的会话：把它**其余**仍停在 `md5:<hex>` 的行一并改成真名。
+
+    读路径按 `chat_id = ?` 精确筛（检索 / 会话导出 / 时间线 / 上下文），停在退化 id 的
+    行对它们不可见。upsert 的 DO UPDATE 只修**本批重扫到的**行，而前向扫描不会再读旧行
+    ——所以按会话修，不按行修。退化 id 由 md5 唯一决定，等值匹配走 `idx_msg_chat_ts`；
+    方向只有「退化 → 真名」，与 `_INSERT_SQL` 的「只许修好、不许写坏」同一立场。
+    `derived_text` 的 `chat_id` 抄自 messages，同批修正。
+    """
+    pairs = {(r["chat_id"], r["account"], messages.degraded_chat_id(r["chat_md5"]))
+             for r in rows if not r["chat_id"].startswith(messages.MD5_PREFIX)}
+    if not pairs:
+        return
+    con.executemany("UPDATE messages SET chat_id=? WHERE account=? AND chat_id=?", pairs)
+    con.executemany("UPDATE derived_text SET chat_id=? WHERE account=? AND chat_id=?", pairs)
+
+
 def upsert_batch(con: sqlite3.Connection, rows: list[messages.MessageRow]) -> int:
     """批量幂等写入。rows 来自 reader 的解码输出（messages.make_row 构造）。
     返回**被排除而跳过的**行数（`0` = 全写入）；排除清单里的 `msg_key` 一条都不落库。
@@ -632,6 +649,7 @@ def upsert_batch(con: sqlite3.Connection, rows: list[messages.MessageRow]) -> in
     keep = [r for r in rows if r["msg_key"] not in skip]
     if keep:
         con.executemany(_INSERT_SQL, [{**r, "exported_at": now} for r in keep])
+        _heal_degraded_chat_ids(con, keep)
     wm: dict[tuple[str, str, str], int] = {}
     for r in rows:  # 水位线：批内按会话聚合后一条语句推进（单调 max）
         k = (r["account"], r["shard"], r["chat_md5"])
