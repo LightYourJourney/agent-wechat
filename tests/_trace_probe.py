@@ -21,15 +21,24 @@ _names = {_mod.__file__, os.path.realpath(_mod.__file__)}
 # **包也要收**：`usecases` 2026-11-21 拆成六个子模块后，代码行落在
 # `usecases/chat.py` 之类的地方，`__init__` 里只剩重导出——只比 `__file__` 的探针
 # 会永远报 MISS（不是「用例没覆盖」，是探针看得太窄）。
-_pkg_dir = (os.path.realpath(_mod.__path__[0])
-            if hasattr(_mod, "__path__") else None)
+_pkg_dirs = ([os.path.abspath(_mod.__path__[0]),
+              os.path.realpath(_mod.__path__[0])]
+             if hasattr(_mod, "__path__") else [])
+_pkg_prefixes = tuple(d + os.sep for d in _pkg_dirs)
 hits: set[int] = set()
 
 
 def _in_target(filename: str) -> bool:
+    """这一帧的源码文件是不是目标模块（或其包内文件）。
+
+    **纯字符串前缀判断，不做 `realpath`**：这个函数由 `settrace` 在**每一行**上调用，
+    `os.path.realpath` 一次约 16 µs（实测），比集合判断慢 600 多倍——探针会把被测用例
+    拖慢到失去意义。`co_filename` 已经是 import 时的路径，两种拼写（`__path__` 原样与
+    realpath 展开）各比一次即可，与 `_names` 的两种写法同一个道理。
+    """
     if filename in _names:
         return True
-    return bool(_pkg_dir) and os.path.realpath(filename).startswith(_pkg_dir + os.sep)
+    return filename.startswith(_pkg_prefixes) if _pkg_prefixes else False
 
 
 def _tracer(frame: types.FrameType, event: str, _arg: object) -> object:

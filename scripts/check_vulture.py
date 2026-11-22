@@ -20,6 +20,12 @@
 钉住。所以按 ①（`check_import_cycles.py`）的规格做成一步：判据是函数，`tests/test_vulture_gate.py`
 直接调它，真路径用例真的去跑 vulture。
 
+**已知盲区（2026-11-21 实测）**：`unused import` 这一类在**整树**调用下会被大量漏报——
+vulture 按名字在全部输入里解析引用，`usecases/chat.py` 里没人用的 `vector` 只因别的文件
+用了 `vector` 就被当成「有引用」。同一文件单独扫能报出来（实测：整树 0 条、单文件 4 条）。
+**增加一层单文件扫描**能补上，但那会让基线从 36 条涨到 40+ 条，属一次显式的口径变更，
+本轮没做；在那之前，`unused import` 靠 /simplify 与人工审读保证。
+
 **调用口径**：`<当前解释器> -m vulture src/ --min-confidence 60`。用 `sys.executable` 而不是
 PATH 上的 `vulture` 或 `uvx`：门禁由哪个解释器跑，就用哪个解释器里的那把尺——不依赖 PATH
 （钩子里的 PATH 与登录 shell 不同）、不依赖网络、不依赖 uv 缓存。vulture 因此是 dev 依赖

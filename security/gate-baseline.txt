@@ -16,7 +16,7 @@
 #
 # 阈值 60 是审计期机械层（M2）用的同一档——换阈值等于换口径，基线要重出。
 #
-# ---- 条目分四类，删之前先看它属于哪一类 ----
+# ---- 条目分五类（① ② ③ ③' ④），删之前先看它属于哪一类 ----
 #
 # ① **带装饰器的注册函数**（`mcp_server.py` 的 11 个 MCP 工具）：由 `@server.tool()` 注册，
 #    运行时框架按名字调用，静态分析看不见。**不能删**；也**不能靠 `# noqa: vulture` 消掉**
@@ -27,15 +27,18 @@
 #    `http.server`、`sqlite3` 与我们自己的别名赋值在运行期按名字取，静态分析同样看不见。
 #    同样不能 noqa。
 # ③ **有意保留的旧 API**：`paths.key_info_dat` / `key_info_db`（磁盘解密路线已结项，留路径
-#    形状作存档）、`store.get_watermark`（CONTEXT.md 记「零生产调用，保留」）。删之前先看
-#    CONTEXT/docs 怎么说的。
+#    形状作存档）、`store.get_watermark`（CONTEXT.md 记「零生产调用，保留」）、
+#    `paths.in_wechat_container`（`container_verdict` 的只读薄壳：生产侧走的是
+#    `container_verdict`/`refuse_container_out`，但 `tests/test_container_out_gate.py`
+#    与 `tests/test_properties.py` 直接测它——它是那组判据的**可测面**，不是死代码）。
+#    删之前先看 CONTEXT/docs 怎么说的。
 # ③' **经包查名的函数**：`usecases/media.py::_voice_keys_for`——拆包后它的调用点是
 #    `pkg_call("_voice_keys_for", …)`（字符串查表），vulture 看不见引用。它是活的。
 # ④ **结构体上只被解析不参与逻辑的字段**（`moments.py` 的 `enc_idx` / `live_key` /
 #    `is_rich` / `duration` / `post_id` / `is_video_post`、`appmsg.py` 的 `from_usr`）：
 #    它们是对外 XML 的**完整映射**，删掉会让「微信给了什么」这件事少一块可查证据。
 #
-# **新增候选不在上面四类里 = 真死代码，必须删或写清理由**（门禁按候选集比较，
+# **新增候选不在上面五类里 = 真死代码，必须删或写清理由**（门禁按候选集比较，
 # 新增即红）。
 src/agent_wechat/appmsg.py:: unused variable 'from_usr' (60% confidence)
 src/agent_wechat/cli.py:: unused attribute 'text_factory' (60% confidence)

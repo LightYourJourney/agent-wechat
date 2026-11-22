@@ -231,6 +231,10 @@ def run_sweep(module: str, mapping: dict, copy_root: pathlib.Path, timeout: floa
     """
     import subprocess
 
+    # **只支持单文件模块**：`usecases` 2026-11-21 拆成包后，`--run usecases` 会在这里
+    # FileNotFoundError。按文件变异需要位点携带文件名（`iter_sites` 现在只回位点、不回
+    # 它落在哪个文件），是另一件事；`--run` 不在门禁路径上（`scripts/check.sh` 只跑
+    # `--census`），所以先如实标注，不做半套支持。
     src = copy_root / "src" / "agent_wechat" / f"{module}.py"
     original = src.read_text(encoding="utf-8")
     tests = mapping[module]

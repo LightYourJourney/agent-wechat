@@ -64,7 +64,7 @@ def test_recent_clamps_large_limit_to_500(captured):
 
 
 def test_search_clamps_non_positive_limit(env, monkeypatch):
-    """`env` 不只是给数据：`usecases._refresh_roster` 会开 `store.open()`，缺了它就按
+    """`env` 不只是给数据：`usecases._core._refresh_roster` 会开 `store.open()`，缺了它就按
     import 期绑定的 `store.DB_PATH` 打开**真实** index.db（新加的 DDL 会写进去）。"""
     seen: dict = {}
 

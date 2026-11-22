@@ -1,14 +1,9 @@
 """检索与长任务用例：关键词/统一检索、上下文、向量构建与任务查询。"""
 from __future__ import annotations
 
-import sqlite3
-from dataclasses import dataclass
-
-from .. import errors, keys, messages, retrieval, search, store, tasks, vector
-from ._core import (DEGRADE_EFFECT, LIMIT_SEMANTIC, ChatContext, Degradation,
-                    NeedConfirm, _display_or_id, _refresh_roster,
-                    collect_degradations, pkg_clamp_limit, pkg_context,
-                    to_accounts)
+from .. import errors, retrieval, search, store, tasks, vector
+from ._core import (DEGRADE_EFFECT, LIMIT_SEMANTIC, NeedConfirm, _display_or_id,
+                    _refresh_roster, pkg_clamp_limit, pkg_context, to_accounts)
 
 def search_history(query: str, contact: str | None = None, limit: int = 20,
                    account: str | None = None) -> dict | NeedConfirm:

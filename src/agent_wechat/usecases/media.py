@@ -16,8 +16,6 @@ from ._core import (MEDIA_KINDS, MONTH_RE, ChatContext, Degradation,
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from .. import moments
-
 @dataclass(frozen=True)
 class MediaExportResult:
     """media_export 的成功返回（CLI 与 MCP 共用，T7 消费）。out_dir 取自 report——

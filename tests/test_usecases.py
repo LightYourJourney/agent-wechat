@@ -725,7 +725,8 @@ def test_voice_keys_for_is_the_documented_seam(monkeypatch):
     """`_voice_keys_for` 是**测试接缝**：写成函数而不是模块级别名，替换它才能生效。
     删掉 `return` 会让它变成 None（= 「读不到」），调用方随之降级。"""
     sentinel = frozenset({("chat-md5", 1)})
-    monkeypatch.setattr(usecases.media, "voice_body_keys", lambda a: sentinel)
+    from agent_wechat import media as media_core
+    monkeypatch.setattr(media_core, "voice_body_keys", lambda a: sentinel)
     assert usecases._voice_keys_for("acct") is sentinel
 
 

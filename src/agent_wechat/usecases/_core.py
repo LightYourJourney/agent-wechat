@@ -1,20 +1,17 @@
 """共享底座：参数归一化、结果类型、`ChatContext` 与降级收集。
 
-`usecases` 拆包后这里是唯一被其它子模块依赖的一层——它只依赖 core 模块，
-不依赖任何兄弟子模块，所以不会成环。"""
+`usecases` 拆包后这里是**依赖图的根**：它只依赖 core 模块，不依赖任何兄弟子模块。
+兄弟之间还有一条向下的边（`chat` / `memory` / `moments` 用 `media` 里的解码与输出路径
+助手），方向始终朝下，所以不会成环——`scripts/check_import_cycles.py` 每次门禁都验它。
+"""
 from __future__ import annotations
 
-import pathlib
 import re
 import sqlite3
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
 
 from .. import account as acc_mod
-from .. import errors, messages, reader, store
-
-if TYPE_CHECKING:
-    from collections.abc import Sequence
+from .. import errors, reader, store
 
 # ---------- 参数归一化 ----------
 
@@ -165,7 +162,11 @@ class ChatContext:
 
         没构造过 reader 说明这次调用没碰微信的库（检索走的是本地索引），没有可报的。
         """
-        return collect_degradations(self._reader) if self._reader is not None else ()
+        if self._reader is None:
+            return ()
+        # **经包查名**：测试与将来的替换打在 `usecases.collect_degradations` 上，而本模块里
+        # 直接用局部名拿到的是 import 时那个函数对象——拆包前两者是同一个名字，拆包后不是。
+        return pkg_call("collect_degradations", self._reader)
 
     def degradations(self) -> list[dict]:
         """同 `drift`，信封形状（search/semantic 的出口，Ruling 13）。"""

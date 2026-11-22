@@ -993,3 +993,25 @@ def test_get_message_parts_carries_location_and_card_payloads(monkeypatch):
     assert "antispamticket" not in first
     assert set(dict(res["extras"][1]["fields"])) == {"username", "nickname"}
     assert msgextra.kind_name(48) == "位置"      # 与产物侧同一处措辞
+
+
+def test_patching_collect_degradations_at_package_level_reaches_chat_context():
+    """包级替换必须能影响 `ChatContext.drift()`。
+
+    拆包（3549934）后 `_core` 里直接用局部名调 `collect_degradations`，而替换打在
+    `usecases.collect_degradations` 上——那次替换对整个 `ctx.degradations()` 无效，
+    而 `search_history` / `search_messages` / `semantic_search` 的降级都从它出来。
+    上面那条 envelope 用例走真实漂移库、**不经过 patch**，所以抓不到这个失效。
+    """
+    from agent_wechat import usecases
+    real = usecases.collect_degradations
+    calls: list[int] = []
+    usecases.collect_degradations = lambda r: (calls.append(1), ())[1]
+    try:
+        ctx = usecases.ChatContext.__new__(usecases.ChatContext)
+        ctx._reader = object()          # 非 None 即会走到 collect_degradations
+        assert ctx.drift() == ()
+        assert ctx.degradations() == []
+        assert len(calls) == 2, f"包级替换没被调用到：{calls}"
+    finally:
+        usecases.collect_degradations = real

@@ -314,7 +314,7 @@ def test_chat_export_passes_limit_and_ctx_to_message_media(con, chat_env, monkey
 
 
 def test_chat_export_counts_unparsed_and_rejected_separately(con, chat_env):
-    """解码收敛到 `usecases._decode_part`（`message_parts` 用的是**同一个**）之后，
+    """解码收敛到 `usecases/media._decode_part`（`message_parts` 用的是**同一个**）之后，
     chat_export 的口径**一字不变**：解压失败与 XML 解不开合计 `unparsed`，命中危险载荷守卫
     计 `rejected`，两者分开（spec §5）。
 

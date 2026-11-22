@@ -78,4 +78,5 @@ MCP 与 CLI 两个入口共享的一层：参数归一化、账号/会话解析�
 `get_task_status` 仍答得上来）。`rows` 有**两个写入方**：运行中 `tasks.update(rows=)`
 写进度（本轮已处理行数，单调递增），跑完由 runner 返回值覆盖为终值。载入时把遗留的
 `running` 收割为 `failed`（无 `interrupted` 枚举值）。**任务登记归 usecases**，core 模块
-只提供管道（`export.run_export` / `vector.build_index`）。出处：`tasks.py`、`usecases/memory.py`。
+只提供管道（`export.run_export` / `vector.build_index`）。出处：`tasks.py`、
+`usecases/chat.py`（export 任务）、`usecases/retrieve.py`（vector 任务）。

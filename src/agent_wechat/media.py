@@ -603,7 +603,7 @@ def export_root() -> pathlib.Path:
     而 import 时绑定值的常量会让那条保护静默失效，后果是测试去删真实数据。
     同款先例：`store.db_paths()`、`decrypt.tmp_dir()`。
 
-    存在的第二个理由：路径的唯一来源必须在拥有它的模块里。`purge.py` 与 `usecases.py`
+    存在的第二个理由：路径的唯一来源必须在拥有它的模块里。`purge.py` 与用例层
     各拼一遍 `HOME_DIR / "media"` 就是第二份来源——拥有者演进时它不会跟着演进。
     """
     return paths.HOME_DIR / "media"
@@ -840,10 +840,6 @@ def _refs_absence_note(kind: str, con: sqlite3.Connection | None, account: str,
                 f"（{name}按 media_refs 索引归属）")
 
 
-# `export_media` 内的「产物已存在吗」判据：(chat_md5, kind, 月份, 基准名) → bool。
-AlreadyFn = Callable[[str, str, str, str], bool]
-
-
 def _refuse_purged(account: str, chat_ids: list[str]) -> None:
     """被 `purge --chat` 立过碑的会话拒绝重导媒体（SECURITY「不会因重导复活」）。
 
@@ -925,11 +921,9 @@ def export_media(account: str, chat_ids: list[str], *, kinds: list[str],
         if _PILK is None:
             report.degraded.append(
                 "pilk 不可用：语音导出为原始 .slk（`uv add pilk` 后可转 WAV）")
-        _export_voices(account, chat_ids, out_root, report, st.want, st.full, st.bump,
-                       st.already)
+        _export_voices(st, chat_ids)
     if "sticker" in kinds:
-        _export_stickers(account, chat_ids, out_root, report, st.want, st.full, st.bump,
-                         st.already, con, with_cdn=with_cdn)
+        _export_stickers(st, chat_ids, con=con, with_cdn=with_cdn)
     return report
 
 
@@ -1054,6 +1048,8 @@ def _export_videos(st: _ExportState, chat_ids: list[str],
     if con is not None:
         _export_videos_from_refs(st, chat_ids, con)
     else:
+        # `con is None` 这一道不可省：refs 路径已经处理过的调用不该再落进账号级枚举
+        # （否则同一批文件会被写两遍、计数翻倍）。
         _export_videos_by_account_scan(st, chat_ids, can_place=len(chat_ids) == 1)
 
 
@@ -1124,7 +1120,6 @@ def _export_videos_from_refs(st: _ExportState, chat_ids: list[str],
             else:
                 st.report.video.ok += 1
             st.bump()
-# 两处的 `con is None` 不可省：refs 路径已经处理过的调用不该再落进账号级枚举。
 
 
 def _export_videos_by_account_scan(st: _ExportState, chat_ids: list[str], *,
@@ -1414,11 +1409,9 @@ def _fetch_cdn_bytes(url: str, expect_md5: str, *, timeout: float = 15.0
     return (body, "ok") if hashlib.md5(body).hexdigest() == expect_md5 else (None, "failed")
 
 
-def _export_stickers(account: str, chat_ids: list[str], out_root: pathlib.Path,
-                     report: MediaReport, want: set[str] | None,
-                     is_full: Callable[[], bool], bump: Callable[[], None],
-                     already: AlreadyFn, con: sqlite3.Connection | None,
-                     *, with_cdn: bool = False) -> None:
+def _export_stickers(st: _ExportState, chat_ids: list[str],
+                     con: sqlite3.Connection | None, *,
+                     with_cdn: bool = False) -> None:
     """贴纸：按 `media_refs` 归属 → **从 CDN 取明文图** → 落盘。
 
     **字节来源只有 CDN**：本机那份（`business/emoticon/`）是加密的，两轮 spike 均未破
@@ -1435,23 +1428,23 @@ def _export_stickers(account: str, chat_ids: list[str], out_root: pathlib.Path,
     → ③ 逐条取件 + 落盘。
     """
     if con is None:
-        report.degraded.append("贴纸导出需要索引库（归属按 media_refs 判定）：本次未导出任何贴纸")
+        st.report.degraded.append("贴纸导出需要索引库（归属按 media_refs 判定）：本次未导出任何贴纸")
         return
     refs: dict[str, list[tuple[str, int, str]]] = {}
     note: str | None = None
     try:
-        refs = store.media_refs_by_chat(con, account, chat_ids, kind="sticker")
+        refs = store.media_refs_by_chat(con, st.account, chat_ids, kind="sticker")
         if not refs:
             # 与视频同款三分解（spec §4.7）：计数值走**不 join messages** 的 count_media_refs，
             # 否则「refs 在但消息没进索引」会被混成「一条都没有」，把用户导向错误的修法。
             note = _refs_absence_note(
-                "sticker", con, account, chat_ids,
+                "sticker", con, st.account, chat_ids,
                 history_clause="（它同时写入消息与媒体引用）。")
     except (sqlite3.Error, OSError) as exc:
         note = (f"贴纸索引读不了（{errors.redact(str(exc))}），本次未导出任何贴纸"
                 "（贴纸按 media_refs 索引归属）")
     if note:
-        report.degraded.append(note)
+        st.report.degraded.append(note)
         return
 
     # ── 第一趟：按 `(cm, 月, md5)` **去重排队**，并保留该 md5 的**全部候选消息** ──
@@ -1481,17 +1474,17 @@ def _export_stickers(account: str, chat_ids: list[str], out_root: pathlib.Path,
         cm = messages.md5_of(chat)
         for msg_key, ts, file_key in refs.get(chat, ()):
             mon = month_of(ts)               # 与 exported_path 同源，见下方注释
-            if want is not None and mon not in want:
+            if st.want is not None and mon not in st.want:
                 continue
-            if already(cm, "sticker", mon, file_key):
-                report.sticker.skipped += 1
+            if st.already(cm, "sticker", mon, file_key):
+                st.report.sticker.skipped += 1
                 continue
             if msg_key.count("|") != 3:
-                report.sticker.missing += 1  # EA-022：形状不对 = 定位不了那一行（一次请求都不会发）
+                st.report.sticker.missing += 1  # EA-022：形状不对 = 定位不了那一行（一次请求都不会发）
                 continue
             key = (cm, mon, file_key)
             if key in cands:
-                report.sticker.skipped += 1  # 本轮已排过：同一个贴纸，落的是同一个文件
+                st.report.sticker.skipped += 1  # 本轮已排过：同一个贴纸，落的是同一个文件
                 continue
             cands[key] = all_keys[(cm, file_key)]
             order.append(key)
@@ -1503,7 +1496,7 @@ def _export_stickers(account: str, chat_ids: list[str], out_root: pathlib.Path,
         for k in keys:
             loc = _loc_of_msg_key(k)             # EA-085：形状校验收在一个可测的纯函数里
             if loc is None:
-                report.sticker.missing += 1      # EA-022：与上面那条「msg_key 形状不对」同支归口
+                st.report.sticker.missing += 1      # EA-022：与上面那条「msg_key 形状不对」同支归口
                 continue
             out.append(loc)
         return out
@@ -1516,47 +1509,47 @@ def _export_stickers(account: str, chat_ids: list[str], out_root: pathlib.Path,
         # 这里**不置 truncated / remaining**——不开开关时重跑同样导不出，
         # 把它们算进 remaining 会说「重跑即可继续」，那是假话。
         local_encrypted = sum(1 for key in order
-                              if resolve_sticker(account, key[2]) is not None)
-        report.sticker.missing += len(order)
-        report.degraded.append(
+                              if resolve_sticker(st.account, key[2]) is not None)
+        st.report.sticker.missing += len(order)
+        st.report.degraded.append(
             f"{len(order)} 个贴纸未导出：微信把贴纸存成加密格式、解密方案未破，"
             "本机那份是缩略档且取不出明文；加 `--with-cdn` 才从 CDN 取件（默认不联网）"
             + (f"（其中 {local_encrypted} 个本机有加密副本）" if local_encrypted else ""))
         return
 
     # ── 第二趟：按分片**一次性**回源（候选消息一并交出去） ──
-    urls, shard_note = sticker_cdn_urls(account, all_locs)
+    urls, shard_note = sticker_cdn_urls(st.account, all_locs)
     if shard_note:
-        report.degraded.append(shard_note)       # EA-021：分片级失败必须公告（一次导出一条）
+        st.report.degraded.append(shard_note)       # EA-021：分片级失败必须公告（一次导出一条）
 
 
     # ── 第三趟：每个不同贴纸取一次件 + 落盘 ──
     wxgf_warned = False          # once-flag：一次导出只说一次（与图片分支同款）
     for cm, mon, md5 in order:
-        if is_full():
-            report.truncated = True
-            report.sticker.remaining += 1
+        if st.full():
+            st.report.truncated = True
+            st.report.sticker.remaining += 1
             continue
         got = next((urls[loc] for loc in _locs(cands[(cm, mon, md5)]) if loc in urls), None)
         if got is None:
             # EA-022：并进 `missing` 而不是 `failed`——**一次请求都没发**。两种成因（行不在
             # 分片里 / XML 无凭据）与「联网了但没取到」的用户动作完全不同，后者重试可能有用，
             # 前者重试无用、要查数据形态。文档口径（TOOLS §9）已同批改为与本行一致。
-            report.sticker.missing += 1
+            st.report.sticker.missing += 1
             continue
         data, why = _fetch_cdn_bytes(got[0], got[1])
         if data is None:
             if why == "refused":
                 # 白名单外 / URL 畸形：**一次请求都没发**，重试永远无效。归 `missing`
                 # （EA-022 那一族「不会去取」），而不是 `failed`（「联网了但没取到」）。
-                report.sticker.missing += 1
+                st.report.sticker.missing += 1
             else:
-                report.sticker.failed += 1   # 联网了但没取到，**如实计失败**
+                st.report.sticker.failed += 1   # 联网了但没取到，**如实计失败**
             continue
         ext = detect_ext(data)
         if ext is None:
             # 认不出格式就当失败：乱码落盘比失败更坏（会被 already() 的跳过判定永久固化）。
-            report.sticker.failed += 1
+            st.report.sticker.failed += 1
             continue
         # **wxgf 是容器、不是图片，直接落盘用户打不开**——与图片分支同一手法：
         # 有 ffmpeg 就转 JPEG（直写终路径，不留半成品），没有/转码失败则退回存原容器**并公告**。
@@ -1564,22 +1557,19 @@ def _export_stickers(account: str, chat_ids: list[str], out_root: pathlib.Path,
         #   一旦遇到，产物会是 `file` 认不出、用户打不开的 .wxgf 而不报任何异常。）
         converted = False
         if ext == "wxgf":
-            converted = _wxgf_to_jpeg(data, _dest(out_root, cm, "sticker", mon, md5, "jpg"))
+            converted = _wxgf_to_jpeg(data, _dest(st.out_root, cm, "sticker", mon, md5, "jpg"))
         if not converted:
             if ext == "wxgf" and not wxgf_warned:
-                report.degraded.append("wxgf 贴纸未转 JPEG（无 ffmpeg 或转码失败），存原容器")
+                st.report.degraded.append("wxgf 贴纸未转 JPEG（无 ffmpeg 或转码失败），存原容器")
                 wxgf_warned = True
-            if save_artifact(out_root, cm, "sticker", mon, md5, ext, data) is None:
-                report.sticker.failed += 1
+            if save_artifact(st.out_root, cm, "sticker", mon, md5, ext, data) is None:
+                st.report.sticker.failed += 1
                 continue
-        report.sticker.ok += 1
-        bump()
+        st.report.sticker.ok += 1
+        st.bump()
 
 
-def _export_voices(account: str, chat_ids: list[str], out_root: pathlib.Path,
-                   report: MediaReport, want: set[str] | None,
-                   is_full: Callable[[], bool], bump: Callable[[], None],
-                   already: AlreadyFn) -> None:
+def _export_voices(st: _ExportState, chat_ids: list[str]) -> None:
     """语音：Name2Id rowid → VoiceInfo(chat_name_id, create_time) → pilk 解码 24kHz WAV。
     pilk 缺失 → 原始 .slk（微信原始形态，`\\x02` 前缀保留）。单库打不开则跳过该分片、
     在 report.degraded 里公告一次，不中断。
@@ -1590,15 +1580,14 @@ def _export_voices(account: str, chat_ids: list[str], out_root: pathlib.Path,
     """
     decrypt.ensure_home_dirs()           # 中间明文只落 HOME/tmp（0700、已排除 Time Machine）
     warned = False                       # 一次导出只说一次（wxgf_warned 同款 once-flag）
-    for db in _voice_db_paths(account):
+    for db in _voice_db_paths(st.account):
         try:
-            passphrase = keys_mod.get_passphrase(account)
+            passphrase = keys_mod.get_passphrase(st.account)
             with decrypt.decrypted(db, passphrase) as plain:
                 con = decrypt.open_plain(plain)
                 con.text_factory = bytes
                 try:
-                    _export_voices_from(con, chat_ids, out_root, report,
-                                        want, is_full, bump, already)
+                    _export_voices_from(st, con, chat_ids)
                 finally:
                     con.close()
         except (errors.AgentWeChatError, sqlite3.Error, OSError) as exc:
@@ -1610,15 +1599,13 @@ def _export_voices(account: str, chat_ids: list[str], out_root: pathlib.Path,
             # 文案经 redact：DecryptError 可能带回 sqlcipher 回显的 `PRAGMA key` 原文。
             if not warned:
                 warned = True
-                report.degraded.append(
+                st.report.degraded.append(
                     f"语音分片打不开（首个原因：{errors.redact(str(exc))}），该分片的语音未导出")
             continue
 
 
-def _export_voices_from(con: sqlite3.Connection, chat_ids: list[str],
-                        out_root: pathlib.Path, report: MediaReport, want: set[str] | None,
-                        is_full: Callable[[], bool], bump: Callable[[], None],
-                        already: AlreadyFn) -> None:
+def _export_voices_from(st: _ExportState, con: sqlite3.Connection,
+                        chat_ids: list[str]) -> None:
     name2id = {u.decode("utf-8", "replace") if isinstance(u, bytes) else u: rid
                for rid, u in con.execute("SELECT rowid, user_name FROM Name2Id")}
     for chat in chat_ids:
@@ -1630,18 +1617,18 @@ def _export_voices_from(con: sqlite3.Connection, chat_ids: list[str],
                 "SELECT create_time, local_id, voice_data FROM VoiceInfo "
                 "WHERE chat_name_id=? ORDER BY create_time, local_id", (rid,)):
             mon = month_of(ts)
-            if want is not None and mon not in want:
+            if st.want is not None and mon not in st.want:
                 continue                     # 月份外的条目本来就不导出，不算「因上限收手」
-            if already(cm, "voice", mon, f"{ts}_{lid}"):
-                report.voice.skipped += 1
+            if st.already(cm, "voice", mon, f"{ts}_{lid}"):
+                st.report.voice.skipped += 1
                 continue
             # 上限检查排在这两条之后：只有**本会导出**的条目被上限挡下，truncated 才成立。
-            if is_full():
-                report.truncated = True
-                report.voice.remaining += 1
+            if st.full():
+                st.report.truncated = True
+                st.report.voice.remaining += 1
                 continue
             if blob is None:
-                report.voice.failed += 1
+                st.report.voice.failed += 1
                 continue
             wav_bytes = None
             if _PILK is not None:
@@ -1662,13 +1649,13 @@ def _export_voices_from(con: sqlite3.Connection, chat_ids: list[str],
                 except Exception:
                     wav_bytes = None  # 解码失败 → 落到 .slk 回退
             if wav_bytes is not None:
-                if save_artifact(out_root, cm, "voice", mon, f"{ts}_{lid}", "wav", wav_bytes) is None:
-                    report.voice.failed += 1         # 落盘失败（Ruling 20）
+                if save_artifact(st.out_root, cm, "voice", mon, f"{ts}_{lid}", "wav", wav_bytes) is None:
+                    st.report.voice.failed += 1         # 落盘失败（Ruling 20）
                     continue
-                report.voice.ok += 1
+                st.report.voice.ok += 1
             else:
-                if save_artifact(out_root, cm, "voice", mon, f"{ts}_{lid}", "slk", blob) is None:
-                    report.voice.failed += 1
+                if save_artifact(st.out_root, cm, "voice", mon, f"{ts}_{lid}", "slk", blob) is None:
+                    st.report.voice.failed += 1
                     continue
-                report.voice.raw_only += 1
-            bump()
+                st.report.voice.raw_only += 1
+            st.bump()

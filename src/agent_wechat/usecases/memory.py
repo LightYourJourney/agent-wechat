@@ -6,8 +6,8 @@ import zlib
 
 from typing import TYPE_CHECKING
 
-from .. import appmsg, errors, exclusions, export, media, messages, store
-from ._core import ChatContext, NeedConfirm, pkg_context
+from .. import appmsg, errors, exclusions, messages, store
+from ._core import NeedConfirm, pkg_context
 
 if TYPE_CHECKING:
     from collections.abc import Callable

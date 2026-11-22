@@ -1,21 +1,18 @@
 """会话类用例：账号状态、联系人、时间线、导出、会话导出与总目录页。"""
 from __future__ import annotations
 
-import re
 import sqlite3
-import zlib
 from collections.abc import Sequence
 from dataclasses import dataclass
 
 from .. import (appmsg, chatview, errors, exclusions, export, keys, media, messages,
-                migrations, msgextra, paths, reader, search, store, tasks, vector)
+                migrations, msgextra, paths, reader, search, store, tasks)
 from .. import account as acc_mod
 from .. import chat_index as index_html
-from ._core import (ChatContext, Degradation, ExportPlan, NeedConfirm, RecentMessages,
-                    _display_or_id, clamp_limit, collect_degradations)
+from ._core import (LIMIT_RECENT, MONTH_RE, Degradation, ExportPlan,
+                    NeedConfirm, RecentMessages, _display_or_id, pkg_call,
+                    pkg_clamp_limit, pkg_context)
 from .media import _decode_extra, _decode_part, _resolve_out
-from ._core import (LIMIT_RECENT, MONTH_RE, pkg_call, pkg_clamp_limit,
-                    pkg_context)
 
 # ---------- 工具用例（每个工具一个函数） ----------
 

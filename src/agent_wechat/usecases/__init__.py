@@ -14,7 +14,7 @@
 
 | 子模块 | 内容 |
 |---|---|
-| `_core` | 参数归一化、结果类型、`ChatContext`、降级收集——唯一被其它子模块依赖的一层 |
+| `_core` | 参数归一化、结果类型、`ChatContext`、降级收集——依赖图的根，不依赖兄弟子模块 |
 | `chat` | 账号状态、联系人、时间线、导出、会话导出与总目录页 |
 | `media` | 媒体导出、按消息查媒体状态、appmsg 部件解码 |
 | `memory` | 按会话销毁目标、回填（媒体引用 / 部件 / 位置名片） |
@@ -45,13 +45,17 @@ from .retrieve import (LIMIT_RETRIEVAL, build_vector_index, index_ready, message
                        task_status)
 
 # 测试会直接调这几个私有判据（它们是真身的唯一一份，测试要钉住同一份实现）。
-# 不放进 `__all__`：对外仍算私有，只是让 `usecases._xxx` 这条路继续可用。
-from .chat import _decode_part  # noqa: E402
+# 对外仍算私有，只是让 `usecases._xxx` 这条路继续可用。
+# （`_decode_part` / `_refresh_roster` 不在此列：只有 docstring 提到它们，没有调用点。）
 from .media import _decode_extra, _state_of, _voice_keys_for  # noqa: E402
 from .moments import _sniff_ext  # noqa: E402
-from ._core import _refresh_roster  # noqa: E402
 
 # 这几个 core 模块对象继续挂在 `usecases` 名下：测试用 `monkeypatch.setattr(usecases.tasks,
 # "start", …)` 钉住真身（不是替身），拆包后必须仍然可达，否则那些用例会静默 patch 到
 # 一个不存在的属性上。它们不是本包的 API，只是沿用旧的引用路径。
-from .. import appmsg, export, media, retrieval, tasks, vector  # noqa: E402,F401
+#
+# **不要在这里导入 `media`**：本包有同名子模块 `usecases/media.py`，这一行会把包属性
+# `usecases.media` 覆写成 core 的 `agent_wechat.media`（2026-11-21 实测：`import
+# agent_wechat.usecases.media as sub` 拿到的也是 core 那个），而真实子模块只在
+# `sys.modules` 里。需要 core 的 media 就直接 `from agent_wechat import media`。
+from .. import appmsg, export, retrieval, tasks, vector  # noqa: E402,F401

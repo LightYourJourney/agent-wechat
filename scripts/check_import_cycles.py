@@ -33,12 +33,64 @@ def _is_type_checking(node: ast.expr) -> bool:
             or (isinstance(node, ast.Attribute) and node.attr == "TYPE_CHECKING"))
 
 
+def _is_package(dir_: pathlib.Path) -> bool:
+    return (dir_ / "__init__.py").exists()
+
+
 def classify(path: pathlib.Path) -> dict[str, set[str]]:
-    """一个模块的包内出边，按 rt / tc / lz 三分类。"""
+    """一个模块的出边，按 rt / tc / lz 三分类。
+
+    **包内的文件要按相对层级解析**，不能只看 `level == 1`：
+    `usecases/chat.py` 里 `from ._core import …`（level 1）指向**包内兄弟**
+    `usecases._core`，而 `from .. import errors`（level 2）指向**顶层** `errors`。
+    两者混为一谈时，包内的边要么丢失、要么被错记成同名顶层模块（`from .media import …`
+    曾因此记成顶层 `media`，而 `usecases.media` 从不出现）。
+    """
     buckets: dict[str, set[str]] = {"rt": set(), "tc": set(), "lz": set()}
 
+    # 本文件所在的包（顶层文件没有）。包内的相对 import 以此为基准向上数。
+    pkg_dir = path.parent if path.parent != ROOT and _is_package(path.parent) else None
+    pkg_name = pkg_dir.name if pkg_dir else None
+
+    def resolve(level: int, module: str | None, names: list[str]) -> list[str]:
+        """把一条 `from <level dots><module> import <names>` 解析成模块身份列表。"""
+        # `level` 是相对 import 的点数：1 = 当前包，2 = 上一级……
+        base = pkg_dir
+        up = level - 1
+        for _ in range(up):
+            base = base.parent if base else None
+        if base is not None and base == ROOT:
+            base = None                       # 升到了 src/agent_wechat 这一层 = 顶层模块
+        if module:
+            # `from .pkg import x` / `from .. import y` 里 module 段本身可能就是目标
+            if base is not None and pkg_name and level == 1:
+                return [f"{pkg_name}.{module.split('.')[0]}"]
+            return [module.split(".")[0]]
+        # 无 module 段：`from . import a, b` —— 每个 name 各是一个目标
+        out = []
+        for n in names:
+            head = n.split(".")[0]
+            if level == 1 and pkg_dir is not None:
+                out.append(f"{pkg_name}.{head}" if (pkg_dir / f"{head}.py").exists()
+                           else head)
+            else:
+                out.append(head)
+        return out
+
     def add(ctx: str, names: list[str]) -> None:
-        buckets[ctx].update(n for n in names if (ROOT / f"{n}.py").exists())
+        for n in names:
+            if "." in n:                       # 已经带包名的身份
+                pkg_part, _, rest = n.partition(".")
+                if (ROOT / f"{pkg_part}.py").exists() or (
+                        (ROOT / pkg_part).is_dir() and _is_package(ROOT / pkg_part)):
+                    buckets[ctx].add(n)
+                continue
+            # 顶层模块：`x.py`
+            if (ROOT / f"{n}.py").exists():
+                buckets[ctx].add(n)
+            # 顶层**包**：`from . import usecases`（`cli.py` 的 16 处）
+            elif (ROOT / n).is_dir() and _is_package(ROOT / n):
+                buckets[ctx].add(n)
 
     def walk(stmts: list[ast.stmt], ctx: str) -> None:
         for s in stmts:
@@ -49,10 +101,8 @@ def classify(path: pathlib.Path) -> dict[str, set[str]]:
                 for sub in s.body:
                     walk([sub], "tc")
             else:
-                if isinstance(s, ast.ImportFrom) and s.level == 1:
-                    ns = ([s.module.split(".")[0]] if s.module
-                          else [a.name.split(".")[0] for a in s.names])
-                    add(ctx, ns)
+                if isinstance(s, ast.ImportFrom) and s.level >= 1:
+                    add(ctx, resolve(s.level, s.module, [a.name for a in s.names]))
                 elif isinstance(s, ast.Import):
                     add(ctx, [a.name.split(".")[1] for a in s.names
                               if a.name.startswith("agent_wechat.")])
@@ -101,7 +151,15 @@ def runtime_cycles(edges: dict[str, set[str]]) -> list[list[str]]:
 
 
 def main() -> int:
-    mods = {p.stem: classify(p) for p in sorted(ROOT.glob("*.py"))}
+    # **包内的文件也要扫**：`usecases` 2026-11-21 拆成包之后，`ROOT.glob("*.py")`
+    # 看不见它，整包的 import 边一条都不进环检查（曾让本门禁对 `usecases` 完全失明）。
+    # 模块身份用 `包名.文件名`，与 `classify` 里包内兄弟的命名同一套。
+    sources = {p.stem: p for p in sorted(ROOT.glob("*.py"))}
+    for pkg_dir in sorted(p for p in ROOT.iterdir() if p.is_dir() and
+                          (p / "__init__.py").exists()):
+        for f in sorted(pkg_dir.glob("*.py")):
+            sources[f"{pkg_dir.name}.{f.stem}"] = f
+    mods = {name: classify(p) for name, p in sources.items()}
     rt = {m: v["rt"] for m, v in mods.items()}
     cycles = runtime_cycles(rt)
     self_loops = sorted(m for m, deps in rt.items() if m in deps)
