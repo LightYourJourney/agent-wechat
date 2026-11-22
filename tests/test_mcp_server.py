@@ -340,6 +340,8 @@ def test_the_export_tools_declare_out_dir_and_pass_it_through(monkeypatch):
     """
     import inspect
 
+    # 本用例钉的是「透传」，不是放行范围：把 /tmp 显式放行（MCP 默认只许写数据目录）
+    monkeypatch.setenv(paths.MCP_OUT_ROOTS_ENV, "/tmp")
     seen: dict = {}
 
     def fake_media(contact, **kw):
@@ -620,6 +622,7 @@ def test_export_chat_envelope_has_paths_counts_and_no_body(monkeypatch):
                 "运行 `agent-wechat appmsg rebuild` 补齐"),))
 
     monkeypatch.setattr(usecases, "chat_export", fake_chat_export)
+    monkeypatch.setenv(paths.MCP_OUT_ROOTS_ENV, "/tmp")       # 透传用例：显式放行 /tmp
     res = _call(mcp_server.export_chat, contact="张三", months="2026-08, 2026-09",
                 limit=10, format="md, html", out_dir="/tmp/out", account="acct")
     assert res == {"chat_id": "wxid_target", "out_dir": "/tmp/c/4f2a",
@@ -1015,3 +1018,62 @@ def test_patching_collect_degradations_at_package_level_reaches_chat_context():
         assert len(calls) == 2, f"包级替换没被调用到：{calls}"
     finally:
         usecases.collect_degradations = real
+
+
+# ---------- MCP 的 out_dir 放行范围（paths.refuse_mcp_out） ----------
+
+_OUT_TOOLS = (
+    (lambda **kw: mcp_server.export_chat(contact="张三", **kw), "chat_export"),
+    (lambda **kw: mcp_server.export_chat_media(contact="张三", **kw), "media_export"),
+    (lambda **kw: mcp_server.export_moments(**kw), "moments_export"),
+    (lambda **kw: mcp_server.get_message_media(contact="张三", **kw), "message_media"),
+)
+
+
+def _trap_usecases(monkeypatch):
+    """被拒时 usecase 一次都不许被调到（判据在写之前）。"""
+    def _boom(*a, **k):
+        raise AssertionError("out_dir 被拒时不许走到 usecase")
+    for _tool, name in _OUT_TOOLS:
+        monkeypatch.setattr(usecases, name, _boom)
+
+
+def test_mcp_out_dir_outside_the_data_dir_is_refused(tmp_path, monkeypatch):
+    """聊天正文进得了 Agent 的上下文——一条消息就能诱导它把明文导出到同步盘。MCP 默认
+    只放行数据目录；四个写/定位产物的工具同一道闸，被拒时是 error 信封、不走到 usecase。"""
+    monkeypatch.setattr(paths, "HOME_DIR", tmp_path / "home")
+    monkeypatch.delenv(paths.MCP_OUT_ROOTS_ENV, raising=False)
+    _trap_usecases(monkeypatch)
+    outside = tmp_path / "icloud-ish"
+    for tool, _name in _OUT_TOOLS:
+        res = _call(tool, out_dir=str(outside))
+        assert "error" in res and paths.MCP_OUT_ROOTS_ENV in res.get("hint", ""), res
+
+
+def test_mcp_out_dir_symlink_pointing_outside_is_refused(tmp_path, monkeypatch):
+    """判据按 resolve() 之后的真实路径：数据目录里的符号链接指出去，照样拒。"""
+    home = tmp_path / "home"
+    home.mkdir()
+    (tmp_path / "elsewhere").mkdir()
+    (home / "link").symlink_to(tmp_path / "elsewhere")
+    monkeypatch.setattr(paths, "HOME_DIR", home)
+    monkeypatch.delenv(paths.MCP_OUT_ROOTS_ENV, raising=False)
+    with pytest.raises(errors.MediaOutputError):
+        paths.refuse_mcp_out(str(home / "link" / "x"))
+    paths.refuse_mcp_out(str(home / "real" / "x"))           # 同一目录下的真目录照常放行
+
+
+def test_mcp_out_dir_inside_home_or_an_allowed_root_passes(tmp_path, monkeypatch):
+    monkeypatch.setattr(paths, "HOME_DIR", tmp_path / "home")
+    allowed = tmp_path / "allowed"
+    monkeypatch.setenv(paths.MCP_OUT_ROOTS_ENV, f"{tmp_path / 'other'}:{allowed}")
+    for target in (tmp_path / "home" / "media" / "x", allowed / "sub", None, ""):
+        paths.refuse_mcp_out(None if target is None else str(target))   # 不抛即放行
+
+
+def test_mcp_out_roots_reject_relative_entries(tmp_path, monkeypatch):
+    """相对条目会按 MCP server 的 CWD 解析——那个 CWD 由客户端决定，放行范围不许随它漂。"""
+    monkeypatch.setattr(paths, "HOME_DIR", tmp_path / "home")
+    monkeypatch.setenv(paths.MCP_OUT_ROOTS_ENV, "exports")
+    with pytest.raises(errors.MediaOutputError):
+        paths.refuse_mcp_out(str(tmp_path / "home" / "x"))

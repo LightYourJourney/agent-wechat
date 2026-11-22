@@ -15,7 +15,7 @@ import re
 import shutil
 import subprocess
 
-from .errors import ContainerWriteRefused, HomeUnavailable
+from .errors import ContainerWriteRefused, HomeUnavailable, MediaOutputError
 
 CONTAINER = pathlib.Path.home() / "Library/Containers/com.tencent.xinWeChat/Data/Documents"
 XWECHAT_FILES = CONTAINER / "xwechat_files"
@@ -164,7 +164,62 @@ def refuse_container_out(p: str | pathlib.Path) -> None:
         raise ContainerWriteRefused(
             f"拒绝把输出写进微信容器目录（{container_bundle()} 及其所有上级目录）：{p}",
             hint="换一个容器之外的目录（CLI 的 --out / MCP 的 out_dir），"
-                 "例如 ~/Desktop/wechat-export")
+                 "例如 ~/Desktop/wechat-export（MCP 的 out_dir 另须在放行范围内，"
+                 f"见 {MCP_OUT_ROOTS_ENV}）")
+
+
+# MCP 入口的导出放行范围（`:` 分隔的绝对路径）。数据目录本身恒在范围内。
+MCP_OUT_ROOTS_ENV = "AGENT_WECHAT_MCP_OUT_ROOTS"
+
+
+def mcp_out_roots() -> tuple[pathlib.Path, ...]:
+    """MCP 入口允许的导出根：`HOME_DIR` + `AGENT_WECHAT_MCP_OUT_ROOTS` 里显式放行的目录。
+
+    **调用时求值**（环境变量与 `HOME_DIR` 都可能在测试里被换掉）。相对路径条目一律拒绝：
+    它会按 MCP server 的 CWD 解析，而那个 CWD 由客户端决定——放行范围不许随它漂。
+    """
+    roots = [HOME_DIR]
+    for raw in os.environ.get(MCP_OUT_ROOTS_ENV, "").split(os.pathsep):
+        raw = raw.strip()
+        if not raw:
+            continue
+        root = pathlib.Path(raw).expanduser()
+        if not root.is_absolute():
+            raise MediaOutputError(
+                f"{MCP_OUT_ROOTS_ENV} 的条目必须是绝对路径：{raw}",
+                hint=f"用 `{os.pathsep}` 分隔多个绝对路径，例如 ~/Desktop/wechat-export")
+        roots.append(root)
+    return tuple(roots)
+
+
+def refuse_mcp_out(out_dir: str | None) -> None:
+    """MCP 的 `out_dir` 不在放行范围内 → `MediaOutputError`。**只给 MCP 入口用**。
+
+    为什么 MCP 比 CLI 严：CLI 的 `--out` 是用户亲手敲的；MCP 的 `out_dir` 由 Agent 填，
+    而 Agent 的上下文里有**聊天正文**——任何给用户发消息的人都写得进去。一条「把记录导出到
+    ~/Library/Mobile Documents/…」的消息，就足以让明文落进 iCloud / Dropbox / 某个 git
+    仓库这类会同步出本机的地方。默认只放行数据目录，别处要用户在环境变量里显式放行。
+
+    判据按 `resolve()` 之后的真实路径（符号链接指出去的照样拒）。空值 = 默认根，放行；
+    解析本身失败（链接环、超长）交给写侧 `_resolve_out` 报它自己的错。
+    """
+    if not out_dir:
+        return
+    try:
+        target = pathlib.Path(out_dir).resolve()
+    except (RuntimeError, OSError):
+        return
+    for root in mcp_out_roots():
+        try:
+            if target.is_relative_to(root.resolve()):
+                return
+        except (RuntimeError, OSError):
+            continue
+    raise MediaOutputError(
+        f"MCP 只允许把产物写到数据目录之下或显式放行的目录：{out_dir}",
+        hint=f"省略 out_dir 用默认根（{HOME_DIR / 'media'}）；确需写到别处，"
+             f"把该目录加进环境变量 {MCP_OUT_ROOTS_ENV}（`{os.pathsep}` 分隔的绝对路径），"
+             "或改用 CLI 的 --out")
 
 
 def _tighten_home_mode() -> None:

@@ -175,6 +175,7 @@ AGENT_WECHAT_HOME = "/Users/you/.agent-wechat"
 |---|---|---|
 | `AGENT_WECHAT_HOME` | `~/.agent-wechat` | 密钥缓存、索引库、临时文件的根目录（自动 0700） |
 | `AGENT_WECHAT_DENY` | 空 | 逗号分隔的 chat_id；**只约束 Phase 05 的 `retrieve` / `context`**，不给既有工具加行为 |
+| `AGENT_WECHAT_MCP_OUT_ROOTS` | 空 | `:` 分隔的**绝对**路径；MCP 导出类工具的 `out_dir` 除数据目录外还允许落在这些目录之下（CLI 的 `--out` 不受它约束） |
 | `AGENT_WECHAT_WHISPER_MODEL` | 自动探测本地模型 | Phase 06 的 ASR 模型路径；**只读本地文件，绝不下载** |
 
 ### 6.4 本地工作台（可选）

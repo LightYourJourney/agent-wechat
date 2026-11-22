@@ -13,6 +13,10 @@
   （含 `derived_text`）一并改成真名；改名会照既有规则投递一次重嵌标记。
 - **工作台 `/api/*` 的 GET 也要求 CSRF 令牌**（`X-AW-CSRF` 头，前端已自动带上）：此前任意
   网页都能跨站触发检索、语义检索的模型加载与诊断。直接用 curl 调工作台 API 的脚本需补这个头。
+- **MCP 导出类工具的 `out_dir` 默认只放行数据目录之下**（`export_chat` / `export_chat_media` /
+  `export_moments` / `get_message_media`）：`out_dir` 由 Agent 填，而聊天正文进得了 Agent 的
+  上下文，一条消息就可能让明文落进同步盘。别处要在 `AGENT_WECHAT_MCP_OUT_ROOTS`（`:` 分隔的
+  绝对路径）里显式放行；CLI 的 `--out` 不变。**此前传外部 `out_dir` 的 MCP 用法会改为报错。**
 - **`bootstrap` 超时收尾不再按名 `pkill -9 -x lldb`**：「没在时限内重新登录」那条路径上
   bash 已被回收，精确终止两轮都失败，于是以 root 身份杀掉本机所有 lldb（含 Xcode 调试会话）。
 - **密钥缓存改为临时文件 + 原子替换**：此前原地截断再写，写到一半被杀会让所有账号的

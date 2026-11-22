@@ -370,7 +370,7 @@ rebuild 与否）各起一条。（F-D，T7 复验：与 §4 同款的合并语�
 | `limit` | int | 否 | 500 | 本次最多**新增**的文件数（下界 1，无上界；产物已存在的不计） |
 | `force` | bool | 否 | `false` | `true` = 忽略已存在的产物全部重做（默认跳过已存在的） |
 | `with_cdn` | bool | 否 | `false` | `true` = 贴纸从腾讯 CDN 取件（**默认不联网**）。会把该贴纸的 `filekey` 以**明文 HTTP** 发往三个后缀之一（`*.tc.qq.com` / `*.qpic.cn` / `*.wechat.com`，端口不受约束）——这是既知且被显式接受的代价，见 SECURITY.md；单条失败只计入 `counts.sticker.failed`（不重试），信封里不出现 URL |
-| `out_dir` | string | 否 | null | 产物落这个输出根（默认 `~/.agent-wechat/media`）。**与 `export_chat` 的 `out_dir` 必须同根**，否则产物页里的媒体引用会断链（§12） |
+| `out_dir` | string | 否 | null | 产物落这个输出根（默认 `~/.agent-wechat/media`）。**与 `export_chat` 的 `out_dir` 必须同根**，否则产物页里的媒体引用会断链（§12）。**MCP 只放行数据目录之下**（或 `AGENT_WECHAT_MCP_OUT_ROOTS` 显式放行的目录，见 SECURITY.md「MCP 的 out_dir 放行范围」），范围外返回 error |
 | `account` | string | 否 | null | 同通用约定 |
 
 **成功返回**：
@@ -465,7 +465,7 @@ rebuild 与否）各起一条。（F-D，T7 复验：与 §4 同款的合并语�
 | `months` | string | 否 | null | 逗号分隔的月份（`YYYY-MM`），按动态时间过滤；省略不限 |
 | `with_media` | bool | 否 | `false` | **是否联网下载并解密媒体本体**。`false`（默认）= 零网络；`true` = 向微信 CDN 发起请求（见下方「联网边界」）。**本机媒体总量约 1.5 GiB，其中本期新增约 0.62 GiB**（小视频 / 视频号 / 视频封面这批内容此前是 0） |
 | `limit` | int | 否 | 500 | 动态条数上限（下界 1，无上界）。截断留下的是**最新**的那些动态 |
-| `out_dir` | string | 否 | null | 产物落这个输出根（默认 `~/.agent-wechat/moments`） |
+| `out_dir` | string | 否 | null | 产物落这个输出根（默认 `~/.agent-wechat/moments`）。**MCP 只放行数据目录之下**（或 `AGENT_WECHAT_MCP_OUT_ROOTS` 显式放行的目录，见 SECURITY.md「MCP 的 out_dir 放行范围」），范围外返回 error |
 | `account` | string | 否 | null | 同通用约定 |
 
 **成功返回**：
@@ -548,7 +548,7 @@ rebuild 与否）各起一条。（F-D，T7 复验：与 §4 同款的合并语�
 | `keys` | string | 否 | null | 逗号分隔的 `msg_key`（取自 §3 / §6 / §8 返回的 `msg_key` 字段）；省略 = 该会话**全部媒体类型的消息**。只答属于该会话的 key：别的会话的 key、以及**索引里根本没有的 key**（消息未导出、或已从索引消失）都**静默略过**——答案里没有某个 key，不等于它不是媒体消息 |
 | `months` | string | 否 | null | 逗号分隔的月份（`YYYY-MM`），按消息时间过滤；格式不符返回 `{"error": "月份格式应为 YYYY-MM：…"}`（不静默 0 命中） |
 | `limit` | int | 否 | 200 | 消息条数上限（1-500，超出按边界处理）。`months` 在 SQL 里筛，故 `limit` 卡的是**命中月份**的条数 |
-| `out_dir` | string | 否 | null | 已导出产物的根目录；省略按 `~/.agent-wechat/media`。**要与导出时用的 `--out` 同一个**，否则已导出的产物会被判成 `exportable` |
+| `out_dir` | string | 否 | null | 已导出产物的根目录；省略按 `~/.agent-wechat/media`。**要与导出时用的 `--out` 同一个**，否则已导出的产物会被判成 `exportable`。**MCP 只放行数据目录之下**（或 `AGENT_WECHAT_MCP_OUT_ROOTS` 显式放行的目录，见 SECURITY.md「MCP 的 out_dir 放行范围」），范围外返回 error |
 | `account` | string | 否 | null | 同通用约定 |
 
 **成功返回**：
@@ -631,7 +631,7 @@ rebuild 与否）各起一条。（F-D，T7 复验：与 §4 同款的合并语�
 | `months` | string | 否 | null | 逗号分隔的月份（`YYYY-MM`），限定**一段连续窗口**。**必须按时间升序、相邻月首尾相接**：非连续（`2026-08,2026-10`）只能取包络、会把 9 月静默带进来，反序会得到倒置（或退化成空区间）的窗口——两者都返回 `{"error": "…"}`，**不静默产出空产物**；格式不符同理 |
 | `limit` | int | 否 | 500 | 封顶窗口内**最近的** N 条（非正值按 1 处理：`LIMIT -1` 在 SQLite 里是「不限量」） |
 | `format` | string | 否 | `"html,md"` | 逗号分隔，`html` / `md`；空串或未知格式返回 `{"error": "…"}`（「少写一个文件」与「格式名写错」长得一样，故不静默跳过） |
-| `out_dir` | string | 否 | null | 输出根；省略按 `~/.agent-wechat/media`。**必须与 §9 `export_chat_media` / CLI `media export` 用同一个根**——产物里的媒体是相对引用，换个根就全是死链 |
+| `out_dir` | string | 否 | null | 输出根；省略按 `~/.agent-wechat/media`。**必须与 §9 `export_chat_media` / CLI `media export` 用同一个根**——产物里的媒体是相对引用，换个根就全是死链。**MCP 只放行数据目录之下**（或 `AGENT_WECHAT_MCP_OUT_ROOTS` 显式放行的目录，见 SECURITY.md「MCP 的 out_dir 放行范围」），范围外返回 error |
 | `account` | string | 否 | null | 同通用约定 |
 
 **成功返回**：
