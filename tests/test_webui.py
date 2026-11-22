@@ -72,6 +72,9 @@ class Simple:
 def _req(s: Simple, path: str, *, method="GET", headers=None, body=None):
     conn = http.client.HTTPConnection("127.0.0.1", s.port, timeout=5)
     hdrs = dict(headers or {})
+    if method == "GET" and path.startswith("/api/"):
+        hdrs.setdefault("X-AW-CSRF", s.csrf)      # 前端 `api()` 每次都带；缺 token 的用例显式给 None
+    hdrs = {k: v for k, v in hdrs.items() if v is not None}
     payload = None
     if body is not None:
         payload = json.dumps(body).encode()
@@ -118,6 +121,25 @@ def test_path_traversal_and_unknown_paths_are_404(srv):
 def test_dns_rebinding_is_rejected(srv):
     res, body = _req(srv, "/api/status", headers={"Host": "evil.example:80"})
     assert res.status == 421
+
+
+def test_get_api_requires_csrf_token(srv):
+    """跨站的简单 GET 带着本机 Host 也能打进来（Host 校验只防 DNS rebinding）：
+    读接口同样要 token，否则任意网页都能触发检索 / 模型加载 / 诊断。"""
+    for path in ("/api/status", f"/api/chats?account={ACCT}",
+                 f"/api/search?account={ACCT}&q=abc"):
+        res, _ = _req(srv, path, headers={"X-AW-CSRF": None})
+        assert res.status == 403, path
+        res, _ = _req(srv, path, headers={"X-AW-CSRF": "wrong"})
+        assert res.status == 403, path
+    res, _ = _req(srv, "/api/status")
+    assert res.status == 200
+
+
+def test_frontend_sends_the_csrf_header_on_every_api_call(srv):
+    """前端只有一个出口 `api()`：它不带头，整页功能就全挂在 403 上。"""
+    _res, raw = _req(srv, "/app.js")
+    assert b"'X-AW-CSRF': csrf" in raw
 
 
 def test_post_requires_origin_and_csrf(srv):
