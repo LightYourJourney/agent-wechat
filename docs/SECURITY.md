@@ -263,7 +263,7 @@ Time Machine 的排除是绑在 **inode** 上的扩展属性，文件一旦被�
 内容不在自动层的覆盖里——`git log` 里出现了没被 `--staged` 看过的行，不是矛盾，是这条边界。
 
 **`pre-push` 那一枚覆盖到 push**（2026-10-14 加，spec §7）：它跑 `scripts/check.sh` 的全量
-五步（运行时 import 环 / vulture 候选集不超基线 / `pytest` / `scan --all` / 钩子自检）。
+六步（运行时 import 环 / vulture 候选集不超基线 / ruff（F 规则）/ `pytest` / `scan --all` / 钩子自检）。
 **它同样不是「内容出门的最后一道」**：`git push --no-verify` 会跳过它。这个仓库已公开，
 唯一还靠人守的红线是「**不要把真实聊天数据 / 密钥 / 本机路径推上去**」——形状扫描拦得住
 形状，拦不住语义（见下）。它挡的是

@@ -130,7 +130,7 @@ def _free_bytes() -> int:
 
 def _vector_ready(con: sqlite3.Connection) -> bool:
     """向量索引是否已存在（存在才有「处理脏队列」这一步；不存在不算故障）。"""
-    if not store._has_table(con, "vector_meta"):
+    if not store.has_table(con, "vector_meta"):
         return False
     row = con.execute("SELECT embedded FROM vector_meta WHERE model_id=?",
                       (vector.MODEL_ID,)).fetchone()

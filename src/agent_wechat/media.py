@@ -1336,7 +1336,7 @@ def sticker_cdn_urls(account: str, items: Sequence[tuple[str, str, int]]
     **凭据只在本函数的栈帧里存在**：`cdnurl`（`filekey` 在其查询串里）取出来交给返回值，
     不落盘、不进日志、不进信封（贴纸 XML 不落库是结构性根治，spec §7.1）。
     """
-    from .reader import MessageReader, _decode_content      # 惰性：避开 reader↔media 的环
+    from .reader import MessageReader      # 惰性：避开 reader↔media 的环（reader 顶层 import 本模块）
     out: dict[tuple[str, str, int], tuple[str, str]] = {}
     failed_shards: list[tuple[str, int]] = []
     # 按分片分组：同一个 (shard) 只开一次
@@ -1345,14 +1345,7 @@ def sticker_cdn_urls(account: str, items: Sequence[tuple[str, str, int]]
         by_shard.setdefault(shard, []).append((chat_md5, local_id))
     for shard, wanted in by_shard.items():
         try:
-            r = MessageReader(account)
-            with r._open(f"message/{shard}") as con:
-                rows: dict[tuple[str, int], str | None] = {}
-                for chat_md5, local_id in wanted:
-                    row = con.execute(
-                        f"SELECT message_content, WCDB_CT_message_content FROM 'Msg_{chat_md5}' "
-                        f"WHERE local_id = ?", (local_id,)).fetchone()
-                    rows[(chat_md5, local_id)] = _decode_content(*row) if row else None
+            rows = MessageReader(account).raw_contents(shard, wanted)
         except Exception:                    # noqa: BLE001 —— 见 `_fetch_cdn_bytes` 的说明（core 层只抛项目异常）
             failed_shards.append((shard, len(wanted)))
             continue                         # 该分片整体取不到：这些键不出现在返回值里

@@ -3,13 +3,14 @@
 #
 # 用法：scripts/check.sh [--fast]
 #   --fast  只跑快速检查（import 环 + `import mcp` 泄漏），给 pre-commit 用（实测 ~0.07 s）；
-#   不带参数跑全部五步，给 pre-push 用（本机三次连跑 133–156 s，绝大部分是 pytest；
+#   不带参数跑全部六步，给 pre-push 用（本机三次连跑 133–156 s，绝大部分是 pytest；
 #   文件缓存与机器负载会拉大，实测见过 275 s）。
 #   **计时时不要并跑其它 pytest**：SQLite 的 fsync 争用会把墙钟放大到 3 倍以上（实测）。
 #
-# 五步与 spec §7 的对应：
+# 六步与 spec §7 的对应（②′ 是 spec 之后补的）：
 #   ① 运行时 import 环（scripts/check_import_cycles.py）
 #   ② vulture 候选**集**不超基线（scripts/check_vulture.py；基线 security/gate-baseline.txt）
+#   ②′ ruff 的 pyflakes（F）规则，零告警
 #   ③ pytest 全量
 #   ④ security/scan.py --all（占位符/形状扫描）
 #   ⑤ security/scan.py --check-hooks（钩子自检）
@@ -48,6 +49,10 @@ if [ "${1:-}" != "--fast" ]; then
   #    或 `comm` 的用法问题，是判据本身没人验——所以按 ① 的规格挪成脚本，退出码 0/1/2
   #    （1＝有新增候选，2＝**这一步没跑起来**）与全部来龙去脉写在那个文件的 docstring 里。
   step "② vulture 候选" "$PY" scripts/check_vulture.py
+
+  # ②′ pyflakes 级 lint（规则集见 pyproject 的 [tool.ruff.lint]）：未用导入、遮蔽、未定义名。
+  #    只查 src——测试里的「未用」导入多半是共享夹具（pytest 按名注入）。
+  step "②′ ruff (F)" "$PY" -m ruff check --no-cache src
 
   step "③ pytest" "$PY" -m pytest tests/ -q
   step "④ scan --all" "$PY" security/scan.py --all

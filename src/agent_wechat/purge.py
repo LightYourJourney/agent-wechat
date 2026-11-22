@@ -19,7 +19,6 @@ import sqlite3
 import stat
 import subprocess
 import tempfile
-import time
 from collections.abc import Iterator
 from dataclasses import dataclass
 
@@ -726,7 +725,7 @@ def _open_index() -> Iterator[sqlite3.Connection]:
     `no such module: vec0` 翻成 PurgeRefused（`store._vec_exec` 的契约），于是 plan /
     execute / verify 三处会全部死在第一句。把「purge 的连接必须能碰向量表」这条知识收在
     本函数一处，而不是散在三处 `with` 块里靠后来人记得。轻装安装上没有向量表，
-    `vector.load` 返回 False 也无妨——`store._has_table` 自会跳过那几处。
+    `vector.load` 返回 False 也无妨——`store.has_table` 自会跳过那几处。
     """
     with store.open() as con:
         vector.load(con)

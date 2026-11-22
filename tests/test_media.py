@@ -2138,7 +2138,7 @@ def test_fetch_sticker_sends_no_request_without_cdnurl(tmp_path, monkeypatch):
         def fetchone(self): return (b"x", 0)
         def close(self): pass
 
-    class _FakeReader:
+    class _FakeReader(reader_mod.MessageReader):      # 继承 raw_contents，只换掉解密那一层
         def __init__(self, account): pass
         def _open(self, rel):
             import contextlib
@@ -2193,7 +2193,7 @@ def test_fetch_sticker_swallows_any_opener_exception(tmp_path, monkeypatch):
         def fetchone(self): return (b"x", 0)
         def close(self): pass
 
-    class _FakeReader:
+    class _FakeReader(reader_mod.MessageReader):      # 继承 raw_contents，只换掉解密那一层
         def __init__(self, account): pass
         def _open(self, rel):
             import contextlib
@@ -2228,7 +2228,7 @@ def test_fetch_sticker_refuses_host_outside_allowlist(tmp_path, monkeypatch):
         def fetchone(self): return (b"x", 0)
         def close(self): pass
 
-    class _FakeReader:
+    class _FakeReader(reader_mod.MessageReader):      # 继承 raw_contents，只换掉解密那一层
         def __init__(self, account): pass
         def _open(self, rel):
             import contextlib
@@ -2302,7 +2302,7 @@ def test_fetch_sticker_reads_cdnurl_in_both_spellings(tmp_path, monkeypatch, sty
         def fetchone(self): return (b"x", 0)
         def close(self): pass
 
-    class _FakeReader:
+    class _FakeReader(reader_mod.MessageReader):      # 继承 raw_contents，只换掉解密那一层
         def __init__(self, account): pass
         def _open(self, rel):
             import contextlib

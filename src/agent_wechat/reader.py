@@ -664,6 +664,23 @@ class MessageReader:
                                 chat_map=chat_map, n2i=n2i, sticker_names=sticker_names):
                             audit_sink(a_rows, a_refs)
 
+    def raw_contents(self, shard: str, wanted: Iterable[tuple[str, int]]
+                     ) -> dict[tuple[str, int], str | None]:
+        """按 `(chat_md5, local_id)` 取**解压后的原始** `message_content`；分片只解密一次。
+
+        给贴纸回源用（`media.sticker_cdn_urls`）：凭据在原始 XML 里，`_decode_row` 产出的
+        `content` 已经是显示串。行不在 → 值为 None；分片打不开 / 表不在照常抛，由调用方
+        按「分片读不出来」记账。原始 XML 只在返回值里存在，不落盘。
+        """
+        out: dict[tuple[str, int], str | None] = {}
+        with self._open(f"message/{shard}") as con:
+            for chat_md5, local_id in wanted:
+                row = con.execute(
+                    f"SELECT message_content, WCDB_CT_message_content FROM 'Msg_{chat_md5}' "
+                    f"WHERE local_id = ?", (local_id,)).fetchone()
+                out[(chat_md5, local_id)] = _decode_content(*row) if row else None
+        return out
+
     def iter_extras_input(self) -> Iterator[tuple[str, int, bytes]]:
         """为 `msg_extras` 回填供料：逐条 yield `(msg_key, msg_type, payload)`。
 

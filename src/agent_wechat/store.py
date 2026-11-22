@@ -670,7 +670,7 @@ def upsert_batch(con: sqlite3.Connection, rows: list[messages.MessageRow]) -> in
     return len(rows) - len(keep)
 
 
-def _has_table(con: sqlite3.Connection, name: str) -> bool:
+def has_table(con: sqlite3.Connection, name: str) -> bool:
     """该表在本连接上存不存在。**向量那三张表在轻装安装上根本不存在**——
     它们在 `VECTOR_SCHEMA` 里，而 `store.connect()` 只跑 `SCHEMA`（`store.py:83` 的注释就是
     写这件事的：「向量表不在本 SCHEMA：sqlite-vec 需运行时加载扩展后建表，owner 是 vector.py」）。
@@ -688,7 +688,7 @@ def _vec_exec(con: sqlite3.Connection, sql: str, args: tuple = ()) -> sqlite3.Cu
     （`vector.py:31` 的 docstring 写着「sqlite-vec 的知识只留在本模块」）。于是装了向量索引的
     机器上（表在、扩展没加载），本模块任何一句真碰 `vec_messages` 的 SQL 都抛裸
     `sqlite3.OperationalError: no such module: vec0`，违反「core 层只抛 AgentWeChatError 子类」
-    （`errors.py:1`）。`_has_table` 只证明「表在」，不证明「这条连接能用它」——两个判据的差
+    （`errors.py:1`）。`has_table` 只证明「表在」，不证明「这条连接能用它」——两个判据的差
     正是这一格。
 
     SELECT 与 DELETE **都是响亮失败**（实测 sqlite-vec 0.1.9：`execute()` 当场抛，不是静默
@@ -742,7 +742,7 @@ def chat_row_counts(con: sqlite3.Connection, account: str, chat_id: str) -> dict
                       ident.messages_args),
         "vectors": (_vec_exec(con, "SELECT count(*) FROM vec_messages WHERE acct_chat=?",
                               (acct_chat,)).fetchone()[0]
-                    if _has_table(con, "vec_messages") else 0),
+                    if has_table(con, "vec_messages") else 0),
         "parts": n("SELECT count(*) FROM msg_parts WHERE substr(msg_key, 1, ?) = ?", (len(p), p)),
         "refs": n("SELECT count(*) FROM media_refs WHERE substr(msg_key, 1, ?) = ?", (len(p), p)),
         "extras": n("SELECT count(*) FROM msg_extras WHERE substr(msg_key, 1, ?) = ?", (len(p), p)),
@@ -794,7 +794,7 @@ def delete_chat(con: sqlite3.Connection, *, account: str, chat_id: str) -> dict[
     md5 = ident.md5
     acct_chat = messages.acct_chat(account, md5)
     p = messages.msg_key_prefix(account, md5)
-    if _has_table(con, "vec_messages"):                 # 轻装安装上不存在——见 _has_table
+    if has_table(con, "vec_messages"):                 # 轻装安装上不存在——见 has_table
         # 按 **`acct_chat` 分区键**删，而不是按 `msg_rowid IN (SELECT id FROM messages …)`：
         # 后者会漏掉孤儿向量（消息行已经不在了的那些），而孤儿正是隐私删除最该清的东西。
         # 实测（sqlite-vec 0.1.9，两个分区各 100 行）：`DELETE … WHERE acct_chat=?` 成立，
@@ -841,7 +841,7 @@ def delete_chat(con: sqlite3.Connection, *, account: str, chat_id: str) -> dict[
     # 这几行必须留在删除的**同一事务**里：先提交删除、再单独修水位线，中间崩一次就是
     # 「行没了、水位线还停在旧高位」，此后复用的 id ≤ 水位线 → 静默不被嵌入
     # （没有任何地方会报错，只有向量检索悄悄少结果）。
-    if _has_table(con, "vector_watermark"):
+    if has_table(con, "vector_watermark"):
         con.execute(
             "UPDATE vector_watermark SET last_rowid = min(last_rowid, "
             "  (SELECT COALESCE(max(id), 0) FROM messages WHERE account=?)) "
@@ -860,7 +860,7 @@ def delete_chat(con: sqlite3.Connection, *, account: str, chat_id: str) -> dict[
     # **这条 UPDATE 不能删掉**：`embedded == 0` 是空索引判据（`vector.semantic_search` 读 `vector_meta.embedded`）。
     # 守卫要两张表都在——重算的来源是 `vec_messages`（`vector_meta` 存在而它不存在时无从重算，
     # 那种状态只在手工建表的测试夹具里出现）。
-    if _has_table(con, "vec_messages") and _has_table(con, "vector_meta"):
+    if has_table(con, "vec_messages") and has_table(con, "vector_meta"):
         _vec_exec(con, "UPDATE vector_meta SET embedded = (SELECT count(*) FROM vec_messages)")
     return before
 
@@ -1287,7 +1287,7 @@ def queued_reembed(con: sqlite3.Connection, account: str | None = None,
 
 def reembed_queue_stats(con: sqlite3.Connection, account: str | None = None) -> dict:
     """队列深度与失败分布（新鲜度诊断用）。表不存在时返回零（轻装安装）。"""
-    if not _has_table(con, "pending_reembed"):
+    if not has_table(con, "pending_reembed"):
         return {"pending": 0, "failed": 0, "max_attempts": 0}
     if account is None:
         pending = con.execute("SELECT count(*) FROM pending_reembed").fetchone()[0]

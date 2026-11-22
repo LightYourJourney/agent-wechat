@@ -68,6 +68,9 @@ dev = [
     # 只作 dev 依赖——**运行时依赖的增量为 0** 是 spec §5 的硬上限。
     "radon>=6.0.1",
     "hypothesis>=6.170.2",
+    # 门禁 ② 之前的 lint 步只开 pyflakes（F）规则：未用导入、遮蔽、未定义名这一类**真错**，
+    # 不管风格——本仓的排版是有意为之，不让格式化器改写。
+    "ruff>=0.17.6",
 ]
 
 [tool.pytest.ini_options]
@@ -79,3 +82,14 @@ markers = [
 # `real` 也排除：它此前只靠「每个 real 测试都同时标了 slow」被连带 deselect，
 # 新增一条只标 real 的用例就会在默认门禁里真读本机数据 / 发 CDN 请求（Phase 00 R-00-4）。
 addopts = "-m 'not slow and not real'"
+
+[tool.ruff]
+src = ["src"]
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["F"]
+
+[tool.ruff.lint.per-file-ignores]
+# 包级重导出面：`usecases.xxx` 的旧调用点与测试的包级打桩都靠这些名字（见该文件 docstring）
+"src/agent_wechat/usecases/__init__.py" = ["F401"]

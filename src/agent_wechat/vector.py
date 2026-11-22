@@ -81,7 +81,7 @@ def load(con: sqlite3.Connection) -> bool:
     `chat_row_counts` 就会被 `store._vec_exec` 翻成 PurgeRefused）。
 
     **best-effort 是刻意的**：轻装安装上根本没有向量表，扩展装不装无关紧要
-    （`store._has_table` 自会跳过那几处）；装了索引而扩展真坏掉时，仍由 `store._vec_exec`
+    （`store.has_table` 自会跳过那几处）；装了索引而扩展真坏掉时，仍由 `store._vec_exec`
     响亮抛 PurgeRefused——那才是该报错的地方，本函数抢着报只会把「表在、扩展不在」变成
     「所有安装一律崩」。`enable_load_extension` 用完立刻关回去（finally），
     不让这条连接一直带着「可加载任意动态库」的权限。
@@ -228,14 +228,20 @@ class FastEmbedEmbedder:
 
 
 _default_embedder: FastEmbedEmbedder | None = None
+_default_lock = threading.Lock()
 
 
 def default_embedder() -> FastEmbedEmbedder:
-    """模块级单例：MCP 常驻进程里避免每次查询重载模型。"""
+    """模块级单例：MCP 常驻进程里避免每次查询重载模型。
+
+    建实例要加锁：MCP SDK 把同步工具放进线程池执行，两个并发的首次调用会各建一个实例、
+    各载一份模型（实例内的 `_lock` 只管得住同一个实例）。
+    """
     global _default_embedder
-    if _default_embedder is None:
-        _default_embedder = FastEmbedEmbedder()
-    return _default_embedder
+    with _default_lock:
+        if _default_embedder is None:
+            _default_embedder = FastEmbedEmbedder()
+        return _default_embedder
 
 
 # ---------- meta / 向量水位线（vector_watermark） ----------
@@ -710,13 +716,13 @@ def freshness(con: sqlite3.Connection, account: str | None = None) -> dict:
     """索引新鲜度：模型、水位线、队列深度、失败次数。**只读**（不建表、不加载扩展）。"""
     out: dict = {"model": MODEL_ID, "embedded": 0, "skipped": 0,
                  "watermark": {}, **store.reembed_queue_stats(con, account)}
-    if store._has_table(con, "vector_meta"):
+    if store.has_table(con, "vector_meta"):
         row = con.execute(
             "SELECT embedded, skipped FROM vector_meta WHERE model_id=?",
             (MODEL_ID,)).fetchone()
         if row:
             out["embedded"], out["skipped"] = int(row[0]), int(row[1])
-    if store._has_table(con, "vector_watermark"):
+    if store.has_table(con, "vector_watermark"):
         sql = "SELECT account, last_rowid FROM vector_watermark"
         args: tuple = ()
         if account:

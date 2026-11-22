@@ -14,7 +14,6 @@ import dataclasses
 import ipaddress
 import json
 import os
-import pathlib
 import secrets
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer

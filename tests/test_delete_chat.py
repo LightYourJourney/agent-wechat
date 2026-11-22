@@ -114,7 +114,7 @@ def test_chat_row_counts_refuses_when_vec_extension_not_loaded(_vec_index_db):
     `SELECT … FROM vec_messages` 抛裸 `sqlite3.OperationalError: no such module: vec0`
     ——违反「core 层只抛 AgentWeChatError 子类」（`errors.py:1`）。
 
-    `_has_table` 只证明「表在」，不证明「这条连接能用它」：守卫要保留（轻装安装是正常路径，
+    `has_table` 只证明「表在」，不证明「这条连接能用它」：守卫要保留（轻装安装是正常路径，
     见 test_delete_chat_without_any_vector_tables），这一格靠翻译补。
     """
     with store.open(_vec_index_db) as plain:        # 不加载扩展的连接——生产 purge 的形态
@@ -294,7 +294,7 @@ def test_delete_chat_without_any_vector_tables(_temp_index):
 
 def test_delete_chat_removes_vectors_of_that_chat_only(_temp_index):
     """**七处里唯一没有直接覆盖的一处**：`vec_messages` 是虚表，前面几条测试都只跑到
-    `_has_table` 为假的分支（轻装安装）。这条真加载 sqlite_vec、真建表、真种向量、真删。
+    `has_table` 为假的分支（轻装安装）。这条真加载 sqlite_vec、真建表、真种向量、真删。
 
     删的是 **`acct_chat` 分区键**（`messages.acct_chat`，生产写入、查询、删除谓词共用同一个
     函数——用它而不是在测试里手拼，正是为了钉住三处同格式），

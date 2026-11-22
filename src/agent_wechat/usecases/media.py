@@ -9,7 +9,7 @@ import zlib
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from .. import appmsg, errors, keys, media, messages, msgextra, paths, store
+from .. import appmsg, errors, media, messages, msgextra, paths, store
 from ._core import (MEDIA_KINDS, MONTH_RE, ChatContext, Degradation,
                     NeedConfirm, pkg_call, pkg_clamp_limit, pkg_context)
 
