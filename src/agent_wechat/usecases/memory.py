@@ -244,11 +244,10 @@ def appmsg_rebuild_parts(account: str | None = None,
                 res = appmsg.parse(raw)
                 if res.reason == "rejected":
                     rejected += 1
-                elif res.reason == "malformed":
+                elif res.reason == "malformed" or res.appmsg is None or res.normalized is None:
+                    # 后两条只为让类型收窄：成功（reason 为 None）时两者必有，见 ParseResult
                     malformed += 1
                 else:
-                    # 成功（reason 为 None）时两者必有——见 appmsg.ParseResult 的说明
-                    assert res.appmsg is not None and res.normalized is not None
                     # `quote` 仅 kind=57 才非 None；`svrid` 在 XML 里是字符串，转不出 int
                     # 时 `_to_int` 已经给了 None（**不抛**）。给 None 的那条**照样落库**，
                     # 否则它的正文也跟着没了。

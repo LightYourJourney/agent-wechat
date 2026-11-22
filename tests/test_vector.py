@@ -830,3 +830,28 @@ def test_a_held_write_lock_surfaces_as_vector_error_not_bare_sqlite(env):
     finally:
         holder.rollback()
         holder.close()
+
+
+def test_default_embedder_is_one_instance_under_concurrent_first_calls(monkeypatch):
+    """MCP SDK 把同步工具放进线程池：两个并发的首次调用此前会各建一个实例、各载一份模型
+    （实例内的锁只管同一个实例）。构造放慢到能让线程交错，断言只建出一个。"""
+    import threading
+    import time
+
+    made = []
+
+    class _Slow:
+        def __init__(self):
+            time.sleep(0.05)
+            made.append(self)
+
+    monkeypatch.setattr(vector, "FastEmbedEmbedder", _Slow)
+    monkeypatch.setattr(vector, "_default_embedder", None)
+    got = []
+    ts = [threading.Thread(target=lambda: got.append(vector.default_embedder()))
+          for _ in range(8)]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+    assert len(made) == 1 and all(g is made[0] for g in got), (len(made), len(got))

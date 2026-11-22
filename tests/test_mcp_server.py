@@ -1058,7 +1058,7 @@ def test_mcp_out_dir_symlink_pointing_outside_is_refused(tmp_path, monkeypatch):
     (home / "link").symlink_to(tmp_path / "elsewhere")
     monkeypatch.setattr(paths, "HOME_DIR", home)
     monkeypatch.delenv(paths.MCP_OUT_ROOTS_ENV, raising=False)
-    with pytest.raises(errors.MediaOutputError):
+    with pytest.raises(errors.OutDirRefused):
         paths.refuse_mcp_out(str(home / "link" / "x"))
     paths.refuse_mcp_out(str(home / "real" / "x"))           # 同一目录下的真目录照常放行
 
@@ -1075,5 +1075,5 @@ def test_mcp_out_roots_reject_relative_entries(tmp_path, monkeypatch):
     """相对条目会按 MCP server 的 CWD 解析——那个 CWD 由客户端决定，放行范围不许随它漂。"""
     monkeypatch.setattr(paths, "HOME_DIR", tmp_path / "home")
     monkeypatch.setenv(paths.MCP_OUT_ROOTS_ENV, "exports")
-    with pytest.raises(errors.MediaOutputError):
+    with pytest.raises(errors.OutDirRefused):
         paths.refuse_mcp_out(str(tmp_path / "home" / "x"))

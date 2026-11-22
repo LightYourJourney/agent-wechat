@@ -522,3 +522,37 @@ def test_upsert_heal_never_touches_other_accounts(con):
                                                ts=1, content="y", **base)])
     got = con.execute("SELECT chat_id FROM messages WHERE account='other'").fetchone()[0]
     assert got == deg
+
+
+def test_upsert_names_new_degraded_rows_after_a_known_real_name(con):
+    """反方向：库里已有真名行，之后某次导出名字源暂时读不出，新写入的行落成 `md5:` 形态。
+    这一批全是退化 id——不按库里已知的真名修，会话以后没有新消息时这些行就一直看不见。"""
+    from agent_wechat import messages
+
+    real = "wxid_abc123def456"
+    md5v = messages.chat_md5(real)
+    base = dict(account="acct", chat_md5=md5v, shard="message_0.db", msg_type=1,
+                sender_id=None, sender_name=None, is_self=0, media_hint=None)
+    store.upsert_batch(con, [messages.make_row(chat_id=real, local_id=1, ts=1,
+                                               content="早先那条", **base)])
+    store.upsert_batch(con, [messages.make_row(chat_id=messages.degraded_chat_id(md5v),
+                                               local_id=2, ts=2, content="名字源读不出时那条",
+                                               **base)])
+    ids = [r[0] for r in con.execute("SELECT chat_id FROM messages ORDER BY local_id")]
+    assert ids == [real, real], ids
+
+
+def test_upsert_heal_also_fixes_fact_claims(con):
+    """`fact_claim.chat_id` 未显式给时抄自证据行（`derived.add_claim`）——同样会停在退化 id。"""
+    from agent_wechat import messages
+
+    real = "wxid_abc123def456"
+    md5v = messages.chat_md5(real)
+    deg = messages.degraded_chat_id(md5v)
+    con.execute("INSERT INTO fact_claim(claim_id, account, chat_id, claim, status, created_at,"
+                " updated_at) VALUES('c1', 'acct', ?, '某主张', 'candidate', 1, 1)", (deg,))
+    con.commit()
+    store.upsert_batch(con, [messages.make_row(
+        account="acct", chat_md5=md5v, chat_id=real, shard="message_0.db", local_id=1, ts=1,
+        msg_type=1, sender_id=None, sender_name=None, is_self=0, content="x", media_hint=None)])
+    assert con.execute("SELECT chat_id FROM fact_claim").fetchone()[0] == real

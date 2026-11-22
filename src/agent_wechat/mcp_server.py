@@ -269,7 +269,7 @@ def export_chat_media(contact: str, kinds: str = "image,voice,video",
     发往腾讯 CDN（实测 `vweixinf.tc.qq.com` 的证书对主机名无效；另一个 host 的 https 未测）
     ——这是既知且被显式接受的代价，
     见 SECURITY.md §1「零网络例外」第 3 条。单条失败计入 counts.sticker.failed，不重试。
-    out_dir 只能落在数据目录（~/.agent-wechat）之下，或用户用 AGENT_WECHAT_MCP_OUT_ROOTS 放行的目录。
+    out_dir 只能落在数据目录（AGENT_WECHAT_HOME，默认 ~/.agent-wechat）之下，或用户用 AGENT_WECHAT_MCP_OUT_ROOTS 放行的目录。
     """
     paths.refuse_mcp_out(out_dir)      # MCP 比 CLI 严：out_dir 由 Agent 填，见 paths.refuse_mcp_out
     res = usecases.media_export(
@@ -334,7 +334,7 @@ def get_message_media(contact: str, keys: str | None = None, months: str | None 
 
     语音库读不到时会降级：degraded 非空，且**尚未导出**的语音一律按 gone 呈现
     （已导出的仍照实报 exported，不会假装成 exportable）。
-    out_dir 只能落在数据目录（~/.agent-wechat）之下，或用户用 AGENT_WECHAT_MCP_OUT_ROOTS 放行的目录。
+    out_dir 只能落在数据目录（AGENT_WECHAT_HOME，默认 ~/.agent-wechat）之下，或用户用 AGENT_WECHAT_MCP_OUT_ROOTS 放行的目录。
     """
     paths.refuse_mcp_out(out_dir)      # MCP 比 CLI 严：out_dir 由 Agent 填，见 paths.refuse_mcp_out
     res = usecases.message_media(
@@ -391,7 +391,7 @@ def export_moments(contact: str | None = None, months: str | None = None,
     时间跨度——**注意这是微信本地缓存的窗口，不是完整历史**（本机实测 1,923 条覆盖
     2013-02~2026-09，密度极不均）。触及 limit 时 truncated=true，留下的是**最新**的
     那些动态，counts.remaining 报出还有多少条**更早**的没进来。
-    out_dir 只能落在数据目录（~/.agent-wechat）之下，或用户用 AGENT_WECHAT_MCP_OUT_ROOTS 放行的目录。
+    out_dir 只能落在数据目录（AGENT_WECHAT_HOME，默认 ~/.agent-wechat）之下，或用户用 AGENT_WECHAT_MCP_OUT_ROOTS 放行的目录。
     """
     paths.refuse_mcp_out(out_dir)      # MCP 比 CLI 严：out_dir 由 Agent 填，见 paths.refuse_mcp_out
     res = usecases.moments_export(
@@ -439,7 +439,7 @@ def export_chat(contact: str, months: str | None = None, limit: int = 500,
     **位置（48）/ 名片（42）的结构化块另需 `agent-wechat extras rebuild`**（也是幂等）：
     没跑过时产物里不出现那两个块，而**不会有任何降级提示**——这一族分不开「表是空的」与
     「这些消息本来就没有位置/名片」（与 `msg_parts` 那条降级不同，别指望 degraded 报它）。
-    out_dir 只能落在数据目录（~/.agent-wechat）之下，或用户用 AGENT_WECHAT_MCP_OUT_ROOTS 放行的目录。
+    out_dir 只能落在数据目录（AGENT_WECHAT_HOME，默认 ~/.agent-wechat）之下，或用户用 AGENT_WECHAT_MCP_OUT_ROOTS 放行的目录。
     """
     paths.refuse_mcp_out(out_dir)      # MCP 比 CLI 严：out_dir 由 Agent 填，见 paths.refuse_mcp_out
     res = usecases.chat_export(

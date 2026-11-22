@@ -106,17 +106,23 @@ def save_cached_hex(bare: str, passphrase_hex: str) -> str | None:
     # 被杀（SIGKILL / 断电）就留下半截 JSON——`_load_cache` 把它当「没有缓存」，**所有账号**
     # 的密钥一起丢，恢复要 sudo 重新引导 + 在微信里重新登录（全项目代价最高的一次恢复）。
     # 现在任何一步失败，盘上那份既有缓存都原样不动（与 `tasks._persist_locked` 同一写法）；
-    # chmod 在 replace **之前**：落到正式文件名的那一刻权限已是 0600，不存在 0644 的窗口。
+    # 临时文件**以 0600 建出**（先 `os.open` 占位、再 `write_text` 写入——写入点留在
+    # `write_text` 上，故障注入矩阵按它记账），chmod 再收一次（同名残留可能是别的权限）；
+    # 落到正式文件名之前权限已是 0600。**任何**中断（含 KeyboardInterrupt）都把临时文件抹掉：
+    # 它装着全部账号的密钥，sudo 下属主还是 root，留在盘上就没人清。
     tmp = CACHE_FILE.with_name(f"{CACHE_FILE.name}.{os.getpid()}.tmp")
     try:
+        os.close(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600))
         tmp.write_text(json.dumps(cache, indent=2))
         os.chmod(tmp, 0o600)
         os.replace(tmp, CACHE_FILE)
-    except OSError as exc:
+    except BaseException as exc:
         try:
             tmp.unlink(missing_ok=True)
         except OSError:
             pass                 # 抹不掉也不掩盖原始错误（下面照抛）
+        if not isinstance(exc, OSError):
+            raise
         raise HomeUnavailable(
             f"无法写入密钥缓存：{CACHE_FILE}",
             hint=f"{exc}；请检查 AGENT_WECHAT_HOME 指向的位置是否可用") from exc

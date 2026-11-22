@@ -208,6 +208,15 @@ class ContainerWriteRefused(AgentWeChatError):
     """
 
 
+class OutDirRefused(AgentWeChatError):
+    """MCP 的 `out_dir` 不在放行范围内（`paths.refuse_mcp_out`）→ 拒绝写入。
+
+    与 `ContainerWriteRefused` 同属**策略拒绝**（目标往往完全可写），但判据不同：那个只认
+    微信容器，这个只给 MCP 入口用、放行面是数据目录 + `AGENT_WECHAT_MCP_OUT_ROOTS`。
+    与 `MediaOutputError`（真写不动）分开，用户才知道该去改配置而不是查磁盘。
+    """
+
+
 class MediaOutputError(AgentWeChatError):
     """媒体输出目录不可建或不可写（`--out` 指向只读目录、不可写 HOME、磁盘满）。
 

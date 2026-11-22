@@ -49,7 +49,7 @@ def test_all_project_errors_share_one_base():
     expected = {
         "AccountNotFound", "CaptureError", "ContainerWriteRefused", "ContactNotFound", "DerivedBusy", "DerivedInputError",
         "DataNotFound", "DecryptError", "DependencyMissing", "HomeUnavailable",
-        "IndexUnavailable", "KeyNotFound", "MediaKeyError", "MediaOutputError",
+        "IndexUnavailable", "KeyNotFound", "MediaKeyError", "MediaOutputError", "OutDirRefused",
         "PurgeRefused", "SchemaDrift", "SchemaMigrationError", "SearchInputError",
         "ScopeDenied", "SnsMediaError", "SyncBusy", "SyncInputError", "TaskNotFound", "VectorError", "VectorIndexEmpty",
     }

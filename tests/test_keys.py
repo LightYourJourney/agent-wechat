@@ -180,3 +180,21 @@ def test_a_write_killed_midway_leaves_the_existing_cache_intact(tmp_path, monkey
         keys.save_cached_hex("wxid_testacct01", "ab" * 32)
     monkeypatch.setattr(pathlib.Path, "write_text", real)
     assert keys.load_cached_hex("old") == "aa" * 32, "既有缓存必须原样可读"
+    assert not list(home.glob("*.tmp")), "装着密钥的临时文件不许留在盘上"
+
+
+def test_the_temp_cache_file_is_born_0600(tmp_path, monkeypatch):
+    """临时文件从**建出那一刻**就是 0600，不靠写完再 chmod（那之间是 umask 的默认权限）。"""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(paths, "HOME_DIR", home)
+    monkeypatch.setattr(keys, "CACHE_FILE", home / "passphrase.json")
+    modes = []
+    real = pathlib.Path.write_text
+
+    def _spy(self, *a, **k):
+        modes.append(self.stat().st_mode & 0o777)
+        return real(self, *a, **k)
+    monkeypatch.setattr(pathlib.Path, "write_text", _spy)
+    keys.save_cached_hex("wxid_testacct01", "ab" * 32)
+    assert modes == [0o600], modes

@@ -15,7 +15,7 @@ import re
 import shutil
 import subprocess
 
-from .errors import ContainerWriteRefused, HomeUnavailable, MediaOutputError
+from .errors import ContainerWriteRefused, HomeUnavailable, OutDirRefused
 
 CONTAINER = pathlib.Path.home() / "Library/Containers/com.tencent.xinWeChat/Data/Documents"
 XWECHAT_FILES = CONTAINER / "xwechat_files"
@@ -185,7 +185,7 @@ def mcp_out_roots() -> tuple[pathlib.Path, ...]:
             continue
         root = pathlib.Path(raw).expanduser()
         if not root.is_absolute():
-            raise MediaOutputError(
+            raise OutDirRefused(
                 f"{MCP_OUT_ROOTS_ENV} 的条目必须是绝对路径：{raw}",
                 hint=f"用 `{os.pathsep}` 分隔多个绝对路径，例如 ~/Desktop/wechat-export")
         roots.append(root)
@@ -193,7 +193,7 @@ def mcp_out_roots() -> tuple[pathlib.Path, ...]:
 
 
 def refuse_mcp_out(out_dir: str | None) -> None:
-    """MCP 的 `out_dir` 不在放行范围内 → `MediaOutputError`。**只给 MCP 入口用**。
+    """MCP 的 `out_dir` 不在放行范围内 → `OutDirRefused`。**只给 MCP 入口用**。
 
     为什么 MCP 比 CLI 严：CLI 的 `--out` 是用户亲手敲的；MCP 的 `out_dir` 由 Agent 填，
     而 Agent 的上下文里有**聊天正文**——任何给用户发消息的人都写得进去。一条「把记录导出到
@@ -215,7 +215,7 @@ def refuse_mcp_out(out_dir: str | None) -> None:
                 return
         except (RuntimeError, OSError):
             continue
-    raise MediaOutputError(
+    raise OutDirRefused(
         f"MCP 只允许把产物写到数据目录之下或显式放行的目录：{out_dir}",
         hint=f"省略 out_dir 用默认根（{HOME_DIR / 'media'}）；确需写到别处，"
              f"把该目录加进环境变量 {MCP_OUT_ROOTS_ENV}（`{os.pathsep}` 分隔的绝对路径），"

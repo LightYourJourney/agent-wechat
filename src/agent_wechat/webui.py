@@ -90,7 +90,7 @@ function el(tag, text, cls) {
   return n;
 }
 async function api(path, opts) {
-  const res = await fetch(path, {...opts, headers: {'X-AW-CSRF': csrf}});
+  const res = await fetch(path, {...opts, headers: {...(opts && opts.headers), 'X-AW-CSRF': csrf}});
   const body = await res.json();
   if (!res.ok) throw new Error(body.error || res.status);
   return body;
@@ -422,7 +422,8 @@ def _route(path: str, qs: dict) -> dict:
             raise errors.SearchInputError("evidence 需要 key")
         res = usecases.message_context(key, account=acct, before=2, after=2)
         # 不给 contact 就不做名字解析，所以不会有 NeedConfirm（也因此不碰微信密钥）
-        assert not isinstance(res, usecases.NeedConfirm)
+        if isinstance(res, usecases.NeedConfirm):
+            raise errors.SearchInputError("evidence 只按 msg_key 取，不做名字解析")
         return res
     if path == "/api/derived":
         return derived.list_derived(acct, chat=_one(qs, "chat") or None,

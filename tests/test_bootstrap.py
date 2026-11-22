@@ -159,8 +159,10 @@ def test_terminate_capture_never_pkills_when_bash_was_already_reaped(monkeypatch
 
 def test_terminate_capture_signals_only_its_own_process_group(monkeypatch):
     """EA-004：收尾此前无条件 `pkill -9 -x lldb`——按**名字**杀，会连坐用户自己的 lldb
-    会话（或以其它身份开的）。现在 Popen 起独立进程组，收尾只向 `getpgid(proc.pid)` 发
+    会话（或以其它身份开的）。现在 Popen 起独立会话，组号即 `proc.pid`，收尾只向它发
     SIGTERM，且**不许**退到按名 pkill。把首选改回 `pkill` 本测试的首条断言必红。
+
+    `getpgid` 故意桩成「答别的组」：收尾不许现查组号（bash 被回收后它必抛 ESRCH）。
     """
     import signal as _signal
 
@@ -173,14 +175,13 @@ def test_terminate_capture_signals_only_its_own_process_group(monkeypatch):
     monkeypatch.setattr(bootstrap.subprocess, "run", _no_pkill)
 
     bootstrap._terminate_capture(_FakeProc(pid=4242))
-    assert seen == [(4243, _signal.SIGTERM)], "只向本进程组发一次 SIGTERM（wait 返回即止）"
+    assert seen == [(4242, _signal.SIGTERM)], "只向本进程组发一次 SIGTERM（wait 返回即止）"
 
 
 def test_terminate_capture_escalates_to_sigkill_when_wait_times_out(monkeypatch):
     """SIGTERM 后收不干净（wait 超时）才升级 SIGKILL——仍不走 pkill。
 
-    `wait` 只超时**一次**：一直不返回的话落到 pkill 才是设计行为（见下一条测试），
-    那测的就不是升级了。
+    `wait` 只超时**一次**：一直不返回的情形见下一条测试。
     """
     import signal as _signal
 
@@ -205,16 +206,27 @@ def test_terminate_capture_escalates_to_sigkill_when_wait_times_out(monkeypatch)
     assert seen == [_signal.SIGTERM, _signal.SIGKILL], seen
 
 
-def test_terminate_capture_falls_back_to_pkill_only_when_killpg_is_unusable(monkeypatch):
-    """killpg 两轮都不可用（getpgid 抛错）时才退到按名 pkill——**不删它**：删了就会在
-    异常路径上静默丢失清理，留下一个 attach 着微信的 lldb。"""
-    monkeypatch.setattr(bootstrap.os, "getpgid",
-                        lambda pid: (_ for _ in ()).throw(ProcessLookupError(pid)))
-    calls = []
-    monkeypatch.setattr(bootstrap.subprocess, "run", lambda argv, **kw: calls.append(argv))
+def test_terminate_capture_never_pkills_even_when_nothing_works(monkeypatch):
+    """最坏情形：wait 永远超时（lldb 卡在不可中断态）、或 killpg 每次都失败。此前两者都
+    落到按名 `pkill -9 -x lldb`（以 root 连坐本机所有 lldb）；现在最后一刀仍只打本组。"""
+    import signal as _signal
+    import subprocess as _sub
 
-    bootstrap._terminate_capture(_FakeProc())
-    assert calls == [["pkill", "-9", "-x", "lldb"]], calls
+    monkeypatch.setattr(bootstrap.subprocess, "run",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("不许按名 pkill")))
+
+    class _Hung(_FakeProc):
+        def wait(self, timeout=None):
+            raise _sub.TimeoutExpired("lldb", timeout)
+    seen = []
+    monkeypatch.setattr(bootstrap.os, "killpg", lambda pgid, sig: seen.append((pgid, sig)))
+    bootstrap._terminate_capture(_Hung(pid=7))
+    assert seen == [(7, _signal.SIGTERM), (7, _signal.SIGKILL), (7, _signal.SIGKILL)], seen
+
+    def _eperm(pgid, sig):
+        raise PermissionError(1, "Operation not permitted")
+    monkeypatch.setattr(bootstrap.os, "killpg", _eperm)
+    bootstrap._terminate_capture(_FakeProc(pid=7))          # 不抛、不 pkill
 
 
 def test_capture_starts_its_own_session_so_cleanup_cannot_hit_the_caller(monkeypatch):

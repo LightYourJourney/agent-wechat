@@ -499,9 +499,8 @@ def build_index(accounts: Sequence[str] | None = None, rebuild: bool = False,
                 if dirty["embedded"] == 0 and dirty["dropped"] == 0 \
                         and dirty["deferred"] == 0:
                     break          # 队列已空（或只剩失败，留给下一轮/诊断）
-        meta = _meta(con)
-        assert meta is not None, "_ensure_meta 在本函数开头已写入本模型的 meta 行"
-        prev_skipped = meta["skipped"]
+        meta = _meta(con)                  # `_ensure_meta` 在本函数开头已写入本模型的 meta 行
+        prev_skipped = meta["skipped"] if meta is not None else 0
         total = con.execute("SELECT count(*) FROM vec_messages").fetchone()[0]
         _write_meta(con, embedded=total, skipped=prev_skipped + skipped)
         return {"embedded_this_run": embedded, "skipped_this_run": skipped}

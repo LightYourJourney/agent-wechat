@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import pathlib
+import sqlite3
 import sys
 import time
 
@@ -97,6 +98,12 @@ def main() -> int:
         except errors.AgentWeChatError as exc:
             counts["decrypt"] += 1
             first_error = first_error or f"{type(exc).__name__}: {exc}"
+        except sqlite3.DatabaseError as exc:
+            # 撕裂的快照**正是要数的那一类**：sqlcipher_export 过了、明文库却是坏的，
+            # `quick_check` / 打开时抛裸 DatabaseError（"malformed" / "not a database"）。
+            # 不接住的话探针在最该计数的那一刻 traceback 退出，前面的计数全丢。
+            counts["check"] += 1
+            first_error = first_error or f"{type(exc).__name__}: {exc}"
         if (i + 1) % 20 == 0:
             print(f"[{i + 1}/{a.iterations}] {counts}", flush=True)
         time.sleep(a.interval)
@@ -105,7 +112,7 @@ def main() -> int:
     print(f"复制期间源文件变化 changed={counts['changed']}  解密失败 decrypt={counts['decrypt']}  "
           f"quick_check 不过 check={counts['check']}  正常 ok={counts['ok']}")
     if first_error:
-        print(f"首个解密错误：{first_error}")
+        print(f"首个错误：{first_error}")
     return 0
 
 

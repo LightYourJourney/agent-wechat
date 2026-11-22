@@ -55,38 +55,36 @@ class BootstrapProgress:
     warning: str | None = None      # kind="warn"（EA-005：属主未归还等非致命降级）
 
 
-def _terminate_capture(proc: subprocess.Popen) -> None:
-    """收尾：**只向本次捕获的 lldb 进程组**发信号（EA-004）。
-
-    此前无条件 `pkill -9 -x lldb`——按**名字**杀，会连带杀掉用户自己的 lldb 会话（或以
-    其它身份开的）。现在 Popen 用 `start_new_session=True` 起了独立进程组，`killpg`
-    精确命中本次的 bash→lldb 进程树；`pkill` 降级为「killpg 也不可用」时的最后兜底
-    ——**不删它**：删了就会在异常路径上静默丢失清理。
-
-    **bash 已退出并被回收时直接收尾，不许落到 pkill**：超时路径上 `_read_capture` 读到
-    EOF 时 `proc.poll()` 已经回收了 bash，此后 `getpgid` 必抛 ESRCH、macOS 的 `killpg`
-    报 EPERM——两轮都「不可用」，于是一次普通的「没在时限内重新登录」会以 root 身份按名
-    杀掉本机所有 lldb。bash 等齐管道全员才退出，所以它退出 = lldb 已结束；仍对组号
-    （`start_new_session` ⇒ 组号即 `proc.pid`）补一次 SIGKILL，兜住 bash 被外力杀掉、
-    lldb 成孤儿的情形，失败一律忽略。
-    """
-    if proc.poll() is not None:
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except OSError:
-            pass                                   # 组里已经没人：这正是常态
-        return
-    for sig in (signal.SIGTERM, signal.SIGKILL):
-        try:
-            os.killpg(os.getpgid(proc.pid), sig)
-            proc.wait(timeout=3)
-            return
-        except Exception:                          # noqa: BLE001 — 兜底路径要吞遍所有失败
-            continue
+def _killpg_quiet(pgid: int, sig: int) -> None:
     try:
-        subprocess.run(["pkill", "-9", "-x", "lldb"], capture_output=True)
-    except (OSError, subprocess.TimeoutExpired):
-        pass          # 最后兜底也失败：清理是尽力而为，不因它把引导打挂（A 矩阵 73）
+        os.killpg(pgid, sig)
+    except OSError:
+        pass                                       # 组里已经没人（或只剩僵尸）：这正是常态
+
+
+def _terminate_capture(proc: subprocess.Popen) -> None:
+    """收尾：**只向本次捕获的 lldb 进程组**发信号，任何路径都不按名字杀（EA-004）。
+
+    组号就是 `proc.pid`：Popen 用 `start_new_session=True` 起，bash 是新会话的首进程
+    （`test_capture_starts_its_own_session…` 钉住这一点）。**不用 `getpgid` 现查**——
+    bash 一旦被回收（超时路径上 `_read_capture` 的 `poll()` 就会回收它）`getpgid` 必抛
+    ESRCH，此前两轮都因此「不可用」，落到按名 `pkill -9 -x lldb`，一次普通的「没在时限内
+    重新登录」就以 root 杀掉本机所有 lldb（含用户自己的调试会话）。
+
+    bash 已退出 = 管道全员已结束（bash 等齐才退），只补一刀 SIGKILL 兜住「bash 被外力杀掉、
+    lldb 成孤儿」；还在跑就 SIGTERM → 等 3 s → SIGKILL → 再等 3 s，最后无论如何再对本组
+    补一刀 SIGKILL。失败一律吞掉：清理是尽力而为，不因它把引导打挂（A 矩阵 73）。
+    """
+    pgid = proc.pid
+    if proc.poll() is None:
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            _killpg_quiet(pgid, sig)
+            try:
+                proc.wait(timeout=3)
+                return
+            except Exception:                      # noqa: BLE001 — 兜底路径要吞遍所有失败
+                continue
+    _killpg_quiet(pgid, signal.SIGKILL)
 
 
 def _read_capture(proc: subprocess.Popen, deadline: float) -> str:
@@ -99,7 +97,8 @@ def _read_capture(proc: subprocess.Popen, deadline: float) -> str:
     """
     buf = ""
     out = proc.stdout
-    assert out is not None, "Popen 必须以 stdout=PIPE 起（capture_passphrase_lldb 就是这么起的）"
+    if out is None:                   # 只有不带 stdout=PIPE 起的进程才会这样：读不到就是没捕获
+        return buf
     while time.time() < deadline:
         # 超时不许越过 deadline：固定 3.0 会让「300s 的 timeout」实际超到 303s，
         # 而按秒计的 deadline 承诺在这里就该是准的（EA-052 的测试钉住了这条）。
