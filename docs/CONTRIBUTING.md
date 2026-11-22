@@ -52,7 +52,7 @@ uv run pytest tests/ -q          # 运行测试
 - **换 clone / 换机器、或怀疑机制时**，跑 `uv run python security/scan.py --check-hooks`：它报安装状态
   的五态（未装 / 旧机制 / 配置指错 / 本地改动 / 正常）。提交拦截是唯一反复复发过的出口，
   而它的失效可以是完全静默的
-- **门禁的单一入口是 `scripts/check.sh`**（七步：运行时 import 环 / vulture 候选集不超基线 / ruff（F 规则）/ pyright /
+- **门禁的单一入口是 `scripts/check.sh`**（运行时 import 环 / vulture 候选集不超基线 / ruff（F 规则）/ pyright /
   `pytest` / `scan --all` / 钩子自检；任一步失败即非 0 并指明是哪一步、哪一条）。
   `pre-commit` 只跑第①步（0.07 s），全量在 `pre-push`（本机实测 133–156 s，绝大部分是 pytest）。手工跑：`bash scripts/check.sh`
   （加 `--fast` 只做结构检查）。vulture 的基线在 `security/gate-baseline.txt`，

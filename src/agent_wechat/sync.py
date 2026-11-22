@@ -62,7 +62,7 @@ class SyncResult:
     skipped: int = 0
     vector: dict | None = None
     health: dict | None = None
-    degraded: list | None = None
+    degraded: list = dataclasses.field(default_factory=list)
     detail: str | None = None
     hint: str | None = None
 
@@ -352,8 +352,6 @@ def run_sync(account: str | None = None, *, full: bool = False,
     started = int(now if now is not None else time.time())
     res = SyncResult(account=account or "", status=FAILED, started_at=started)
     stats: dict = {}
-    degraded: list = []
-    res.degraded = degraded
     skipped_rows = {"n": 0}
 
     try:
@@ -388,7 +386,7 @@ def run_sync(account: str | None = None, *, full: bool = False,
             try:
                 res.exported = export.run_export(
                     acct, full=full,
-                    on_reader=lambda r: degraded.extend(
+                    on_reader=lambda r: res.degraded.extend(
                         d.envelope() for d in usecases.collect_degradations(r)),
                     on_skipped=lambda n: skipped_rows.__setitem__("n", n))
                 res.skipped = skipped_rows["n"]

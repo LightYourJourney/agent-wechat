@@ -623,17 +623,21 @@ def _heal_degraded_chat_ids(con: sqlite3.Connection, rows: list[messages.Message
     `derived_text` 与 `fact_claim` 的 `chat_id` 都抄自 messages（`derived.add_claim` 未显式给
     会话时取证据行的），同批修正——否则那些行停在退化 id 上，按会话筛照样不可见。
     """
-    pairs = {(r["chat_id"], r["account"], messages.degraded_chat_id(r["chat_md5"]))
-             for r in rows if not r["chat_id"].startswith(messages.MD5_PREFIX)}
-    # 反方向：本批全是退化 id（名字源这一轮读不出来），而库里该会话**已有**真名行——
-    # 按已知真名修。查找走 `msg_key` 唯一索引的前缀区间（`account|md5|…`；`}` 紧跟 `|`
+    pairs: set[tuple[str, str, str]] = set()
+    named: set[tuple[str, str]] = set()
+    degraded: set[tuple[str, str]] = set()
+    for r in rows:
+        key = (r["account"], r["chat_md5"])
+        if r["chat_id"].startswith(messages.MD5_PREFIX):
+            degraded.add(key)
+        else:
+            named.add(key)
+            pairs.add((r["chat_id"], r["account"], messages.degraded_chat_id(r["chat_md5"])))
+    # 反方向：本批里只有退化 id 的会话（名字源这一轮读不出来），而库里该会话**已有**真名行
+    # ——按已知真名修。查找走 `msg_key` 唯一索引的前缀区间（`account|md5|…`；`}` 紧跟 `|`
     # 之后），不为它新建索引；只在本批出现退化行时才查，正常导出零开销。
-    named = {(c, a) for c, a, _d in pairs}
-    for acct, md5 in {(r["account"], r["chat_md5"]) for r in rows
-                      if r["chat_id"].startswith(messages.MD5_PREFIX)}:
-        if any(a == acct and messages.chat_md5(c) == md5 for c, a in named):
-            continue                     # 本批自己就带着真名
-        prefix = f"{acct}|{md5}|"
+    for acct, md5 in degraded - named:
+        prefix = messages.msg_key_prefix(acct, md5)
         hit = con.execute(
             "SELECT chat_id FROM messages WHERE msg_key >= ? AND msg_key < ?"
             " AND chat_id NOT LIKE ? LIMIT 1",

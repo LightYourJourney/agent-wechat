@@ -245,6 +245,13 @@ class _Handler(BaseHTTPRequestHandler):
             return True
         return False
 
+    def _reject_csrf(self) -> bool:
+        """每进程随机令牌（`X-AW-CSRF`）。GET `/api/*` 与 POST 共用这一份判据。"""
+        if self.headers.get("X-AW-CSRF") != self.state.csrf:
+            _json(self, 403, {"error": "CSRF 校验失败"})
+            return True
+        return False
+
     def do_GET(self) -> None:                # noqa: N802 — BaseHTTPRequestHandler 协议
         if self._reject_host():
             return
@@ -264,8 +271,7 @@ class _Handler(BaseHTTPRequestHandler):
             # 都能让浏览器带着 `Host: 127.0.0.1:<port>` 打过来，触发检索 / 语义检索（加载模型）/
             # 诊断。同源策略让它读不到响应，但计时侧信道与资源消耗都还在。自定义头会让跨站
             # fetch 先发预检，而本服务不答 CORS，于是跨站请求根本到不了这里。
-            if self.headers.get("X-AW-CSRF") != self.state.csrf:
-                _json(self, 403, {"error": "CSRF 校验失败"})
+            if self._reject_csrf():
                 return
             qs = urllib.parse.parse_qs(path.query)
             try:
@@ -284,8 +290,7 @@ class _Handler(BaseHTTPRequestHandler):
         if not _origin_ok(self.headers.get("Origin"), self.state.port):
             _json(self, 403, {"error": "Origin 不在本机允许列表"})
             return
-        if self.headers.get("X-AW-CSRF") != self.state.csrf:
-            _json(self, 403, {"error": "CSRF 校验失败"})
+        if self._reject_csrf():
             return
         path = urllib.parse.urlparse(self.path)
         if not store.DB_PATH.exists():

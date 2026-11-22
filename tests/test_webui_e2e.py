@@ -42,21 +42,22 @@ def test_sync_search_evidence_and_derived_delete(tmp_path, monkeypatch):
 
     httpd = webui.create_server("127.0.0.1", 0)
     port = httpd.server_address[1]
+    csrf = httpd.aw_state.csrf
     t = threading.Thread(target=httpd.serve_forever, daemon=True)
     t.start()
     try:
-        status, body = _req(port, httpd.aw_state.csrf, "/api/status")
+        status, body = _req(port, csrf, "/api/status")
         assert status.status == 200 and ACCT in body["accounts"]
 
-        status, chats = _req(port, httpd.aw_state.csrf, f"/api/chats?account={ACCT}")
+        status, chats = _req(port, csrf, f"/api/chats?account={ACCT}")
         assert any(c["chat_id"] == FRIEND for c in chats["chats"])
 
-        status, found = _req(port, httpd.aw_state.csrf, f"/api/search?account={ACCT}&q=甲一&mode=hybrid")
+        status, found = _req(port, csrf, f"/api/search?account={ACCT}&q=甲一&mode=hybrid")
         assert status.status == 200 and found["hits"], found
         hit = found["hits"][0]
         assert hit["msg_key"].startswith(ACCT + "|")
 
-        status, ctx = _req(port, httpd.aw_state.csrf, f"/api/evidence?account={ACCT}&key={hit['msg_key']}")
+        status, ctx = _req(port, csrf, f"/api/evidence?account={ACCT}&key={hit['msg_key']}")
         assert status.status == 200
         assert any(m["content"] == "甲一" for m in ctx["messages"])
 
@@ -71,14 +72,14 @@ def test_sync_search_evidence_and_derived_delete(tmp_path, monkeypatch):
                 (did, hit["msg_key"], ACCT, FRIEND, "ocr", "证据截图文字",
                  "fake", "auto", 1))
             con.commit()
-        status, listed = _req(port, httpd.aw_state.csrf, f"/api/derived?account={ACCT}")
+        status, listed = _req(port, csrf, f"/api/derived?account={ACCT}")
         assert any(i["derivation_id"] == did for i in listed["items"])
 
-        status, deleted = _post(port, httpd.aw_state.csrf, "/api/derived/delete",
+        status, deleted = _post(port, csrf, "/api/derived/delete",
                                 {"derivation_id": did})
         assert status.status == 200 and deleted["status"] == "deleted"
 
-        status, listed = _req(port, httpd.aw_state.csrf, f"/api/derived?account={ACCT}")
+        status, listed = _req(port, csrf, f"/api/derived?account={ACCT}")
         assert all(i["derivation_id"] != did or i["status"] == "deleted"
                    for i in listed["items"])
         with store.open() as con:

@@ -271,7 +271,7 @@ def export_chat_media(contact: str, kinds: str = "image,voice,video",
     见 SECURITY.md §1「零网络例外」第 3 条。单条失败计入 counts.sticker.failed，不重试。
     out_dir 只能落在数据目录（AGENT_WECHAT_HOME，默认 ~/.agent-wechat）之下，或用户用 AGENT_WECHAT_MCP_OUT_ROOTS 放行的目录。
     """
-    paths.refuse_mcp_out(out_dir)      # MCP 比 CLI 严：out_dir 由 Agent 填，见 paths.refuse_mcp_out
+    paths.refuse_mcp_out(out_dir)
     res = usecases.media_export(
         contact, kinds=[k.strip() for k in kinds.split(",") if k.strip()],
         months=[m.strip() for m in months.split(",") if m.strip()] if months else None,
@@ -336,7 +336,7 @@ def get_message_media(contact: str, keys: str | None = None, months: str | None 
     （已导出的仍照实报 exported，不会假装成 exportable）。
     out_dir 只能落在数据目录（AGENT_WECHAT_HOME，默认 ~/.agent-wechat）之下，或用户用 AGENT_WECHAT_MCP_OUT_ROOTS 放行的目录。
     """
-    paths.refuse_mcp_out(out_dir)      # MCP 比 CLI 严：out_dir 由 Agent 填，见 paths.refuse_mcp_out
+    paths.refuse_mcp_out(out_dir)
     res = usecases.message_media(
         contact,
         keys=[k.strip() for k in keys.split(",") if k.strip()] if keys else None,
@@ -393,7 +393,7 @@ def export_moments(contact: str | None = None, months: str | None = None,
     那些动态，counts.remaining 报出还有多少条**更早**的没进来。
     out_dir 只能落在数据目录（AGENT_WECHAT_HOME，默认 ~/.agent-wechat）之下，或用户用 AGENT_WECHAT_MCP_OUT_ROOTS 放行的目录。
     """
-    paths.refuse_mcp_out(out_dir)      # MCP 比 CLI 严：out_dir 由 Agent 填，见 paths.refuse_mcp_out
+    paths.refuse_mcp_out(out_dir)
     res = usecases.moments_export(
         contact,
         months=[m.strip() for m in months.split(",") if m.strip()] if months else None,
@@ -441,7 +441,7 @@ def export_chat(contact: str, months: str | None = None, limit: int = 500,
     「这些消息本来就没有位置/名片」（与 `msg_parts` 那条降级不同，别指望 degraded 报它）。
     out_dir 只能落在数据目录（AGENT_WECHAT_HOME，默认 ~/.agent-wechat）之下，或用户用 AGENT_WECHAT_MCP_OUT_ROOTS 放行的目录。
     """
-    paths.refuse_mcp_out(out_dir)      # MCP 比 CLI 严：out_dir 由 Agent 填，见 paths.refuse_mcp_out
+    paths.refuse_mcp_out(out_dir)
     res = usecases.chat_export(
         contact,
         months=[m.strip() for m in months.split(",") if m.strip()] if months else None,

@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import pytest
 
-from agent_wechat import paths, store
+from agent_wechat import messages, paths, store
 
 
 @pytest.fixture
@@ -477,6 +477,21 @@ def test_schema_drift_notes_reports_a_missing_trigger(con):
     assert any(name in n and "不存在" in n for n in notes), notes
 
 
+
+# ---------- 退化 id 按会话自愈（`store._heal_degraded_chat_ids`） ----------
+
+_REAL = "wxid_abc123def456"
+_MD5 = messages.chat_md5(_REAL)
+_DEG = messages.degraded_chat_id(_MD5)
+
+
+def _row(chat_id: str, local_id: int, content: str = "x", account: str = "acct"):
+    return messages.make_row(account=account, chat_md5=_MD5, chat_id=chat_id,
+                             shard="message_0.db", local_id=local_id, ts=local_id, msg_type=1,
+                             sender_id=None, sender_name=None, is_self=0, content=content,
+                             media_hint=None)
+
+
 def test_upsert_heals_degraded_siblings_not_in_this_batch(con):
     """同一会话里**别的**退化 id 行，在名字解析回来的那一批里一并修正。
 
@@ -485,74 +500,40 @@ def test_upsert_heals_degraded_siblings_not_in_this_batch(con):
     漏掉它们。前向扫描不会再读到旧行，只靠逐行重扫自愈太慢——所以修正按会话做，
     不按行做。
     """
-    from agent_wechat import messages
-
-    real = "wxid_abc123def456"
-    md5v = messages.chat_md5(real)
-    deg = messages.degraded_chat_id(md5v)
-    base = dict(account="acct", chat_md5=md5v, shard="message_0.db", msg_type=1,
-                sender_id=None, sender_name=None, is_self=0, media_hint=None)
-    store.upsert_batch(con, [messages.make_row(chat_id=deg, local_id=1, ts=1,
-                                               content="早先那条", **base)])
+    store.upsert_batch(con, [_row(_DEG, 1, "早先那条")])
+    key = messages.row_key("acct", _MD5, "message_0.db", 1)
     con.execute("INSERT INTO derived_text(derivation_id, msg_key, account, chat_id, kind,"
                 " text, engine, status, created_at) VALUES(?,?,?,?,?,?,?,?,?)",
-                (f"acct|{md5v}|message_0.db|1|ocr", f"acct|{md5v}|message_0.db|1",
-                 "acct", deg, "ocr", "图里的字", "t", "auto", 1))
+                (f"{key}|ocr", key, "acct", _DEG, "ocr", "图里的字", "t", "auto", 1))
     con.commit()
     # 下一轮：名字回来了，但这一批只含**新**消息
-    store.upsert_batch(con, [messages.make_row(chat_id=real, local_id=2, ts=2,
-                                               content="后来那条", **base)])
+    store.upsert_batch(con, [_row(_REAL, 2, "后来那条")])
     ids = {r[0] for r in con.execute("SELECT chat_id FROM messages")}
-    assert ids == {real}, ids
-    assert con.execute("SELECT chat_id FROM derived_text").fetchone()[0] == real
+    assert ids == {_REAL}, ids
+    assert con.execute("SELECT chat_id FROM derived_text").fetchone()[0] == _REAL
 
 
 def test_upsert_heal_never_touches_other_accounts(con):
     """修正按 `(account, 退化 id)` 定位：另一个账号的同形退化行不许被改名。"""
-    from agent_wechat import messages
-
-    real = "wxid_abc123def456"
-    md5v = messages.chat_md5(real)
-    deg = messages.degraded_chat_id(md5v)
-    base = dict(chat_md5=md5v, shard="message_0.db", msg_type=1, sender_id=None,
-                sender_name=None, is_self=0, media_hint=None)
-    store.upsert_batch(con, [messages.make_row(account="other", chat_id=deg, local_id=1,
-                                               ts=1, content="x", **base)])
-    store.upsert_batch(con, [messages.make_row(account="acct", chat_id=real, local_id=1,
-                                               ts=1, content="y", **base)])
+    store.upsert_batch(con, [_row(_DEG, 1, account="other")])
+    store.upsert_batch(con, [_row(_REAL, 1)])
     got = con.execute("SELECT chat_id FROM messages WHERE account='other'").fetchone()[0]
-    assert got == deg
+    assert got == _DEG
 
 
 def test_upsert_names_new_degraded_rows_after_a_known_real_name(con):
     """反方向：库里已有真名行，之后某次导出名字源暂时读不出，新写入的行落成 `md5:` 形态。
     这一批全是退化 id——不按库里已知的真名修，会话以后没有新消息时这些行就一直看不见。"""
-    from agent_wechat import messages
-
-    real = "wxid_abc123def456"
-    md5v = messages.chat_md5(real)
-    base = dict(account="acct", chat_md5=md5v, shard="message_0.db", msg_type=1,
-                sender_id=None, sender_name=None, is_self=0, media_hint=None)
-    store.upsert_batch(con, [messages.make_row(chat_id=real, local_id=1, ts=1,
-                                               content="早先那条", **base)])
-    store.upsert_batch(con, [messages.make_row(chat_id=messages.degraded_chat_id(md5v),
-                                               local_id=2, ts=2, content="名字源读不出时那条",
-                                               **base)])
+    store.upsert_batch(con, [_row(_REAL, 1, "早先那条")])
+    store.upsert_batch(con, [_row(_DEG, 2, "名字源读不出时那条")])
     ids = [r[0] for r in con.execute("SELECT chat_id FROM messages ORDER BY local_id")]
-    assert ids == [real, real], ids
+    assert ids == [_REAL, _REAL], ids
 
 
 def test_upsert_heal_also_fixes_fact_claims(con):
     """`fact_claim.chat_id` 未显式给时抄自证据行（`derived.add_claim`）——同样会停在退化 id。"""
-    from agent_wechat import messages
-
-    real = "wxid_abc123def456"
-    md5v = messages.chat_md5(real)
-    deg = messages.degraded_chat_id(md5v)
     con.execute("INSERT INTO fact_claim(claim_id, account, chat_id, claim, status, created_at,"
-                " updated_at) VALUES('c1', 'acct', ?, '某主张', 'candidate', 1, 1)", (deg,))
+                " updated_at) VALUES('c1', 'acct', ?, '某主张', 'candidate', 1, 1)", (_DEG,))
     con.commit()
-    store.upsert_batch(con, [messages.make_row(
-        account="acct", chat_md5=md5v, chat_id=real, shard="message_0.db", local_id=1, ts=1,
-        msg_type=1, sender_id=None, sender_name=None, is_self=0, content="x", media_hint=None)])
-    assert con.execute("SELECT chat_id FROM fact_claim").fetchone()[0] == real
+    store.upsert_batch(con, [_row(_REAL, 1)])
+    assert con.execute("SELECT chat_id FROM fact_claim").fetchone()[0] == _REAL

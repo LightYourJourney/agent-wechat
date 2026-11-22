@@ -79,7 +79,7 @@ git config core.hooksPath security/hooks
 |---|---|---|---|
 | `pre-commit` | ① `scripts/check_import_cycles.py`（运行时 import 环 + `import mcp` 泄漏）② `security/scan.py --staged` | ① 0.07 s ② 视改动量 | 逐次提交都付得起的**快速结构检查**；标识外流拦截一直在这儿 |
 | `commit-msg` | `security/scan.py` 的提交信息模式 | 毫秒 | 只进提交信息的同串（EA-009 那族） |
-| `pre-push` | `scripts/check.sh`（**全量七步**：import 环 / vulture 基线 / ruff / pyright / pytest / `scan --all` / 钩子自检） | **~2.5 min**（本机实测 133–156 s，绝大部分是 pytest） | push 是内容离开本机的动作（本仓红线是**不外流**），值得那几分钟；放进 pre-commit 会让「钩子碍事」变成绕过的理由 |
+| `pre-push` | `scripts/check.sh`（**全量**：import 环 / vulture 基线 / ruff / pyright / pytest / `scan --all` / 钩子自检） | **~2.5 min**（本机实测 133–156 s，绝大部分是 pytest） | push 是内容离开本机的动作（本仓红线是**不外流**），值得那几分钟；放进 pre-commit 会让「钩子碍事」变成绕过的理由 |
 
 **门禁的单一入口是 `scripts/check.sh`**（`--fast` 只跑第①步，给 `pre-commit` 用）。
 vulture 那一步比的是**候选集**而不是条数：`security/gate-baseline.txt` 只许放存量条目，

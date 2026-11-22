@@ -120,6 +120,10 @@ def test_capture_pid_zero_treated_as_not_running(monkeypatch):
 
 # ---------- EA-004：收尾只向**本进程组**发信号 ----------
 
+def _no_pkill(*a, **k):
+    raise AssertionError("不许按名字 pkill——那会连坐用户自己的 lldb 会话")
+
+
 class _FakeProc:
     def __init__(self, pid: int = 4242):
         self.pid = pid
@@ -150,8 +154,7 @@ def test_terminate_capture_never_pkills_when_bash_was_already_reaped(monkeypatch
     monkeypatch.setattr(bootstrap.os, "killpg", _killpg)
     monkeypatch.setattr(bootstrap.os, "getpgid",
                         lambda pid: (_ for _ in ()).throw(ProcessLookupError(pid)))
-    monkeypatch.setattr(bootstrap.subprocess, "run",
-                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("不许按名 pkill")))
+    monkeypatch.setattr(bootstrap.subprocess, "run", _no_pkill)
 
     bootstrap._terminate_capture(_Reaped(pid=4242))
     assert seen == [(4242, _signal.SIGKILL)], seen
@@ -170,8 +173,6 @@ def test_terminate_capture_signals_only_its_own_process_group(monkeypatch):
     monkeypatch.setattr(bootstrap.os, "getpgid", lambda pid: pid + 1)
     monkeypatch.setattr(bootstrap.os, "killpg", lambda pgid, sig: seen.append((pgid, sig)))
 
-    def _no_pkill(*a, **k):
-        raise AssertionError("不许按名字 pkill——那会连坐用户自己的 lldb 会话")
     monkeypatch.setattr(bootstrap.subprocess, "run", _no_pkill)
 
     bootstrap._terminate_capture(_FakeProc(pid=4242))
@@ -199,8 +200,7 @@ def test_terminate_capture_escalates_to_sigkill_when_wait_times_out(monkeypatch)
             if type(self).calls == 1:
                 raise _sub.TimeoutExpired("lldb", timeout)   # 第一次收不干净
             return 0                                          # SIGKILL 之后收干净
-    monkeypatch.setattr(bootstrap.subprocess, "run",
-                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("不许 pkill")))
+    monkeypatch.setattr(bootstrap.subprocess, "run", _no_pkill)
 
     bootstrap._terminate_capture(_Stubborn(pid=7))
     assert seen == [_signal.SIGTERM, _signal.SIGKILL], seen
@@ -212,8 +212,7 @@ def test_terminate_capture_never_pkills_even_when_nothing_works(monkeypatch):
     import signal as _signal
     import subprocess as _sub
 
-    monkeypatch.setattr(bootstrap.subprocess, "run",
-                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("不许按名 pkill")))
+    monkeypatch.setattr(bootstrap.subprocess, "run", _no_pkill)
 
     class _Hung(_FakeProc):
         def wait(self, timeout=None):

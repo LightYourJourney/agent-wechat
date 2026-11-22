@@ -430,8 +430,9 @@ class MessageReader:
 
     # ---------- 消息 ----------
 
-    def _name2id(self, con: sqlite3.Connection) -> dict[int, str | None]:
-        return {rowid: _s(u) for rowid, u in con.execute("SELECT rowid, user_name FROM Name2Id")}
+    def _name2id(self, con: sqlite3.Connection) -> dict[int, str]:
+        return {rowid: name for rowid, u in con.execute("SELECT rowid, user_name FROM Name2Id")
+                if (name := _s(u)) is not None}
 
     def _shard_tables(self, con: sqlite3.Connection, chat_md5: str | None) -> list[str]:
         if chat_md5:
@@ -443,7 +444,7 @@ class MessageReader:
 
     def _decode_row(self, lid: int, ltype: int, sender: int | None, ts: int,
                     mc: bytes | str | None, ct: int | None, md5hex: str,
-                    chat_map: Mapping[str, str], n2i: Mapping[int, str | None],
+                    chat_map: Mapping[str, str], n2i: Mapping[int, str],
                     sticker_names: Mapping[str, str] | None = None) -> Message:
         """单行解码：压缩、类型掩码、群前缀、媒体提示。所有读取路径共用此函数。"""
         chat_id = chat_map.get(md5hex) or messages.degraded_chat_id(md5hex)
@@ -495,7 +496,7 @@ class MessageReader:
                        content=body, media_hint=hint, sticker_md5=sticker_md5)
 
     def _read_rows(self, con: sqlite3.Connection, table: str, shard: str, md5hex: str,
-                   chat_map: Mapping[str, str], n2i: Mapping[int, str | None],
+                   chat_map: Mapping[str, str], n2i: Mapping[int, str],
                    order_desc: bool = False, limit: int | None = None,
                    sticker_names: Mapping[str, str] | None = None) -> list[Message]:
         sql = (f"SELECT local_id, local_type, real_sender_id, create_time, "
@@ -544,7 +545,7 @@ class MessageReader:
         return self._apply_roster(chat_id, pieces)[-limit:]
 
     def _export_piece(self, row: tuple, *, shard: str, md5hex: str,
-                      chat_map: Mapping[str, str], n2i: Mapping[int, str | None],
+                      chat_map: Mapping[str, str], n2i: Mapping[int, str],
                       sticker_names: Mapping[str, str] | None
                       ) -> tuple[messages.MessageRow, RefRow | None]:
         """一行源数据 → `(messages 行, media_ref 或 None)`。
@@ -575,7 +576,7 @@ class MessageReader:
             content=m.content, media_hint=m.media_hint), ref
 
     def _batched(self, src_rows: Iterable[tuple], *, batch: int, shard: str, md5hex: str,
-                 chat_map: Mapping[str, str], n2i: Mapping[int, str | None],
+                 chat_map: Mapping[str, str], n2i: Mapping[int, str],
                  sticker_names: Mapping[str, str] | None
                  ) -> Iterator[tuple[list[messages.MessageRow], list[RefRow]]]:
         """源行 → `(messages 行批次, refs 批次)`。**前向扫描与回看共用**：
