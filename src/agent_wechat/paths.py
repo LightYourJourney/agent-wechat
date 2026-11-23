@@ -14,6 +14,7 @@ import pathlib
 import re
 import shutil
 import subprocess
+from shutil import copyfile as _copyfile   # 单独绑定：conftest 会把 `paths.shutil` 整个换成桩
 
 from .errors import ContainerWriteRefused, HomeUnavailable, OutDirRefused
 
@@ -423,6 +424,67 @@ def pid_alive(pid: object) -> bool:
         # 其余 OSError 同理保守。三种都归「活着」。
         return True
     return True
+
+
+def atomic_write(dest: pathlib.Path, data: str | bytes, *, mode: int = 0o600) -> None:
+    """临时文件 + `os.replace`：失败时 `dest` 上既有的文件**原样不动**，也不会出现半截文件。
+
+    三处共用（密钥缓存、任务注册表、媒体产物），此前各写一份、写法已经分叉（媒体那份直接
+    截断终路径再写，断电后半截文件被「已导出」判据永久跳过）。
+    - 临时文件在**同目录**（`os.replace` 只在同一文件系统上原子）、名带 pid（并发进程不共用
+      同一个 tmp），以 `mode` **建出**——落到正式文件名之前权限已经收紧；chmod 再收一次
+      （同名残留可能是别的权限）。
+    - 写入与 chmod 走 `Path` 的方法：故障注入矩阵（`tests/faultkit.py`）按它们记账。
+    - **任何**中断（含 KeyboardInterrupt）都抹掉临时文件；异常原样上抛（OSError 由调用方
+      翻成各自的项目异常）。崩溃（SIGKILL）留下的 tmp 由 `sweep_stale_tmp` 收。
+    - `os.replace` 换的是**名字**：`dest` 是符号链接时替换链接本身，不会写穿到链接目标。
+    """
+    if isinstance(data, str):
+        _atomic(dest, lambda tmp: tmp.write_text(data), mode)
+    else:
+        _atomic(dest, lambda tmp: tmp.write_bytes(data), mode)
+
+
+def atomic_copy(src: pathlib.Path, dest: pathlib.Path, *, mode: int = 0o600) -> None:
+    """同 `atomic_write`，内容来自文件 `src`（流式复制，不整读进内存——视频可达数百 MB）。
+    `shutil.copyfile` 只拷数据、不拷权限：临时文件建出时的 `mode` 留着。"""
+    _atomic(dest, lambda tmp: _copyfile(src, tmp), mode)
+
+
+def _atomic(dest: pathlib.Path, fill, mode: int) -> None:
+    tmp = dest.with_name(f"{dest.name}.{os.getpid()}.tmp")
+    try:
+        os.close(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode))
+        fill(tmp)
+        tmp.chmod(mode)
+        os.replace(tmp, dest)
+    except BaseException:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass                       # 抹不掉也不掩盖原始错误
+        raise
+
+
+def sweep_stale_tmp(dest: pathlib.Path) -> None:
+    """清掉崩溃遗留的 `<dest>.<pid>.tmp`（`atomic_write` 的产物）。**只清死 pid 的**——活进程的
+    tmp 可能正在被写，绝不碰（与 `decrypt.sweep_stale_tempdirs` 同一立场）。尽力而为。"""
+    prefix = dest.name + "."
+    try:
+        entries = list(dest.parent.iterdir())
+    except OSError:
+        return
+    for p in entries:
+        n = p.name
+        if not n.startswith(prefix) or not n.endswith(".tmp"):
+            continue
+        pid = n[len(prefix):-len(".tmp")]
+        if not pid.isdigit() or pid_alive(int(pid)):
+            continue
+        try:
+            p.unlink()
+        except OSError:
+            pass
 
 
 def time_machine_excluded() -> str | None:

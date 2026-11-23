@@ -349,7 +349,10 @@ def resolve_sticker(account: str, md5: str) -> tuple[pathlib.Path, bool] | None:
 # 实测（spec §2.6）：dat/mp4 文件名哈希在 packed_info_data 里（32-hex）；
 # XML md5 与文件名**无关**（19,832 条 0 命中），只作 packed 缺失时的兜底记录。
 _HEX32 = re.compile(r"[0-9a-fA-F]{32}")
-_XML_MD5 = re.compile(r'<(?:img|videomsg)[^>]*?\smd5="([0-9a-fA-F]{16,32})"')
+# `[^<>]` 而不是 `[^>]`：后者遇到大量 `<img ` 且没有 `>` 的内容时，每个起点都一路扫到串尾
+# （平方级：实测 256 KB 约 40s）。合法 XML 的属性值里不会出现裸 `<`，所以扫描在下一个 `<`
+# 处就停——线性，且不像封顶那样会截断真实的长标签（贴纸 / 图片标签带好几段 CDN URL）。
+_XML_MD5 = re.compile(r'<(?:img|videomsg)[^<>]*?\smd5="([0-9a-fA-F]{16,32})"')
 
 
 def extract_media_ref(local_type: int, content: str | None,
@@ -394,7 +397,7 @@ def _emoji_attr_re(name: str, value: str = r'[^"]*') -> re.Pattern[str]:
     `value` 是该属性的**取值形态**：只有 `md5` 需要收紧成 32-hex（`extract_sticker_ref`
     的契约要求非法 md5 一律返回 None，而通用 `[^"]*` 会把 `md5="short"` 也放进来）。
     """
-    return re.compile(rf'<emoji\b[^>]*?\s{re.escape(name)}{_ATTR_EQ}"({value})"')
+    return re.compile(rf'<emoji\b[^<>]*?\s{re.escape(name)}{_ATTR_EQ}"({value})"')   # `[^<>]`：见 `_XML_MD5`
 
 
 # **不要叫 `_HEX32`**：本模块已有一个同名的**编译后**正则（`extract_media_ref` 在用），
@@ -549,12 +552,15 @@ def _find_ffmpeg() -> str | None:
 
 
 def _wxgf_to_jpeg(data: bytes, dest: pathlib.Path) -> bool:
-    """wxgf（HEVC 容器）→ 首帧 JPEG，**直写 dest**（必需：微信目录只读）。
+    """wxgf（HEVC 容器）→ 首帧 JPEG，原子落到 dest（必需：微信目录只读）。
 
-    dest 由调用方算成 out_root 下的终路径；HEVC 流走 stdin 交给 ffmpeg，因此全过程
-    一个中间文件都不落——**绝不能**把临时文件写到微信数据目录里（那是本次导出的
-    前置红线），out_root 里也不需要留半成品。失败（无 ffmpeg / 流是坏的）→ False，
-    调用方退回存 .wxgf 原容器。
+    dest 由调用方算成 out_root 下的终路径。HEVC 流走 stdin、JPEG 走 **stdout**（`image2pipe`）
+    交回本进程，再由 `paths.atomic_write` 以 0600 落盘：
+    - 此前让 ffmpeg 直写 dest——路径里有 `%d` 时（`--out` 指向的目录名可以是任何东西）
+      ffmpeg 把它当图像序列模板，转码静默失败；
+    - ffmpeg 直写的文件权限跟 umask，本进程被杀后还会留下一个权限没收紧的明文图。
+    全过程一个中间文件都不落——**绝不能**把临时文件写到微信数据目录里（那是本次导出的
+    前置红线）。失败（无 ffmpeg / 流是坏的 / 落盘失败）→ False，调用方退回存 .wxgf 原容器。
     """
     ff = _find_ffmpeg()
     if ff is None:
@@ -563,25 +569,19 @@ def _wxgf_to_jpeg(data: bytes, dest: pathlib.Path) -> bool:
     if i < 0:
         return False
     try:
-        r = subprocess.run([ff, "-y", "-loglevel", "error", "-f", "hevc", "-i", "pipe:0",
-                            "-frames:v", "1", str(dest)],
+        r = subprocess.run([ff, "-loglevel", "error", "-f", "hevc", "-i", "pipe:0",
+                            "-frames:v", "1", "-f", "image2pipe", "-c:v", "mjpeg", "pipe:1"],
                            input=data[i:], capture_output=True, timeout=30)
     except (OSError, subprocess.TimeoutExpired):
-        r = None
+        return False
+    jpeg = r.stdout if isinstance(r.stdout, bytes) else b""
+    if r.returncode != 0 or not jpeg.startswith(b"\xff\xd8\xff"):
+        return False
     try:
-        if r is None or r.returncode != 0 or not dest.exists() or dest.stat().st_size == 0:
-            dest.unlink(missing_ok=True)   # ffmpeg 万一建了半成品：清掉，不留坏文件
-            return False
-        dest.chmod(0o600)                  # ffmpeg 落盘的权限跟 umask，这里收口（同 _save）
+        paths.atomic_write(dest, jpeg)
     except OSError:
-        # 收尾这几步（stat / unlink / chmod）任一 OSError 都只能算「这次没转成」：裸 OSError
-        # 逃出去会击穿 core 的错误契约（Ruling 21，与 Ruling 9/20 同族），而调用方对 False
-        # 的处置是完整的（回退存 .wxgf 容器）。可能已落盘的 jpeg 在这里尽力清掉——宁可回退
-        # 存原容器，也不留一个权限没收紧的明文图。
-        try:
-            dest.unlink(missing_ok=True)
-        except OSError:
-            pass
+        # 落盘失败只能算「这次没转成」（Ruling 21）：裸 OSError 逃出去会击穿 core 的错误契约，
+        # 而调用方对 False 的处置是完整的（回退存 .wxgf 容器）。atomic_write 失败不留残骸。
         return False
     return True
 
@@ -715,18 +715,19 @@ def _dest(out_root: pathlib.Path, cm: str, kind: str, mon: str,
 
 
 def save_artifact(out_root: pathlib.Path, rel_dir: str, kind: str, mon: str,
-                  stem: str, ext: str, data: bytes) -> pathlib.Path | None:
+                  stem: str, ext: str, data: bytes | pathlib.Path) -> pathlib.Path | None:
     """写一个导出文件（0600）。落盘失败（磁盘满/权限/只读挂载）返回 None（Ruling 20）——
-    调用方按自己的口径计数（图片 failed / 视频 missing / 语音 failed），裸 OSError 不逃出 core。"""
+    调用方按自己的口径计数（图片 failed / 视频 missing / 语音 failed），裸 OSError 不逃出 core。
+    `data` 给路径时流式复制该文件（视频：不整读进内存）；源读不了同样返回 None。"""
     p = _dest(out_root, rel_dir, kind, mon, stem, ext)
     try:
-        p.write_bytes(data)
-        p.chmod(0o600)                         # 导出的是明文媒体：除了属主谁也读不到
+        # 原子落盘（0600：导出的是明文媒体）。此前直接截断终路径再写：断电留下的半截文件会被
+        # `already()` 当成品永久跳过；`force` 重导时写失败，旧的好产物先被截断再被删掉。
+        if isinstance(data, pathlib.Path):
+            paths.atomic_copy(data, p)
+        else:
+            paths.atomic_write(p, data)
     except OSError:
-        try:
-            p.unlink(missing_ok=True)          # 写了一半的产物比没有更坏：skip 判定会把它当成品
-        except OSError:
-            pass                               # 清理本身失败不该盖过「这次没写成功」
         return None
     return p
 
@@ -950,15 +951,20 @@ class _ExportState:
         self.progress = progress
         self.produced = 0
 
-    def already(self, cm: str, kind: str, mon: str, base: str) -> bool:
+    def already(self, cm: str, kind: str, mon: str, base: str, *,
+                accept_thumb: bool = True) -> bool:
         """目标文件已在 → 本轮跳过。**在解密之前判**——省掉的正是真正的开销。
 
         候选名与读侧 `exported_path` 同源（见 `_out_candidates`）：判定比读侧严格就会
         出现「读侧说已导出、写侧说没有」的漂移。
+        `accept_thumb=False`：视频只认本体（mp4）——缩略图是本体不在时的**降级**产物，
+        本体后来出现时必须能升级，不能被它永久占位。
         """
         if self.force:
             return False
         cands = _out_candidates(kind, base)
+        if not accept_thumb:
+            cands = tuple(c for c in cands if not c[0].endswith("_thumb"))
         if kind == "voice" and _PILK is not None:
             # pilk 在时 `.slk` 只是**解码失败**留下的回退产物，不算完成：每轮重试转 WAV
             # （pilk 升级后自动补回）。读侧（`exported_path`）照旧认 `.slk`——文件确实在那儿。
@@ -1092,14 +1098,29 @@ def _export_videos_from_refs(st: _ExportState, chat_ids: list[str],
                 "（视频按 media_refs 索引归属）")
     if note:
         st.report.degraded.append(note)
+    seen: set[tuple[str, str, str]] = set()
     for chat in chat_ids:
         cm = messages.md5_of(chat)
         for _msg_key, ts, file_key in refs_by_chat.get(chat, ()):
-            if st.want is not None and month_of(ts) not in st.want:
+            mon = month_of(ts)
+            if st.want is not None and mon not in st.want:
                 continue                     # 月份外的条目本来就不导出，不算「因上限收手」
-            if st.already(cm, "video", month_of(ts), file_key):
+            # 同一个视频被多条消息引用（转发 / 重发）：产物是同一个文件，只处理一次——
+            # 否则撞上限时每条引用各计一次 remaining，报的比真正还差的文件数多（贴纸同款）。
+            if (cm, mon, file_key) in seen:
                 st.report.video.skipped += 1
                 continue
+            seen.add((cm, mon, file_key))
+            if st.already(cm, "video", mon, file_key, accept_thumb=False):
+                st.report.video.skipped += 1
+                continue
+            got = None
+            if st.already(cm, "video", mon, file_key):
+                # 只有缩略图在：本体仍不在就维持现状；本体出现了就升级成 mp4（往下走）。
+                got = resolve_video(st.account, ts, file_key)
+                if got is None or got[1]:
+                    st.report.video.skipped += 1
+                    continue
             # 上限检查排在月份过滤之后（与语音同一个口径）：只有**本会导出**的条目
             # 被上限挡下，truncated 才成立；反过来的话 `--limit` 恰好用尽时会把一条
             # 本来就跳过的条目当成「已提前收手」，那是假话。
@@ -1107,22 +1128,17 @@ def _export_videos_from_refs(st: _ExportState, chat_ids: list[str],
                 st.report.truncated = True
                 st.report.video.remaining += 1
                 continue
-            got = resolve_video(st.account, ts, file_key)
+            got = got or resolve_video(st.account, ts, file_key)
             if got is None:
                 st.report.video.missing += 1        # 有 ref 但本体不在磁盘（被清理）
                 continue
             src, is_thumb = got
-            try:
-                buf = src.read_bytes()
-            except OSError:
-                st.report.video.missing += 1        # 文件在、拿不到本体（Ruling 9）
-                continue
             # 名字逐字取自**源文件**（`{K}.mp4` / `{K}_raw.mp4` / `{K}_thumb.jpg`），与
             # 账号级枚举那条路一致：`media.exported_path` 正是按这三个名字探测的，改成
             # `{K}.jpg` 会让它找不到缩略图，机器上既有的产物也会被误报成「未导出」。
-            if save_artifact(st.out_root, cm, "video", month_of(ts),
-                     src.stem, src.suffix[1:], buf) is None:
-                st.report.video.missing += 1        # 落盘失败 → 同归口（Ruling 20）
+            if save_artifact(st.out_root, cm, "video", mon, src.stem, src.suffix[1:], src) is None:
+                # 文件在、拿不到本体（Ruling 9）或落盘失败（Ruling 20）：同归口
+                st.report.video.missing += 1
                 continue
             if is_thumb:
                 st.report.video.thumb += 1
@@ -1156,7 +1172,8 @@ def _export_videos_by_account_scan(st: _ExportState, chat_ids: list[str], *,
             # 缺失（读不到 / 写不出）**不记**：那时缩略图是唯一的退路，必须照写。
             mp4_stems = set()
             for f in _safe_iter(month_dir, "*.mp4"):
-                if st.already(cm, "video", mon, f.stem):
+                # 只认本体：先前只拿到缩略图的视频，本体出现后要能升级（见 `already`）
+                if st.already(cm, "video", mon, f.stem, accept_thumb=False):
                     st.report.video.skipped += 1
                     mp4_stems.add(f.stem.removesuffix("_raw"))
                     continue
@@ -1165,13 +1182,8 @@ def _export_videos_by_account_scan(st: _ExportState, chat_ids: list[str], *,
                     st.report.video.remaining += 1
                     mp4_stems.add(f.stem.removesuffix("_raw"))
                     continue
-                try:
-                    buf = f.read_bytes()
-                except OSError:
-                    st.report.video.missing += 1    # 文件在、拿不到本体（Ruling 9）
-                    continue
-                if save_artifact(st.out_root, cm, "video", mon, f.stem, "mp4", buf) is None:
-                    st.report.video.missing += 1    # 落盘失败 → 与读不到本体同归口（Ruling 20）
+                if save_artifact(st.out_root, cm, "video", mon, f.stem, "mp4", f) is None:
+                    st.report.video.missing += 1    # 读不到本体（Ruling 9）/ 落盘失败（Ruling 20）同归口
                     continue
                 mp4_stems.add(f.stem.removesuffix("_raw"))
                 st.report.video.ok += 1
@@ -1193,13 +1205,8 @@ def _export_videos_by_account_scan(st: _ExportState, chat_ids: list[str], *,
                     st.report.truncated = True
                     st.report.video.remaining += 1
                     continue
-                try:
-                    buf = f.read_bytes()
-                except OSError:
-                    st.report.video.missing += 1    # 缩略图也拿不到：同样的归口
-                    continue
-                if save_artifact(st.out_root, cm, "video", mon, f.stem, "jpg", buf) is None:
-                    st.report.video.missing += 1    # 同上：缩略图也 write 不出来
+                if save_artifact(st.out_root, cm, "video", mon, f.stem, "jpg", f) is None:
+                    st.report.video.missing += 1    # 缩略图也拿不到 / 写不出来：同样的归口
                     continue
                 st.report.video.thumb += 1
                 st.bump()                # 缩略图同样占 limit、同样报进度

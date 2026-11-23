@@ -479,3 +479,36 @@ def test_a_symlinked_data_dir_is_not_chmodded_through(tmp_path, monkeypatch):
     monkeypatch.setattr(paths, "_tm_exclusion_checked", True)
     paths.ensure_home_dirs()
     assert target.stat().st_mode & 0o777 == 0o755
+
+
+def test_atomic_write_leaves_the_existing_file_untouched_on_failure(tmp_path, monkeypatch):
+    """写到一半失败：正式文件名下仍是旧内容，同目录不留 tmp；成功时权限是 0600。"""
+    import pathlib
+    import stat as stat_mod
+
+    dest = tmp_path / "f.bin"
+    paths.atomic_write(dest, b"old")
+    assert stat_mod.S_IMODE(dest.stat().st_mode) == 0o600
+    real = pathlib.Path.write_bytes
+
+    def half(self, data):
+        self.open("wb").write(data[:1])
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(pathlib.Path, "write_bytes", half)
+    with pytest.raises(OSError):
+        paths.atomic_write(dest, b"new content")
+    monkeypatch.setattr(pathlib.Path, "write_bytes", real)
+    assert dest.read_bytes() == b"old"
+    assert [p.name for p in tmp_path.iterdir()] == ["f.bin"], "tmp 残骸没抹掉"
+
+
+def test_sweep_stale_tmp_only_reclaims_dead_pids(tmp_path, monkeypatch):
+    dest = tmp_path / "passphrase.json"
+    dead, live = tmp_path / "passphrase.json.111.tmp", tmp_path / "passphrase.json.222.tmp"
+    other = tmp_path / "tasks.json.111.tmp"
+    for p in (dead, live, other):
+        p.write_text("x")
+    monkeypatch.setattr(paths, "pid_alive", lambda pid: pid == 222)
+    paths.sweep_stale_tmp(dest)
+    assert not dead.exists() and live.exists() and other.exists()

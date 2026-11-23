@@ -122,27 +122,11 @@ def _file_lock() -> Iterator[None]:
 def _sweep_stale_tmp() -> None:
     """清掉崩溃遗留的 `tasks.json.<pid>.tmp`（R2-A-001，P3）。
 
-    tmp 名带 pid（F5 的并发要求）：进程被 SIGKILL 时 `_persist_locked` 的 except 跑不到，
+    tmp 名带 pid（F5 的并发要求）：进程被 SIGKILL 时 `paths.atomic_write` 的 except 跑不到，
     于是那份**完整的合并快照**会一直躺在数据目录里。它不会被读路径当成注册表，但会无限堆积
-    （每次崩溃留一份）。判据与 `decrypt.sweep_stale_tempdirs` 同一条立场：**只清死 pid 的**
-    ——活进程的 tmp 可能正在被写，绝不碰。
+    （每次崩溃留一份）。只清死 pid 的，判据见 `paths.sweep_stale_tmp`。
     """
-    parent, prefix = TASKS_FILE.parent, TASKS_FILE.name + "."
-    try:
-        entries = list(parent.iterdir())
-    except OSError:
-        return                        # 读不了目录：清扫是尽力而为
-    for p in entries:
-        n = p.name
-        if not n.startswith(prefix) or not n.endswith(".tmp"):
-            continue
-        pid = n[len(prefix):-len(".tmp")]
-        if not pid.isdigit() or paths.pid_alive(int(pid)):
-            continue
-        try:
-            p.unlink()
-        except OSError:
-            pass                      # 删不掉也不该挡住读盘
+    paths.sweep_stale_tmp(TASKS_FILE)
 
 
 def _load_locked() -> None:
@@ -173,15 +157,10 @@ def _persist_locked(changed: dict[str, dict]) -> None:
     disk = snapshot()
     merged = disk if disk is not None else dict(_tasks)
     merged.update(changed)
-    tmp = TASKS_FILE.with_name(f"{TASKS_FILE.name}.{os.getpid()}.tmp")
     try:
-        tmp.write_text(json.dumps(merged, ensure_ascii=False, indent=1))
-        os.replace(tmp, TASKS_FILE)      # 读者要么看到旧全量、要么看到新全量
+        # 读者要么看到旧全量、要么看到新全量；失败不留 tmp 残骸（见 `paths.atomic_write`）
+        paths.atomic_write(TASKS_FILE, json.dumps(merged, ensure_ascii=False, indent=1))
     except OSError as exc:
-        try:
-            tmp.unlink(missing_ok=True)  # 失败不留 tmp 残骸
-        except OSError:
-            pass                         # 清理本身失败不该盖过「这次没写成功」
         # 不变量 4 / core 契约：落盘失败此前裸穿（R2-A-002/003）。既有注册表内容**原样
         # 留在盘上**（tmp+replace 的语义保证），这里只把它变成项目异常。
         raise errors.HomeUnavailable(

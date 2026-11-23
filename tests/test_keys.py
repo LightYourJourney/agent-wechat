@@ -123,9 +123,13 @@ def test_a_failed_chmod_does_not_leave_a_loosely_permissioned_cache(tmp_path, mo
     cache = home / "passphrase.json"
     monkeypatch.setattr(keys, "CACHE_FILE", cache)
 
-    def _boom(path, mode):
-        raise OSError(1, "Operation not permitted")
-    monkeypatch.setattr(keys.os, "chmod", _boom)
+    real_chmod = pathlib.Path.chmod
+
+    def _boom(self, mode, **kw):
+        if self.name.startswith("passphrase.json"):
+            raise OSError(1, "Operation not permitted")
+        return real_chmod(self, mode, **kw)
+    monkeypatch.setattr(pathlib.Path, "chmod", _boom)
 
     with pytest.raises(errors.HomeUnavailable) as ei:
         keys.save_cached_hex("wxid_testacct01", "ab" * 32)

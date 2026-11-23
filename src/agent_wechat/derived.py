@@ -224,7 +224,10 @@ def engine_status(ocr: TesseractOcr | None = None,
 
 def _candidates(con: sqlite3.Connection, account: str, chat: str | None,
                 wants: set[str], limit: int, *,
-                force: bool = False) -> list[sqlite3.Row]:
+                force: bool = False,
+                before: tuple[int, int, str] | None = None) -> list[sqlite3.Row]:
+    """一页候选（新→旧）。`before` 是上一页最后一行的 `(ts, local_id, msg_key)`：keyset 分页，
+    下一页从它之后接着取——`msg_key` 是并列时的决胜键（不同分片的 local_id 可以相同）。"""
     where = ["m.account = ?"]
     args: list[object] = [account]
     wanted_types = []
@@ -246,13 +249,34 @@ def _candidates(con: sqlite3.Connection, account: str, chat: str | None,
             "NOT EXISTS (SELECT 1 FROM derived_text d WHERE d.msg_key = m.msg_key"
             " AND d.kind = CASE WHEN m.msg_type = ? THEN 'ocr' ELSE 'asr' END)")
         args.append(messages.TYPE_IMAGE)
+    if before is not None:
+        where.append("(m.ts, m.local_id, m.msg_key) < (?, ?, ?)")
+        args.extend(before)
     args.append(limit)
     return con.execute(
         "SELECT m.msg_key, m.account, m.chat_id, m.chat_md5, m.ts, m.local_id,"
         " m.msg_type, r.file_key FROM messages m"
         " LEFT JOIN media_refs r ON r.msg_key = m.msg_key"
-        f" WHERE {' AND '.join(where)} ORDER BY m.ts DESC, m.local_id DESC LIMIT ?",
+        f" WHERE {' AND '.join(where)}"
+        " ORDER BY m.ts DESC, m.local_id DESC, m.msg_key DESC LIMIT ?",
         args).fetchall()
+
+
+def _paged_candidates(con: sqlite3.Connection, account: str, chat: str | None,
+                      wants: set[str], page: int, *, force: bool):
+    """按页取候选直到取完（调用方处理满 limit 条就不再往下要）。
+
+    此前只取最新的 `limit × 4` 条：本机没导出的媒体每轮都占满名额（它们不会被标记），
+    于是每一轮都卡在同一批上，更早那些已导出的图永远轮不到。
+    """
+    before: tuple[int, int, str] | None = None
+    while True:
+        rows = _candidates(con, account, chat, wants, page, force=force, before=before)
+        yield from rows
+        if len(rows) < page:
+            return
+        last = rows[-1]
+        before = (last["ts"], last["local_id"], last["msg_key"])
 
 
 def _kind_of(msg_type: int) -> str | None:
@@ -341,8 +365,7 @@ def ingest(account: str, chat: str | None = None, *,
                     available, version = False, None
                 result["engines"][kind] = {
                     "name": eng.name, "available": available, "version": version}
-            rows = _candidates(con, account, chat, wants, limit * 4, force=force)
-            for row in rows:
+            for row in _paged_candidates(con, account, chat, wants, limit * 4, force=force):
                 if sum(result["counts"].values()) >= limit:
                     break
                 kind = _kind_of(row["msg_type"])
@@ -360,7 +383,9 @@ def ingest(account: str, chat: str | None = None, *,
                 existing = con.execute(
                     "SELECT status FROM derived_text WHERE derivation_id=?",
                     (f"{row['msg_key']}|{kind}",)).fetchone()
-                if existing is not None:
+                if existing is not None and (existing["status"] in ("edited", "deleted")
+                                             or not force):
+                    # `--force` 重新识别的是**没编辑过**的行（auto）；用户纠正过的与删掉的永不覆盖
                     reason = {"edited": "edited", "deleted": "deleted"}.get(
                         existing["status"], "exists")
                     skip(reason)

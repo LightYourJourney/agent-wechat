@@ -546,6 +546,51 @@ def test_video_export_refs_rerun_is_skipped(tmp_path, monkeypatch):
     assert (second.video.ok, second.video.skipped, second.video.remaining) == (0, 1, 0)
 
 
+@pytest.mark.parametrize("with_index", [True, False])
+def test_a_thumbnail_does_not_block_the_video_body_that_shows_up_later(
+        tmp_path, monkeypatch, with_index):
+    """第一轮只有缩略图 → 导出 `_thumb.jpg`；之后本体下载到本机，第二轮必须补出 mp4。
+
+    此前「已导出」判据把缩略图也算进候选，第二轮报 skipped、mp4 永远不导——与此同时
+    `get_message_media` 把它判成 exportable，两边自相矛盾。两条路（refs 驱动 / 账号级
+    枚举）都有这个判据，都要钉住。本体仍不在时，第二轮照旧 skipped（不重写缩略图）。
+    """
+    root, account = make_tree(tmp_path, monkeypatch)
+    ts = int(datetime.datetime(2026, 9, 15, 12, 0).timestamp())
+    fk, mon = "ef01" * 8, media.month_of(ts)
+    vdir = paths.XWECHAT_FILES / account / "msg/video" / mon
+    vdir.mkdir(parents=True)
+    (vdir / f"{fk}_thumb.jpg").write_bytes(b"\xff\xd8\xff" + b"t" * 16)
+    con = _video_index(tmp_path, account, [("wxid_a", 1, ts, fk)]) if with_index else None
+    out = root / "home" / "media"
+    run = lambda: media.export_media(account, ["wxid_a"], kinds=["video"], out_dir=out, con=con)
+
+    assert run().video.thumb == 1
+    again = run()
+    assert (again.video.thumb, again.video.skipped) == (0, 1), "本体仍不在：维持缩略图"
+    (vdir / f"{fk}.mp4").write_bytes(b"m" * 64)
+    third = run()
+    assert third.video.ok == 1, third.video
+    assert (out / messages.md5_of("wxid_a") / "video" / mon / f"{fk}.mp4").exists()
+
+
+def test_one_video_referenced_twice_counts_once(tmp_path, monkeypatch):
+    """同一视频被两条消息引用（转发）：产物是同一个文件，`remaining` 只能算一次。"""
+    root, account = make_tree(tmp_path, monkeypatch)
+    ts = int(datetime.datetime(2026, 9, 15, 12, 0).timestamp())
+    vdir = paths.XWECHAT_FILES / account / "msg/video" / media.month_of(ts)
+    vdir.mkdir(parents=True)
+    a, b = "aa" * 16, "bb" * 16
+    for fk in (a, b):
+        (vdir / f"{fk}.mp4").write_bytes(b"v")
+    con = _video_index(tmp_path, account, [("wxid_a", 1, ts, a), ("wxid_a", 2, ts, b),
+                                           ("wxid_a", 3, ts, b)])
+    out = root / "home" / "media"
+    rep = media.export_media(account, ["wxid_a"], kinds=["video"], out_dir=out, con=con,
+                             max_files=1)
+    assert (rep.video.ok, rep.video.remaining) == (1, 1), rep.video
+
+
 def test_video_export_degrades_when_no_refs(tmp_path, monkeypatch):
     """索引为空 → 明确降级，不静默产出 0 条（否则「没建索引」与「本机没有视频」不可区分）。"""
     root, account = make_tree(tmp_path, monkeypatch)
@@ -740,17 +785,17 @@ def test_export_media_video_read_error_counts_missing(tmp_path, monkeypatch):
     bad_mp4, bad_thumb = vdir / "bbbb.mp4", vdir / "dddd_thumb.jpg"
     bad_mp4.write_bytes(b"m" * 8)
     bad_thumb.write_bytes(b"t" * 8)              # 两个读不了的文件：本体与缩略图各占一处
-    real_read = pathlib.Path.read_bytes
-
-    def fake(self):
-        if self in (bad_mp4, bad_thumb):
-            raise PermissionError(13, "Operation not permitted", str(self))
-        return real_read(self)
-
-    monkeypatch.setattr(pathlib.Path, "read_bytes", fake)
-    rep = media.export_media(account, ["c@chatroom"], kinds=["video"],
-                             months=["2026-09"], out_dir=root / "home" / "media")
+    # 真的读不了（0000），不桩某个读函数：视频改成流式复制之后读法换了，判据不该跟着换。
+    for f in (bad_mp4, bad_thumb):
+        f.chmod(0)
+    try:
+        rep = media.export_media(account, ["c@chatroom"], kinds=["video"],
+                                 months=["2026-09"], out_dir=root / "home" / "media")
+    finally:
+        for f in (bad_mp4, bad_thumb):
+            f.chmod(0o600)
     assert rep.video.ok == 1 and rep.video.thumb == 1 and rep.video.missing == 2
+    assert not list((root / "home" / "media").rglob("*.tmp")), "读失败不许留临时文件"
 
 
 # ---------- Ruling 11：0700 覆盖输出树全链路 ----------
@@ -1118,7 +1163,7 @@ def test_export_media_image_write_error_counts_failed(tmp_path, monkeypatch):
     real_write = pathlib.Path.write_bytes
 
     def fake(self, data):
-        if self.name == "beef.jpg":
+        if self.name.startswith("beef.jpg"):      # 落盘先写同目录的 `beef.jpg.<pid>.tmp`
             raise OSError(28, "No space left on device", str(self))
         return real_write(self, data)
 
@@ -1156,7 +1201,7 @@ def test_export_media_partial_write_is_unlinked(tmp_path, monkeypatch):
     real_write = pathlib.Path.write_bytes
 
     def fake(self, data):
-        if self.name == "beef.jpg":
+        if self.name.startswith("beef.jpg"):      # 落盘先写同目录的 `beef.jpg.<pid>.tmp`
             self.open("wb").write(data[: len(data) // 2])   # 半成品先落盘：磁盘满正是这个形态
             raise OSError(28, "No space left on device", str(self))
         return real_write(self, data)
@@ -1192,7 +1237,7 @@ def test_export_media_video_write_error_counts_missing(tmp_path, monkeypatch):
     blocked = {"bbbb.mp4", "dddd_thumb.jpg"}
 
     def fake(self, mode, **kw):
-        if self.name in blocked:
+        if any(self.name.startswith(b) for b in blocked):   # 含 `<名>.<pid>.tmp`
             raise PermissionError(13, "Operation not permitted", str(self))
         return real_chmod(self, mode, **kw)
 
@@ -1212,7 +1257,7 @@ def test_export_media_voice_write_error_counts_failed(tmp_path, monkeypatch):
     real_write = pathlib.Path.write_bytes
 
     def fake(self, data):
-        if self.suffix == ".wav":                     # 中间 silk 写在临时目录（.silk）：不受影响
+        if ".wav" in self.suffixes:                   # 中间 silk 写在临时目录（.silk）：不受影响
             raise OSError(28, "No space left on device", str(self))
         return real_write(self, data)
 
@@ -1365,9 +1410,9 @@ def test_wxgf_jpeg_chmod_failure_falls_back_to_container(tmp_path, monkeypatch):
 
     class _Proc:
         returncode = 0
+        stdout = b"\xff\xd8\xff" + b"\x00" * 16          # 假装 ffmpeg 把 JPEG 交回了 stdout
 
     def fake_run(cmd, **kw):
-        pathlib.Path(cmd[-1]).write_bytes(b"\xff\xd8\xff" + b"\x00" * 16)   # 假装 ffmpeg 直写成功
         return _Proc()
 
     monkeypatch.setattr(media, "_find_ffmpeg", lambda: "ffmpeg")
@@ -1375,7 +1420,7 @@ def test_wxgf_jpeg_chmod_failure_falls_back_to_container(tmp_path, monkeypatch):
     real_chmod = pathlib.Path.chmod
 
     def fake_chmod(self, mode, **kw):
-        if self.suffix == ".jpg":                    # 只拒绝 jpeg 落盘那一下，.wxgf 照常
+        if ".jpg" in self.suffixes:                  # 只拒绝 jpeg 落盘那一下（含 tmp），.wxgf 照常
             raise PermissionError(13, "Operation not permitted", str(self))
         return real_chmod(self, mode, **kw)
 
@@ -2828,8 +2873,8 @@ def test_wxgf_transcode_reports_success_and_writes_dest(tmp_path, monkeypatch):
     dest = tmp_path / "x.jpg"
 
     def fake_run(argv, **kw):
-        dest.write_bytes(b"\xff\xd8\xffjpeg")
-        return type("R", (), {"returncode": 0})()
+        assert argv[-1] == "pipe:1", "JPEG 必须经 stdout 交回，不让 ffmpeg 直写路径"
+        return type("R", (), {"returncode": 0, "stdout": b"\xff\xd8\xffjpeg"})()
 
     monkeypatch.setattr(media, "_find_ffmpeg", lambda: "/usr/bin/ffmpeg")
     monkeypatch.setattr(media.subprocess, "run", fake_run)
@@ -3467,3 +3512,55 @@ def test_export_media_matrix__refs_absent_degrades_per_kind(tmp_path, monkeypatc
     assert any("无法归属" in d for d in rep_multi.degraded), rep_multi.degraded
     assert rep.video.ok + rep.video.missing >= 0     # 单会话不报那条降级
     assert not any("无法归属" in d for d in rep.degraded), rep.degraded
+
+
+def test_a_failed_forced_rewrite_keeps_the_good_artifact(tmp_path, monkeypatch):
+    """`force` 重导时写失败：旧的好产物必须原样留着。
+
+    此前 `save_artifact` 直接截断终路径再写，失败分支再 unlink——好产物先被截断、再被删掉。
+    """
+    out = tmp_path / "m"
+    good = media.save_artifact(out, "c" * 32, "image", "2026-09", "beef", "jpg", b"good")
+    assert good is not None
+    real = pathlib.Path.write_bytes
+
+    def full_disk(self, data):
+        raise OSError(28, "No space left on device", str(self))
+
+    monkeypatch.setattr(pathlib.Path, "write_bytes", full_disk)
+    assert media.save_artifact(out, "c" * 32, "image", "2026-09", "beef", "jpg", b"new") is None
+    monkeypatch.setattr(pathlib.Path, "write_bytes", real)
+    assert good.read_bytes() == b"good"
+
+
+def test_wxgf_transcode_survives_a_percent_d_in_the_output_path(tmp_path):
+    """真 ffmpeg：输出目录名含 `%d` 时照样转成（此前 ffmpeg 直写路径，把它当序列模板）。"""
+    import subprocess as sp
+
+    ff = media._find_ffmpeg()
+    if ff is None:
+        pytest.skip("本机没有 ffmpeg")
+    gen = sp.run([ff, "-loglevel", "error", "-f", "lavfi", "-i", "color=c=red:s=16x16",
+                  "-frames:v", "1", "-c:v", "libx265", "-f", "hevc", "pipe:1"],
+                 capture_output=True, timeout=30)
+    if gen.returncode != 0 or not gen.stdout:
+        pytest.skip("本机 ffmpeg 没有 libx265，造不出 HEVC 样本")
+    dest = tmp_path / "pct%d" / "K.jpg"
+    dest.parent.mkdir()
+    assert media._wxgf_to_jpeg(b"wxgf" + b"\x00" * 8 + gen.stdout, dest) is True
+    assert dest.read_bytes().startswith(b"\xff\xd8\xff")
+    assert stat.S_IMODE(dest.stat().st_mode) == 0o600
+    assert [p.name for p in dest.parent.iterdir()] == ["K.jpg"]
+
+
+@pytest.mark.parametrize("tag", ["<img ", "<emoji "])
+def test_media_ref_regexes_are_linear_on_unclosed_tags(tag):
+    """大量 `<img ` / `<emoji ` 且没有 `>`：此前 `[^>]*?` 每个起点都扫到串尾（256 KB 约 40s）。"""
+    import time
+
+    blob = tag * (256_000 // len(tag))
+    t0 = time.monotonic()
+    media._XML_MD5.search(blob)
+    media._STICKER_MD5.search(blob)
+    media._emoji_attr_re("cdnurl").search(blob)
+    assert time.monotonic() - t0 < 1.0

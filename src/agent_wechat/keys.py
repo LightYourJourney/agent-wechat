@@ -110,19 +110,11 @@ def save_cached_hex(bare: str, passphrase_hex: str) -> str | None:
     # `write_text` 上，故障注入矩阵按它记账），chmod 再收一次（同名残留可能是别的权限）；
     # 落到正式文件名之前权限已是 0600。**任何**中断（含 KeyboardInterrupt）都把临时文件抹掉：
     # 它装着全部账号的密钥，sudo 下属主还是 root，留在盘上就没人清。
-    tmp = CACHE_FILE.with_name(f"{CACHE_FILE.name}.{os.getpid()}.tmp")
+    # 崩溃（SIGKILL）留下的 `passphrase.json.<pid>.tmp` 装着全部账号的密钥，顺手收掉。
+    paths.sweep_stale_tmp(CACHE_FILE)
     try:
-        os.close(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600))
-        tmp.write_text(json.dumps(cache, indent=2))
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, CACHE_FILE)
-    except BaseException as exc:
-        try:
-            tmp.unlink(missing_ok=True)
-        except OSError:
-            pass                 # 抹不掉也不掩盖原始错误（下面照抛）
-        if not isinstance(exc, OSError):
-            raise
+        paths.atomic_write(CACHE_FILE, json.dumps(cache, indent=2))
+    except OSError as exc:
         raise HomeUnavailable(
             f"无法写入密钥缓存：{CACHE_FILE}",
             hint=f"{exc}；请检查 AGENT_WECHAT_HOME 指向的位置是否可用") from exc

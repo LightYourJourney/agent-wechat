@@ -308,6 +308,39 @@ def test_repeated_ingest_advances_to_older_media(tmp_path, monkeypatch):
     assert derived.list_derived(ACCT, kind="ocr")["total"] == 2
 
 
+def test_unexported_newer_media_do_not_starve_older_exported_ones(tmp_path, monkeypatch):
+    """较新的媒体大多没导出时，扫描要能越过它们推进到更早那张已导出的图。
+
+    此前候选只取最新的 `limit × 4` 条：没导出的媒体不会被标记，每一轮都占满名额，
+    于是每一轮都卡在同一批上（实测连跑 3 轮都是 `media_not_exported: 200`）。
+    """
+    out = _env(tmp_path, monkeypatch, export_image=False, export_voice=False)
+    with store.open() as con:
+        store.upsert_batch(con, [_row(100 + i, messages.TYPE_IMAGE, "[图片]") for i in range(30)])
+        store.upsert_batch(con, [_row(0, messages.TYPE_IMAGE, "[老图]")])
+        store.upsert_media_refs(con, [
+            (_row(0, messages.TYPE_IMAGE, None)["msg_key"], "image", "b" * 32, None)])
+        con.commit()
+    md5 = hashlib.md5(CHAT.encode()).hexdigest()
+    month = dt.datetime.fromtimestamp(T0, dt.timezone.utc).strftime("%Y-%m")
+    p = out / md5 / "image" / month / f"{'b' * 32}.png"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 64)
+
+    res = derived.ingest(ACCT, CHAT, kinds=("ocr",), ocr=FakeOcr(), limit=2)   # 一页 8 条
+    assert res["counts"] == {"ocr": 1}, res
+
+
+def test_force_reingest_rerecognises_rows_nobody_edited(tmp_path, monkeypatch):
+    """`--force` 要重新识别**没编辑过**（auto）的行；此前遇到已存在的行一律按 exists 跳过。"""
+    _env(tmp_path, monkeypatch)
+    derived.ingest(ACCT, CHAT, kinds=("ocr",), ocr=FakeOcr("旧识别"))
+    res = derived.ingest(ACCT, CHAT, kinds=("ocr",), ocr=FakeOcr("新识别"), force=True)
+    assert res["counts"] == {"ocr": 1}, res
+    img = next(i for i in derived.list_derived(ACCT)["items"] if i["kind"] == "ocr")
+    assert img["text"] == "新识别"
+
+
 def test_ingest_requires_an_explicit_chat_or_all(tmp_path, monkeypatch):
     _env(tmp_path, monkeypatch)
     with pytest.raises(errors.DerivedInputError):
