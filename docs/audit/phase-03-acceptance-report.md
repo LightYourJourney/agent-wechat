@@ -189,7 +189,7 @@
 | 45 s | cur | 777,263 行（正在 rebuild） | **0**，中断标记 1 | 0 | 同上 |
 
 - 两个时点正好覆盖了 FTS 批量路径的两个窗口：灌库中途被杀，以及 rebuild 进行时被杀。两种情况下次打开都自动补建，结果与一次跑完的逐字节一致。
-- 被杀和恢复之间的这段时间里，`doctor` 报「首次导出的 FTS 批量重建被中断」，此时检索只能搜到部分结果。
+- 首次导出进行中，以及被杀之后、下一次打开索引之前，FTS 是空的。这段时间关键词检索自动改走逐行扫描（只含已入库的部分），并在 `degraded` 里说明；被杀之后 `doctor` 报「首次导出的 FTS 批量重建被中断」，下一次任何检索或导出打开索引时自动补建。
 - 崩溃后不再残留明文，这是进程内后端的又一个安全收益：base 在 20 s 时点残留了 119 MB 明文，要等下一次运行时由清扫器删掉。
 
 ### 3.3 其它
@@ -216,7 +216,7 @@
 | 页校验失败被 `sync` 归为 `key_invalid`，叫用户重新 bootstrap | **已修** | 改归 `source_unavailable` |
 | `inspect` 固定走 CLI 后端，没装 brew 就用不了 | **已修** | 改走 `open_db` |
 | src 里有注释还在描述明文时代；SECURITY.md 没提派生密钥的内存缓存 | **已修** | |
-| CI 只跑默认后端 | **债** | CLI 回退和「没装 `[semantic]`」两种形态只在本地验证过，见 §7 ② |
+| CI 只跑默认后端 | 部分已还 | 代码审查后 CI 加了一遍 `AGENT_WECHAT_DECRYPT=cli` 的全量用例；「没装 `[semantic]`」的基础安装仍只在本地验证过，见 §7 ② |
 | `[semantic]` 拆分带来的升级摩擦 | 已在文档中说明 | 不带 `--extra semantic` 的 `uv sync` 会卸掉 fastembed；`doctor` 在「已建索引却没装」时报问题 |
 | 代码规模 | 可接受 | src 17,808 → 18,197 行（12 个文件 +539 / −150）；`decrypt.py` 193 → 443 行，增量是第二后端、异常翻译、克隆快照和契约；decrypt / store / export / reader 四个模块的平均圈复杂度 4.31 → 3.71 |
 
@@ -282,7 +282,7 @@ Python 层负责 schema 适配、异常契约、幂等与断点续传、排除�
 ## 7. 后续最值得投入的方向（按投入产出排序）
 
 1. **向量构建按长度分桶**（纯 Python，低风险）。推理批降到 8 后仍有组内 padding；把待嵌入行按 token 长度排序或分桶后再成批，预计还能再快 1.5–2 倍。这是全量耗时最长的环节（约 2–3 小时）。验收方式照本报告 §2.6：同一抽样下比吞吐与向量数值（余弦 ≥ 0.9999）。
-2. **CI 补两个矩阵项**：`AGENT_WECHAT_DECRYPT=cli`，以及不带 `--all-extras` 的基础安装。两条回退路径目前只在本地验证过，回退代码最容易在没人注意时坏掉。
+2. **CI 补两个矩阵项**：`AGENT_WECHAT_DECRYPT=cli`（代码审查后已加，见 §9），以及不带 `--all-extras` 的基础安装（仍待做）。回退代码最容易在没人注意时坏掉。
 3. **`sqlcipher3-wheels` 供应链兜底**。它由个人维护，上次发布约在 10 个月前。现有兜底：`uv.lock` 锁定哈希，保留 CLI 回退，`-m real` 真机对比用例。建议补上：
    - 关注 cp315 wheel 的发布；
    - 预备一份自建 wheel 的方案（上游是 setuptools + 内嵌 amalgamation，构建简单），在上游停更时切换。
@@ -299,4 +299,24 @@ Python 层负责 schema 适配、异常契约、幂等与断点续传、排除�
 | `ed517db` | 修复 zstd 并发解码的损坏与段错误（基线就有的缺陷） |
 | `649000a` | 独立审查的小项：页校验失败的分类、`inspect` 走 `open_db`、`ReadConnection` 契约、文档 |
 | `54cd941` | 首次导出 FTS 批量重建（持久化中断标记）、APFS 克隆快照、`[semantic]` 拆成可选安装项 |
-| 本报告所在提交 | Phase 03 验收脚本与结果，精简 `spike/phase01` |
+| `0c851f9` | Phase 03 验收脚本与结果，精简 `spike/phase01` |
+| `b85d877` | pilk 诊断隔离用例改用确定性替身，修 CI |
+| 代码审查修正 | 见 §9 |
+
+## 9. 代码审查后的修正（2026-11-24）
+
+`/code-review`（`97b78dc...HEAD`，标准轴 + 规格轴并行）发现的问题与处理：
+
+| 发现 | 处理 |
+|---|---|
+| **FTS 批量路径与并发连接冲突**：任何别的连接打开索引都会跑整套 SCHEMA、把刚拆掉的 FTS 触发器建回来；灌库自己的 UPDATE 随即对没进过索引的行做 FTS 'delete'，报 `database disk image is malformed`。首次导出期间一次 MCP 检索就能把导出打挂 | `connect()` 改跑不含 FTS 触发器的 DDL，FTS 触发器由 `_ensure_fts_triggers` 在写锁下判过中断标记后再建：灌库进行中不建、中断了当场补建、常态只有两次读 |
+| 首次导出期间关键词检索 0 命中、没有任何说明（此前逐行触发器下能搜到已入库部分） | 检测到进行中的批量路径时改走 LIKE，`degraded` 里说明 |
+| 常驻 MCP 进程里收口失败永远修不好：标记的 pid 就是这个活着的进程 | 记录本进程进行中的灌库数；标记是本进程、而本进程没有在灌 = 中断，下一次打开索引即补建。批量路径收成上下文管理器 `store.fts_bulk` |
+| 没装 `[semantic]` 时 `vector-build --rebuild` 先清空索引再失败 | 在清表之前检查并报「未安装语义检索组件」 |
+| 收口失败时 `con.rollback()` 的裸 `sqlite3.Error` 会顶替原异常穿出 core；批量路径的 `commit()` 在 `try` 之外 | 都纳入项目异常出口 |
+| 连接 / 游标代理的 `__getattr__` 透传绕过异常翻译 | 删掉透传，只暴露契约里的接口 |
+| `sync` 按文案前缀判「源的问题」 | 新增 `errors.SourceUnreadable(DecryptError)`，按类型判 |
+| 中断判据在 `store` 与 `sync` 各写一份；`import sqlcipher3` 在函数里出现 7 次；朋友圈测试夹具只做转发 | 收成 `store.fts_bulk_interrupted`、模块级一次导入、夹具直接用 `helpers.plain_open_db` |
+| CI 不跑 CLI 回退后端 | CI 增加一步：`AGENT_WECHAT_DECRYPT=cli` 下全量用例 |
+
+未改的：`--full` 重扫不走批量路径（§2.4 的有意取舍）；缺 fastembed 时仍报 `VectorError` 而非 `DependencyMissing`（`VectorError` 的定义本就涵盖「依赖缺失」，检索降级按它接）；损坏的 `sns.db` 报 `DecryptError` 而非 `SchemaDrift`（改动前的 CLI 后端也是在整库导出那一步以 `DecryptError` 失败，不是回归）；已推送提交的粒度不再改写。

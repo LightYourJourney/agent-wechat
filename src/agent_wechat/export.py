@@ -1,11 +1,10 @@
 """导出管道：流式、幂等、断点续传。任务登记在 usecases 层，这里只有管道。"""
 from __future__ import annotations
 
-import contextlib
 import sqlite3
 from collections.abc import Callable
 
-from . import errors, reader, store
+from . import reader, store
 
 
 def run_export(acct: str, chat_id: str | None = None, full: bool = False,
@@ -70,10 +69,9 @@ def run_export(acct: str, chat_id: str | None = None, full: bool = False,
                 store.upsert_media_refs(con, refs)
             store.upsert_batch(con, rows)
 
-        # 消息表为空（首次导出）时走 FTS 批量路径：拆触发器灌库、最后一次 rebuild。
-        # 无论成败都在 finally 里收口；进程被杀则由下次 `store.connect()` 按中断标记补做。
-        bulk = chat_id is None and store.fts_bulk_begin(con)
-        try:
+        # 消息表为空（首次导出）时走 FTS 批量路径：拆触发器灌库、退出时一次 rebuild（成败都收口；
+        # 进程被杀则由下次 `store.connect()` 按中断标记补做）。
+        with store.fts_bulk(con, enabled=chat_id is None):
             for rows, refs in r.iter_all(chat_id=chat_id, resume=resume,
                                          audit_cursors=audit_cursors,
                                          audit_rows=audit_window,
@@ -88,16 +86,6 @@ def run_export(acct: str, chat_id: str | None = None, full: bool = False,
                 total += len(rows) - dropped
                 if progress and total % 20_000 < store.BATCH:
                     progress(total)
-        except BaseException:
-            if bulk:
-                # 已提交的批次要能被检索到：失败也先把 FTS 补齐。补不成（多半与原失败同因，
-                # 如磁盘满）就留着标记交给下次 connect，**原异常优先**。
-                with contextlib.suppress(errors.AgentWeChatError):
-                    con.rollback()
-                    store.fts_bulk_finish(con)
-            raise
-        if bulk:
-            store.fts_bulk_finish(con)
 
         # ---- 历史回看（Phase 02）----
         # 回看在同一次分片解密里完成（`iter_all` 的 audit_* 参数）：另开一趟会多付一次

@@ -32,3 +32,8 @@ jobs:
       - run: scripts/check.sh
         env:
           AGENT_WECHAT_HOME: ${{ runner.temp }}/aw-home
+      # 回退路径（sqlcipher CLI 整库导出）平时没人走，最容易坏而没人发现：同一套用例再跑一遍
+      - run: uv run --frozen python -m pytest tests -q
+        env:
+          AGENT_WECHAT_HOME: ${{ runner.temp }}/aw-home-cli
+          AGENT_WECHAT_DECRYPT: cli

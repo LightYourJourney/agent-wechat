@@ -34,12 +34,14 @@ from typing import Any, Protocol
 from . import errors, keys, paths
 from .errors import DecryptError, HomeUnavailable
 
+try:
+    import sqlcipher3
+    _HAS_SQLCIPHER3 = True
+except (ImportError, OSError):    # 没装（如 Python ≥ 3.15 还没有 wheel）/ 动态库载不进来
+    _HAS_SQLCIPHER3 = False
+
 # 强制回退到 CLI 后端的开关（排障用：疑似 sqlcipher3 的问题时，用它对照确认）。
 BACKEND_ENV = "AGENT_WECHAT_DECRYPT"
-# 两类「不是密钥问题」的解密失败的文案开头：sync 按它们把失败归为源的问题（重试 / 查权限），
-# 而不是 key_invalid（叫用户重新 bootstrap）。改文案必须同步这里。
-SNAPSHOT_FAILED = "无法快照微信数据库"
-PAGE_CHECK_FAILED = "读取微信库时页校验失败"
 
 
 def _first_line(text: str) -> str:
@@ -152,8 +154,8 @@ def snapshot(db: pathlib.Path, td: pathlib.Path) -> pathlib.Path:
     except OSError as exc:
         # A 矩阵：快照那一步此前裸穿 PermissionError/ENOSPC（R2-A-007）。快照是解密的
         # 第一步，失败就整条走不通——按 core 契约只能是项目异常。
-        raise DecryptError(
-            f"{SNAPSHOT_FAILED}（只读复制失败）：{db.name}",
+        raise errors.SourceUnreadable(
+            f"无法快照微信数据库（只读复制失败）：{db.name}",
             hint=f"{exc}；请确认数据目录与 AGENT_WECHAT_HOME 都有空间、且可写"
         ) from exc
     return dst
@@ -283,6 +285,7 @@ class ReadConnection(Protocol):
 
     def execute(self, sql: str, parameters: Any = ..., /) -> Rows: ...
 
+
 def backend() -> str:
     """`open_db` 实际会用的后端：`"inproc"`（默认）或 `"cli"`（回退）。
 
@@ -290,11 +293,7 @@ def backend() -> str:
     （例如 Python ≥ 3.15 还没有它的 wheel，依赖声明里就没装）。**进程内后端运行期出错不会
     自动改走 CLI**：密钥不对两条路一样失败，静默重试只会把真问题藏起来、白花一次整库导出。
     """
-    if os.environ.get(BACKEND_ENV, "").strip().lower() == "cli":
-        return "cli"
-    try:
-        import sqlcipher3  # noqa: F401
-    except (ImportError, OSError):
+    if os.environ.get(BACKEND_ENV, "").strip().lower() == "cli" or not _HAS_SQLCIPHER3:
         return "cli"
     return "inproc"
 
@@ -309,10 +308,9 @@ def _translate(exc: BaseException) -> BaseException:
       进程内是**按页惰性**解密，同一个失败推迟到了查询中途——异常类型保持原来的口径。
     - 其余子类（OperationalError 之类）→ **同名**的 sqlite3 异常，与查明文副本时逐类一致。
     """
-    import sqlcipher3
     if type(exc) is sqlcipher3.DatabaseError:
-        return DecryptError(
-            f"{PAGE_CHECK_FAILED}（页无法解密或已损坏）",
+        return errors.SourceUnreadable(
+            "读取微信库时页校验失败（页无法解密或已损坏）",
             hint="多半是快照那一刻微信正在写入：重试一次即可；反复出现请跑 "
                  "`agent-wechat status --verify-keys` 核对密钥")
     cls = getattr(sqlite3, type(exc).__name__, None)
@@ -330,7 +328,6 @@ class _CipherCursor:
         self._cur = cur
 
     def __iter__(self) -> Iterator[Any]:
-        import sqlcipher3
         it = iter(self._cur)
         while True:
             try:
@@ -342,7 +339,6 @@ class _CipherCursor:
             yield row
 
     def _call(self, name: str) -> Any:
-        import sqlcipher3
         try:
             return getattr(self._cur, name)()
         except sqlcipher3.Error as exc:
@@ -354,17 +350,17 @@ class _CipherCursor:
     def fetchall(self) -> list[Any]:
         return self._call("fetchall")
 
-    def __getattr__(self, name: str) -> Any:            # description / rowcount ...
-        return getattr(self._cur, name)
-
 
 class _CipherConnection:
-    """只读连接代理：对调用方表现得像 `sqlite3.Connection`（`text_factory`、`execute`、
-    游标迭代、`close`），异常一律经 `_translate`。**不支持 `sqlite3.Row` 作 row_factory**
-    （它只认 sqlite3 自己的游标）；读微信库的调用方都只用元组行。"""
+    """只读连接代理：**只**暴露 `ReadConnection` 契约里的 `text_factory` / `execute`，外加
+    `open_db` 自己用的 `close`，异常一律经 `_translate`。故意没有 `__getattr__` 透传：透传出去的
+    方法（`executemany`、`cursor()`……）抛的是裸 sqlcipher3 异常，`except sqlite3.Error` 接不住。
+    **不支持 `sqlite3.Row` 作 row_factory**（它只认 sqlite3 自己的游标）。"""
+
+    __slots__ = ("_con",)
 
     def __init__(self, con: Any) -> None:
-        object.__setattr__(self, "_con", con)
+        self._con = con
 
     @property
     def text_factory(self) -> Any:
@@ -375,22 +371,16 @@ class _CipherConnection:
         self._con.text_factory = value
 
     def execute(self, sql: str, parameters: Any = (), /) -> _CipherCursor:
-        import sqlcipher3
         try:
             return _CipherCursor(self._con.execute(sql, parameters))
         except sqlcipher3.Error as exc:
             raise _translate(exc) from exc
 
     def close(self) -> None:
-        import sqlcipher3
         try:
             self._con.close()
         except sqlcipher3.Error as exc:   # 例如别的线程终结了持有它的生成器（跨线程关闭）
             raise _translate(exc) from exc
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._con, name)
-
 
 
 def _connect_encrypted(snap: pathlib.Path, enc_key: bytes) -> _CipherConnection:
@@ -401,7 +391,6 @@ def _connect_encrypted(snap: pathlib.Path, enc_key: bytes) -> _CipherConnection:
     只读打开（与 CLI 后端的 `open_plain` 同口径）：快照里还没 checkpoint 的 WAL 帧照常可见，
     快照缺 -shm 时也能读（用例覆盖）；任何写语句都被拒成 `sqlite3.OperationalError`。
     """
-    import sqlcipher3
     try:
         raw = sqlcipher3.connect(f"file:{snap}?mode=ro", uri=True)
     except sqlcipher3.Error as exc:

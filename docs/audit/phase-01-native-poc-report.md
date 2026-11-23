@@ -41,7 +41,7 @@ ISAAC64、XOR 这类微热点没有做原型：Phase 00 已经说明，用 Pytho
 
 ## 2. 原型设计
 
-### 2.1 进程内 SQLCipher（`spike/phase01/inproc_sqlcipher.py`）
+### 2.1 进程内 SQLCipher（`spike/phase01/inproc_sqlcipher.py`，已删除；正式实现是 `decrypt.open_db`）
 
 - **接口**：`open_encrypted(db, passphrase) -> Connection`（上下文管理器），返回对象的行为与 `sqlite3.Connection` 对齐。
   快照仍复用 `decrypt.snapshot`，微信目录零写入。去掉了「把整库导出成明文」这一步：查询只解密实际读到的页。

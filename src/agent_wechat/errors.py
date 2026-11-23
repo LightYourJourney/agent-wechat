@@ -90,6 +90,14 @@ class DecryptError(AgentWeChatError):
     """快照/派生/sqlcipher 解密失败。"""
 
 
+class SourceUnreadable(DecryptError):
+    """解密失败里**源的问题**：快照读不动，或读到撕裂的页（快照那一刻微信正在写）。
+
+    重试 / 查权限即可，不是密钥失效——`sync` 据此报 `source_unavailable` 而不是 `key_invalid`
+    （后者叫用户重新 bootstrap）。按类型分，不按文案前缀分：改措辞不该改变分类。
+    """
+
+
 class DependencyMissing(AgentWeChatError):
     """运行期依赖缺失（如 zstandard 未安装）。"""
 

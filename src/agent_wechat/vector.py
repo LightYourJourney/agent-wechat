@@ -5,6 +5,7 @@ pre-v1，存在已知崩溃/内存泄漏 bug），便于回归测试与将来整
 """
 from __future__ import annotations
 
+import importlib.util
 import os
 import sqlite3
 import threading
@@ -173,7 +174,6 @@ SEMANTIC_HINT = ("语义检索是可选安装项：在项目目录跑 `uv sync -
 
 def semantic_installed() -> bool:
     """fastembed 装没装（只查元数据，不导入——导入它要 ~1 s 且会拉起 onnxruntime）。"""
-    import importlib.util
     return importlib.util.find_spec("fastembed") is not None
 
 
@@ -481,6 +481,9 @@ def build_index(accounts: Sequence[str] | None = None, rebuild: bool = False,
     不靠 `VECTOR_DROP` 顺手做）——中断后重跑同一条 rebuild 命令要从头；续跑走不带 rebuild 的那条。
     """
     embedder = embedder or default_embedder()
+    if isinstance(embedder, FastEmbedEmbedder) and not semantic_installed():
+        # 先于 rebuild 的清表：没装组件时 `--rebuild` 会先把现有索引删光、再在第一次嵌入时失败
+        raise VectorError(SEMANTIC_MISSING, hint=SEMANTIC_HINT)
     con = connect()
     try:
         if rebuild:

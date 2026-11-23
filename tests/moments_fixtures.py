@@ -7,7 +7,6 @@
 """
 from __future__ import annotations
 
-import contextlib
 import json
 import sqlite3
 
@@ -19,16 +18,9 @@ from helpers import plain_open_db
 ACCT = "wxid_testacct01_ab12"
 
 
-@contextlib.contextmanager
-def _passthrough(db_path, passphrase):
-    """`decrypt.open_db` 的直通桩（合成 sns.db 是明文，直接只读打开）。
-
-    **不带 `tmpdir=` 形参**（EA-048 已把那个形参从 `decrypt.decrypted` 删掉，全仓零调用方）：
-    review-code 的 Standards 轴 #11 指出，上一版留着它并给了一句「外部桩同签名」的理由——
-    而那是个**编出来的理由**（签名早就不一样了），死形参被新共享夹具「合法化」了。
-    """
-    with plain_open_db(db_path, passphrase) as con:
-        yield con
+# `decrypt.open_db` 的直通桩（合成 sns.db 是明文，直接只读打开）。保留这个名字只因三个
+# 朋友圈测试模块按它导入；实现就是 helpers 里那一份，不再包一层。
+_passthrough = plain_open_db
 
 
 @pytest.fixture()

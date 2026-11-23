@@ -72,7 +72,7 @@ def test_inproc_and_cli_backends_read_the_same_rows(tmp_path, monkeypatch):
 
 
 def test_backend_falls_back_to_cli_when_sqlcipher3_cannot_be_imported(monkeypatch):
-    monkeypatch.setitem(sys.modules, "sqlcipher3", None)        # import → ImportError
+    monkeypatch.setattr(decrypt, "_HAS_SQLCIPHER3", False)      # 模块导入时 import 失败
     assert decrypt.backend() == "cli"
 
 

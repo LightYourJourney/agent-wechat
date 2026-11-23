@@ -117,7 +117,15 @@ def search(query: str, chat_id: str | None = None, limit: int = 20,
             else:
                 raise _runtime_failure(msg) from exc
 
-        if not rows and len(query.strip()) <= 2:
+        # 首次导出的 FTS 批量路径进行中：全文索引要到导出结束才一次建好，此前 MATCH 恒空。
+        # 改走 LIKE，并说出来——此前（逐行触发器）导出中途就搜得到已入库的部分。
+        bulk = (not rows and mode == "fts"
+                and con.execute("SELECT 1 FROM fts_bulk_pending LIMIT 1").fetchone() is not None)
+        if bulk:
+            notes.append({"capability": "search_fts",
+                          "effect": "首次导出进行中：全文索引在导出结束时一次建好，"
+                                    "此前逐行扫描检索（结果只含已入库的部分，较慢）"})
+        if not rows and (len(query.strip()) <= 2 or bulk):
             # trigram 无法匹配 <3 字符 → LIKE 兜底（有 chat 过滤则快，无过滤为全表扫）
             mode = "like"
             q = query.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")

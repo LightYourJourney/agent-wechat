@@ -273,22 +273,26 @@ def diagnose(account: str | None = None) -> dict:
             if has("messages"):
                 out["fts"]["messages"] = con.execute(
                     "SELECT count(*) FROM messages").fetchone()[0]
+            # 首次导出的 FTS 批量路径：进行中时 FTS 为空、触发器拆着，都是预期态而不是问题
+            bulk_live = False
+            if has("fts_bulk_pending"):
+                out["fts"]["bulk_pending"] = con.execute(
+                    "SELECT count(*) FROM fts_bulk_pending").fetchone()[0]
+                interrupted = store.fts_bulk_interrupted(con)
+                bulk_live = bool(out["fts"]["bulk_pending"]) and not interrupted
+                if interrupted:
+                    # 只读诊断不修：下一次以读写方式打开索引（任何检索 / 导出）时自动补建
+                    out["problems"].append("首次导出的 FTS 批量重建被中断"
+                                           "（下次打开索引时自动补建，约每 10 万条 1 秒）")
             if has("messages_fts_docsize") and out["fts"]["messages"] is not None:
                 out["fts"]["indexed"] = con.execute(
                     "SELECT count(*) FROM messages_fts_docsize").fetchone()[0]
                 out["fts"]["desync"] = (out["fts"]["indexed"] != out["fts"]["messages"])
-                if out["fts"]["desync"]:
+                if out["fts"]["desync"] and not bulk_live:
                     out["problems"].append("FTS 索引与消息表行数不一致（重跑一次导出即可重建）")
-            if has("fts_bulk_pending"):
-                pids = [r[0] for r in con.execute("SELECT pid FROM fts_bulk_pending")]
-                out["fts"]["bulk_pending"] = len(pids)
-                if pids and not any(paths.pid_alive(p) for p in pids):
-                    # 只读诊断不修：下一次以读写方式打开索引（任何检索 / 导出）时自动补建
-                    out["problems"].append("首次导出的 FTS 批量重建被中断"
-                                           "（下次打开索引时自动补建，约每 10 万条 1 秒）")
             names = {r[0] for r in con.execute(
                 "SELECT name FROM sqlite_master WHERE type='trigger'")}
-            required = {*store.FTS_TRIGGER_NAMES, "msg_reembed_au"}
+            required = {"msg_reembed_au"} | (set() if bulk_live else set(store.FTS_TRIGGER_NAMES))
             out["fts"]["triggers_ok"] = required <= names
             if not out["fts"]["triggers_ok"]:
                 out["problems"].append("FTS/重嵌触发器缺失")
@@ -334,9 +338,7 @@ def diagnose(account: str | None = None) -> dict:
 def _decrypt_status(exc: errors.DecryptError) -> str:
     """解密失败再分一层：**快照读不动**与**页校验失败**（快照那一刻微信正在写，重试即可）
     是源的问题，**解不开**才像密钥的问题——后者才该叫用户重新 bootstrap。"""
-    return (SOURCE_UNAVAILABLE
-            if str(exc).startswith((decrypt.SNAPSHOT_FAILED, decrypt.PAGE_CHECK_FAILED))
-            else KEY_INVALID)
+    return SOURCE_UNAVAILABLE if isinstance(exc, errors.SourceUnreadable) else KEY_INVALID
 
 
 def _health_summary(info: dict) -> dict:

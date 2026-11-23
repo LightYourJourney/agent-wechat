@@ -5,6 +5,8 @@
 """
 from __future__ import annotations
 
+import os
+import sqlite3
 import subprocess
 import sys
 
@@ -87,17 +89,90 @@ def test_a_failure_mid_fill_still_leaves_fts_consistent_with_what_was_committed(
         _assert_consistent(con)                       # 第一批已提交，且检索得到
 
 
-def test_a_killed_fill_is_rebuilt_on_the_next_open(env, monkeypatch):
-    """被杀 = finish 从没跑过：触发器没了、FTS 是空的、标记还在。下次 connect 补做。"""
+def _fill_without_finish(monkeypatch) -> None:
+    """模拟「灌完、还没收口就被杀」：finish 换成空操作跑一次首次导出，然后恢复。"""
     finish = store.fts_bulk_finish
     monkeypatch.setattr(store, "fts_bulk_finish", lambda con: None)
     export.run_export(ACCT)
     monkeypatch.setattr(store, "fts_bulk_finish", finish)
-    with store.open() as con:                          # 本进程还活着：不该抢着修
+
+
+def _set_marker_pid(pid: int) -> None:
+    """直接改标记（不经 `store.connect`：那一步本身就会判标记、可能当场修掉）。"""
+    con = sqlite3.connect(store.DB_PATH)
+    con.execute("UPDATE fts_bulk_pending SET pid=?", (pid,))
+    con.commit()
+    con.close()
+
+
+def test_a_killed_fill_is_rebuilt_on_the_next_open(env, monkeypatch):
+    """被杀 = finish 从没跑过：触发器没了、FTS 是空的、标记还在。下次 connect 补做。"""
+    _fill_without_finish(monkeypatch)
+    _set_marker_pid(os.getppid())                      # 写标记的进程还活着（另一个进程在灌）
+    with store.open() as con:                          # → 不该抢着修
         assert con.execute("SELECT count(*) FROM messages_fts_docsize").fetchone()[0] == 0
-        con.execute("UPDATE fts_bulk_pending SET pid=?", (_dead_pid(),))
+        assert not (set(store.FTS_TRIGGER_NAMES) & _triggers(con)), "灌库进行中不许把触发器建回来"
+    _set_marker_pid(_dead_pid())
     with store.open() as con:                          # 写标记的进程已死：当场 rebuild
         _assert_consistent(con)
+
+
+def test_a_failed_finish_in_a_long_lived_process_heals_on_the_next_open(env, monkeypatch):
+    """MCP 常驻进程里收口失败：标记的 pid 是本进程、一直活着——不能因此永远修不好。"""
+    def broken(con):
+        raise errors.IndexUnavailable("模拟收口时磁盘满")
+    finish = store.fts_bulk_finish
+    monkeypatch.setattr(store, "fts_bulk_finish", broken)
+    with pytest.raises(errors.IndexUnavailable, match="收口"):
+        export.run_export(ACCT)
+    monkeypatch.setattr(store, "fts_bulk_finish", finish)
+    with store.open() as con:                          # 同一进程、灌库已结束 → 当场补做
+        _assert_consistent(con)
+
+
+def test_another_connection_during_the_fill_does_not_corrupt_fts(tmp_path, monkeypatch):
+    """灌库期间别的连接（MCP 检索 / status）打开索引：此前 `connect()` 每次跑整套 SCHEMA，会把
+    拆掉的触发器建回来，灌库自己的 UPDATE 随即对没进过索引的行做 FTS 'delete'——
+    `database disk image is malformed`。"""
+    from agent_wechat import paths
+    from test_reader_export_pipeline import FRIEND, mk_row
+    monkeypatch.setattr(paths, "HOME_DIR", tmp_path)
+    db = tmp_path / "i.db"
+    con = store.connect(db)
+    try:
+        with store.fts_bulk(con) as bulk:
+            assert bulk
+            store.upsert_batch(con, [mk_row("a", FRIEND, i, f"第{i}条消息", shard="message_0.db")
+                                     for i in range(1, 6)])
+            other = store.connect(db)                  # 并发的读者
+            other.close()
+            assert not (set(store.FTS_TRIGGER_NAMES) & _triggers(con))
+            con.execute("UPDATE messages SET chat_id = chat_id || '_x'")   # 会话名自愈那类写
+            con.commit()
+        _assert_consistent(con)
+    finally:
+        con.close()
+
+
+def test_search_during_the_fill_falls_back_to_like_and_says_so(tmp_path, monkeypatch):
+    from agent_wechat import paths, search
+    from test_reader_export_pipeline import FRIEND, mk_row
+    monkeypatch.setattr(paths, "HOME_DIR", tmp_path)
+    monkeypatch.setattr(store, "DB_PATH", tmp_path / "i.db")
+    con = store.connect()
+    try:
+        with store.fts_bulk(con):
+            store.upsert_batch(con, [mk_row("a", FRIEND, 1, "明天开会讨论方案", shard="message_0.db")])
+            res = search.search("开会讨论", account="a")
+            assert [h["content"] for h in res["hits"]] == ["明天开会讨论方案"]
+            assert res["mode"] == "like"
+            assert any("首次导出进行中" in d["effect"] for d in res["degraded"])
+            info = sync.diagnose("a")                  # 进行中：FTS 为空、触发器拆着都不是问题
+            assert not any("FTS" in p for p in info["problems"]), info["problems"]
+        res = search.search("开会讨论", account="a")
+        assert res["mode"] == "fts" and len(res["hits"]) == 1 and res["degraded"] == []
+    finally:
+        con.close()
 
 
 def test_bulk_begin_refuses_a_non_empty_index(tmp_path, monkeypatch):
@@ -112,12 +187,8 @@ def test_bulk_begin_refuses_a_non_empty_index(tmp_path, monkeypatch):
 
 
 def test_doctor_reports_an_interrupted_fill(env, monkeypatch):
-    finish = store.fts_bulk_finish
-    monkeypatch.setattr(store, "fts_bulk_finish", lambda con: None)
-    export.run_export(ACCT)
-    monkeypatch.setattr(store, "fts_bulk_finish", finish)
-    with store.open() as con:
-        con.execute("UPDATE fts_bulk_pending SET pid=?", (_dead_pid(),))
+    _fill_without_finish(monkeypatch)
+    _set_marker_pid(_dead_pid())
     info = sync.diagnose(ACCT)                         # 只读：不修，只报
     assert info["fts"]["bulk_pending"] == 1
     assert any("批量重建" in p for p in info["problems"])

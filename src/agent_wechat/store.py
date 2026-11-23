@@ -14,6 +14,7 @@ import os
 import pathlib
 import re
 import sqlite3
+import threading
 import time
 from collections.abc import Iterator, Mapping, Sequence
 
@@ -293,16 +294,22 @@ BEGIN
         changed_at=excluded.changed_at, reason=excluded.reason;
 END;"""
 
-# 首次导出的 FTS 批量路径（`fts_bulk_begin` / `fts_bulk_finish`）的**持久化中断标记**：
-# 一行 = 一个正在（或曾经）以「拆掉 FTS 触发器」方式灌库的进程。行在、进程已死 = 灌到一半被
-# 杀掉，FTS 缺行且不会自己补上——`connect()` 见到就当场重建（`_heal_fts_bulk`）。
+# 首次导出的 FTS 批量路径（`fts_bulk`）的**持久化中断标记**：一行 = 一个正在（或曾经）以
+# 「拆掉 FTS 触发器」方式灌库的进程。行在、灌库已不在进行 = 中途被杀或收口失败，FTS 缺行且不会
+# 自己补上——`connect()` 见到就当场重建（`_ensure_fts_triggers`）。
 FTS_BULK_DDL = """CREATE TABLE IF NOT EXISTS fts_bulk_pending (
     pid        INTEGER NOT NULL,
     started_at INTEGER NOT NULL
 );"""
 
-SCHEMA = (_SCHEMA_BODY + "\n" + "\n".join(FTS_TRIGGERS) + "\n" + REEMBED_TRIGGER
-          + "\n" + "\n".join(DERIVED_TRIGGERS) + "\n" + FTS_BULK_DDL)
+# `connect()` 每次跑的是**不含 FTS 触发器**的这一份：FTS 触发器改由 `_ensure_fts_triggers`
+# 在判过中断标记之后再建——否则首次导出灌库期间，任何一个别的连接（MCP 检索、status）都会把
+# 刚拆掉的触发器建回来，灌库自己的 UPDATE（会话名自愈）随即对一行从未进过索引的记录做 FTS
+# 'delete'，外部内容 FTS 当场写坏（复现：`database disk image is malformed`）。
+_SCHEMA_SANS_FTS_TRIGGERS = (_SCHEMA_BODY + "\n" + REEMBED_TRIGGER
+                             + "\n" + "\n".join(DERIVED_TRIGGERS) + "\n" + FTS_BULK_DDL)
+# 完整建库脚本（含 FTS 触发器）：触发器体漂移的比对基准、测试手工建旧库都用它。
+SCHEMA = _SCHEMA_SANS_FTS_TRIGGERS + "\n" + "\n".join(FTS_TRIGGERS)
 
 # 本程序已知的 main scope 最新版本。迁移只列**IF NOT EXISTS 表达不了**的变更；
 # 基线（v1）由 `migrations.apply` 隐式 stamp——那代表「整套 DDL 已由 ensure 建好」。
@@ -457,8 +464,9 @@ def connect(db_path: pathlib.Path | None = None) -> sqlite3.Connection:
         migrations.refuse_if_newer(con, scope=migrations.SCOPE_EXCLUSIONS, latest=1,
                                    table=migrations.EXCLUSIONS_TABLE)
         # ensure：整套 DDL 每次连接都跑（自愈：缺表/缺索引就补建）。`CREATE … IF NOT EXISTS`
-        # 的重建能力是既有行为，不能挪进「只跑一次」的迁移里。
-        con.executescript(SCHEMA)
+        # 的重建能力是既有行为，不能挪进「只跑一次」的迁移里。FTS 触发器在迁移之后单独判
+        # （见 `_SCHEMA_SANS_FTS_TRIGGERS` 与 `_ensure_fts_triggers`）。
+        con.executescript(_SCHEMA_SANS_FTS_TRIGGERS)
         con.executescript(exclusions.SCHEMA)
         # migrate：只做 ensure 表达不了的变更。两个 scope 各自事务、各自版本；
         # **不假设跨库原子**（index.db 与 exclusions.db 是两个文件，主库还是 WAL）。
@@ -466,7 +474,7 @@ def connect(db_path: pathlib.Path | None = None) -> sqlite3.Connection:
         migrations.apply(con, scope=migrations.SCOPE_EXCLUSIONS, migrations=(),
                          table=migrations.EXCLUSIONS_TABLE)
         con.execute("PRAGMA synchronous=NORMAL")
-        _heal_fts_bulk(con)
+        _ensure_fts_triggers(con)
     except (errors.SchemaMigrationError, errors.IndexUnavailable):
         # 迁移失败/库太新：**原样抛出**（它的文案已带 scope/version 与可执行动作），
         # 不翻成 IndexUnavailable——「库坏了」与「库太新/迁移没跑完」是两种病。
@@ -622,21 +630,53 @@ def _begin_immediate(con: sqlite3.Connection) -> None:
         raise index_unavailable(exc) from exc
 
 
-def fts_bulk_begin(con: sqlite3.Connection) -> bool:
-    """首次导出专用：消息表为空时拆掉 3 条 FTS 触发器、落中断标记，返回是否进入批量路径。
+# 本进程里**正在进行**的批量灌库数（多线程：MCP 后台导出）。中断标记里的 pid 是本进程、而这里
+# 是 0 = 本进程的灌库已经结束却没收口（收口失败）——与「写标记的进程已死」同样算中断。
+# 没有这一条，常驻的 MCP 进程里一次收口失败就永远修不好（标记的 pid 一直是活的）。
+_bulk_active = 0
+_bulk_lock = threading.Lock()
+
+
+@contextlib.contextmanager
+def fts_bulk(con: sqlite3.Connection, *, enabled: bool = True) -> Iterator[bool]:
+    """首次导出的 FTS 批量路径：消息表为空时拆触发器灌库、退出时一次 `rebuild`。yield 是否进入。
 
     逐行触发器是首次全量导出的大头（Phase 01 实测 77.8 万行：63.7 s → 灌入 27.6 s + 一次
     `rebuild` 7.3 s）。**只在消息表为空时**进入：已有数据的 `--full` 重扫几乎全是「值没变、
     不更新」，触发器本来就不触发，换成整表 rebuild 只会更慢。
 
-    ad / au 也必须拆：灌库过程中有 UPDATE（会话名自愈），au 去 'delete' 一行从没进过索引的
-    记录会把外部内容 FTS 写坏。窗口里别的连接（`connect()` 每次都跑 SCHEMA）会把触发器建
-    回来——无妨：`fts_bulk_finish` 的 rebuild 按消息表整体重建，中间任何交错都被它抹平。
-    标记与拆触发器同一事务：要么都发生，要么都没有。
+    退出时无论成败都收口（重建 FTS、恢复触发器、清标记）——已提交的批次要能被检索到。收口
+    失败时**原异常优先**、标记留着：下一次 `connect()`（本进程或别的进程）会补做。
     """
-    if con.in_transaction:
-        con.commit()
-    _begin_immediate(con)
+    global _bulk_active
+    if not (enabled and fts_bulk_begin(con)):
+        yield False
+        return
+    with _bulk_lock:
+        _bulk_active += 1
+    try:
+        try:
+            yield True
+        except BaseException:
+            # rollback 抛的是裸 sqlite3.Error：一并吞掉，否则它会顶替原异常穿出 core
+            with contextlib.suppress(errors.AgentWeChatError, sqlite3.Error, OSError):
+                con.rollback()
+                fts_bulk_finish(con)
+            raise
+        fts_bulk_finish(con)
+    finally:
+        with _bulk_lock:
+            _bulk_active -= 1
+
+
+def fts_bulk_begin(con: sqlite3.Connection) -> bool:
+    """消息表为空时拆掉 3 条 FTS 触发器、落中断标记（同一事务），返回是否进入批量路径。
+
+    ad / au 也必须拆：灌库过程中有 UPDATE（会话名自愈），au 去 'delete' 一行从没进过索引的
+    记录会把外部内容 FTS 写坏。窗口里别的连接不会把它们建回来：`connect()` 见到**进行中**的
+    标记就不建（`_ensure_fts_triggers`），而判断与建触发器都在写锁下，与本函数互斥。
+    """
+    _commit_then_begin(con)
     try:
         if con.execute("SELECT 1 FROM messages LIMIT 1").fetchone() is not None:
             con.rollback()
@@ -658,29 +698,74 @@ def fts_bulk_finish(con: sqlite3.Connection) -> None:
     清的是**全部**标记行：rebuild 覆盖了此刻所有已提交的行（别的灌库进程的写事务不可能与
     本事务的写锁并存），此后到来的行有触发器跟随。`secure-delete` 配置在 rebuild 后保留。
     """
-    if con.in_transaction:
-        con.commit()
-    _begin_immediate(con)
+    _commit_then_begin(con)
     try:
-        for ddl in FTS_TRIGGERS:
-            con.execute(ddl)
-        con.execute("INSERT INTO messages_fts(messages_fts) VALUES('rebuild')")
-        con.execute("DELETE FROM fts_bulk_pending")
+        _finish_in_txn(con)
         con.commit()
     except (sqlite3.Error, OSError) as exc:
         con.rollback()
         raise index_unavailable(exc) from exc
 
 
-def _heal_fts_bulk(con: sqlite3.Connection) -> None:
-    """中断标记还在、而写它的进程**全都死了** → 当场补做 `fts_bulk_finish`。
+def _finish_in_txn(con: sqlite3.Connection) -> None:
+    for ddl in FTS_TRIGGERS:
+        con.execute(ddl)
+    con.execute("INSERT INTO messages_fts(messages_fts) VALUES('rebuild')")
+    con.execute("DELETE FROM fts_bulk_pending")
 
-    灌库进程活着（含本进程自己的另一个线程）就不动：那是正常的进行中。判不出死活
-    （`pid_alive` 对 EPERM 答「活」）同样不动——宁可晚修，不在别人灌库中途抢写锁重建。
+
+def _commit_then_begin(con: sqlite3.Connection) -> None:
+    """批量路径的两段都要**自己的**写事务：先把调用方已做完的写提交掉（export 的调用点上只有
+    全量导出复位水位线那一笔，它本来就紧跟着显式 commit），再拿写锁。提交失败与 BEGIN 失败
+    同一个出口（core 只抛项目异常）。"""
+    if con.in_transaction:
+        try:
+            con.commit()
+        except (sqlite3.Error, OSError) as exc:
+            raise index_unavailable(exc) from exc
+    _begin_immediate(con)
+
+
+def fts_bulk_interrupted(con: sqlite3.Connection) -> int:
+    """被中断的批量重建：返回中断标记行数；灌库还在进行（或判不出来）时返回 0。
+
+    「不在进行」= 每一行的 pid 要么已死，要么是本进程而本进程此刻没有灌库（`_bulk_active`）。
+    判不出死活（`pid_alive` 对 EPERM 答「活」）一律当进行中——宁可晚修，不在别人灌库中途
+    抢写锁重建。`_ensure_fts_triggers`（修）与 `sync.diagnose`（只报）共用这一个判据。
     """
     pids = [r[0] for r in con.execute("SELECT pid FROM fts_bulk_pending")]
-    if pids and not any(paths.pid_alive(p) for p in pids):
-        fts_bulk_finish(con)
+    me = os.getpid()
+    live = any(_bulk_active > 0 if p == me else paths.pid_alive(p) for p in pids)
+    return 0 if live else len(pids)
+
+
+def _fts_triggers_present(con: sqlite3.Connection) -> bool:
+    names = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='trigger'")}
+    return set(FTS_TRIGGER_NAMES) <= names
+
+
+def _ensure_fts_triggers(con: sqlite3.Connection) -> None:
+    """`connect()` 的最后一步：FTS 触发器该在就建上，被中断的批量重建当场补做，进行中的不碰。
+
+    常态（触发器都在、没有标记）只有两次读，不拿写锁。要动手时先拿写锁、**在锁下重判**：
+    与 `fts_bulk_begin` 互斥，所以不会出现「这边判完没有标记、那边刚拆完触发器、这边又建回来」。
+    """
+    marked = con.execute("SELECT 1 FROM fts_bulk_pending LIMIT 1").fetchone() is not None
+    if not marked and _fts_triggers_present(con):
+        return
+    if marked and not fts_bulk_interrupted(con):
+        return                                   # 灌库进行中：触发器就该是拆着的
+    _commit_then_begin(con)
+    try:
+        if con.execute("SELECT 1 FROM fts_bulk_pending LIMIT 1").fetchone() is None:
+            for ddl in FTS_TRIGGERS:             # 没有批量路径：缺了就补（既有的自愈行为）
+                con.execute(ddl)
+        elif fts_bulk_interrupted(con):
+            _finish_in_txn(con)
+        con.commit()
+    except (sqlite3.Error, OSError) as exc:
+        con.rollback()
+        raise index_unavailable(exc) from exc
 
 
 def _filter_excluded(con: sqlite3.Connection, keys: Sequence[str]) -> set[str]:

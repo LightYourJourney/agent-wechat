@@ -15,12 +15,14 @@
   一个解压器。
 - **首次导出更快**：消息表为空时拆掉 FTS 触发器灌库、最后一次 `rebuild`。中断标记与拆触发器同一事务
   持久化；进程被杀后，下次打开索引（任何检索 / 导出）自动补建，`doctor` 报告这一状态。已有数据的
-  `--full` 重扫不走这条路（那时触发器几乎不触发，整表重建反而更慢）。
+  `--full` 重扫不走这条路（那时触发器几乎不触发，整表重建反而更慢）。导出进行中关键词检索改走
+  逐行扫描（`degraded` 里说明），别的连接打开索引不会把拆掉的触发器建回来。
 - **快照改用 APFS 克隆**（`clonefile(2)`，写时复制）：237 MB 分片从 120–470 ms 降到约 1 ms；
   跨卷或非 APFS 时自动回退普通复制。
 - **语义检索改为可选安装项 `[semantic]`**：基础安装 179 MB → 37 MB。要语义检索：
   `uv sync --extra semantic`。不装时 `vector-build` / `semantic` 报「未安装语义检索组件」，
-  `retrieve --mode hybrid` 只剩关键词一路并在 `degraded` 里说明；`doctor` 新增 `vector.installed`，
+  `retrieve --mode hybrid` 只剩关键词一路并在 `degraded` 里说明（`--rebuild` 会在清空索引之前就拒绝）；
+  `doctor` 新增 `vector.installed`，
   已建过向量索引却没装时列为问题。**升级注意**：已在用语义检索的，升级后要补一次
   `uv sync --extra semantic`（不带它的 `uv sync` 会把 fastembed 卸掉）。
 - **页校验失败不再被 `sync` 归为 `key_invalid`**（叫人重新 bootstrap），改归 `source_unavailable`，

@@ -301,14 +301,14 @@ def test_key_invalid_and_source_unreadable_are_distinguished(tmp_path, monkeypat
     assert sync.run_sync(ACCT).status == "key_invalid"
 
     def bad_source(*a, **k):
-        raise errors.DecryptError("无法快照微信数据库（只读复制失败）：message_0.db")
+        raise errors.SourceUnreadable("无法快照微信数据库（只读复制失败）：message_0.db")
 
     monkeypatch.setattr(sync.export, "run_export", bad_source)
     assert sync.run_sync(ACCT).status == "source_unavailable"
 
     # 进程内后端的「页校验失败」= 快照撕裂，重试即可：不许报成 key_invalid（叫人重新 bootstrap）
     def torn(*a, **k):
-        raise errors.DecryptError("读取微信库时页校验失败（页无法解密或已损坏）")
+        raise errors.SourceUnreadable("读取微信库时页校验失败（页无法解密或已损坏）")
 
     monkeypatch.setattr(sync.export, "run_export", torn)
     assert sync.run_sync(ACCT).status == "source_unavailable"

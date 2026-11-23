@@ -967,3 +967,12 @@ def test_a_missing_semantic_extra_is_a_vector_error_naming_the_extra(monkeypatch
     with pytest.raises(errors.VectorError, match="未安装语义检索组件") as ei:
         vector.FastEmbedEmbedder()._ensure()
     assert "--extra semantic" in ei.value.hint
+
+
+def test_rebuild_without_the_semantic_extra_refuses_before_dropping_anything(monkeypatch):
+    """没装 fastembed 时 `--rebuild` 不许先把现有索引删光、再在第一次嵌入时失败。"""
+    from agent_wechat import errors, vector
+    monkeypatch.setattr(vector, "semantic_installed", lambda: False)
+    monkeypatch.setattr(vector, "connect", lambda: pytest.fail("不该打开索引（更不该清表）"))
+    with pytest.raises(errors.VectorError, match="未安装语义检索组件"):
+        vector.build_index(rebuild=True, embedder=vector.FastEmbedEmbedder())
