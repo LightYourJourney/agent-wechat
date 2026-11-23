@@ -293,3 +293,32 @@ def test_a_card_without_readable_fields_says_so():
         parts={}, media={}, out_dir="/tmp", truncated=False, unparsed=0, rejected=0,
         degraded=(), extras={"k1": msgextra.Extra(42, ())})
     assert chat_text.EXTRA_NO_FIELDS in chat_html.render(view)
+
+
+def test_a_link_shows_its_real_host_next_to_the_spoofable_title():
+    """锚文本是对方可控的标题：写成 `mp.weixin.qq.com`、实际指向 evil.example 时，
+    页面上必须印出真实主机（朋友圈产物早有这枚徽章，聊天产物此前没有）。"""
+    from agent_wechat import chat_md
+
+    spoof = appmsg.AppMsg(kind=appmsg.KIND_LINK, title="mp.weixin.qq.com 官方通知", fields=(),
+                          link=appmsg.Link(url="https://Evil.Example/x",
+                                           title="mp.weixin.qq.com 官方通知", des=None),
+                          file=None, transfer=None, quote=None)
+    view = chatview.build(
+        "c", title="t", rows=[{"msg_key": "k2", "ts": 2, "msg_type": 49, "content": "",
+                               "sender_name": "我", "is_self": True}],
+        parts={"k2": spoof}, media={}, out_dir="/tmp",
+        truncated=False, unparsed=0, rejected=0, degraded=())
+    assert '<span class="host">evil.example</span>' in chat_html.render(view)
+    assert "（evil.example）" in chat_md.render(view)
+
+
+def test_both_html_outputs_carry_the_csp():
+    """两个 HTML 产物都带同一份 CSP（`chat_text.CSP_META`）：不许脚本、不许外联。
+    真 Chrome 在 file:// 下实测过：本地图片 / 音频 / 视频照常加载、内联样式生效、远程图片被挡。"""
+    from agent_wechat import chat_text, moments_html
+    from tests.test_moments_html import _mk, _rep
+
+    assert chat_text.CSP_META in chat_html.render(_view(rows=[]))
+    assert chat_text.CSP_META in moments_html.render([_mk()], _rep())
+    assert "default-src 'none'" in chat_text.CSP_META and "script-src" not in chat_text.CSP_META

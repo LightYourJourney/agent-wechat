@@ -87,6 +87,27 @@ def url_is_safe(url: str) -> bool:
     return True
 
 
+# 两个 HTML 产物共用的 CSP（纵深防御：所有输出都已 `html.escape`，这一层防的是将来某处漏了）。
+# 不许任何脚本、不许外联：媒体只认本地文件（`file:`；产物是从磁盘打开的）与 `data:`，样式只有
+# 内联那一段。远程图片也被挡——打开导出不该向任何人报到。`base-uri` / `form-action` 堵住
+# 「注入一个 `<base>` / `<form>` 把相对链接改道」那一类。
+CSP_META = ('<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; '
+            "style-src 'unsafe-inline'; img-src 'self' file: data:; media-src 'self' file:; "
+            "base-uri 'none'; form-action 'none'\">")
+
+
+def link_host(url: str) -> str:
+    """链接徽章显示的主机名（小写）。只对**已过 `url_is_safe`** 的 URL 调用——那道判据保证了
+    这里看到的主机与浏览器真正会去的主机是同一个，徽章才不骗人。
+
+    为什么要徽章：锚文本是对方可控的标题，可以写成 `mp.weixin.qq.com`、实际指向别处；
+    页面上不把真实主机印出来，用户在点之前无从判断去哪。三个产物（聊天 HTML / MD、朋友圈）共用。
+    """
+    from . import moments                      # 惰性：理由见 `url_is_safe`
+    s = moments.split_url(url)
+    return (s.hostname or "").lower() if s is not None else ""
+
+
 def unknown_status_note(status: str) -> str:
     """四态之外的取值：照实印出来，不猜也不吞（上游将来加枚举值时两个产物同时变）。"""
     return f"未知媒体状态 {status}"

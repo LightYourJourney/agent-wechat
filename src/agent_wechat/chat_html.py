@@ -58,6 +58,7 @@ margin-bottom:16px;font-size:13px}
 .app{background:#fafafa;border:1px solid #eee;border-radius:6px;padding:8px;
 margin:6px 0;font-size:13px}
 .app .ttl{font-weight:600;margin-bottom:4px}
+.app .host{color:#999;font-size:12px;margin-left:8px}
 .app table{border-collapse:collapse}
 .app td{padding:1px 10px 1px 0;vertical-align:top}
 .q{border-left:3px solid #ddd;padding-left:8px;color:#555;margin:4px 0}
@@ -140,7 +141,9 @@ def _appmsg_block(a: AppMsg, ref_anchor: str | None) -> str:
             # 守卫，两处判据现已共用 `chat_text.url_is_safe`）。不安全的 URL 降级成纯文本
             # ——照常显示出来（用户看得见去哪），只是不可点。
             if chat_text.url_is_safe(url):
-                inner.append(f'<div><a href="{_esc(url)}">{_esc(title)}</a></div>')
+                # 主机徽章：锚文本是对方可控的标题，不印真实主机就看不出点下去去哪
+                inner.append(f'<div><a href="{_esc(url)}">{_esc(title)}</a>'
+                             f'<span class="host">{_esc(chat_text.link_host(url))}</span></div>')
             else:
                 inner.append(f'<div>[链接：{_esc(url)}]</div>')
         if a.link.des:
@@ -221,6 +224,7 @@ def render(view: ChatView, media_prefix: str = "..") -> str:
     if not body:
         body.append('<div class="msg empty">没有匹配的消息。</div>')
     return ('<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8">'
+            f"{chat_text.CSP_META}"
             '<meta name="viewport" content="width=device-width,initial-scale=1">'
             f"<title>{_esc(view.title or '会话导出')}</title><style>{_CSS}</style></head>"
             f"<body>{_notice(view)}{''.join(body)}</body></html>")

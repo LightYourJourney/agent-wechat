@@ -570,3 +570,12 @@ def test_extra_field_values_are_hard_escaped():
     x = msgextra.Extra(48, (("label", _ATK),))
     out = chat_md.render(_extra_view(extras={"k1": x}))
     assert _ATK not in out and r"\!\[" in out
+
+
+def test_obsidian_comment_and_math_markers_are_escaped():
+    """`%%…%%` 在 Obsidian 里是注释：对方先发一条 `%%`、隔几条再发一条，中间别人的消息就从
+    预览里消失了；`$…$` 是公式。两者都要转义（反斜杠转义在 CommonMark 里合法，渲染不变）。"""
+    from agent_wechat import chat_md
+
+    assert chat_md._esc_md("%%藏起来%%") == "\\%\\%藏起来\\%\\%"
+    assert chat_md._esc_md("花了 $5 和 $6") == "花了 \\$5 和 \\$6"

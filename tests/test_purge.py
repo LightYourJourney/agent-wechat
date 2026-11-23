@@ -1040,6 +1040,29 @@ def test_execute_chat_refuses_when_history_tombstones_mask_new_unblocked_rows(tm
         assert store.chat_row_counts(con, "a", VICTIM)["messages"] == 1, "没挡住就不许删"
 
 
+@pytest.mark.skipif(not store.FTS_SECURE_DELETE_SUPPORTED, reason="SQLite < 3.42 没有 FTS5 secure-delete")
+def test_purge_leaves_no_trigrams_of_the_deleted_text_in_the_fts_index(tmp_path):
+    """删掉的正文不许以 trigram 的形式留在 `messages_fts_data` 的活跃页里。
+
+    FTS5 默认的删除只记一个「删除标记」，被删 token 要等段合并才真的消失（实测 8 个里 7 个还在）；
+    `secure-delete`（迁移 v8）让它当场抹掉。核查看的是行，看不见这一层，所以这里直接查段数据。
+    """
+    home = tmp_path / "home"; home.mkdir(parents=True)
+    secret = "QZXJKVWY"
+    with store.open() as con:
+        # 小夹具是有意的：段里只有几行时删除标记与原 token 同段并存，最容易看出残留
+        store.upsert_batch(con, [_keeper_row(n) for n in range(1, 4)]
+                           + [{**_victim_row(99), "content": f"口令 {secret}"}])
+    purge.execute_chat(purge.plan_chat(
+        [{"account": "a", "chat_id": VICTIM, "chat_md5": VICTIM_MD5}]))
+    with store.open() as con:
+        blob = b"".join(r[0] for r in con.execute("SELECT block FROM messages_fts_data")
+                        if isinstance(r[0], bytes))
+    # trigram 分词器默认折叠大小写：段数据里存的是小写
+    left = [t for t in (secret.lower()[i:i + 3] for i in range(len(secret) - 2)) if t.encode() in blob]
+    assert left == [], f"被删正文的 trigram 还在索引里：{left}"
+
+
 def test_execute_chat_is_idempotent_and_tolerates_missing_export(tmp_path):
     """幂等 + 导出目录不存在都算成功（spec §5.7）。第二次要 0 条、不报错。"""
     home = tmp_path / "home"; home.mkdir(parents=True)

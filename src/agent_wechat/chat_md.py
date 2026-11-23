@@ -58,7 +58,10 @@ def _t(v: str | None) -> str:
 # Markdown 的**行内**结构字符（在任何位置都有语义）；反斜杠转义是 CommonMark 的正式做法。
 # **不含 `.` `-` `+` `#` `>`**：它们只在**行首**才有结构义，一律转义会把 `¥100.00` 弄成
 # `¥100\.00`（渲染无差异、源却脏了）——行首那一档在 `_esc_md` 里单独处理。
-_MD_INLINE = "\\`*_[]()!|~"
+# `%` `$` 不是 CommonMark 的结构字符，但常见渲染器的扩展语法认它们：Obsidian 的 `%%…%%`
+# 是注释（对方发一条 `%%`、隔几条再发一条，中间**别人的消息**就从预览里消失了），`$…$` 是
+# 公式。二者都是 ASCII 标点，反斜杠转义在 CommonMark 里合法，渲染结果不变。
+_MD_INLINE = "\\`*_[]()!|~%$"
 _MD_LINE_START = "#>+-*="          # `=` 是 setext 标题（`标题\n===`）——复审实测的漏挡面
 
 
@@ -237,7 +240,8 @@ def _appmsg_lines(a: AppMsg, ref_anchor: str | None) -> list[str]:
             # 目的地原样写 `url`（不加 `_t`）：`_md_dest_ok` 已排除 `<`/`>`，`_t` 在这是空操作，
             # 而它会把 URL 里合法的 `&` 之外的实体写法搅乱——不写更诚实。
             if chat_text.url_is_safe(url) and _md_dest_ok(url):
-                out.append(f"[{_esc_md(title)}]({url})")
+                # 主机徽章（同 HTML 侧）：锚文本可伪造，真实主机要印出来
+                out.append(f"[{_esc_md(title)}]({url})（{_esc_md(chat_text.link_host(url))}）")
             else:
                 out.append(f"[链接：{_esc_md(url)}]")
         if a.link.des:

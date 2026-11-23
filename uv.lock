@@ -34,7 +34,7 @@ dev = [
 requires-dist = [
     { name = "cryptography", specifier = ">=50.0.1" },
     { name = "fastembed", specifier = "==0.8.*" },
-    { name = "mcp", specifier = ">=2.2.0" },
+    { name = "mcp", specifier = ">=2.2.0,<3" },
     { name = "pilk", specifier = ">=0.2.4" },
     { name = "sqlite-vec", specifier = "==0.1.9" },
     { name = "zstandard", specifier = ">=0.25.0" },

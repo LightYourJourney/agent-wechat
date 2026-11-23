@@ -39,6 +39,10 @@ ORPHAN_ERROR = "进程中断，任务未完成"
 # （export 每 2 万行、向量每批一次），所以活任务的 updated_at 恒新鲜；误判也有自愈：
 # 本进程的下一次 update 会把 failed 改回 running。
 STALE_RUNNING_SECONDS = 24 * 3600
+# 保留策略：已结束（非 running）的记录最多留 KEEP_FINISHED 条，且超过 KEEP_FINISHED_SECONDS
+# 的一律清掉；running 永不删。此前注册表只增不删，每次操作都整表重读 + 整表落盘，越用越慢。
+KEEP_FINISHED = 200
+KEEP_FINISHED_SECONDS = 30 * 24 * 3600
 # 准入键（F1，T7 复审）：同 kind、且这些区分「目标」的字段全部相同才算同一次工作。
 # 此前只看 (kind, account)——要 chatB 的调用会拿到 chatA 的 task_id、`full=True` 被增量
 # 任务吸收、`build_vector_index()`（全部账号）被单账号任务吸收，调用方按 done 轮询后
@@ -144,6 +148,20 @@ def _load_locked() -> None:
         _tasks = disk
 
 
+def _prune(recs: dict[str, dict], now: int) -> dict[str, dict]:
+    """按保留策略修剪（见 `KEEP_FINISHED`）。running 原样留着；已结束的按结束时刻
+    （老记录回落 updated_at / started_at）新→旧取前 `KEEP_FINISHED` 条，再去掉过期的。"""
+    def ended(rec: dict) -> int:
+        v = rec.get("finished_at") or rec.get("updated_at") or rec.get("started_at") or 0
+        return v if isinstance(v, int) else 0
+
+    done = sorted((tid for tid, r in recs.items() if r.get("status") != "running"),
+                  key=lambda tid: ended(recs[tid]), reverse=True)
+    drop = set(done[KEEP_FINISHED:])
+    drop |= {tid for tid in done if now - ended(recs[tid]) > KEEP_FINISHED_SECONDS}
+    return {tid: r for tid, r in recs.items() if tid not in drop}
+
+
 def _persist_locked(changed: dict[str, dict]) -> None:
     """把**本操作改动的记录**合并进磁盘现状后原子落盘（EA-014 + F2；调用方必须已持 `_lock`）。
 
@@ -157,6 +175,7 @@ def _persist_locked(changed: dict[str, dict]) -> None:
     disk = snapshot()
     merged = disk if disk is not None else dict(_tasks)
     merged.update(changed)
+    merged = _prune(merged, int(time.time()))
     try:
         # 读者要么看到旧全量、要么看到新全量；失败不留 tmp 残骸（见 `paths.atomic_write`）
         paths.atomic_write(TASKS_FILE, json.dumps(merged, ensure_ascii=False, indent=1))

@@ -22,7 +22,7 @@ classifiers = [
     "Topic :: Database",
 ]
 dependencies = [
-    "mcp>=2.2.0",
+    "mcp>=2.2.0,<3",
     "zstandard>=0.25.0",
     "fastembed==0.8.*",
     "sqlite-vec==0.1.9",

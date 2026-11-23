@@ -431,3 +431,16 @@ def test_doctor_counts_tasks_with_the_same_reaper_as_get_task_status(tmp_path, m
         "task_id": "t", "status": "running", "pid": os.getpid(),
         "started_at": stale, "updated_at": stale}}), encoding="utf-8")
     assert sync.diagnose(ACCT)["tasks"] == {"running": 0, "failed": 1}
+
+
+def test_doctor_does_not_call_the_reembed_queue_a_backlog_without_a_vector_index(
+        tmp_path, monkeypatch):
+    """没建向量索引时，自愈 / 改写照常往 `pending_reembed` 投递，但没有消费者——那不是积压。"""
+    _env(tmp_path, monkeypatch)
+    sync.run_sync(ACCT)
+    with store.open() as con:
+        con.execute("INSERT INTO pending_reembed(msg_key, changed_at, reason) "
+                    "VALUES (?, 0, 'chat_id')", (f"{ACCT}|m|message_0.db|1",))
+    info = sync.diagnose(ACCT)
+    assert info["dirty"]["pending"] == 1, "统计照报"
+    assert not any("积压" in p for p in info["problems"]), info["problems"]

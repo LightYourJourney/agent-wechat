@@ -661,6 +661,7 @@ agent-wechat purge --excluded              # 列出排除清单的规模（按�
   清单**」，**不是「字节层面不存在」**。`secure_delete=ON` 只清 SQLite 自己释放的页，而 vec0
   的 `preview` 列装的是相邻消息的正文——chunk 没整块清空时它仍可能留在**活跃页**里：把
   `index.db` 连同 `-wal` 读成字节去 grep，实测 1200 行形态下开了 pragma 也还能命中 1–3 次
+  （全文索引自索引库 v8 起开了 FTS5 `secure-delete`，不留 trigram；SQLite < 3.42 除外）
   （**不是**本工具的检索还能搜到它——索引查询里它已经没有了）。要字节级清除只能 `purge --index`
   后重跑 `export`。
 

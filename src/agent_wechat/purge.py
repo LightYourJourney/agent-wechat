@@ -971,7 +971,9 @@ def execute_chat(plan: ChatPlan) -> tuple[ChatReport, ...]:
     清单」。**不是**「字节层面不存在」：`secure_delete` 只清 SQLite 自己释放的页，而 vec0 的
     `preview` 列装的是**被删行前一条消息的显示正文**（`vector._INSERT_VEC` 写入的 `preview` 列，真内容）——chunk 没整块
     清空时它仍留在**活跃页**里（评审实测 1200 行形态下，开了本 pragma 也还能在 `messages` 与
-    `vec_messages_auxiliary` 的活跃页里搜到 1–3 次，dbstat 显示它们不在 freelist）。要字节级
+    `vec_messages_auxiliary` 的活跃页里搜到 1–3 次，dbstat 显示它们不在 freelist）。两张 FTS5 表
+    自迁移 v8 起开了 `secure-delete`，被删正文的 trigram 当场抹掉（SQLite < 3.42 除外，见
+    `store.FTS_SECURE_DELETE`）。要字节级
     清除只能重建：`purge --index` 后重跑 export。
     """
     # 与 `execute()` 同一道闸门、同一位置（先闸门，再链接，最后占用/删除）：会话轴此前**只有

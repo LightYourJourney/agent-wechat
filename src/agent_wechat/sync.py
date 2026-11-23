@@ -285,7 +285,9 @@ def diagnose(account: str | None = None) -> dict:
                 out["audit"]["cursors"] = con.execute(
                     "SELECT count(*) FROM audit_cursor").fetchone()[0]
             out["dirty"] = store.reembed_queue_stats(con, account)
-            if (out["dirty"].get("pending") or 0) > 0:
+            # 没建过向量索引时队列由触发器照常投递、却没有消费者（sync 跳过向量阶段）——
+            # 那不是积压，是「还没开这个功能」：报成 problem 会让 doctor 永远不干净。
+            if (out["dirty"].get("pending") or 0) > 0 and _vector_ready(con):
                 out["problems"].append(
                     f"重嵌队列有 {out['dirty']['pending']} 条积压（跑一次 vector-build 或 sync）")
             if (out["dirty"].get("failed") or 0) > 0:

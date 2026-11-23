@@ -297,7 +297,18 @@ SCHEMA = (_SCHEMA_BODY + "\n" + "\n".join(FTS_TRIGGERS) + "\n" + REEMBED_TRIGGER
 
 # 本程序已知的 main scope 最新版本。迁移只列**IF NOT EXISTS 表达不了**的变更；
 # 基线（v1）由 `migrations.apply` 隐式 stamp——那代表「整套 DDL 已由 ensure 建好」。
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
+
+# FTS5 的 `secure-delete`（SQLite ≥ 3.42）：删除时把被删行的 token 从索引段里**当场**抹掉。
+# 不开的话 `purge --chat` 之后，被删正文的 trigram 仍留在 `*_fts_data` 的活跃页里（实测 8 个里
+# 有 7 个还在），要等某次段合并才消失。它是表级的持久设置（写进 `*_fts_config`），开一次即可。
+# 更老的 SQLite 不认这条命令（报错会让整次迁移回滚、索引库打不开），所以那时 v8 是空迁移——
+# 残留边界照旧写在 `purge.execute_chat` 的「保证的边界」里。
+FTS_SECURE_DELETE_SUPPORTED = sqlite3.sqlite_version_info >= (3, 42, 0)
+FTS_SECURE_DELETE: tuple[str, ...] = (
+    "INSERT INTO messages_fts(messages_fts, rank) VALUES('secure-delete', 1)",
+    "INSERT INTO derived_fts(derived_fts, rank) VALUES('secure-delete', 1)",
+) if FTS_SECURE_DELETE_SUPPORTED else ()
 
 MIGRATIONS: tuple[migrations.Migration, ...] = (
     migrations.Migration(
@@ -352,6 +363,11 @@ MIGRATIONS: tuple[migrations.Migration, ...] = (
         statements=(DERIVED_TEXT_DDL, DERIVED_TOMBSTONE_DDL, DERIVED_FTS_DDL,
                     FACT_CLAIM_DDL, FACT_EVIDENCE_DDL,
                     *DERIVED_INDEXES, *FACT_INDEXES) + DERIVED_TRIGGERS,
+    ),
+    migrations.Migration(
+        version=8,
+        name="FTS 开启 secure-delete（被删正文不留 trigram）",
+        statements=FTS_SECURE_DELETE,
     ),
 )
 

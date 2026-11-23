@@ -669,3 +669,30 @@ def test_sweep_stale_tmp_tolerates_an_unreadable_directory(tmp_path, monkeypatch
     not_a_dir.write_bytes(b"x")                 # 让 parent.iterdir() 抛 NotADirectoryError
     monkeypatch.setattr(tasks, "TASKS_FILE", not_a_dir / "tasks.json")
     tasks._sweep_stale_tmp()                    # 不抛
+
+
+def test_finished_records_are_pruned_but_running_ones_never(tmp_path, monkeypatch):
+    """保留策略：已结束的最多留 `KEEP_FINISHED` 条、且过期的清掉；running 永不删。"""
+    import json as _json
+    import time as _time
+
+    monkeypatch.setattr(tasks, "TASKS_FILE", tmp_path / "tasks.json")
+    monkeypatch.setattr(tasks, "KEEP_FINISHED", 3)
+    now = int(_time.time())
+    recs = {f"d{i}": {"id": f"d{i}", "kind": "export", "status": "done",
+                      "started_at": now - 100 + i, "finished_at": now - 100 + i}
+            for i in range(5)}
+    recs["old"] = {"id": "old", "kind": "export", "status": "failed",
+                   "started_at": 1, "finished_at": 1}
+    recs["run"] = {"id": "run", "kind": "export", "status": "running", "pid": os.getpid(),
+                   "started_at": 1, "updated_at": now}
+    (tmp_path / "tasks.json").write_text(_json.dumps(recs))
+    tid = tasks.start("vector", lambda _tid: 0)
+    deadline = _time.time() + 5
+    while tasks.status(tid)["status"] == "running" and _time.time() < deadline:
+        _time.sleep(0.02)
+    kept = set(_json.loads((tmp_path / "tasks.json").read_text()))
+    assert "run" in kept, "running 永不删"
+    assert "old" not in kept, "过期的已结束记录要清掉"
+    assert len(kept - {"run"}) <= 3, kept
+    assert tid in kept and "d4" in kept and "d0" not in kept, kept

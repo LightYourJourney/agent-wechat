@@ -76,8 +76,7 @@ def _link_block(link: moments.SnsLink) -> str:
     # EA-034：判据已搬到 `chat_text.url_is_safe`（两个模板共用一处）——本函数只留呈现。
     if not chat_text.url_is_safe(link.url):
         return f'<div class="ph">[链接：{_esc(link.url)}]</div>'
-    s = moments.split_url(link.url)
-    host = (s.hostname or "").lower() if s is not None else ""   # 徽章显示用（判据已过）
+    host = chat_text.link_host(link.url)           # 徽章显示用（判据已过）
     title = _esc(link.title) or _esc(link.url)
     return (f'<div class="link"><a href="{_esc(link.url)}" target="_blank" '
             f'rel="noopener noreferrer nofollow">{title}</a>'
@@ -157,6 +156,7 @@ def render(posts: Iterable[moments.SnsPost], report: moments.MomentsReport) -> s
     if not items:
         body.append('<div class="post empty">没有匹配的动态。</div>')
     return ("<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">"
+            f"{chat_text.CSP_META}"
             "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
             f"<title>朋友圈导出</title><style>{_CSS}</style></head><body>"
             f"{_notice(report, len(items))}{''.join(body)}</body></html>")
