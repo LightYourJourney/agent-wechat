@@ -469,7 +469,8 @@ def cmd_media_export(args: argparse.Namespace) -> int:
     print(f"图片   ok={rep['image']['ok']}  skipped={rep['image']['skipped']}"
           f"  failed={rep['image']['failed']}  missing={rep['image']['missing']}")
     print(f"语音   ok={rep['voice']['ok']}  skipped={rep['voice']['skipped']}"
-          f"  failed={rep['voice']['failed']}  raw_only={rep['voice']['raw_only']}")
+          f"  failed={rep['voice']['failed']}  raw_only={rep['voice']['raw_only']}"
+          f"  decode_failed={rep['voice']['decode_failed']}")
     print(f"视频   ok={rep['video']['ok']}  skipped={rep['video']['skipped']}"
           f"  thumb={rep['video']['thumb']}  missing={rep['video']['missing']}")
     print(f"贴纸   ok={rep['sticker']['ok']}  skipped={rep['sticker']['skipped']}"

@@ -18,7 +18,7 @@
 | **例外**：`chat export --out DIR` 会把同一份**会话正文明文**（HTML / Markdown，含引用原文与转账字段）写到**容器之外的任意指定目录** | `DIR`（带容器路径判据：解析后落在微信容器内即拒绝，见 §3；代码逐级 chmod 0700、文件 0600，但不在 `~/.agent-wechat/` 之下） | 极高（用后必须手动删除；不受 Time Machine 排除与 `purge` 覆盖。`chat index --out` 只写一页索引，同理，同带该判据） |
 
 数据流向**默认始终在本机**：embedding、检索、MCP（stdio 传输）全部本地闭环，
-不存在任何网络上传路径。媒体导出同理——pilk（进程内调用）与 ffmpeg（本地子进程）
+不存在任何网络上传路径。媒体导出同理——pilk（隔离子进程：`python -I`，它的 C 代码会往 stdout 打诊断，不能和 MCP 的 stdio 通道共用一个进程）与 ffmpeg（本地子进程）
 都只做本机解码，不联网、不上传。
 
 **MCP 信封里的消息正文（含本次新增的 `get_message_parts`）**

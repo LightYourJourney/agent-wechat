@@ -392,7 +392,7 @@ def test_export_chat_media_envelope(monkeypatch):
                    "counts": {"image": {"ok": 3, "failed": 1, "missing": 2,
                                         "skipped": 3, "remaining": 4},
                               "voice": {"ok": 4, "failed": 0, "raw_only": 1,
-                                        "skipped": 0, "remaining": 2},
+                                        "decode_failed": 0, "skipped": 0, "remaining": 2},
                               "video": {"ok": 1, "thumb": 2, "missing": 5,
                                         "skipped": 0, "remaining": 0},
                               "sticker": {"ok": 0, "failed": 0, "missing": 0,
@@ -424,7 +424,7 @@ def test_export_chat_media_defaults_split_cleanly(monkeypatch):
                              "image": {"ok": 0, "failed": 0, "missing": 0,
                                        "skipped": 0, "remaining": 0},
                              "voice": {"ok": 0, "failed": 0, "raw_only": 0,
-                                       "skipped": 0, "remaining": 0},
+                                       "decode_failed": 0, "skipped": 0, "remaining": 0},
                              "video": {"ok": 0, "thumb": 0, "missing": 0,
                                        "skipped": 0, "remaining": 0}}
     assert res["degraded"] == [] and res["truncated"] is False

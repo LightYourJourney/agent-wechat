@@ -1019,7 +1019,7 @@ def test_media_export_renders_counts_and_degraded_to_stderr(monkeypatch, capsys)
     out, err = capsys.readouterr()
     assert out == ("会话 wxid_target\n"
                    "图片   ok=3  skipped=5  failed=1  missing=0\n"
-                   "语音   ok=2  skipped=1  failed=0  raw_only=1\n"
+                   "语音   ok=2  skipped=1  failed=0  raw_only=1  decode_failed=0\n"
                    "视频   ok=1  skipped=0  thumb=2  missing=1\n"
                    "贴纸   ok=4  skipped=6  failed=2  missing=3\n"
                    "（达到 --limit 上限，还有 11 个未导出 —— 重跑同一条命令即可继续）\n"

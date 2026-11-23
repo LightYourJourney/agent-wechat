@@ -426,7 +426,7 @@ agent-wechat extras rebuild
 agent-wechat media export --chat 小李
 # 会话 wxid_abc123def456
 # 图片   ok=12  skipped=0  failed=1  missing=0
-# 语音   ok=8  skipped=0  failed=0  raw_only=2
+# 语音   ok=8  skipped=0  failed=0  raw_only=2  decode_failed=0
 # 视频   ok=3  skipped=0  thumb=1  missing=0
 # 输出目录: /Users/you/.agent-wechat/media
 
@@ -452,6 +452,7 @@ agent-wechat media rebuild-refs
 - **能导出的远少于会话里的媒体消息数**：微信按需下载并定期清理本地媒体，`missing` 大
   是常态而不是错误（本机实测：84.1 万条索引里 39,344 条图片消息，磁盘上只剩 198 个 dat）
 - 计数含义：`failed` = 解密/未知格式/落盘失败；`raw_only` = pilk 缺失时导出的原始 `.slk` 数；
+  `decode_failed` = pilk 在、但解码失败而存成 `.slk` 的数量（下次导出会重试转 WAV）；
   `thumb` = 视频本体不在、回退缩略图的数量；`skipped` = 本次因产物**已存在**、或**本轮内
   重复**（同一个贴纸 md5 只取一次件）而跳过的**文件**数（**按文件**计，不是消息条数）；`remaining` = 撞上 `--limit` 时还有多少个**未导出**
   （CLI 印的是三类之和）。`image.missing` 恒为 0（图片按目录枚举，不按消息清点）

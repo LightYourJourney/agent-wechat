@@ -260,6 +260,34 @@ def test_build_does_not_write_back_rows_purged_while_embedding(env):
         "复用了被删 id 的新消息没被嵌入：水位线停在了已删的高位"
 
 
+def test_build_does_not_hold_the_write_lock_while_embedding(env):
+    """嵌入期间别的连接要能写库，构建自己也不能因为别人提交过而失败。
+
+    两种旧形态都会在这里红：① 事务从第一次 INSERT 开到 `commit_rows` 行之后才提交，中间
+    的嵌入全程持写锁——另一条连接等满 timeout 报 locked；② 贯穿整轮的扫描游标把本连接钉在
+    旧快照上，别人提交过一次之后本连接的写拿不到锁（BUSY_SNAPSHOT，同样报 locked）。
+    """
+    store.upsert_batch(env, [mk_row("acct", "chatA", i, f"第{i}条消息") for i in range(1, 8)])
+    env.commit()
+    writes: list[int] = []
+
+    class _ConcurrentWriter(FakeEmbedder):
+        def embed(self, texts):
+            other = sqlite3.connect(store.DB_PATH, timeout=0.5)
+            try:
+                other.execute("INSERT INTO display_names VALUES ('acct','x',?, 'y')",
+                              (str(len(writes)),))
+                other.commit()
+                writes.append(1)
+            finally:
+                other.close()
+            return super().embed(texts)
+
+    res = vector.build_index(embedder=_ConcurrentWriter(), batch=1, commit_rows=3)
+    assert res["embedded_this_run"] == 7
+    assert len(writes) == 7, "嵌入期间另一条连接的写入被写锁挡住了"
+
+
 def test_build_index_resumes_after_new_rows(env):
     store.upsert_batch(env, [mk_row("acct", "chatA", 1, "第一条消息")])
     vector.build_index(embedder=FakeEmbedder())

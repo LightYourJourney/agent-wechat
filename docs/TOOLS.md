@@ -381,7 +381,7 @@ rebuild 与否）各起一条。（F-D，T7 复验：与 §4 同款的合并语�
   "out_dir": "/Users/you/.agent-wechat/media",
   "counts": {
     "image": { "ok": 12, "failed": 1, "missing": 0, "skipped": 0, "remaining": 0 },
-    "voice": { "ok": 8, "failed": 0, "raw_only": 2, "skipped": 0, "remaining": 0 },
+    "voice": { "ok": 8, "failed": 0, "raw_only": 2, "decode_failed": 0, "skipped": 0, "remaining": 0 },
     "video": { "ok": 3, "thumb": 1, "missing": 0, "skipped": 0, "remaining": 0 },
     "sticker": { "ok": 5, "failed": 1, "missing": 40, "skipped": 0, "remaining": 0 }
   },
@@ -397,7 +397,8 @@ rebuild 与否）各起一条。（F-D，T7 复验：与 §4 同款的合并语�
   历史图片/视频大概率已不在磁盘上——能导出的只有磁盘还保留的部分，`missing` 大
   不是错误。
 - 计数口径：`image.failed` = 解密/未知格式/落盘失败数；`voice.raw_only` = pilk 缺失时
-  导出的原始 `.slk` 数；`video.thumb` = 本体不在、回退缩略图的数量；
+  导出的原始 `.slk` 数；`voice.decode_failed` = pilk 在、但解码失败而存成 `.slk` 的数量
+  （下次导出会重试转 WAV，不算「已导出」）；`video.thumb` = 本体不在、回退缩略图的数量；
   **`video.missing` 现在还会数「有视频消息、但本机既没有本体也没有缩略图」**（此外仍是
   文件在磁盘上却读不了/写不出来的那些）——微信只为**近期**消息保留本体，本机实测
   4,626 条视频消息只剩 30 个文件，所以**几千的 `video.missing` 是如实回答，不是故障**；

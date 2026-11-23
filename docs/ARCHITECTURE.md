@@ -164,7 +164,7 @@ media.export_media(account, chat_ids, kinds, months, con)
   → 图片：kvcomm 文件名取 code + md5(code+裸wxid) + 样本 dat 尾部统计 xorKey → 样本 dat 验证
       → 解密 dat（V2 = AES-128-ECB 段 + XOR 尾）→ 明文图片落 media/<会话md5>/image/<月份>/
   → 语音：media_*.db 快照解密（HOME/tmp，用后即焚）→ VoiceInfo.voice_data（明文 SILK）
-      → pilk 解 SILK → 自封 44B 头的 24kHz 单声道 WAV
+      → pilk 解 SILK（每次导出一个隔离子进程，带超时）→ 自封 44B 头的 24kHz 单声道 WAV
   → 视频：查 media_refs 取该会话的 file_key → 定位 msg/video/{月份}/ 下的明文 mp4
       （本体不在则回退缩略图 {file_key}_thumb.jpg）→ 复制
   → 产物一律落 ~/.agent-wechat/media/（0700、文件 0600）；微信目录始终只读

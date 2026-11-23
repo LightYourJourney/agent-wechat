@@ -259,8 +259,9 @@ def test_voice_export_write_failure(tmp_path, monkeypatch):
         rep = media.export_media(acct, [chat_name], kinds=["voice"],
                                  out_dir=str(tmp_path / "out"))
         inj.assert_fired()
-        assert rep.voice.ok == 0 and (rep.voice.failed + rep.voice.raw_only) >= 1, \
-            "写失败必须进报告（failed 或 raw_only），不得静默当作成功"
+        assert rep.voice.ok == 0 and (rep.voice.failed + rep.voice.raw_only
+                                      + rep.voice.decode_failed) >= 1, \
+            "写失败必须进报告（failed / raw_only / decode_failed），不得静默当作成功"
     finally:
         inj.undo()
 

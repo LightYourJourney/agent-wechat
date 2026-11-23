@@ -22,9 +22,11 @@ import hashlib
 import os
 import pathlib
 import re
+import select
 import sqlite3
 import stat
 import subprocess
+import sys
 import tempfile
 import http.client
 import urllib.error
@@ -493,6 +495,7 @@ class Counts:
     failed: int = 0
     missing: int = 0
     raw_only: int = 0      # voice 专属：pilk 缺失时导出原始 .slk 的数量
+    decode_failed: int = 0  # voice 专属：pilk 在、但解码失败而存成 .slk 的数量（下次导出重试）
     thumb: int = 0         # video 专属：回退缩略图数量
     skipped: int = 0       # 本次因产物**已存在**或**本轮内重复**（EA-084：同一个贴纸 md5 只取一次件）而跳过的**文件**数（有本体的视频，其缩略图不再另写，故不另计）；不吃 --limit 预算
     remaining: int = 0     # 撞上 --limit 后本会导出的条数（只计数，不落盘）
@@ -514,6 +517,7 @@ class MediaReport:
                           "skipped": self.image.skipped, "remaining": self.image.remaining},
                 "voice": {"ok": self.voice.ok, "failed": self.voice.failed,
                           "raw_only": self.voice.raw_only,
+                          "decode_failed": self.voice.decode_failed,
                           "skipped": self.voice.skipped, "remaining": self.voice.remaining},
                 "video": {"ok": self.video.ok, "thumb": self.video.thumb,
                           "missing": self.video.missing,
@@ -954,8 +958,13 @@ class _ExportState:
         """
         if self.force:
             return False
+        cands = _out_candidates(kind, base)
+        if kind == "voice" and _PILK is not None:
+            # pilk 在时 `.slk` 只是**解码失败**留下的回退产物，不算完成：每轮重试转 WAV
+            # （pilk 升级后自动补回）。读侧（`exported_path`）照旧认 `.slk`——文件确实在那儿。
+            cands = tuple(c for c in cands if c[1] != "slk")
         return any(_out_path(self.out_root, cm, kind, mon, s, e).exists()
-                   for s, e in _out_candidates(kind, base))
+                   for s, e in cands)
 
     def full(self) -> bool:
         return self.produced >= self.max_files
@@ -1562,10 +1571,124 @@ def _export_stickers(st: _ExportState, chat_ids: list[str],
         st.bump()
 
 
+# 语音解码 worker 的源码：`sys.executable -I -c` 起一个**隔离子进程**跑 pilk。
+# 两条理由（审查 P1-3）：① pilk 的 C 代码遇到坏数据直接往 **fd 1** 打字
+# （`SKP_Silk_SDK_Decode returned -11`），而 MCP 走 stdio——那就是 JSON-RPC 的通道；
+# 进程内 dup2 是进程级的，会吞掉并发写出的协议消息，所以只能换进程。② 它解析的是发送方
+# 可控的数据，C 库崩溃或卡死不该拖垮整个服务。用 `-c` 而不是 `-m agent_wechat.…`：worker 只需要
+# pilk，不必（也不该）把整个包导进来；`-I` 不读 PYTHON* 环境变量、不把 cwd 放进 sys.path。
+_VOICE_WORKER_SRC = r"""
+import os, sys
+proto = os.fdopen(os.dup(1), "w", buffering=1)
+os.dup2(2, 1)
+try:
+    import pilk
+except Exception:
+    proto.write("unavailable\n")
+    sys.exit(0)
+proto.write("ready\n")
+for line in sys.stdin:
+    src, dst = line.rstrip("\n").split("\t")
+    try:
+        pilk.decode(src, dst, 24000)
+        proto.write("ok\n")
+    except Exception:
+        proto.write("err\n")
+"""
+
+
+class _VoiceWorker:
+    """一次导出调用一个解码子进程（启动开销只付一次），坏数据只杀它不杀主进程。
+
+    协议是行式的：父进程写 `<silk 路径>` TAB `<pcm 路径>`，子进程回 `ok` / `err`。两个路径都在
+    父进程建的 `awvoice-<pid>-` 临时目录里（0700、可被清扫认领），明文不进管道。
+    超时或子进程退出 → 这一条算解码失败、杀掉 worker，下一条按需重启。
+    """
+
+    TIMEOUT = 30.0
+
+    def __init__(self) -> None:
+        self._proc: subprocess.Popen | None = None
+        self._buf = b""
+        self.unavailable = False          # 子进程里 import pilk 失败
+
+    def __enter__(self) -> "_VoiceWorker":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
+    def _readline(self) -> str | None:
+        proc = self._proc
+        if proc is None or proc.stdout is None:
+            return None
+        fd = proc.stdout.fileno()
+        while b"\n" not in self._buf:
+            ready, _, _ = select.select([fd], [], [], self.TIMEOUT)
+            if not ready:
+                return None                       # 卡死
+            chunk = os.read(fd, 4096)
+            if not chunk:
+                return None                       # 崩溃 / 退出
+            self._buf += chunk
+        line, _, self._buf = self._buf.partition(b"\n")
+        return line.decode("ascii", "replace")
+
+    def _start(self) -> bool:
+        self._buf = b""
+        try:
+            self._proc = subprocess.Popen(
+                [sys.executable, "-I", "-c", _VOICE_WORKER_SRC],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        except OSError:
+            self._proc = None
+            return False
+        hello = self._readline()
+        if hello == "ready":
+            return True
+        self.unavailable = hello == "unavailable"
+        self.close()
+        return False
+
+    def decode(self, src: pathlib.Path, dst: pathlib.Path) -> bool:
+        if self.unavailable or (self._proc is None and not self._start()):
+            return False
+        proc = self._proc
+        if proc is None or proc.stdin is None:       # _start 成功即两者都在；只为类型收窄
+            return False
+        try:
+            proc.stdin.write(f"{src}\t{dst}\n".encode())
+            proc.stdin.flush()
+        except OSError:
+            self.close()
+            return False
+        resp = self._readline()
+        if resp is None:
+            self.close()
+            return False
+        return resp == "ok"
+
+    def close(self) -> None:
+        proc, self._proc = self._proc, None
+        if proc is None:
+            return
+        for stream in (proc.stdin, proc.stdout):
+            if stream is not None:
+                try:
+                    stream.close()
+                except OSError:
+                    pass
+        try:
+            proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+
+
 def _export_voices(st: _ExportState, chat_ids: list[str]) -> None:
     """语音：Name2Id rowid → VoiceInfo(chat_name_id, create_time) → pilk 解码 24kHz WAV。
     pilk 缺失 → 原始 .slk（微信原始形态，`\\x02` 前缀保留）。单库打不开则跳过该分片、
-    在 report.degraded 里公告一次，不中断。
+    在 report.degraded 里公告一次，不中断。解码在隔离子进程里做（见 `_VoiceWorker`）。
 
     每个分片都对**全部**请求会话查一遍 Name2Id（不在本分片里的自然跳过）——实测 media_0 与
     media_1 的 Name2Id 交集 13 人、其中 12 个会话**两分片都有语音**，所以「查到就把会话从待办
@@ -1573,32 +1696,64 @@ def _export_voices(st: _ExportState, chat_ids: list[str]) -> None:
     """
     decrypt.ensure_home_dirs()           # 中间明文只落 HOME/tmp（0700、已排除 Time Machine）
     warned = False                       # 一次导出只说一次（wxgf_warned 同款 once-flag）
-    for db in _voice_db_paths(st.account):
-        try:
-            passphrase = keys_mod.get_passphrase(st.account)
-            with decrypt.decrypted(db, passphrase) as plain:
-                con = decrypt.open_plain(plain)
-                con.text_factory = bytes
-                try:
-                    _export_voices_from(st, con, chat_ids)
-                finally:
-                    con.close()
-        except (errors.AgentWeChatError, sqlite3.Error, OSError) as exc:
-            # 这个库打不开（漂移/密钥缺失/库读不了/HOME 的 tmp 建不出来）：跳过该分片，不中断。
-            # OSError 那一支是 Ruling 23a：decrypt.decrypted 里 mkdtemp 与 snapshot 的
-            # copy2/read_bytes 都直接抛 OSError（不包装），漏了它就带 traceback 冲出 core。
-            # 但**跳过必须可见**：会话的语音全在这种分片里时 voice 计数为 0，没有这条说明
-            # 就与「这个会话没有语音消息」不可区分（本功能其它能力级失败都会公告）。
-            # 文案经 redact：DecryptError 可能带回 sqlcipher 回显的 `PRAGMA key` 原文。
-            if not warned:
-                warned = True
-                st.report.degraded.append(
-                    f"语音分片打不开（首个原因：{errors.redact(str(exc))}），该分片的语音未导出")
-            continue
+    # 输入 silk 与中间 pcm **都**只落在 HOME/tmp 的 0700 临时目录里，退出即清
+    # （Ruling 19：silk_to_wav 会把中间明文 pcm 留在系统 TMPDIR 且不删）
+    # 前缀**必须带 pid**：`decrypt.sweep_stale_tempdirs` 靠它判「持有者还在不在」。
+    # 不带 pid 的目录在 SIGKILL / daemon 线程被丢弃时残留，且没有任何清扫路径
+    # 能认领它（同一类明文残留，`awdec-` 那条早有兜底）。
+    with tempfile.TemporaryDirectory(dir=decrypt.tmp_dir(),
+                                     prefix=f"awvoice-{os.getpid()}-") as td, \
+            _VoiceWorker() as worker:
+        for db in _voice_db_paths(st.account):
+            try:
+                passphrase = keys_mod.get_passphrase(st.account)
+                with decrypt.decrypted(db, passphrase) as plain:
+                    con = decrypt.open_plain(plain)
+                    con.text_factory = bytes
+                    try:
+                        _export_voices_from(st, con, chat_ids, pathlib.Path(td), worker)
+                    finally:
+                        con.close()
+            except (errors.AgentWeChatError, sqlite3.Error, OSError) as exc:
+                # 这个库打不开（漂移/密钥缺失/库读不了/HOME 的 tmp 建不出来）：跳过该分片，不中断。
+                # OSError 那一支是 Ruling 23a：decrypt.decrypted 里 mkdtemp 与 snapshot 的
+                # copy2/read_bytes 都直接抛 OSError（不包装），漏了它就带 traceback 冲出 core。
+                # 但**跳过必须可见**：会话的语音全在这种分片里时 voice 计数为 0，没有这条说明
+                # 就与「这个会话没有语音消息」不可区分（本功能其它能力级失败都会公告）。
+                # 文案经 redact：DecryptError 可能带回 sqlcipher 回显的 `PRAGMA key` 原文。
+                if not warned:
+                    warned = True
+                    st.report.degraded.append(
+                        f"语音分片打不开（首个原因：{errors.redact(str(exc))}），该分片的语音未导出")
+                continue
+    if worker.unavailable:
+        st.report.degraded.append("pilk 在解码子进程里导入失败：语音存为原始 .slk")
+    elif st.report.voice.decode_failed:
+        st.report.degraded.append(
+            f"{st.report.voice.decode_failed} 条语音 pilk 解码失败，已存原始 .slk；下次导出会重试")
+
+
+def _decode_voice(worker: _VoiceWorker, td: pathlib.Path, blob: bytes) -> bytes | None:
+    """一条 silk → WAV 字节；失败返回 None。临时文件在 `td` 里逐条覆盖。"""
+    tmp_silk, tmp_pcm = td / "v.silk", td / "v.pcm"
+    try:
+        tmp_pcm.unlink(missing_ok=True)   # 上一条的 pcm 不许被当成这一条的结果
+        tmp_silk.write_bytes(blob)
+        if worker.decode(tmp_silk, tmp_pcm) and tmp_pcm.exists():
+            return _wav_bytes(tmp_pcm.read_bytes())
+        return None
+    except OSError:
+        return None                       # 临时文件写读失败 = 这一条解不了，落 .slk 回退
+    finally:
+        for f in (tmp_silk, tmp_pcm):
+            try:
+                f.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def _export_voices_from(st: _ExportState, con: sqlite3.Connection,
-                        chat_ids: list[str]) -> None:
+                        chat_ids: list[str], td: pathlib.Path, worker: _VoiceWorker) -> None:
     name2id = {u.decode("utf-8", "replace") if isinstance(u, bytes) else u: rid
                for rid, u in con.execute("SELECT rowid, user_name FROM Name2Id")}
     for chat in chat_ids:
@@ -1623,24 +1778,7 @@ def _export_voices_from(st: _ExportState, con: sqlite3.Connection,
             if blob is None:
                 st.report.voice.failed += 1
                 continue
-            wav_bytes = None
-            if _PILK is not None:
-                try:
-                    # 输入 silk 与中间 pcm **都**只落在 HOME/tmp 的 0700 临时目录里，退出即清
-                    # （Ruling 19：silk_to_wav 会把中间明文 pcm 留在系统 TMPDIR 且不删）
-                    # 前缀**必须带 pid**：`decrypt.sweep_stale_tempdirs` 靠它判「持有者还在不在」。
-                    # 不带 pid 的目录在 SIGKILL / daemon 线程被丢弃时残留，且没有任何清扫路径
-                    # 能认领它（同一类明文残留，`awdec-` 那条早有兜底）。
-                    with tempfile.TemporaryDirectory(dir=decrypt.tmp_dir(),
-                                                     prefix=f"awvoice-{os.getpid()}-") as td:
-                        tmp_silk = pathlib.Path(td) / "v.silk"
-                        tmp_silk.write_bytes(blob)
-                        tmp_pcm = pathlib.Path(td) / "v.pcm"
-                        _PILK.decode(str(tmp_silk), str(tmp_pcm), 24000)
-                        if tmp_pcm.exists():
-                            wav_bytes = _wav_bytes(tmp_pcm.read_bytes())
-                except Exception:
-                    wav_bytes = None  # 解码失败 → 落到 .slk 回退
+            wav_bytes = _decode_voice(worker, td, blob) if _PILK is not None else None
             if wav_bytes is not None:
                 if save_artifact(st.out_root, cm, "voice", mon, f"{ts}_{lid}", "wav", wav_bytes) is None:
                     st.report.voice.failed += 1         # 落盘失败（Ruling 20）
@@ -1650,5 +1788,8 @@ def _export_voices_from(st: _ExportState, con: sqlite3.Connection,
                 if save_artifact(st.out_root, cm, "voice", mon, f"{ts}_{lid}", "slk", blob) is None:
                     st.report.voice.failed += 1
                     continue
-                st.report.voice.raw_only += 1
+                if _PILK is None:
+                    st.report.voice.raw_only += 1
+                else:
+                    st.report.voice.decode_failed += 1
             st.bump()

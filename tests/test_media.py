@@ -306,7 +306,8 @@ def test_report_to_dict_envelope_shape():
                             video=media.Counts(ok=1, thumb=4), degraded=["x"])
     d = rep.to_dict()
     assert d["image"] == {"ok": 3, "failed": 1, "missing": 0, "skipped": 0, "remaining": 0}
-    assert d["voice"] == {"ok": 0, "failed": 0, "raw_only": 2, "skipped": 0, "remaining": 0}
+    assert d["voice"] == {"ok": 0, "failed": 0, "raw_only": 2, "decode_failed": 0,
+                          "skipped": 0, "remaining": 0}
     assert d["video"] == {"ok": 1, "thumb": 4, "missing": 0, "skipped": 0, "remaining": 0}
     assert d["truncated"] is False
 
@@ -3259,6 +3260,66 @@ def test_voice_export_counts_a_failed_slk_save(tmp_path, monkeypatch):
     assert rep.voice.failed == 1 and rep.voice.raw_only == 0, rep.voice
 
 
+def test_pilk_diagnostics_never_reach_our_stdout(tmp_path, monkeypatch, capfd):
+    """坏 silk 让 pilk 的 C 代码往 **fd 1** 打字——那是 MCP 的 JSON-RPC 通道。
+
+    解码必须在隔离子进程里做（`_VoiceWorker`）：本进程的 fd 1 上一个字节都不许出现，
+    这条语音计入 `decode_failed`（不是 `raw_only`：pilk 在，只是解不开）并公告。
+    `capfd` 抓的是**文件描述符**层（`capsys` 只抓 `sys.stdout`，抓不到 C 代码的 printf）。
+    """
+    root, account = make_tree(tmp_path, monkeypatch)
+    ts = int(datetime.datetime(2026, 9, 15, 12, 0).timestamp())
+    _voice_fixture(account, [(1, ts, 7, b"\x02#!SILK_V3" + bytes(range(256)) * 8)])
+    _passthrough_decrypted(monkeypatch)
+    capfd.readouterr()
+    rep = media.export_media(account, ["chatA@chatroom"], kinds=["voice"],
+                             months=[media.month_of(ts)], out_dir=root / "home" / "media")
+    out, _err = capfd.readouterr()
+    assert out == "", f"pilk 的诊断漏到了本进程 stdout：{out[:120]!r}"
+    assert rep.voice.decode_failed == 1 and rep.voice.raw_only == 0, rep.voice
+    assert any("解码失败" in d for d in rep.degraded), rep.degraded
+
+
+def test_a_voice_that_failed_to_decode_is_retried_next_export(tmp_path, monkeypatch):
+    """pilk 在、解码失败时存下的 `.slk` 只是回退产物，**不算完成**：下一轮重试转 WAV。
+
+    此前 `already()` 认 `.slk`，第一次解码失败就永久停在原始格式（pilk 升级也补不回来）。
+    """
+    root, account = make_tree(tmp_path, monkeypatch)
+    ts = int(datetime.datetime(2026, 9, 15, 12, 0).timestamp())
+    _voice_fixture(account, [(1, ts, 7, _silk_blob())])
+    _passthrough_decrypted(monkeypatch)
+    out = root / "home" / "media"
+    ok = [False]
+
+    class _FlakyWorker(media._VoiceWorker):
+        def decode(self, src, dst):
+            if ok[0]:
+                pathlib.Path(dst).write_bytes(b"\x00" * 64)
+            return ok[0]
+
+    monkeypatch.setattr(media, "_VoiceWorker", _FlakyWorker)
+    first = media.export_media(account, ["chatA@chatroom"], kinds=["voice"],
+                               months=[media.month_of(ts)], out_dir=out)
+    assert first.voice.decode_failed == 1
+    ok[0] = True
+    second = media.export_media(account, ["chatA@chatroom"], kinds=["voice"],
+                                months=[media.month_of(ts)], out_dir=out)
+    assert second.voice.ok == 1 and second.voice.skipped == 0, second.voice
+    assert list(out.rglob("*.wav")), "第二轮应补出 WAV"
+
+
+def test_a_hung_decoder_times_out_and_is_replaced(tmp_path, monkeypatch):
+    """worker 卡死（C 库死循环）只算这一条失败：超时后杀掉，下一条按需重启。"""
+    monkeypatch.setattr(media, "_VOICE_WORKER_SRC",
+                        "import sys, time\nprint('ready', flush=True)\n"
+                        "for line in sys.stdin:\n    time.sleep(60)\n")
+    monkeypatch.setattr(media._VoiceWorker, "TIMEOUT", 0.5)
+    with media._VoiceWorker() as w:
+        assert w.decode(tmp_path / "a.silk", tmp_path / "a.pcm") is False
+        assert w._proc is None, "超时后必须把 worker 杀掉，而不是留着下一条接着等"
+
+
 def test_voice_export_reports_progress(tmp_path, monkeypatch):
     """语音分支的 `progress(done)`：删掉它，长语音导出全程无进度。"""
     root, account, chat_name = make_voice_tree(tmp_path, monkeypatch)
@@ -3314,13 +3375,13 @@ def test_the_voice_workspace_is_recognizable_by_the_sweeper(tmp_path, monkeypatc
 
     seen = []
 
-    class _FakePilk:
-        @staticmethod
-        def decode(src, dst, rate):
+    class _FakeWorker(media._VoiceWorker):
+        def decode(self, src, dst):
             seen.append(pathlib.Path(src).parent.name)
             pathlib.Path(dst).write_bytes(b"\x00" * 64)
+            return True
 
-    monkeypatch.setattr(media, "_PILK", _FakePilk)
+    monkeypatch.setattr(media, "_VoiceWorker", _FakeWorker)
     media.export_media(account, ["chatA@chatroom"], kinds=["voice"], months=[mon],
                        out_dir=root / "home" / "media")
 

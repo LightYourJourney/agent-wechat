@@ -314,11 +314,16 @@ def _set_vector_watermark(con: sqlite3.Connection, account: str, rowid: int) -> 
         (MODEL_ID, account, rowid, int(time.time())))
 
 
-_SELECT_ROWS = (
+# **一页一条完整查询**（keyset 分页），不是一个贯穿整轮的游标：活跃的读语句会把连接钉在
+# 它开始时的快照上，此后别的连接（导出 / sync）只要提交过一次，本连接的写事务就拿不到锁
+# （SQLITE_BUSY_SNAPSHOT，报 `database is locked`，且不等 busy timeout）——写入时对
+# messages 的存活复查也会读到那个旧快照。`NOT INDEXED` 让它走 rowid 区间扫描、按 id 序
+# 取满 LIMIT 即停；不加时规划器选 idx_msg_ts 再整段临时排序，每页都要 O(账号行数)。
+_SELECT_PAGE = (
     "SELECT " + messages.column_list(
         "id", "msg_key", "account", "chat_md5", "chat_id", "ts", "msg_type", "sender_id",
         "sender_name", "is_self", "content", "media_hint")
-    + " FROM messages WHERE account = ? AND id > ? ORDER BY id")
+    + " FROM messages NOT INDEXED WHERE account = ? AND id > ? ORDER BY id LIMIT ?")
 
 _INSERT_VEC = ("INSERT INTO vec_messages(msg_rowid, embedding, acct_chat, account, ts, preview) "
                "VALUES (?,?,?,?,?,?)")
@@ -342,17 +347,21 @@ def _build_account(con: sqlite3.Connection, acct: str, embedder: FastEmbedEmbedd
                    batch: int, commit_rows: int) -> tuple[int, int]:
     """单账号增量嵌入。返回 (embedded, skipped)。
 
-    事务边界：每 commit_rows 行提交一次（含水位线，二者同事务 → 崩溃后不会重复嵌入）。
+    **嵌入在任何事务之外**：每批向量先攒在内存里（`commit_rows` 行约 10 MB），攒够了再开
+    一个短写事务——复查存活、写向量、推水位线、提交，四步同一事务（崩溃后不会重复嵌入）。
+    此前事务从第一次 INSERT 开到 `commit_rows` 行之后才提交，中间约 20 批 CPU 推理（按
+    「68 万行 2.5–3 小时」折算每段约 70s）全程持写锁，并发的导出 / sync 等满 5s 就报
+    `database is locked`。
     batch 同时是分页步长与单次嵌入的行数上限（默认取模块常量，由 build_index 注入）。
     """
-    last_id = start = _vector_watermark(con, acct)
+    last_id = _vector_watermark(con, acct)
     prev_by_chat: dict[str, str] = {}
     buf_texts: list[str] = []
     buf_rows: list[tuple] = []
-    embedded = skipped = since_commit = 0
+    pending: list[tuple] = []          # (msg_rowid, blob, acct_chat, ts, preview, msg_key)
+    embedded = skipped = 0
 
     def flush() -> None:
-        nonlocal embedded
         if not buf_rows:
             return
         # 长度排序后成批嵌入，压掉混合长度批次的 padding 浪费（spec §7；
@@ -363,7 +372,7 @@ def _build_account(con: sqlite3.Connection, acct: str, embedder: FastEmbedEmbedd
         # EA-123：**维度自检**并在这里——嵌入模型与 `store.VECTOR_DIM`（DDL 用它建 vec0 表）
         # 是两个必须同步的常量，此前没有任何校验：换模型时失败面是循环中途的裸
         # `sqlite3.OperationalError`（vec0 表 512 维、插 768 维的行），且已经嵌了几批。
-        # 放在 flush（所有路径的必经点、且在本批 `executemany` **之前**）⇒ 第一批落盘前就抛
+        # 放在 flush（所有路径的必经点、且在本批落盘**之前**）⇒ 第一批落盘前就抛
         # 项目异常。条目原本建议「起手单嵌一条常量串」——**不采纳**：那会给每个 batch 多出
         # 一次嵌入调用，污染所有按调用计数/顺序的假 embedder（实测 5 条既有用例同时红）。
         if vecs and len(vecs[0]) != store.VECTOR_DIM:
@@ -373,34 +382,41 @@ def _build_account(con: sqlite3.Connection, acct: str, embedder: FastEmbedEmbedd
                 hint="换回建索引时的模型，或用 rebuild=True 重建（DDL 会按新维度建表）",
             )
         if len(vecs) != len(order):
-            # EA-059：`zip(order, vecs)` 会**静默截断**——少返的向量对应的行不进索引，而下面
-            # `embedded += len(buf_rows)` 照记（账目漂移 + 那些消息永远搜不到）。真实
-            # fastembed 恒等长，这条防的是嵌入层被换/出错的形态。抛出即整轮终止（水位线停在上
-            # 一次 commit 处，重跑可续）。
+            # EA-059：`zip(order, vecs)` 会**静默截断**——少返的向量对应的行不进索引，而
+            # 账目照记（账目漂移 + 那些消息永远搜不到）。真实 fastembed 恒等长，这条防的是
+            # 嵌入层被换/出错的形态。抛出即整轮终止（水位线停在上一次 commit 处，重跑可续）。
             # 文案（复审 F3）：**重跑**才是对的修法——抛在这里时水位线还没推进，不带 rebuild
             # 重跑会从上次提交处续跑；rebuild 会把已经嵌好的部分全部作废（2.5–3 小时）。
             raise VectorError(
                 f"嵌入返回的向量数不足（{len(vecs)} != {len(order)}）：索引不完整。"
                 "重跑一次即可从上次提交处续跑（不带 rebuild）；反复出现再用 rebuild 重建")
-        # **写入时复查消息还在**（与下面的 INSERT 同一个写事务）：本函数不登记任务，`purge --chat`
-        # 的闸门看不见它——嵌入期间被销毁的会话，其向量（preview 列是真正文）否则会被写回来。
-        # 按 (id, msg_key) 对：messages.id 不是 AUTOINCREMENT，被删的 id 会被新消息复用。
-        if not con.in_transaction:
-            con.execute("BEGIN IMMEDIATE")
-        alive = _alive_ids(con, [(r[0], r[4]) for r in buf_rows])
-        con.executemany(_INSERT_VEC,
-                        # serialize_float32 注解成 List，实际只做 `pack(*v)`：numpy 数组照收
-                        [(buf_rows[i][0], sqlite_vec.serialize_float32(v),  # pyright: ignore[reportArgumentType]
-                          buf_rows[i][1],
-                          acct, buf_rows[i][2], buf_rows[i][3])
-                         for i, v in zip(order, vecs) if buf_rows[i][0] in alive])
-        embedded += len(alive)
+        # serialize_float32 注解成 List，实际只做 `pack(*v)`：numpy 数组照收
+        pending.extend((buf_rows[i][0], sqlite_vec.serialize_float32(v),  # pyright: ignore[reportArgumentType]
+                        *buf_rows[i][1:]) for i, v in zip(order, vecs))
         buf_texts.clear()
         buf_rows.clear()
 
-    cur = con.execute(_SELECT_ROWS, (acct, start))
-    while True:                       # 分页遍历（实测：同连接边读边写边 commit 安全）
-        page = cur.fetchmany(batch)
+    def write(upto: int) -> None:
+        nonlocal embedded
+        con.execute("BEGIN IMMEDIATE")
+        # **写入时复查消息还在**（同一个写事务）：本函数不登记任务，`purge --chat` 的闸门
+        # 看不见它——嵌入期间被销毁的会话，其向量（preview 列是真正文）否则会被写回来。
+        # 按 (id, msg_key) 对：messages.id 不是 AUTOINCREMENT，被删的 id 会被新消息复用。
+        alive = _alive_ids(con, [(r[0], r[5]) for r in pending])
+        con.executemany(_INSERT_VEC, [(r[0], r[1], r[2], acct, r[3], r[4])
+                                      for r in pending if r[0] in alive])
+        _set_vector_watermark(con, acct, upto)
+        try:
+            con.commit()
+        except (sqlite3.Error, OSError) as exc:
+            raise store.index_unavailable(exc) from exc
+        embedded += len(alive)
+        pending.clear()
+        if progress:
+            progress(embedded)
+
+    while True:
+        page = con.execute(_SELECT_PAGE, (acct, last_id, batch)).fetchall()
         if not page:
             break
         for row in page:
@@ -416,26 +432,12 @@ def _build_account(con: sqlite3.Connection, acct: str, embedder: FastEmbedEmbedd
                 prev_by_chat[chat_key] = display_text(row)
                 if len(buf_rows) >= batch:
                     flush()
-                    since_commit += batch
-                    if since_commit >= commit_rows:
-                        _set_vector_watermark(con, acct, last_id)
-                        try:
-                            con.commit()
-                        except (sqlite3.Error, OSError) as exc:
-                            raise store.index_unavailable(exc) from exc
-                        since_commit = 0
-                        if progress:
-                            progress(embedded)
+                    if len(pending) >= commit_rows:
+                        write(last_id)       # 此刻 ≤ last_id 的行不是在 pending 里就是已跳过
             else:
                 skipped += 1
     flush()
-    _set_vector_watermark(con, acct, last_id)
-    try:
-        con.commit()
-    except (sqlite3.Error, OSError) as exc:
-        raise store.index_unavailable(exc) from exc
-    if progress:
-        progress(embedded)
+    write(last_id)
     return embedded, skipped
 
 

@@ -856,9 +856,8 @@ def delete_chat(con: sqlite3.Connection, *, account: str, chat_id: str) -> dict[
     # max(...)（单调不减），这一行 min 会被它当场吃掉、静默无效（spec §5.2 第 1 条）。
     # 取**该账号自己的** max 即可（与那条 WHERE account=? 天然配对）。
     # 早先这里写的是「max 必须全局」——2026-09-30 终审推翻了它：扫描谓词 `WHERE account=? AND
-    # id>?` 是按账号过滤的，降到该账号自己的新 max 时区间里一条存活行都没有，那个危害不存在；
-    # 而且实测 `_SELECT_ROWS` 的执行计划是 COVERING INDEX idx_msg_ts(account=?) + TEMP B-TREE
-    # FOR ORDER BY——它压根不用 id>? 做范围，连性能差别都没有。
+    # id>?` 是按账号过滤的，降到该账号自己的新 max 时区间里一条存活行都没有，那个危害不存在
+    # （`vector._SELECT_PAGE` 走 rowid 区间扫描，降低下界只是多跳过几行别的账号的）。
     # 这几行必须留在删除的**同一事务**里：先提交删除、再单独修水位线，中间崩一次就是
     # 「行没了、水位线还停在旧高位」，此后复用的 id ≤ 水位线 → 静默不被嵌入
     # （没有任何地方会报错，只有向量检索悄悄少结果）。
