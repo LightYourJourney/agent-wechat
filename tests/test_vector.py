@@ -260,6 +260,31 @@ def test_build_does_not_write_back_rows_purged_while_embedding(env):
         "复用了被删 id 的新消息没被嵌入：水位线停在了已删的高位"
 
 
+def test_watermark_cap_is_per_account_not_global(env):
+    """封顶取**该账号**的 max(id)：取全局 max 时，A 的水位线会停在 B 的行上；之后 B 被销毁，
+    `delete_chat` 只回压 B 的水位线，A 复用那段 id 的新消息就落在水位线之下、永不被嵌入。"""
+    store.upsert_batch(env, [mk_row("A", "keep", 1, "留下来的消息A")]); env.commit()
+    store.upsert_batch(env, [mk_row("B", "b", i, f"B的消息{i}") for i in (2, 3)]); env.commit()
+    store.upsert_batch(env, [mk_row("A", "victim", i, f"被删的正文{i}") for i in (4, 5)])
+    env.commit()
+    fired: list[int] = []
+
+    class _PurgeMidway(FakeEmbedder):
+        def embed(self, texts):
+            if not fired:
+                fired.append(1)
+                other = sqlite3.connect(store.DB_PATH)
+                other.execute("DELETE FROM messages WHERE chat_id='victim'")
+                other.commit(); other.close()
+            return super().embed(texts)
+
+    vector.build_index(embedder=_PurgeMidway())
+    store.delete_chat(env, account="B", chat_id="b"); env.commit()
+    store.upsert_batch(env, [mk_row("A", "keep", 9, "删除之后的新消息")]); env.commit()
+    assert vector.build_index(embedder=FakeEmbedder())["embedded_this_run"] == 1, \
+        "A 的新消息复用了 B 被删的 id，却落在 A 的水位线之下"
+
+
 def test_build_does_not_hold_the_write_lock_while_embedding(env):
     """嵌入期间别的连接要能写库，构建自己也不能因为别人提交过而失败。
 

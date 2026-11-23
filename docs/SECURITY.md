@@ -199,7 +199,8 @@
 > 不存在」**：`secure_delete` 只清 SQLite 自己释放的页，vec0 的 `preview` 列装的是相邻消息的
 > 正文——chunk 没整块清空时，把 `index.db` 连同 `-wal` 读成字节去 grep，仍能在活跃页里命中它
 > （全文索引两张 FTS5 表自索引库 v8 起开了 `secure-delete`，被删正文的 trigram 当场抹掉；
-> SQLite < 3.42 没有这个开关，那时 trigram 也会在活跃页里留到下一次段合并）
+> SQLite < 3.42 没有这个开关，那时 trigram 也会在活跃页里留到下一次段合并；在这种 SQLite 上
+> 升到 v8 的库，之后换成新版 SQLite 也**不会**自动补开——要补就 `purge --index` 后重跑 `export`）
 > （**不是**本工具的检索还能搜到：索引查询里它已经没有了）。要字节级清除只能 `purge --index`
 > 后重跑 `export`（实测与取舍见下
 > §2.2b / §5.7）。

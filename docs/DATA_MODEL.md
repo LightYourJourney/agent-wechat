@@ -404,7 +404,7 @@ CREATE TABLE IF NOT EXISTS schema_version (
   版本迁移：`main v2` 把 FTS 三条触发器重建为代码里的最新定义（EA-077 的旧体漂移）；
   `main v3`（Phase 02）建立历史回看游标与重嵌队列（`audit_cursor` / `pending_reembed`）
   并重建重嵌触发器；`main v4`（Phase 03）新增重嵌失败账本 `reembed_failures`；
-  `main v5`（Phase 03）给队列加 `reason` 列（表重建）；`main v6`（Phase 04）新增同步终态表 `sync_state`；`main v7`（Phase 06）新增派生文本（`derived_text` / `derived_tombstone` / `derived_fts`）与事实记忆（`fact_claim` / `fact_evidence`）。
+  `main v5`（Phase 03）给队列加 `reason` 列（表重建）；`main v6`（Phase 04）新增同步终态表 `sync_state`；`main v7`（Phase 06）新增派生文本（`derived_text` / `derived_tombstone` / `derived_fts`）与事实记忆（`fact_claim` / `fact_evidence`）；`main v8` 给 `messages_fts` / `derived_fts` 开 FTS5 `secure-delete`（删除时连倒排索引里的 trigram 一起抹掉；SQLite < 3.42 时为空迁移，只记版本）。
 - **整次升级 = 一笔事务**：`BEGIN IMMEDIATE; <本次全部待执行迁移的 DDL>; <逐条写版本行>;
   COMMIT`。任一句失败整次回滚（版本停在升级前），抛 `SchemaMigrationError`；下次连接重做。
   已是最新的库走只读快路径，**不拿写锁**；重复执行是 no-op（`applied_at` 都不变）。

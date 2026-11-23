@@ -105,12 +105,10 @@ def save_cached_hex(bare: str, passphrase_hex: str) -> str | None:
     # **临时文件 + `os.replace`**：此前是 `CACHE_FILE.write_text` 原地截断再写，进程在中途
     # 被杀（SIGKILL / 断电）就留下半截 JSON——`_load_cache` 把它当「没有缓存」，**所有账号**
     # 的密钥一起丢，恢复要 sudo 重新引导 + 在微信里重新登录（全项目代价最高的一次恢复）。
-    # 现在任何一步失败，盘上那份既有缓存都原样不动（与 `tasks._persist_locked` 同一写法）；
-    # 临时文件**以 0600 建出**（先 `os.open` 占位、再 `write_text` 写入——写入点留在
-    # `write_text` 上，故障注入矩阵按它记账），chmod 再收一次（同名残留可能是别的权限）；
-    # 落到正式文件名之前权限已是 0600。**任何**中断（含 KeyboardInterrupt）都把临时文件抹掉：
-    # 它装着全部账号的密钥，sudo 下属主还是 root，留在盘上就没人清。
-    # 崩溃（SIGKILL）留下的 `passphrase.json.<pid>.tmp` 装着全部账号的密钥，顺手收掉。
+    # 现在走 `paths.atomic_write`（与任务注册表、媒体产物共用）：任何一步失败，盘上那份
+    # 既有缓存都原样不动；临时文件以 0600 建出，任何中断都把它抹掉——它装着全部账号的
+    # 密钥，sudo 下属主还是 root，留在盘上就没人清。崩溃（SIGKILL）留下的
+    # `passphrase.json.<pid>.tmp` 同理，写之前顺手收掉。
     paths.sweep_stale_tmp(CACHE_FILE)
     try:
         paths.atomic_write(CACHE_FILE, json.dumps(cache, indent=2))

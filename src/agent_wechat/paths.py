@@ -1,4 +1,5 @@
-"""微信数据路径解析。纯函数 + 常量，不做有副作用的 IO。
+"""微信数据路径解析（纯函数 + 常量），外加本项目数据目录的文件系统原语：
+建目录 / 原子写（`atomic_write` / `atomic_copy` / `sweep_stale_tmp`）。
 
 实测路径结构（WeChat 4.1.13, macOS 沙盒容器）：
     ~/Library/Containers/com.tencent.xinWeChat/Data/Documents/
@@ -14,6 +15,7 @@ import pathlib
 import re
 import shutil
 import subprocess
+from collections.abc import Callable
 from shutil import copyfile as _copyfile   # 单独绑定：conftest 会把 `paths.shutil` 整个换成桩
 
 from .errors import ContainerWriteRefused, HomeUnavailable, OutDirRefused
@@ -451,7 +453,7 @@ def atomic_copy(src: pathlib.Path, dest: pathlib.Path, *, mode: int = 0o600) -> 
     _atomic(dest, lambda tmp: _copyfile(src, tmp), mode)
 
 
-def _atomic(dest: pathlib.Path, fill, mode: int) -> None:
+def _atomic(dest: pathlib.Path, fill: Callable[[pathlib.Path], object], mode: int) -> None:
     tmp = dest.with_name(f"{dest.name}.{os.getpid()}.tmp")
     try:
         os.close(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode))

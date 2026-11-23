@@ -263,7 +263,7 @@ def _candidates(con: sqlite3.Connection, account: str, chat: str | None,
 
 
 def _paged_candidates(con: sqlite3.Connection, account: str, chat: str | None,
-                      wants: set[str], page: int, *, force: bool):
+                      wants: set[str], page: int, *, force: bool) -> Iterator[sqlite3.Row]:
     """按页取候选直到取完（调用方处理满 limit 条就不再往下要）。
 
     此前只取最新的 `limit × 4` 条：本机没导出的媒体每轮都占满名额（它们不会被标记），

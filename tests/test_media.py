@@ -3354,6 +3354,36 @@ def test_a_voice_that_failed_to_decode_is_retried_next_export(tmp_path, monkeypa
     assert list(out.rglob("*.wav")), "第二轮应补出 WAV"
 
 
+def test_voices_that_keep_failing_do_not_starve_the_limit(tmp_path, monkeypatch):
+    """重试解码失败的语音不占 limit：每条只在**第一次**存 `.slk` 时计一次数。
+
+    否则最老的 N 条坏语音（N ≥ limit）每轮都被重试、每轮都把名额用光——truncated 恒为真、
+    remaining 不降，「重跑同一条命令即可继续」失效。
+    """
+    root, account = make_tree(tmp_path, monkeypatch)
+    ts = int(datetime.datetime(2026, 9, 15, 12, 0).timestamp())
+    _voice_fixture(account, [(1, ts + i, 7 + i, _silk_blob()) for i in range(4)])
+    _passthrough_decrypted(monkeypatch)
+    out = root / "home" / "media"
+
+    class _BadOldest(media._VoiceWorker):
+        def decode(self, src, dst):
+            return False
+
+    monkeypatch.setattr(media, "_VoiceWorker", _BadOldest)
+
+    def run():
+        return media.export_media(account, ["chatA@chatroom"], kinds=["voice"],
+                                  months=[media.month_of(ts)], out_dir=out, max_files=2)
+
+    first, second, third = run(), run(), run()
+    assert first.voice.remaining == 2 and first.truncated, first.voice
+    assert second.voice.remaining == 0 and not second.truncated, second.voice
+    assert second.voice.decode_failed == 4, second.voice
+    assert len(list(out.rglob("*.slk"))) == 4
+    assert third.voice.decode_failed == 4 and not third.truncated, third.voice
+
+
 def test_a_hung_decoder_times_out_and_is_replaced(tmp_path, monkeypatch):
     """worker 卡死（C 库死循环）只算这一条失败：超时后杀掉，下一条按需重启。"""
     monkeypatch.setattr(media, "_VOICE_WORKER_SRC",

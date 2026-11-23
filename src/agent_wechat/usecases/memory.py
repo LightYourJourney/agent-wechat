@@ -54,7 +54,7 @@ def purge_chat_targets(contact: str, account: str | None = None) -> list[dict] |
                 rows = con.execute(
                     f"SELECT account FROM messages WHERE {ident.messages_where} "
                     "UNION SELECT account FROM exclusions.excluded WHERE chat_md5=? "
-                    "ORDER BY account", (*ident.messages_args[1:], md5)).fetchall()
+                    "ORDER BY account", (ident.md5, ident.chat_id, ident.degraded_id, md5)).fetchall()
         else:
             with exclusions.standalone(store.DB_PATH) as con:
                 rows = con.execute(

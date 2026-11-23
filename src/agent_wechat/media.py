@@ -1615,7 +1615,7 @@ class _VoiceWorker:
     TIMEOUT = 30.0
 
     def __init__(self) -> None:
-        self._proc: subprocess.Popen | None = None
+        self._proc: subprocess.Popen[bytes] | None = None
         self._buf = b""
         self.unavailable = False          # 子进程里 import pilk 失败
 
@@ -1734,7 +1734,8 @@ def _export_voices(st: _ExportState, chat_ids: list[str]) -> None:
                         f"语音分片打不开（首个原因：{errors.redact(str(exc))}），该分片的语音未导出")
                 continue
     if worker.unavailable:
-        st.report.degraded.append("pilk 在解码子进程里导入失败：语音存为原始 .slk")
+        st.report.degraded.append("pilk 在解码子进程里导入失败：语音存为原始 .slk；"
+                                 "`uv sync` 重装依赖后重新导出即可转成 WAV")
     elif st.report.voice.decode_failed:
         st.report.degraded.append(
             f"{st.report.voice.decode_failed} 条语音 pilk 解码失败，已存原始 .slk；下次导出会重试")
@@ -1791,6 +1792,12 @@ def _export_voices_from(st: _ExportState, con: sqlite3.Connection,
                     st.report.voice.failed += 1         # 落盘失败（Ruling 20）
                     continue
                 st.report.voice.ok += 1
+            elif _PILK is not None and _out_path(st.out_root, cm, "voice", mon,
+                                                 f"{ts}_{lid}", "slk").exists():
+                # 上一轮已存过 `.slk`、这次重试又失败：不重写、**不占 limit**——否则最老的
+                # 一批坏语音每轮都把名额用光，后面的永远轮不到（truncated 恒真）。
+                st.report.voice.decode_failed += 1
+                continue
             else:
                 if save_artifact(st.out_root, cm, "voice", mon, f"{ts}_{lid}", "slk", blob) is None:
                     st.report.voice.failed += 1

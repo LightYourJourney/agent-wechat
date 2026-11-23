@@ -301,17 +301,18 @@ def _vector_watermark(con: sqlite3.Connection, account: str) -> int:
 
 
 def _set_vector_watermark(con: sqlite3.Connection, account: str, rowid: int) -> None:
-    # 写入值封顶在 `max(messages.id)`：扫描期间 `purge --chat` 删掉了**最高的那几行**时，
-    # 扫到的 last_id 会高过库里现存的最大 id，而 messages.id 不是 AUTOINCREMENT——新消息
-    # 复用这段 id、全部落在水位线之下，从此静默不被嵌入。全局 max 是 O(1)（rowid B 树），
-    # 且新行的 id 恒大于写入时刻的全局 max，所以封顶不会让任何存活行被重嵌。
+    # 写入值封顶在**该账号**的 `max(messages.id)`：扫描期间 `purge --chat` 删掉了最高的那几行
+    # 时，扫到的 last_id 会高过库里现存的最大 id，而 messages.id 不是 AUTOINCREMENT——新消息
+    # 复用这段 id、全部落在水位线之下，从此静默不被嵌入。必须按账号而不是全局：全局 max
+    # 可能是别的账号的行，那个账号之后被销毁时 `store.delete_chat` 只回压它自己的水位线，
+    # 本账号就停在一段会被复用的 id 上。扫描谓词按账号过滤，封顶到本账号 max 不会重嵌任何行。
     con.execute(
         """INSERT INTO vector_watermark(model_id, account, last_rowid, updated_at)
-           VALUES (?,?, min(?, (SELECT COALESCE(max(id), 0) FROM messages)), ?)
+           VALUES (?,?, min(?, (SELECT COALESCE(max(id), 0) FROM messages WHERE account=?)), ?)
            ON CONFLICT(model_id, account) DO UPDATE SET
              last_rowid = max(last_rowid, excluded.last_rowid),
              updated_at = excluded.updated_at""",
-        (MODEL_ID, account, rowid, int(time.time())))
+        (MODEL_ID, account, rowid, account, int(time.time())))
 
 
 # **一页一条完整查询**（keyset 分页），不是一个贯穿整轮的游标：活跃的读语句会把连接钉在
