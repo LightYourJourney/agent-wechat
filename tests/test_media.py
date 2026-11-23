@@ -3310,10 +3310,24 @@ def test_pilk_diagnostics_never_reach_our_stdout(tmp_path, monkeypatch, capfd):
     解码必须在隔离子进程里做（`_VoiceWorker`）：本进程的 fd 1 上一个字节都不许出现，
     这条语音计入 `decode_failed`（不是 `raw_only`：pilk 在，只是解不开）并公告。
     `capfd` 抓的是**文件描述符**层（`capsys` 只抓 `sys.stdout`，抓不到 C 代码的 printf）。
+
+    worker 里的 pilk 换成**确定性**的替身：先往 fd 1 写字（与 C 代码的 printf 同一层）、再抛异常。
+    此前喂的是一段乱码 silk，指望真 pilk 解不开——但「乱码解不解得开」取决于 pilk 的 C 代码在
+    那台机器上怎么编译（它只发 sdist，读到未初始化的缓冲区）：本机抛 `Packets decoded: 3`，
+    CI（macos-15）上照样解码成功，本用例因此在 CI 上一直红。worker 的其余部分（fd 重定向、
+    行协议）原样不动——那才是这里要钉的东西。
     """
+    real_import = "    import pilk\n"
+    assert media._VOICE_WORKER_SRC.count(real_import) == 1, "worker 源码变了，替身插不进去"
+    fake = ("    class pilk:\n"
+            "        @staticmethod\n"
+            "        def decode(src, dst, rate):\n"
+            "            os.write(1, b'\\nSKP_Silk_SDK_Decode returned -11')\n"
+            "            raise RuntimeError('Packets decoded: 3')\n")
+    monkeypatch.setattr(media, "_VOICE_WORKER_SRC", media._VOICE_WORKER_SRC.replace(real_import, fake))
     root, account = make_tree(tmp_path, monkeypatch)
     ts = int(datetime.datetime(2026, 9, 15, 12, 0).timestamp())
-    _voice_fixture(account, [(1, ts, 7, b"\x02#!SILK_V3" + bytes(range(256)) * 8)])
+    _voice_fixture(account, [(1, ts, 7, _silk_blob())])
     _passthrough_open_db(monkeypatch)
     capfd.readouterr()
     rep = media.export_media(account, ["chatA@chatroom"], kinds=["voice"],
