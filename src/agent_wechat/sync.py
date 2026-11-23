@@ -192,13 +192,15 @@ def diagnose(account: str | None = None) -> dict:
         "key": {"cached": keys.CACHE_FILE.exists()},
         "index": {"exists": store.DB_PATH.exists()},
         "schema": {"latest": store.SCHEMA_VERSION, "version": None, "pending": None},
-        "fts": {"messages": None, "indexed": None, "triggers_ok": None, "desync": None},
+        "fts": {"messages": None, "indexed": None, "triggers_ok": None, "desync": None,
+                "bulk_pending": None},
         "watermarks": {"rows": None, "accounts": None},
         "audit": {"cursors": None},
         "dirty": {"pending": None, "failed": None, "max_attempts": None,
                   "by_reason": {}},
         "vector": {"indexed": False, "model": vector.MODEL_ID, "embedded": 0,
-                   "model_matches": None, "model_cache": _model_cache_ready()},
+                   "model_matches": None, "model_cache": _model_cache_ready(),
+                   "installed": vector.semantic_installed()},
         "tasks": {"running": 0, "failed": 0},
         "sync_state": None,
         "permissions": {"home_mode": None, "private": None},
@@ -277,6 +279,13 @@ def diagnose(account: str | None = None) -> dict:
                 out["fts"]["desync"] = (out["fts"]["indexed"] != out["fts"]["messages"])
                 if out["fts"]["desync"]:
                     out["problems"].append("FTS 索引与消息表行数不一致（重跑一次导出即可重建）")
+            if has("fts_bulk_pending"):
+                pids = [r[0] for r in con.execute("SELECT pid FROM fts_bulk_pending")]
+                out["fts"]["bulk_pending"] = len(pids)
+                if pids and not any(paths.pid_alive(p) for p in pids):
+                    # 只读诊断不修：下一次以读写方式打开索引（任何检索 / 导出）时自动补建
+                    out["problems"].append("首次导出的 FTS 批量重建被中断"
+                                           "（下次打开索引时自动补建，约每 10 万条 1 秒）")
             names = {r[0] for r in con.execute(
                 "SELECT name FROM sqlite_master WHERE type='trigger'")}
             required = {*store.FTS_TRIGGER_NAMES, "msg_reembed_au"}
@@ -311,6 +320,10 @@ def diagnose(account: str | None = None) -> dict:
                                      model_matches=foreign is None)
                 if foreign is not None:
                     out["problems"].append("向量索引由其它模型构建（需 rebuild）")
+                if out["vector"]["indexed"] and not out["vector"]["installed"]:
+                    # 没建过索引时「没装」只是没开这个功能，不算问题；建过了才是能力丢了
+                    out["problems"].append(f"向量索引已建，但{vector.SEMANTIC_MISSING}"
+                                           "（`uv sync --extra semantic`）")
             if has("sync_state") and account:
                 out["sync_state"] = store.load_sync_state(con, account)
     except (errors.AgentWeChatError, sqlite3.Error, OSError) as exc:

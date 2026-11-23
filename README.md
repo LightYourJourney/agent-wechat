@@ -89,7 +89,9 @@ uv run agent-wechat recent filehelper -n 5   # 实时读取
 uv run agent-wechat export                   # 全量导出（~2 分钟）
 uv run agent-wechat search "关键词"           # 检索
 
-# 5.（可选）向量语义检索：先建索引（首次会下载约 95MB 本地模型，之后完全离线）
+# 5.（可选）向量语义检索：可选安装项，先装组件再建索引
+#    （组件约 130 MB；首次建索引会下载约 95MB 本地模型，之后完全离线）
+uv sync --extra semantic
 uv run agent-wechat vector-build
 uv run agent-wechat semantic "上次说的那个爬山的安排"
 ```

@@ -957,3 +957,13 @@ def test_default_embedder_is_one_instance_under_concurrent_first_calls(monkeypat
     for t in ts:
         t.join()
     assert len(made) == 1 and all(g is made[0] for g in got), (len(made), len(got))
+
+
+def test_a_missing_semantic_extra_is_a_vector_error_naming_the_extra(monkeypatch):
+    """fastembed 是可选安装项：没装时给项目异常（检索据此降级），不让裸 ImportError 穿出去。"""
+    import sys
+    from agent_wechat import errors, vector
+    monkeypatch.setitem(sys.modules, "fastembed", None)       # import 即 ImportError
+    with pytest.raises(errors.VectorError, match="未安装语义检索组件") as ei:
+        vector.FastEmbedEmbedder()._ensure()
+    assert "--extra semantic" in ei.value.hint

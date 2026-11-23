@@ -209,3 +209,54 @@ def test_key_derivation_is_cached_per_passphrase_and_salt(tmp_path, monkeypatch)
         with decrypt.open_db(enc, b"\x02" * 32):
             pass
     assert len(calls) == 2
+
+
+# ---------- 快照：能克隆就克隆（APFS clonefile），不行就复制 ----------
+
+def _triplet(d):
+    d.mkdir()
+    db = d / "x.db"
+    db.write_bytes(os.urandom(8192))
+    (d / "x.db-wal").write_bytes(os.urandom(4096))
+    return db
+
+
+def test_snapshot_clones_and_the_clone_is_independent_of_the_source(tmp_path, monkeypatch):
+    probe = tmp_path / "probe"
+    probe.write_bytes(b"x")
+    if decrypt._clonefile is None or decrypt._clonefile(
+            bytes(probe), bytes(tmp_path / "probe2"), 0) != 0:
+        pytest.skip("本机 / tmp_path 所在的卷不支持 clonefile(2)")
+    db = _triplet(tmp_path / "src")
+    before = {p.name: p.read_bytes() for p in db.parent.iterdir()}
+    copied = []
+    monkeypatch.setattr(decrypt.shutil, "copy2", lambda *a, **k: copied.append(a))
+    td = tmp_path / "td"
+    td.mkdir()
+    dst = decrypt.snapshot(db, td)
+    assert copied == [], "能克隆时不该退回逐字节复制"
+    assert {p.name: p.read_bytes() for p in td.iterdir()} == before   # 两个文件都在、逐字节相同
+    assert not (td / "x.db-shm").exists()                             # 源没有的不凭空造
+    with open(dst, "r+b") as f:                                        # 写时复制：改克隆不动源
+        f.write(b"\0" * 16)
+    assert {p.name: p.read_bytes() for p in db.parent.iterdir()} == before
+
+
+def test_snapshot_falls_back_to_copy_when_cloning_fails(tmp_path, monkeypatch):
+    """跨卷（HOME 不在微信所在的卷）/ 非 APFS：clonefile 失败 → copy2，结果相同。"""
+    monkeypatch.setattr(decrypt, "_clonefile", lambda src, dst, flags: -1)
+    db = _triplet(tmp_path / "src")
+    td = tmp_path / "td"
+    td.mkdir()
+    decrypt.snapshot(db, td)
+    assert {p.name: p.read_bytes() for p in td.iterdir()} == \
+        {p.name: p.read_bytes() for p in db.parent.iterdir()}
+
+
+@pytest.mark.parametrize("clone", [True, False], ids=["clone", "copy"])
+def test_open_db_reads_the_same_rows_whichever_way_the_snapshot_was_taken(tmp_path, monkeypatch, clone):
+    if not clone:
+        monkeypatch.setattr(decrypt, "_clonefile", None)
+    enc, pp = build_fake_wechat_db(tmp_path)
+    with decrypt.open_db(enc, pp) as con:
+        assert _rows(con)

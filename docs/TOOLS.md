@@ -282,6 +282,7 @@ rebuild 与否）各起一条。（F-D，T7 复验：与 §4 同款的合并语�
 ```
 
 - 嵌入在本机 CPU 完成（fastembed + `BAAI/bge-small-zh-v1.5`），**聊天内容不外发**。
+- 语义检索是**可选安装项**（`uv sync --extra semantic`）。没装时本工具与 `semantic_search` 返回 `VectorError`「未安装语义检索组件」，`search_messages` 的 `hybrid` 退化成关键词并在 `degraded` 里说明。
 - 模型仅首次下载（约 95MB，存于 `~/.agent-wechat/models`），之后一律从本地缓存加载：
   **运行期不发起任何网络请求**。若想让缓存缺失时直接报错而不是回退下载，可设 `HF_HUB_OFFLINE=1`。
 - 全量构建实测约 2.5–3 小时（84 万条消息 → 68 万向量；2026-09-11 真机，含多次中断续跑）——

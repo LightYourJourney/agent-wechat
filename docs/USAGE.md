@@ -161,6 +161,7 @@ agent-wechat semantic "合同什么时候签" --contact 小李 -n 5
   触发重嵌**——水位线只按消息 id 推进，需要时用 `--rebuild` 全量重建
 - **进度**：每约 5120 行打印一次「已嵌入 N 行…」，结束打印本轮嵌入/跳过行数
 - **本机闭环**：嵌入在本机 CPU 完成（fastembed + bge-small-zh-v1.5），聊天内容不外发
+- **可选安装项**：需先 `uv sync --extra semantic`；没装时 `vector-build` / `semantic` 报「未安装语义检索组件」，`retrieve --mode hybrid` 只剩关键词一路（`degraded` 里说明）
 
 **已知限制**（细节见 TOOLS.md §7–§8）：
 

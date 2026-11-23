@@ -1,10 +1,11 @@
 """导出管道：流式、幂等、断点续传。任务登记在 usecases 层，这里只有管道。"""
 from __future__ import annotations
 
+import contextlib
 import sqlite3
 from collections.abc import Callable
 
-from . import reader, store
+from . import errors, reader, store
 
 
 def run_export(acct: str, chat_id: str | None = None, full: bool = False,
@@ -69,25 +70,39 @@ def run_export(acct: str, chat_id: str | None = None, full: bool = False,
                 store.upsert_media_refs(con, refs)
             store.upsert_batch(con, rows)
 
-        for rows, refs in r.iter_all(chat_id=chat_id, resume=resume,
-                                     audit_cursors=audit_cursors,
-                                     audit_rows=audit_window,
-                                     audit_sink=_audit_sink if audit_window > 0 else None):
-            if refs:
-                # 先写 refs，再 upsert_batch。refs 自己 BEGIN IMMEDIATE（判据的读也因此落在
-                # 写事务里，Task 4 fix1）；upsert_batch 复用同一事务并在尾部 commit——
-                # 两者同事务（spec §4.3），本批的读与写之间没有窗口。
-                skipped += store.upsert_media_refs(con, refs)
-            dropped = store.upsert_batch(con, rows)
-            skipped += dropped
-            total += len(rows) - dropped
-            if progress and total % 20_000 < store.BATCH:
-                progress(total)
+        # 消息表为空（首次导出）时走 FTS 批量路径：拆触发器灌库、最后一次 rebuild。
+        # 无论成败都在 finally 里收口；进程被杀则由下次 `store.connect()` 按中断标记补做。
+        bulk = chat_id is None and store.fts_bulk_begin(con)
+        try:
+            for rows, refs in r.iter_all(chat_id=chat_id, resume=resume,
+                                         audit_cursors=audit_cursors,
+                                         audit_rows=audit_window,
+                                         audit_sink=_audit_sink if audit_window > 0 else None):
+                if refs:
+                    # 先写 refs，再 upsert_batch。refs 自己 BEGIN IMMEDIATE（判据的读也因此落在
+                    # 写事务里，Task 4 fix1）；upsert_batch 复用同一事务并在尾部 commit——
+                    # 两者同事务（spec §4.3），本批的读与写之间没有窗口。
+                    skipped += store.upsert_media_refs(con, refs)
+                dropped = store.upsert_batch(con, rows)
+                skipped += dropped
+                total += len(rows) - dropped
+                if progress and total % 20_000 < store.BATCH:
+                    progress(total)
+        except BaseException:
+            if bulk:
+                # 已提交的批次要能被检索到：失败也先把 FTS 补齐。补不成（多半与原失败同因，
+                # 如磁盘满）就留着标记交给下次 connect，**原异常优先**。
+                with contextlib.suppress(errors.AgentWeChatError):
+                    con.rollback()
+                    store.fts_bulk_finish(con)
+            raise
+        if bulk:
+            store.fts_bulk_finish(con)
 
         # ---- 历史回看（Phase 02）----
         # 回看在同一次分片解密里完成（`iter_all` 的 audit_* 参数）：另开一趟会多付一次
-        # 分片快照 + 全表扫描（CLI 回退后端下还是一次整库导出）。游标**最后统一落盘**——它必须晚于数据提交；中途失败就整批
-        # 不推进，下一轮重看同一段（upsert 幂等）。
+        # 分片快照 + 全表扫描（CLI 回退后端下还是一次整库导出）。游标**最后统一落盘**——
+        # 它必须晚于数据提交；中途失败就整批不推进，下一轮重看同一段（upsert 幂等）。
         if audit_window > 0:
             # 显式取属性：fake reader 忘了 `audit_marks` 时要响亮地红，而不是静默地
             # 永远不推进游标（那会让同一段历史被无限重读）。

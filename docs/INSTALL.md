@@ -26,13 +26,14 @@ git clone https://github.com/LightYourJourney/agent-wechat.git ~/agent-wechat
 cd ~/agent-wechat
 
 # 2) 安装依赖（自动创建 .venv）
-uv sync
+uv sync                      # 基础：读取 / 导出 / 关键词检索 / 媒体 / MCP
+uv sync --extra semantic     # 另要语义检索（向量索引）时用这一条代替上一条
 
 # 3) 验证 CLI 可用
 uv run agent-wechat status
 ```
 
-依赖 6 个：`mcp`（MCP SDK）、`zstandard`（WCDB 压缩解码）、`fastembed` + `sqlite-vec`（本地向量检索，首次下载模型）、`cryptography`（图片 dat 的 AES 解密）、`pilk`（语音 SILK→WAV）；其余全为标准库。语音 / 向量为按需能力：缺 `pilk` 只降级、缺 `sqlite-vec` 则向量功能不可用。
+基础依赖 6 个：`mcp`（MCP SDK）、`zstandard`（WCDB 压缩解码）、`sqlcipher3-wheels`（进程内 SQLCipher）、`sqlite-vec`（向量表）、`cryptography`（图片 dat 的 AES 解密）、`pilk`（语音 SILK→WAV）；其余全为标准库。**语义检索是可选安装项 `[semantic]`**（`fastembed`，连同 onnxruntime / numpy 等约 130 MB；首次建索引再下载约 95 MB 模型）：不装时关键词检索照常，`semantic` 与 `hybrid` 的语义一路明确降级，`doctor` 的 `vector.installed` 会显示 `false`。注意 `uv sync` 是**精确同步**：装过 `[semantic]` 后再跑一次不带 `--extra semantic` 的 `uv sync` 会把它卸掉（`uv run` 不会）。语音为按需能力：缺 `pilk` 只降级。
 
 > **`uv.lock` 里的下载源是清华镜像**（`pypi.tuna.tsinghua.edu.cn`）：它由作者本机的
 > uv 配置生成，锁定文件因此记录了镜像 URL。**当你在中国大陆之外、或该镜像不可达**时，
@@ -52,7 +53,7 @@ uv run agent-wechat status
 [USAGE.md](USAGE.md) §0）。若想在**任何目录**裸敲 `agent-wechat`，做一次性全局安装：
 
 ```bash
-uv tool install --editable ~/agent-wechat
+uv tool install --editable ~/agent-wechat            # 要语义检索：--editable '~/agent-wechat[semantic]'
 # 生成 ~/.local/bin/agent-wechat 与 agent-wechat-mcp；--editable 改代码即时生效
 ```
 

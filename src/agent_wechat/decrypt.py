@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import contextlib
+import ctypes
 import functools
 import os
 import pathlib
@@ -114,14 +115,40 @@ def ensure_home_dirs() -> None:
         _swept_stale = True
 
 
+def _load_clonefile() -> Any:
+    try:
+        fn = ctypes.CDLL(None, use_errno=True).clonefile
+    except (OSError, AttributeError):        # 非 macOS / 老系统：没有 clonefile(2)
+        return None
+    fn.argtypes = (ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint32)
+    fn.restype = ctypes.c_int
+    return fn
+
+
+_clonefile = _load_clonefile()
+
+
+def _clone_or_copy(src: pathlib.Path, dst: pathlib.Path) -> None:
+    """APFS 克隆（`clonefile(2)`，写时复制，与文件大小无关的常数时间），不行再普通复制。
+
+    Phase 03 实测：快照是进程内后端读取的主要耗时——237 MB 分片 `copy2` 要 120–470 ms，
+    克隆约 1 ms。克隆是**那一刻**文件内容的原子快照（比边读边拷更一致）；之后微信改它的文件、
+    我们删自己的克隆，彼此不影响。克隆不了（跨卷：AGENT_WECHAT_HOME 不在微信所在的 APFS 卷上；
+    非 APFS）就回退 `copy2`——源文件本身读不了的错误也由 `copy2` 照常抛出。
+    """
+    if _clonefile is not None and _clonefile(os.fsencode(src), os.fsencode(dst), 0) == 0:
+        return
+    shutil.copy2(src, dst)
+
+
 def snapshot(db: pathlib.Path, td: pathlib.Path) -> pathlib.Path:
-    """db+wal+shm 三元组快照到私有目录。微信目录零写入（只读打开+复制）。"""
+    """db+wal+shm 三元组快照到私有目录。微信目录零写入（只读：克隆或复制）。"""
     dst = td / db.name
     try:
         for suf in ("", "-wal", "-shm"):
             src = pathlib.Path(str(db) + suf)
             if src.exists():
-                shutil.copy2(src, pathlib.Path(str(dst) + suf))
+                _clone_or_copy(src, pathlib.Path(str(dst) + suf))
     except OSError as exc:
         # A 矩阵：快照那一步此前裸穿 PermissionError/ENOSPC（R2-A-007）。快照是解密的
         # 第一步，失败就整条走不通——按 core 契约只能是项目异常。

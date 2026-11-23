@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import contextlib
+import os
 import pathlib
 import re
 import sqlite3
@@ -292,8 +293,16 @@ BEGIN
         changed_at=excluded.changed_at, reason=excluded.reason;
 END;"""
 
+# 首次导出的 FTS 批量路径（`fts_bulk_begin` / `fts_bulk_finish`）的**持久化中断标记**：
+# 一行 = 一个正在（或曾经）以「拆掉 FTS 触发器」方式灌库的进程。行在、进程已死 = 灌到一半被
+# 杀掉，FTS 缺行且不会自己补上——`connect()` 见到就当场重建（`_heal_fts_bulk`）。
+FTS_BULK_DDL = """CREATE TABLE IF NOT EXISTS fts_bulk_pending (
+    pid        INTEGER NOT NULL,
+    started_at INTEGER NOT NULL
+);"""
+
 SCHEMA = (_SCHEMA_BODY + "\n" + "\n".join(FTS_TRIGGERS) + "\n" + REEMBED_TRIGGER
-          + "\n" + "\n".join(DERIVED_TRIGGERS))
+          + "\n" + "\n".join(DERIVED_TRIGGERS) + "\n" + FTS_BULK_DDL)
 
 # 本程序已知的 main scope 最新版本。迁移只列**IF NOT EXISTS 表达不了**的变更；
 # 基线（v1）由 `migrations.apply` 隐式 stamp——那代表「整套 DDL 已由 ensure 建好」。
@@ -457,9 +466,11 @@ def connect(db_path: pathlib.Path | None = None) -> sqlite3.Connection:
         migrations.apply(con, scope=migrations.SCOPE_EXCLUSIONS, migrations=(),
                          table=migrations.EXCLUSIONS_TABLE)
         con.execute("PRAGMA synchronous=NORMAL")
-    except errors.SchemaMigrationError:
+        _heal_fts_bulk(con)
+    except (errors.SchemaMigrationError, errors.IndexUnavailable):
         # 迁移失败/库太新：**原样抛出**（它的文案已带 scope/version 与可执行动作），
         # 不翻成 IndexUnavailable——「库坏了」与「库太新/迁移没跑完」是两种病。
+        # IndexUnavailable 来自 `_heal_fts_bulk`（已是项目异常），同样只关连接、原样抛。
         if con is not None:
             con.close()
         raise
@@ -609,6 +620,67 @@ def _begin_immediate(con: sqlite3.Connection) -> None:
         con.execute("BEGIN IMMEDIATE")
     except (sqlite3.Error, OSError) as exc:
         raise index_unavailable(exc) from exc
+
+
+def fts_bulk_begin(con: sqlite3.Connection) -> bool:
+    """首次导出专用：消息表为空时拆掉 3 条 FTS 触发器、落中断标记，返回是否进入批量路径。
+
+    逐行触发器是首次全量导出的大头（Phase 01 实测 77.8 万行：63.7 s → 灌入 27.6 s + 一次
+    `rebuild` 7.3 s）。**只在消息表为空时**进入：已有数据的 `--full` 重扫几乎全是「值没变、
+    不更新」，触发器本来就不触发，换成整表 rebuild 只会更慢。
+
+    ad / au 也必须拆：灌库过程中有 UPDATE（会话名自愈），au 去 'delete' 一行从没进过索引的
+    记录会把外部内容 FTS 写坏。窗口里别的连接（`connect()` 每次都跑 SCHEMA）会把触发器建
+    回来——无妨：`fts_bulk_finish` 的 rebuild 按消息表整体重建，中间任何交错都被它抹平。
+    标记与拆触发器同一事务：要么都发生，要么都没有。
+    """
+    if con.in_transaction:
+        con.commit()
+    _begin_immediate(con)
+    try:
+        if con.execute("SELECT 1 FROM messages LIMIT 1").fetchone() is not None:
+            con.rollback()
+            return False
+        con.execute("INSERT INTO fts_bulk_pending(pid, started_at) VALUES (?, ?)",
+                    (os.getpid(), int(time.time())))
+        for name in FTS_TRIGGER_NAMES:
+            con.execute(f"DROP TRIGGER IF EXISTS {name}")
+        con.commit()
+    except (sqlite3.Error, OSError) as exc:
+        con.rollback()
+        raise index_unavailable(exc) from exc
+    return True
+
+
+def fts_bulk_finish(con: sqlite3.Connection) -> None:
+    """恢复触发器 → 按消息表整体 `rebuild` FTS → 清标记，同一事务。
+
+    清的是**全部**标记行：rebuild 覆盖了此刻所有已提交的行（别的灌库进程的写事务不可能与
+    本事务的写锁并存），此后到来的行有触发器跟随。`secure-delete` 配置在 rebuild 后保留。
+    """
+    if con.in_transaction:
+        con.commit()
+    _begin_immediate(con)
+    try:
+        for ddl in FTS_TRIGGERS:
+            con.execute(ddl)
+        con.execute("INSERT INTO messages_fts(messages_fts) VALUES('rebuild')")
+        con.execute("DELETE FROM fts_bulk_pending")
+        con.commit()
+    except (sqlite3.Error, OSError) as exc:
+        con.rollback()
+        raise index_unavailable(exc) from exc
+
+
+def _heal_fts_bulk(con: sqlite3.Connection) -> None:
+    """中断标记还在、而写它的进程**全都死了** → 当场补做 `fts_bulk_finish`。
+
+    灌库进程活着（含本进程自己的另一个线程）就不动：那是正常的进行中。判不出死活
+    （`pid_alive` 对 EPERM 答「活」）同样不动——宁可晚修，不在别人灌库中途抢写锁重建。
+    """
+    pids = [r[0] for r in con.execute("SELECT pid FROM fts_bulk_pending")]
+    if pids and not any(paths.pid_alive(p) for p in pids):
+        fts_bulk_finish(con)
 
 
 def _filter_excluded(con: sqlite3.Connection, keys: Sequence[str]) -> set[str]:

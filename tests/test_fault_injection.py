@@ -211,6 +211,8 @@ def test_decrypt_snapshot_copy_failure(fake_wechat_db, tmp_path, monkeypatch):
     from agent_wechat import decrypt
     enc, _passphrase = fake_wechat_db
     home = tmp_path / "home"; home.mkdir(); monkeypatch.setattr(paths, "HOME_DIR", home)
+    # 克隆不可用（跨卷 / 非 APFS）时才走 copy2：这里注入的正是那条回退路径
+    monkeypatch.setattr(decrypt, "_clonefile", None)
     inj = install([Fault("shutil.copy2", "EACCES")])
     try:
         with pytest.raises(errors.AgentWeChatError):

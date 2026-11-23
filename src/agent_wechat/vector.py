@@ -166,6 +166,17 @@ def cache_dir_blocks_loading() -> bool:
     return False
 
 
+SEMANTIC_MISSING = "未安装语义检索组件（fastembed）"
+SEMANTIC_HINT = ("语义检索是可选安装项：在项目目录跑 `uv sync --extra semantic`"
+                 "（或 `pip install 'agent-wechat[semantic]'`）；不装时关键词检索照常可用")
+
+
+def semantic_installed() -> bool:
+    """fastembed 装没装（只查元数据，不导入——导入它要 ~1 s 且会拉起 onnxruntime）。"""
+    import importlib.util
+    return importlib.util.find_spec("fastembed") is not None
+
+
 class FastEmbedEmbedder:
     """fastembed 懒加载封装：模型只在首次使用时载入（首次会下载 ~95MB 公共资产）。
 
@@ -179,7 +190,12 @@ class FastEmbedEmbedder:
 
     def _ensure(self) -> Any:
         if self._model is None:
-            from fastembed import TextEmbedding
+            try:
+                from fastembed import TextEmbedding
+            except ImportError as exc:
+                # 语义检索是可选安装项（pyproject `[semantic]`）：没装就明确报「没装」，
+                # 而不是让裸 ImportError 穿出去（检索侧会据此降级成只有关键词）。
+                raise VectorError(SEMANTIC_MISSING, hint=SEMANTIC_HINT) from exc
             # **本模块是 `HOME_DIR/models` 的 owner，闸门就得在这里**（EA-003 的收口项）：
             # 此前它只靠 `store.open()` **间接**过关——相对 `AGENT_WECHAT_HOME` 那条确实会被
             # 拦住，但那是传递性保证：换一条不碰索引的入口（或将来把模型缓存挪到别处）就没了，

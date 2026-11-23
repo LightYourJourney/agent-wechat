@@ -219,6 +219,22 @@ def test_doctor_reports_the_decrypt_backend(tmp_path, monkeypatch):
     assert any("sqlcipher" in p for p in info["problems"])
 
 
+def test_doctor_flags_a_built_vector_index_without_the_semantic_extra(tmp_path, monkeypatch):
+    """语义检索是可选安装项：没建索引时「没装」不算问题；建过了再没装，才是能力丢了。"""
+    _env(tmp_path, monkeypatch)
+    sync.run_sync(ACCT, skip_vector=True)
+    monkeypatch.setattr(sync.vector, "semantic_installed", lambda: False)
+    info = sync.diagnose(ACCT)
+    assert info["vector"]["installed"] is False
+    assert not any("semantic" in p for p in info["problems"])
+    with store.open() as con:
+        con.execute("CREATE TABLE IF NOT EXISTS vector_meta (model_id TEXT PRIMARY KEY, dim INTEGER,"
+                    " built_at INTEGER, embedded INTEGER, skipped INTEGER)")
+        con.execute("INSERT INTO vector_meta VALUES (?, 512, 0, 5, 0)", (sync.vector.MODEL_ID,))
+    info = sync.diagnose(ACCT)
+    assert any("--extra semantic" in p for p in info["problems"])
+
+
 def test_doctor_flags_an_fts_desync(tmp_path, monkeypatch):
     _env(tmp_path, monkeypatch)
     sync.run_sync(ACCT)
