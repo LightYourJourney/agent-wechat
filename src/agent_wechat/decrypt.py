@@ -11,7 +11,7 @@
      **明文从不落盘**。`recent` 一类只读少量页的路径快一个数量级（Phase 01 实测 1,540 ms →
      12 ms / 237 MB 分片）。
    - **CLI**（`decrypted`）：`sqlcipher_export` 整库导出明文副本、yield 路径。保留给
-     `decrypt` / `inspect` 两个调试命令（它们要的就是明文库），以及进程内后端不可用
+     `decrypt --out`（它要的就是一份明文库文件），以及进程内后端不可用
      （没装 sqlcipher3 / `AGENT_WECHAT_DECRYPT=cli`）时 `open_db` 的回退。
    两个后端读出的内容逐字节一致（真机 36 个库 / 480 万行核对，见
    docs/audit/phase-01-native-poc-report.md §3.1）。退出时一律清理快照。
@@ -28,13 +28,17 @@ import sqlite3
 import subprocess
 import tempfile
 from collections.abc import Iterator
-from typing import Any, cast
+from typing import Any, Protocol
 
 from . import errors, keys, paths
 from .errors import DecryptError, HomeUnavailable
 
 # 强制回退到 CLI 后端的开关（排障用：疑似 sqlcipher3 的问题时，用它对照确认）。
 BACKEND_ENV = "AGENT_WECHAT_DECRYPT"
+# 两类「不是密钥问题」的解密失败的文案开头：sync 按它们把失败归为源的问题（重试 / 查权限），
+# 而不是 key_invalid（叫用户重新 bootstrap）。改文案必须同步这里。
+SNAPSHOT_FAILED = "无法快照微信数据库"
+PAGE_CHECK_FAILED = "读取微信库时页校验失败"
 
 
 def _first_line(text: str) -> str:
@@ -45,7 +49,7 @@ def _first_line(text: str) -> str:
     return ""
 
 
-# `tmp/` 下**所有**带 pid 的明文临时目录。此前只认 `awdec-`（众数分片解密），于是
+# `tmp/` 下**所有**带 pid 的临时目录（CLI 后端与语音解码会在里面放明文）。此前只认 `awdec-`（众数分片解密），于是
 # 语音解码的 `awvoice-`（silk + 中间 pcm，成对明文）崩溃后残留**永不清扫**——同一类
 # 残留，一类有兜底一类没有。两种前缀共用清扫判据。
 _STALE_TMP_RE = re.compile(r"^(?:awdec|awvoice)-(\d+)-")
@@ -102,8 +106,8 @@ def ensure_home_dirs() -> None:
             f"解密临时目录不可用：{tmp_dir()}",
             hint=f"{exc}；请检查 AGENT_WECHAT_HOME 指向的位置是否可用") from exc
     if not _swept_stale:
-        # 挂在「第一次解密之前」这条路径上（`decrypted()` 每次都先调本函数）：
-        # 清扫必须发生在**新建**明文之前，否则刚建的目录会被自己扫掉。
+        # 挂在「第一次解密之前」这条路径上（两个后端都经 `_keyed_snapshot` 先调本函数）：
+        # 清扫必须发生在**新建**临时目录之前，否则刚建的目录会被自己扫掉。
         # flag 置在**清扫之后**（复审 N1）：清扫万一将来开始抛，本进程下次还会再试，
         # 而不是永久放弃清扫。
         sweep_stale_tempdirs()
@@ -122,7 +126,7 @@ def snapshot(db: pathlib.Path, td: pathlib.Path) -> pathlib.Path:
         # A 矩阵：快照那一步此前裸穿 PermissionError/ENOSPC（R2-A-007）。快照是解密的
         # 第一步，失败就整条走不通——按 core 契约只能是项目异常。
         raise DecryptError(
-            f"无法快照微信数据库（只读复制失败）：{db.name}",
+            f"{SNAPSHOT_FAILED}（只读复制失败）：{db.name}",
             hint=f"{exc}；请确认数据目录与 AGENT_WECHAT_HOME 都有空间、且可写"
         ) from exc
     return dst
@@ -174,7 +178,7 @@ _KEY_MISMATCH_HINT = ("最常见的成因是密钥与库不匹配（微信重新
 def decrypted(db: pathlib.Path, passphrase: bytes) -> Iterator[pathlib.Path]:
     """CLI 后端：yield **整库明文副本**的路径，退出时自动清理临时文件。
 
-    只有真要一个明文库文件的地方才用它（`decrypt --out` / `inspect`）；读数据走 `open_db`。
+    只有真要一个明文库文件的地方才用它（`decrypt --out`）；读数据走 `open_db`。
     """
     with _keyed_snapshot(db, passphrase) as (td, snap, enc_key):
         out = td / "plain.db"
@@ -231,6 +235,27 @@ def open_plain(plain: pathlib.Path) -> sqlite3.Connection:
 
 # ---------- 进程内后端（Phase 02） ----------
 
+class Rows(Protocol):
+    """`ReadConnection.execute` 的返回：可迭代 + fetchone / fetchall。"""
+
+    def __iter__(self) -> Iterator[Any]: ...
+    def fetchone(self) -> Any: ...
+    def fetchall(self) -> list[Any]: ...
+
+
+class ReadConnection(Protocol):
+    """`open_db` 给出的连接的**全部**契约（两个后端都满足：`sqlite3.Connection` 与
+    `_CipherConnection`）。故意只有读路径用到的这几样——`with con:`、`cursor()`、
+    `row_factory = sqlite3.Row`、`fetchmany` 进程内后端都不支持（或不翻译异常），
+    写在契约外，pyright 就能在新调用方用到它们时报出来，而不是只在默认后端上运行期才炸。"""
+
+    @property
+    def text_factory(self) -> Any: ...
+    @text_factory.setter
+    def text_factory(self, value: Any) -> None: ...
+
+    def execute(self, sql: str, parameters: Any = ..., /) -> Rows: ...
+
 def backend() -> str:
     """`open_db` 实际会用的后端：`"inproc"`（默认）或 `"cli"`（回退）。
 
@@ -260,7 +285,7 @@ def _translate(exc: BaseException) -> BaseException:
     import sqlcipher3
     if type(exc) is sqlcipher3.DatabaseError:
         return DecryptError(
-            "读取微信库时页校验失败（页无法解密或已损坏）",
+            f"{PAGE_CHECK_FAILED}（页无法解密或已损坏）",
             hint="多半是快照那一刻微信正在写入：重试一次即可；反复出现请跑 "
                  "`agent-wechat status --verify-keys` 核对密钥")
     cls = getattr(sqlite3, type(exc).__name__, None)
@@ -314,10 +339,18 @@ class _CipherConnection:
     def __init__(self, con: Any) -> None:
         object.__setattr__(self, "_con", con)
 
-    def execute(self, sql: str, params: Any = ()) -> _CipherCursor:
+    @property
+    def text_factory(self) -> Any:
+        return self._con.text_factory
+
+    @text_factory.setter
+    def text_factory(self, value: Any) -> None:
+        self._con.text_factory = value
+
+    def execute(self, sql: str, parameters: Any = (), /) -> _CipherCursor:
         import sqlcipher3
         try:
-            return _CipherCursor(self._con.execute(sql, params))
+            return _CipherCursor(self._con.execute(sql, parameters))
         except sqlcipher3.Error as exc:
             raise _translate(exc) from exc
 
@@ -331,8 +364,6 @@ class _CipherConnection:
     def __getattr__(self, name: str) -> Any:
         return getattr(self._con, name)
 
-    def __setattr__(self, name: str, value: Any) -> None:   # text_factory 等
-        setattr(self._con, name, value)
 
 
 def _connect_encrypted(snap: pathlib.Path, enc_key: bytes) -> _CipherConnection:
@@ -362,7 +393,7 @@ def _connect_encrypted(snap: pathlib.Path, enc_key: bytes) -> _CipherConnection:
 
 
 @contextlib.contextmanager
-def open_db(db: pathlib.Path, passphrase: bytes) -> Iterator[sqlite3.Connection]:
+def open_db(db: pathlib.Path, passphrase: bytes) -> Iterator[ReadConnection]:
     """读微信库的统一入口：yield 一个只读连接，退出时关连接、删快照。
 
     默认进程内后端（明文不落盘、只解密触及的页）；不可用时回退 CLI 后端（整库导出明文副本，
@@ -380,7 +411,6 @@ def open_db(db: pathlib.Path, passphrase: bytes) -> Iterator[sqlite3.Connection]
     with _keyed_snapshot(db, passphrase) as (_td, snap, enc_key):
         con = _connect_encrypted(snap, enc_key)
         try:
-            # 鸭子类型：代理覆盖了读路径用到的 sqlite3.Connection 接口（见类注释）
-            yield cast(sqlite3.Connection, con)
+            yield con
         finally:
             con.close()

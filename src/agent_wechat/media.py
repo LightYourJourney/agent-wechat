@@ -1753,7 +1753,7 @@ def _decode_voice(worker: _VoiceWorker, td: pathlib.Path, blob: bytes) -> bytes 
                 pass
 
 
-def _export_voices_from(st: _ExportState, con: sqlite3.Connection,
+def _export_voices_from(st: _ExportState, con: decrypt.ReadConnection,
                         chat_ids: list[str], td: pathlib.Path, worker: _VoiceWorker) -> None:
     name2id = {u.decode("utf-8", "replace") if isinstance(u, bytes) else u: rid
                for rid, u in con.execute("SELECT rowid, user_name FROM Name2Id")}

@@ -231,8 +231,9 @@ decrypt.open_db(db, passphrase)                     # reader / 语音 / 朋友�
   `sqlite3` 异常；页 HMAC 校验失败（快照撕裂）翻成 `DecryptError`——CLI 后端在整库导出那一步
   就以同一个异常失败，进程内只是把它推迟到了查询中途。
 - **不做运行期自动回退**：密钥不对时两个后端一样失败，静默重试只会多花一次整库导出、藏住真问题。
-- `decrypt` / `inspect` 两个调试命令仍走 CLI 后端（它们要的就是明文库文件），所以 `sqlcipher`
-  CLI 从「必需」降为「这两个命令与回退时需要」。
+- 只有 `decrypt --out` 仍固定走 CLI 后端（它要的就是一份明文库文件）；`decrypt`（不带 `--out`，
+  只做 `quick_check`）与 `inspect` 走 `open_db`。`sqlcipher` CLI 从「必需」降为「`decrypt --out`
+  与回退时需要」。
 
 ## 4. 关键设计决策与取舍
 
@@ -260,7 +261,7 @@ decrypt.open_db(db, passphrase)                     # reader / 语音 / 朋友�
 - **自验证门**：任何密钥候选必须通过 page1 HMAC-SHA512 校验才被接受（唯一真值判据）；
   该公式经合成加密库对照实验做了真/假双向验证
 - **缓存**：passphrase 文件 0600；目录 0700；不写日志、不进错误信息
-- **临时文件**：默认后端只在 0700 目录放**密文**快照（明文不落盘）；CLI 回退与 `decrypt`/`inspect`
+- **临时文件**：默认后端只在 0700 目录放**密文**快照（明文不落盘）；CLI 回退与 `decrypt --out`
   才产生单分片明文，用后即焚；`~/.agent-wechat/` 由代码在首次使用时
   自动加入 Time Machine 排除（先 `tmutil isexcluded` 查询，未排除才 `addexclusion`；失败需手动执行）；索引明文依赖
   FileVault

@@ -86,7 +86,7 @@ def run_export(acct: str, chat_id: str | None = None, full: bool = False,
 
         # ---- 历史回看（Phase 02）----
         # 回看在同一次分片解密里完成（`iter_all` 的 audit_* 参数）：另开一趟会多付一次
-        # sqlcipher 导出。游标**最后统一落盘**——它必须晚于数据提交；中途失败就整批
+        # 分片快照 + 全表扫描（CLI 回退后端下还是一次整库导出）。游标**最后统一落盘**——它必须晚于数据提交；中途失败就整批
         # 不推进，下一轮重看同一段（upsert 幂等）。
         if audit_window > 0:
             # 显式取属性：fake reader 忘了 `audit_marks` 时要响亮地红，而不是静默地

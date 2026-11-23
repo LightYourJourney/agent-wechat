@@ -79,6 +79,8 @@ dev = [
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
+# 裸跑 `pytest` 只收 tests/：spike/ 下的实验脚本依赖本机真数据或额外工具链，不是门禁的一部分。
+testpaths = ["tests"]
 markers = [
     "slow: 需要真实 fastembed 模型（默认不跑；用 -m slow 运行）",
     "real: 需要本机真实数据/模型（默认不跑；用 -m real 运行）",

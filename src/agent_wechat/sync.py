@@ -319,8 +319,10 @@ def diagnose(account: str | None = None) -> dict:
 
 
 def _decrypt_status(exc: errors.DecryptError) -> str:
-    """解密失败再分一层：**快照读不动**是源的问题，**解不开**才像密钥的问题。"""
-    return (SOURCE_UNAVAILABLE if str(exc).startswith("无法快照微信数据库")
+    """解密失败再分一层：**快照读不动**与**页校验失败**（快照那一刻微信正在写，重试即可）
+    是源的问题，**解不开**才像密钥的问题——后者才该叫用户重新 bootstrap。"""
+    return (SOURCE_UNAVAILABLE
+            if str(exc).startswith((decrypt.SNAPSHOT_FAILED, decrypt.PAGE_CHECK_FAILED))
             else KEY_INVALID)
 
 
@@ -403,8 +405,8 @@ def run_sync(account: str | None = None, *, full: bool = False,
                 raise _Abort(KEY_MISSING, str(exc), "重新引导") from exc
             except errors.DecryptError as exc:
                 raise _Abort(_decrypt_status(exc), str(exc),
-                             "若是密钥失效：重新 bootstrap 后重试；"
-                             "若是源不可读：检查完全磁盘访问权限与容器路径") from exc
+                             "若是密钥失效：重新 bootstrap 后重试；若是源不可读：检查完全磁盘访问"
+                             "权限与容器路径；若是页校验失败：微信正在写，下一轮会自动重试") from exc
             except errors.DataNotFound as exc:
                 raise _Abort(SOURCE_UNAVAILABLE, str(exc),
                              "确认微信数据目录存在、且具备完全磁盘访问权限") from exc

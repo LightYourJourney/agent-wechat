@@ -8,6 +8,7 @@
 | 数据 | 位置 | 敏感度 |
 |---|---|---|
 | 数据库密钥 passphrase（32 字节） | 内存（微信进程）→ `~/.agent-wechat/passphrase.json` | 极高 |
+| 每个库的派生密钥（PBKDF2 结果，32 字节） | **本项目进程内存**：按 (passphrase, 库 salt) 缓存，最多 64 条，进程退出即失（MCP 常驻进程里存活整个进程期）；不落盘、不进日志与错误信息 | 极高（与 passphrase 同级：拿到进程内存就等于拿到 passphrase） |
 | 聊天数据库（加密） | 微信容器目录 | 高（常规流程只做只读快照、不落盘存储；**唯一例外**是 `decrypt --out`，见下表） |
 | 解密后的消息明文 | `~/.agent-wechat/tmp/`（临时）→ `index.db`（持久） | 极高 |
 | 解密后的媒体明文（图片/语音 WAV/视频）与**会话时间线产物**（HTML / Markdown 明文，含引用 / 链接 / 转账内容） | `~/.agent-wechat/media/`（持久） | 极高 |
@@ -181,7 +182,7 @@
 | 文件权限 | `~/.agent-wechat/` 全目录 `0700`，passphrase 缓存 `0600`（仅当前用户可读） |
 | 全盘加密 | 索引明文依赖 **FileVault**（**建议开启**，见 INSTALL.md）；未开 FileVault 的机器不建议使用本项目的导出功能。⚠️ **代码不校验也不阻断**，建议自行用 `fdesetup status` 确认 |
 | 备份排除 | 代码先用 `tmutil isexcluded` 查询，未排除时自动执行 `tmutil addexclusion ~/.agent-wechat`（每个进程查一次；已排除不再重复执行）；失败时请手动执行，防止明文档案绕过 FileVault 进入备份盘 |
-| 临时文件 | 默认（进程内解密后端）`tmp/`（0700）里只有**密文**快照，查询在内存里按页解密，**明文不落盘**；快照用后即焚。回退到 CLI 后端（`AGENT_WECHAT_DECRYPT=cli`，或 sqlcipher3 不可用）以及 `inspect` 时，解密明文在 `tmp/` 短暂存在，单分片、用后即焚——**按消息查媒体归属（`media locate` / `get_message_media`）的语音本体判定也走这一条**；唯一例外是 `decrypt --out` 显式导出的明文库（见上表） |
+| 临时文件 | 默认（进程内解密后端）`tmp/`（0700）里只有**密文**快照，查询在内存里按页解密，**明文不落盘**；快照用后即焚。回退到 CLI 后端（`AGENT_WECHAT_DECRYPT=cli`，或 sqlcipher3 不可用）时，解密明文在 `tmp/` 短暂存在，单分片、用后即焚——**按消息查媒体归属（`media locate` / `get_message_media`）的语音本体判定也走这一条**；唯一例外是 `decrypt --out` 显式导出的明文库（见上表） |
 | 传输 | MCP 走 stdio；无网络监听、无云同步路径 |
 | 销毁 | `agent-wechat purge --all --yes` 清除**整个 `~/.agent-wechat/` 超集**——不只是「密钥 + 索引」，还包括 `media/`、`moments/`、`models/`、`tasks.json`、`tmp/` 等全部产物；不加 `--yes` 只预览，删完给出残留核查。手工 `rm -rf ~/.agent-wechat` 仍是等价后备 |
 | 按会话销毁 | `agent-wechat purge --chat <会话> --yes` 只删该会话在**本工具里的副本**（索引行、向量、appmsg 部件、媒体引用、群成员显示名、`media/<会话md5>/`），并把它们的 `msg_key` 逐条写进 `exclusions.db`——那批内容不会因重导复活（`export --full` / `appmsg rebuild` / `media rebuild-refs` / 名册重建四条路都在写入端被拦；`media export` / `export_chat_media` 对该会话**整体拒绝**——媒体按磁盘目录取件、没有逐条过滤的抓手，代价是 purge 之后新到的媒体也要先 `purge --chat <会话> --undo --yes` 才导得出），而删除之后新来的消息照常进索引。**微信容器一个字节都不动**（只读红线不变）；**朋友圈导出不在范围内**（`moments/` 是一份 HTML 装所有人，不按会话分目录）。默认导出根的 `chat index` 总目录页（`media/index.html`）列着该会话时**一并删除**（重跑 `chat index` 即重建、不含已删会话）；**不在保证内的一处**：自定义 `--out` 根下的那一页本命令无从得知，那一行会留到下次在那个根上重跑 `chat index` |

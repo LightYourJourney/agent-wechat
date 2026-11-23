@@ -63,7 +63,7 @@ def _holders(path: pathlib.Path) -> list[int]:
     已知限制（本轮明确不修）：`lsof <目录>` 列出的是**持有该目录本身**的进程，不是「开着
     目录里某个文件」的进程——实测同一个进程，`lsof -n -P d/open.db` 找得到，`lsof -n -P d`
     却返回 exit 1、无输出。于是 `purge --tmp` 探测不到正在 decrypt 的任务（它持有
-    `tmp/awdec-*/plain.db`），照样会删掉那个目录。要覆盖得换 `lsof +D`：它逐个文件递归，
+    `tmp/awdec-*/` 里的快照，CLI 后端下还有 `plain.db`），照样会删掉那个目录。要覆盖得换 `lsof +D`：它逐个文件递归，
     在 --all 那种整树规模上代价不可接受。
     """
     if not path.exists():

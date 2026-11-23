@@ -24,6 +24,7 @@ from test_reader_export_pipeline import (ACCT, FRIEND, T0, build_shard, drift_tr
 # test_usecases_media_link 同一套夹具（索引 + `_FakeCtx`），抄一份必漂。导入的都是常量、
 # 桩类与 fixture，没有 test_* 名，不会被本模块重复收集。
 from test_usecases_media_link import CM, MON, TS, _FakeCtx, idx  # noqa: F401
+from helpers import plain_open_db
 
 
 @pytest.fixture()
@@ -2184,15 +2185,9 @@ def test_decrypt_without_out_runs_quick_check(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(account, "resolve_account", lambda a: "wxid_testacct01_ab12")
     monkeypatch.setattr(paths, "db_storage", lambda acc: db.parent)
     monkeypatch.setattr(keys, "get_passphrase", lambda acc: b"p" * 32)
-
-    class _Ctx:
-        def __enter__(self):
-            return plain
-
-        def __exit__(self, *a):
-            return False
-
-    monkeypatch.setattr(decrypt, "decrypted", lambda d, pp: _Ctx())
+    # 不带 `--out` 只做完整性检查：走 `open_db`（与日常读取同一后端），不再要 CLI 整库导出
+    monkeypatch.setattr(decrypt, "open_db", lambda d, pp: plain_open_db(plain, pp))
+    monkeypatch.setattr(decrypt, "decrypted", lambda d, pp: pytest.fail("不该走整库明文导出"))
     with pytest.raises(SystemExit) as ei:
         cli.main(["decrypt", "message_0.db"])
     assert ei.value.code == 0

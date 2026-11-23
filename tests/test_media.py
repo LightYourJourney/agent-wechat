@@ -920,7 +920,7 @@ def _voice_fixture(account: str, rows: list[tuple[int, int, int, bytes]],
     con.close()
 
 
-def _passthrough_decrypted(monkeypatch) -> None:
+def _passthrough_open_db(monkeypatch) -> None:
     """把 `decrypt.open_db` 换成「直接只读打开原库」的假上下文（合成库是明文）。
 
     第二条 setattr 要求 `media.decrypt` 是**模块级**属性（Ruling 17）——函数内 import
@@ -942,7 +942,7 @@ def make_voice_tree(tmp_path, monkeypatch):
     root, account = make_tree(tmp_path, monkeypatch)
     ts = int(datetime.datetime(2026, 9, 15, 12, 0).timestamp())   # 月由 ts 现算
     _voice_fixture(account, [(1, ts, 7, _silk_blob())])
-    _passthrough_decrypted(monkeypatch)
+    _passthrough_open_db(monkeypatch)
     return root, account, "chatA@chatroom"
 
 
@@ -986,7 +986,7 @@ def test_export_media_voice_month_filter(tmp_path, monkeypatch):
     ts_prev = int(prev.timestamp())
     assert media.month_of(ts_prev) != mon             # 夹具自证：两条确实落在不同月
     _voice_fixture(account, [(1, ts, 7, _silk_blob()), (1, ts_prev, 8, _silk_blob())])
-    _passthrough_decrypted(monkeypatch)
+    _passthrough_open_db(monkeypatch)
 
     rep = media.export_media(account, ["chatA@chatroom"], kinds=["voice"],
                              months=[mon], out_dir=root / "home" / "media")
@@ -1003,7 +1003,7 @@ def test_export_media_voice_slk_fallback(tmp_path, monkeypatch):
     mon = media.month_of(ts)
     blob = b"\x02#!SILK_V3" + b"\x00" * 32
     _voice_fixture(account, [(1, ts, 7, blob)])
-    _passthrough_decrypted(monkeypatch)
+    _passthrough_open_db(monkeypatch)
     monkeypatch.setattr(media, "_PILK", None)
 
     out = root / "home" / "media"
@@ -1030,7 +1030,7 @@ def test_export_media_voice_respects_max_files(tmp_path, monkeypatch):
     ts = int(datetime.datetime(2026, 9, 15, 12, 0).timestamp())
     mon = media.month_of(ts)
     _voice_fixture(account, [(1, ts, 7, _silk_blob()), (1, ts, 8, _silk_blob())])
-    _passthrough_decrypted(monkeypatch)
+    _passthrough_open_db(monkeypatch)
 
     out = root / "home" / "media"
     rep = media.export_media(account, ["chatA@chatroom"], kinds=["voice"],
@@ -1051,7 +1051,7 @@ def test_export_media_reports_remaining_after_cap(tmp_path, monkeypatch):
     ts = int(datetime.datetime(2026, 9, 15, 12, 0).timestamp())
     mon = media.month_of(ts)
     _voice_fixture(account, [(1, ts, i, _silk_blob()) for i in (7, 8, 9)])
-    _passthrough_decrypted(monkeypatch)
+    _passthrough_open_db(monkeypatch)
 
     rep = media.export_media(account, ["chatA@chatroom"], kinds=["voice"],
                              months=[mon], out_dir=root / "home" / "media", max_files=1)
@@ -1067,7 +1067,7 @@ def test_export_media_skip_does_not_consume_limit(tmp_path, monkeypatch):
     ts = int(datetime.datetime(2026, 9, 15, 12, 0).timestamp())
     mon = media.month_of(ts)
     _voice_fixture(account, [(1, ts, i, _silk_blob()) for i in (5, 6, 7, 8, 9)])
-    _passthrough_decrypted(monkeypatch)
+    _passthrough_open_db(monkeypatch)
     out = root / "home" / "media"
 
     media.export_media(account, ["chatA@chatroom"], kinds=["voice"],
@@ -1125,7 +1125,7 @@ def test_export_media_voice_plaintext_stays_in_home_tmp(tmp_path, monkeypatch):
     ts = int(datetime.datetime(2026, 9, 15, 12, 0).timestamp())
     mon = media.month_of(ts)
     _voice_fixture(account, [(1, ts, 7, _silk_blob())])
-    _passthrough_decrypted(monkeypatch)
+    _passthrough_open_db(monkeypatch)
 
     sys_tmp = pathlib.Path(tempfile.gettempdir())
     before = sorted(p.name for p in (*sys_tmp.glob("*.pcm"), *sys_tmp.glob("*.silk")))
@@ -1250,7 +1250,7 @@ def test_export_media_voice_write_error_counts_failed(tmp_path, monkeypatch):
     ts = int(datetime.datetime(2026, 9, 15, 12, 0).timestamp())
     mon = media.month_of(ts)
     _voice_fixture(account, [(1, ts, 7, _silk_blob())])
-    _passthrough_decrypted(monkeypatch)
+    _passthrough_open_db(monkeypatch)
     real_write = pathlib.Path.write_bytes
 
     def fake(self, data):
@@ -1444,7 +1444,7 @@ def test_export_media_voice_present_in_two_shards_exports_both(tmp_path, monkeyp
     mon = media.month_of(ts)
     _voice_fixture(account, [(1, ts, 7, _silk_blob())], shard=0)
     _voice_fixture(account, [(1, ts, 8, _silk_blob())], shard=1)
-    _passthrough_decrypted(monkeypatch)
+    _passthrough_open_db(monkeypatch)
 
     out = root / "home" / "media"
     rep = media.export_media(account, ["chatA@chatroom"], kinds=["voice"],
@@ -1480,7 +1480,7 @@ def test_export_media_voice_unreadable_shard_is_skipped(tmp_path, monkeypatch):
         with plain_open_db(db_path, passphrase) as con:
             yield con
 
-    # 与 _passthrough_decrypted 同一套 monkeypatch（含 Ruling 17 的模块级属性那条）
+    # 与 _passthrough_open_db 同一套 monkeypatch（含 Ruling 17 的模块级属性那条）
     monkeypatch.setattr(dec_mod, "open_db", flaky)
     monkeypatch.setattr("agent_wechat.media.decrypt", dec_mod)
 
@@ -1743,7 +1743,7 @@ def test_voice_body_keys_reads_the_query_body(tmp_path, monkeypatch):
     root, account = make_tree(tmp_path, monkeypatch)
     _voice_fixture(account, [(1, 1700000000, 7, b"silky"),
                              (1, 1700000001, 8, b"silky")])
-    _passthrough_decrypted(monkeypatch)
+    _passthrough_open_db(monkeypatch)
     want = hashlib.md5(b"chatA@chatroom").hexdigest()
     assert media.voice_body_keys(account) == frozenset({(want, 7), (want, 8)})
 
@@ -1754,7 +1754,7 @@ def test_voice_body_keys_skips_rows_without_voice_data(tmp_path, monkeypatch):
     root, account = make_tree(tmp_path, monkeypatch)
     _voice_fixture(account, [(1, 1700000000, 7, b"silky"),
                              (1, 1700000001, 8, None)])
-    _passthrough_decrypted(monkeypatch)
+    _passthrough_open_db(monkeypatch)
     want = hashlib.md5(b"chatA@chatroom").hexdigest()
     assert media.voice_body_keys(account) == frozenset({(want, 7)})
 
@@ -1773,7 +1773,7 @@ def test_export_media_skips_already_exported(tmp_path, monkeypatch):
     ts = int(datetime.datetime(2026, 9, 15, 12, 0).timestamp())
     mon = media.month_of(ts)
     _voice_fixture(account, [(1, ts, i, _silk_blob()) for i in (7, 8, 9)])
-    _passthrough_decrypted(monkeypatch)
+    _passthrough_open_db(monkeypatch)
     out = root / "home" / "media"
 
     first = media.export_media(account, ["chatA@chatroom"], kinds=["voice"],
@@ -1794,7 +1794,7 @@ def test_export_media_force_ignores_existing(tmp_path, monkeypatch):
     ts = int(datetime.datetime(2026, 9, 15, 12, 0).timestamp())
     mon = media.month_of(ts)
     _voice_fixture(account, [(1, ts, i, _silk_blob()) for i in (7, 8)])
-    _passthrough_decrypted(monkeypatch)
+    _passthrough_open_db(monkeypatch)
     out = root / "home" / "media"
 
     media.export_media(account, ["chatA@chatroom"], kinds=["voice"],
@@ -3287,7 +3287,7 @@ def test_voice_export_counts_a_null_body(tmp_path, monkeypatch):
     root, account = make_tree(tmp_path, monkeypatch)
     ts = int(datetime.datetime(2026, 9, 15, 12, 0).timestamp())
     _voice_fixture(account, [(1, ts, 7, None)])          # 有行、无本体
-    _passthrough_decrypted(monkeypatch)
+    _passthrough_open_db(monkeypatch)
     rep = media.export_media(account, ["chatA@chatroom"], kinds=["voice"],
                              months=[media.month_of(ts)], out_dir=root / "home" / "media")
     assert rep.voice.failed == 1 and rep.voice.ok == 0, rep.voice
@@ -3314,7 +3314,7 @@ def test_pilk_diagnostics_never_reach_our_stdout(tmp_path, monkeypatch, capfd):
     root, account = make_tree(tmp_path, monkeypatch)
     ts = int(datetime.datetime(2026, 9, 15, 12, 0).timestamp())
     _voice_fixture(account, [(1, ts, 7, b"\x02#!SILK_V3" + bytes(range(256)) * 8)])
-    _passthrough_decrypted(monkeypatch)
+    _passthrough_open_db(monkeypatch)
     capfd.readouterr()
     rep = media.export_media(account, ["chatA@chatroom"], kinds=["voice"],
                              months=[media.month_of(ts)], out_dir=root / "home" / "media")
@@ -3332,7 +3332,7 @@ def test_a_voice_that_failed_to_decode_is_retried_next_export(tmp_path, monkeypa
     root, account = make_tree(tmp_path, monkeypatch)
     ts = int(datetime.datetime(2026, 9, 15, 12, 0).timestamp())
     _voice_fixture(account, [(1, ts, 7, _silk_blob())])
-    _passthrough_decrypted(monkeypatch)
+    _passthrough_open_db(monkeypatch)
     out = root / "home" / "media"
     ok = [False]
 
@@ -3362,7 +3362,7 @@ def test_voices_that_keep_failing_do_not_starve_the_limit(tmp_path, monkeypatch)
     root, account = make_tree(tmp_path, monkeypatch)
     ts = int(datetime.datetime(2026, 9, 15, 12, 0).timestamp())
     _voice_fixture(account, [(1, ts + i, 7 + i, _silk_blob()) for i in range(4)])
-    _passthrough_decrypted(monkeypatch)
+    _passthrough_open_db(monkeypatch)
     out = root / "home" / "media"
 
     class _BadOldest(media._VoiceWorker):
@@ -3445,7 +3445,7 @@ def test_the_voice_workspace_is_recognizable_by_the_sweeper(tmp_path, monkeypatc
     ts = int(datetime.datetime(2026, 9, 15, 12, 0).timestamp())
     mon = media.month_of(ts)
     _voice_fixture(account, [(1, ts, 7, _silk_blob())])
-    _passthrough_decrypted(monkeypatch)
+    _passthrough_open_db(monkeypatch)
 
     seen = []
 

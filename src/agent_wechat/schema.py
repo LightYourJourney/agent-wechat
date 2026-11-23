@@ -11,8 +11,11 @@
 """
 from __future__ import annotations
 
-import sqlite3
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .decrypt import ReadConnection
 
 
 @dataclass(frozen=True)
@@ -78,7 +81,7 @@ def _text(v: object) -> object:
     return v.decode("utf-8", "replace") if isinstance(v, bytes) else v
 
 
-def probe(con: sqlite3.Connection, req: Requirement, table: str | None = None) -> ProbeResult:
+def probe(con: ReadConnection, req: Requirement, table: str | None = None) -> ProbeResult:
     """该连接下的库是否满足这条声明。
 
     `table` 用于通配声明（`Msg_*`）：真名由调用方从 sqlite_master 拿到后传进来。

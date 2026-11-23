@@ -290,6 +290,13 @@ def test_key_invalid_and_source_unreadable_are_distinguished(tmp_path, monkeypat
     monkeypatch.setattr(sync.export, "run_export", bad_source)
     assert sync.run_sync(ACCT).status == "source_unavailable"
 
+    # 进程内后端的「页校验失败」= 快照撕裂，重试即可：不许报成 key_invalid（叫人重新 bootstrap）
+    def torn(*a, **k):
+        raise errors.DecryptError("读取微信库时页校验失败（页无法解密或已损坏）")
+
+    monkeypatch.setattr(sync.export, "run_export", torn)
+    assert sync.run_sync(ACCT).status == "source_unavailable"
+
 
 def test_an_explicit_unknown_account_is_not_reported_as_wechat_not_running(tmp_path, monkeypatch):
     _env(tmp_path, monkeypatch)

@@ -97,30 +97,31 @@ def cmd_decrypt(args: argparse.Namespace) -> int:
         print(f"库不存在: {db}", file=sys.stderr)
         return 1
     passphrase = keys.get_passphrase(acc)
-    with decrypt.decrypted(db, passphrase) as plain:
-        if args.out:
-            out = paths.HOME_DIR / args.out
-            try:
-                out.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-                out.write_bytes(plain.read_bytes())
-                out.chmod(0o600)  # EA-050：整库明文，权限与目录侧承诺对齐
-            except OSError as exc:
-                # A 矩阵：这三步此前裸穿（`PermissionError`/`OSError` 直接 traceback）。
-                # 整库明文是高敏产物——写不成必须说清，且不许留权限未收紧的半成品。
-                try:
-                    out.unlink(missing_ok=True)
-                except OSError:
-                    pass
-                raise errors.MediaOutputError(
-                    f"写明文副本失败：{out}",
-                    hint=f"{exc}；请检查磁盘空间与 AGENT_WECHAT_HOME 的目录权限"
-                ) from exc
-            print(f"已导出明文: {out}")
-        else:
-            con = decrypt.open_plain(plain)
+    if not args.out:
+        # 只做完整性检查：走与日常读取同一个后端（进程内时不需要 sqlcipher 命令，也不落明文）
+        with decrypt.open_db(db, passphrase) as con:
             ok = con.execute("PRAGMA quick_check").fetchone()[0]
-            print(f"quick_check: {ok}")
-            con.close()
+        print(f"quick_check: {ok}")
+        return 0
+    # `--out` 要的就是一份整库明文文件：只有 CLI 后端的 sqlcipher_export 产得出来
+    with decrypt.decrypted(db, passphrase) as plain:
+        out = paths.HOME_DIR / args.out
+        try:
+            out.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            out.write_bytes(plain.read_bytes())
+            out.chmod(0o600)  # EA-050：整库明文，权限与目录侧承诺对齐
+        except OSError as exc:
+            # A 矩阵：这三步此前裸穿（`PermissionError`/`OSError` 直接 traceback）。
+            # 整库明文是高敏产物——写不成必须说清，且不许留权限未收紧的半成品。
+            try:
+                out.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise errors.MediaOutputError(
+                f"写明文副本失败：{out}",
+                hint=f"{exc}；请检查磁盘空间与 AGENT_WECHAT_HOME 的目录权限"
+            ) from exc
+        print(f"已导出明文: {out}")
     return 0
 
 
@@ -132,8 +133,7 @@ def cmd_inspect(args: argparse.Namespace) -> int:
         print(f"库不存在: {db}", file=sys.stderr)
         return 1
     passphrase = keys.get_passphrase(acc)
-    with decrypt.decrypted(db, passphrase) as plain:
-        con = decrypt.open_plain(plain)
+    with decrypt.open_db(db, passphrase) as con:
         # 库里有非 UTF-8 的 TEXT 列，默认解码会直接抛异常；统一按 bytes 取，展示时再防御解码
         con.text_factory = bytes
         print(f"== {args.db} ==")
@@ -152,7 +152,6 @@ def cmd_inspect(args: argparse.Namespace) -> int:
                 for row in rows:
                     sample = {c: _shorten(_decode(v)) for c, v in zip(cols, row)}
                     print("  " + json.dumps(sample, ensure_ascii=False, default=str))
-        con.close()
     return 0
 
 

@@ -194,7 +194,7 @@ class MessageReader:
         return self._passphrase
 
     @contextlib.contextmanager
-    def _open(self, rel: str) -> Iterator[sqlite3.Connection]:
+    def _open(self, rel: str) -> Iterator[decrypt.ReadConnection]:
         db = paths.db_storage(self.acct) / rel
         if not db.exists():
             raise DataNotFound(f"{db} 不存在")
@@ -202,7 +202,7 @@ class MessageReader:
             con.text_factory = bytes   # 库内 TEXT 含非 UTF-8 字节，统一按 bytes 取
             yield con
 
-    def _check(self, capability: str, rel: str, con: sqlite3.Connection, *,
+    def _check(self, capability: str, rel: str, con: decrypt.ReadConnection, *,
                table: str | None = None, only: str | None = None) -> None:
         """校验该能力在**这个库**上的声明，缺了抛 `SchemaDrift`。
 
@@ -443,11 +443,11 @@ class MessageReader:
 
     # ---------- 消息 ----------
 
-    def _name2id(self, con: sqlite3.Connection) -> dict[int, str]:
+    def _name2id(self, con: decrypt.ReadConnection) -> dict[int, str]:
         return {rowid: name for rowid, u in con.execute("SELECT rowid, user_name FROM Name2Id")
                 if (name := _s(u)) is not None}
 
-    def _shard_tables(self, con: sqlite3.Connection, chat_md5: str | None) -> list[str]:
+    def _shard_tables(self, con: decrypt.ReadConnection, chat_md5: str | None) -> list[str]:
         if chat_md5:
             return [f"Msg_{chat_md5}"] if con.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
@@ -508,7 +508,7 @@ class MessageReader:
                        sender_name=sender_name, is_self=(sender_u == self.self_wxid),
                        content=body, media_hint=hint, sticker_md5=sticker_md5)
 
-    def _read_rows(self, con: sqlite3.Connection, table: str, shard: str, md5hex: str,
+    def _read_rows(self, con: decrypt.ReadConnection, table: str, shard: str, md5hex: str,
                    chat_map: Mapping[str, str], n2i: Mapping[int, str],
                    order_desc: bool = False, limit: int | None = None,
                    sticker_names: Mapping[str, str] | None = None) -> list[Message]:
@@ -663,7 +663,7 @@ class MessageReader:
 
                     if audit_sink is not None and audit_rows > 0:
                         # 回看与导出**共用同一次分片解密**：另开一趟会让每轮增量多付
-                        # 一次 sqlcipher 导出（500MB 量级的常态成本）。游标走到表尾
+                        # 一次分片快照与扫描（CLI 回退后端下是 500MB 量级的整库导出）。游标走到表尾
                         # （本段不足 audit_rows）就绕回 0，下一轮从头再走。
                         #
                         # 回看的行走 `audit_sink` 而**不**混进 yield：调用方要把「本轮
