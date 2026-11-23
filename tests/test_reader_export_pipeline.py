@@ -533,6 +533,36 @@ def test_zstd_frames_without_content_size_decode_and_garbage_is_a_project_error(
         reader_mod._decode_content(frame[:-3], 4)
 
 
+def test_zstd_decoding_is_safe_across_threads():
+    """Phase 03 验收：此前模块级单例 `ZstdDecompressor` 被多线程共用（MCP 后台导出 + 并发
+    工具调用），同一个底层 DCtx 被踩，真机 8 线程偶发「Data corruption detected」。
+    改回模块级单例本测试必红——本机实测更糟：整个进程**段错误**退出（MCP 服务会被直接打死）。"""
+    import random
+    import threading
+    import zstandard
+    from agent_wechat import reader as reader_mod
+    rnd = random.Random(0)
+    cctx = zstandard.ZstdCompressor(write_content_size=False)
+    plain = ["".join(rnd.choice("ab中文😀\n") for _ in range(rnd.randint(200, 4000))) for _ in range(64)]
+    frames = [cctx.compress(p.encode()) for p in plain]
+    bad: list[str] = []
+
+    def work():
+        for _ in range(30):
+            for p, f in zip(plain, frames):
+                try:
+                    if reader_mod._decode_content(f, 4) != p:
+                        bad.append("value")
+                except Exception as exc:                        # noqa: BLE001 — 收集即可
+                    bad.append(type(exc).__name__)
+    ts = [threading.Thread(target=work) for _ in range(8)]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+    assert bad == []
+
+
 # ---------- export ----------
 
 def test_export_full_idempotent(env):

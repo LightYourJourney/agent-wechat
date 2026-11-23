@@ -11,6 +11,7 @@ import contextlib
 import dataclasses
 import html
 import sqlite3
+import threading
 import zlib
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, asdict
@@ -21,9 +22,24 @@ from .errors import DataNotFound, DependencyMissing
 
 try:
     import zstandard
-    _ZSTD = zstandard.ZstdDecompressor()
+    _HAS_ZSTD = True
 except ImportError:  # pragma: no cover
-    _ZSTD = None
+    _HAS_ZSTD = False
+
+# **每线程一个**解压器（Phase 03 验收发现）：`ZstdDecompressor` 不是线程安全的——同一个实例
+# 派生的 decompressobj 共用底层 DCtx。此前是模块级单例，MCP 里后台线程跑导出、工具调用
+# 并发读近期消息时，两边同时解码就会互相踩上下文：8 线程实测偶发「Data corruption detected」，
+# 压得更紧时整个进程段错误（基线 97b78dc 同样复现，与解密后端无关）。
+_ZSTD_LOCAL = threading.local()
+
+
+def _zstd() -> zstandard.ZstdDecompressor | None:
+    if not _HAS_ZSTD:
+        return None
+    d = getattr(_ZSTD_LOCAL, "d", None)
+    if d is None:
+        d = _ZSTD_LOCAL.d = zstandard.ZstdDecompressor()
+    return d
 
 # 类型词汇表的 owner 是 messages.py；此处转出以保持既有引用点可用。
 TYPE_NAMES = messages.TYPE_NAMES
@@ -65,13 +81,14 @@ def _decode_content(raw: bytes | str | None, ct_flag: int | None) -> str | None:
     if isinstance(raw, str):
         return raw
     if ct_flag == 4:
-        if _ZSTD is None:
+        dctx = _zstd()
+        if dctx is None:
             raise DependencyMissing("缺少 zstandard：uv add zstandard")
         try:
             # `decompressobj` 而不是 `decompress`：后者遇到头部不带内容长度的**合法**帧直接抛
             # 「could not determine content size」。代价是截断帧它只吐半截、**不抛**——所以
             # 还要看 `eof`：没有走到帧尾就是坏数据，不许把半截正文当正文静默入库。
-            dobj = _ZSTD.decompressobj()
+            dobj = dctx.decompressobj()
             out = dobj.decompress(raw)
             if not dobj.eof:
                 raise errors.DecryptError(
