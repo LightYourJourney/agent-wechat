@@ -1,0 +1,60 @@
+{
+ "impls": {
+  "py": {
+   "rows": 778495,
+   "load_s": 1.65,
+   "best_s": 1.165,
+   "ns_per_row": 1496.8,
+   "rss_load_mb": 369.4,
+   "rss_extra_mb": 2037.7,
+   "digest": "599fbdc91b1eb1f8"
+  },
+  "rs_one": {
+   "rows": 778495,
+   "load_s": 1.59,
+   "best_s": 0.993,
+   "ns_per_row": 1275.0,
+   "rss_load_mb": 369.5,
+   "rss_extra_mb": 2097.8,
+   "digest": "599fbdc91b1eb1f8"
+  },
+  "rs_batch": {
+   "rows": 778495,
+   "load_s": 1.58,
+   "best_s": 0.926,
+   "ns_per_row": 1189.8,
+   "rss_load_mb": 369.2,
+   "rss_extra_mb": 2289.0,
+   "digest": "599fbdc91b1eb1f8"
+  },
+  "noop_one": {
+   "rows": 778495,
+   "load_s": 1.58,
+   "best_s": 0.036,
+   "ns_per_row": 46.8,
+   "rss_load_mb": 369.2,
+   "rss_extra_mb": 24.0
+  },
+  "noop_batch": {
+   "rows": 778496,
+   "load_s": 1.58,
+   "best_s": 0.0,
+   "ns_per_row": 0.0,
+   "rss_load_mb": 369.3,
+   "rss_extra_mb": 0.2
+  }
+ },
+ "same_output": true,
+ "fuzz": {
+  "cases": 200000,
+  "kinds": {
+   "utf8": 40132,
+   "zstd_ok": 40079,
+   "zstd_trunc": 39754,
+   "zstd_multi": 39995,
+   "zstd_garbage": 40040
+  },
+  "value_mismatch": 0,
+  "error_mismatch": 0
+ }
+}

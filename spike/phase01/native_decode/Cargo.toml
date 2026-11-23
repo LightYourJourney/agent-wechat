@@ -1,0 +1,17 @@
+[package]
+name = "native_decode"
+version = "0.0.1"
+edition = "2021"
+publish = false
+
+[lib]
+name = "native_decode"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.30", features = ["extension-module", "abi3-py312"] }
+zstd = "0.14"
+
+[profile.release]
+lto = true
+codegen-units = 1

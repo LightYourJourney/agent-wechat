@@ -1,0 +1,40 @@
+{
+ "n": 8000,
+ "results": {
+  "现状 256/256": {
+   "elapsed_s": 223.71,
+   "embedded": 6569,
+   "rate": 29.4,
+   "rss_mb": 5952.8,
+   "min_cos_vs_base": 1.0
+  },
+  "16/256": {
+   "elapsed_s": 57.13,
+   "embedded": 6569,
+   "rate": 115.0,
+   "rss_mb": 692.2,
+   "min_cos_vs_base": 0.9999998807907104
+  },
+  "16/1024": {
+   "elapsed_s": 57.59,
+   "embedded": 6569,
+   "rate": 114.1,
+   "rss_mb": 681.1,
+   "min_cos_vs_base": 0.9999998807907104
+  },
+  "32/1024": {
+   "elapsed_s": 50.68,
+   "embedded": 6569,
+   "rate": 129.6,
+   "rss_mb": 1099.7,
+   "min_cos_vs_base": 0.9999998807907104
+  },
+  "8/1024": {
+   "elapsed_s": 45.08,
+   "embedded": 6569,
+   "rate": 145.7,
+   "rss_mb": 473.5,
+   "min_cos_vs_base": 0.9999998807907104
+  }
+ }
+}

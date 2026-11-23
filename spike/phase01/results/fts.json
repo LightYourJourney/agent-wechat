@@ -1,0 +1,38 @@
+{
+ "trigger": {
+  "elapsed_s": 63.66,
+  "exported": 778496,
+  "rss_mb": 99.1
+ },
+ "bulk": {
+  "elapsed_s": 34.93,
+  "exported": 778496,
+  "load_s": 27.59,
+  "rebuild_s": 7.34,
+  "rss_mb": 100.8
+ },
+ "verify": {
+  "messages_same": true,
+  "integrity_trigger": "ok",
+  "secure_delete_trigger": [
+   1
+  ],
+  "triggers_trigger": [
+   "msg_fts_ad",
+   "msg_fts_ai",
+   "msg_fts_au"
+  ],
+  "integrity_bulk": "ok",
+  "secure_delete_bulk": [
+   1
+  ],
+  "triggers_bulk": [
+   "msg_fts_ad",
+   "msg_fts_ai",
+   "msg_fts_au"
+  ],
+  "queries": 400,
+  "total_hits": 1692716,
+  "query_mismatch": 0
+ }
+}

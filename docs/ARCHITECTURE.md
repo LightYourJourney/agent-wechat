@@ -46,7 +46,7 @@ src/agent_wechat/
 ├── migrations.py   版本化 schema 迁移：版本表、按 scope 顺序执行、未来版本拒绝、失败回滚
 │                   （只认 scope 与版本，不认识任何业务表——DDL 仍归各 owner）
 ├── search.py       检索路由：trigram FTS / LIKE 兜底
-├── vector.py       向量索引与语义检索（唯一接触 fastembed 与 sqlite-vec 的隔离带）
+├── vector.py       向量索引与语义检索（唯一接触 fastembed 与 sqlite-vec 的隔离带；fastembed 是可选安装项 [semantic]）
 ├── tasks.py        长任务注册表：后台线程 + 进度落盘 + 中断回收（不认识任何具体任务）
 ├── usecases/       用例层（包）：两个入口共享的入口策略（参数归一化、账号/会话解析、结果形状）
 │   ├── _core.py    共享底座：limit 归一化、结果类型、ChatContext、降级收集
@@ -125,6 +125,8 @@ export.run_export
       ① 前向：local_id > 导出水位线 → 新消息
       ② 回看：local_id > audit_cursor 的一小段旧行（默认 100 行/会话/轮）
   → fetchmany(batch) 分批解码 → 批量幂等 upsert + 水位线推进（同一事务）
+     首次导出（消息表为空）：先拆 3 条 FTS 触发器并落中断标记（同一事务），灌完一次 rebuild、
+     恢复触发器、清标记；进程被杀则下次 store.connect() 见标记且写它的进程已死，当场补建
   → 数据提交之后才推进 audit_cursor（回看游标；绕圈覆盖整段历史）
   → 快照删除；进度写 tasks.json（进程重启后从该文件载入，遗留的 running 记为 failed）；
   中断后重跑自动续传
@@ -219,12 +221,16 @@ moments.iter_posts(account, report=…)       # 复用 passphrase 解密 sns/sns
 
 ```
 decrypt.open_db(db, passphrase)                     # reader / 语音 / 朋友圈的唯一入口
-  → 快照 db+wal+shm 到 tmp/awdec-<pid>-*（0700）→ 读 page1 的 salt → PBKDF2（进程内按 salt 缓存）
+  → 快照 db+wal+shm 到 tmp/awdec-<pid>-*（0700；APFS clonefile 写时复制，跨卷/非 APFS 回退复制）
+  → 读 page1 的 salt → PBKDF2（进程内按 salt 缓存）
   → 默认：sqlcipher3 只读打开**加密快照**，查询只解密触及的页，明文不落盘
      回退：AGENT_WECHAT_DECRYPT=cli 或 sqlcipher3 不可用 → sqlcipher CLI 整库导出明文副本再只读打开
   → 退出：关连接、删快照（两个后端都一样）
 ```
 
+- **连接契约是 `decrypt.ReadConnection`**（窄 Protocol：`execute` 返回可迭代 / fetchone / fetchall
+  的结果、`text_factory` 可设）。`with con:`、`cursor()`、`row_factory = sqlite3.Row` 不在契约里，
+  pyright 会在新调用方用到它们时报错。
 - **两个后端读出的内容逐字节一致**：真机 36 个库 / 1,763 张表 / 480 万行核对过
   （`tests/test_decrypt_real.py`，`-m real`）。
 - **异常口径不变**：sqlcipher3 的异常不是 `sqlite3.Error` 的子类，连接代理把它们翻成同名的

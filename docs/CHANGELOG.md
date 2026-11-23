@@ -3,6 +3,31 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 风格，
 版本号语义为 0.x 阶段（API 可能变动）。
 
+### Phase 03 验收：并发解码修复、首次导出 FTS 批量、APFS 克隆快照、语义检索改可选（2026-11-24）
+
+依据 `docs/audit/phase-03-acceptance-report.md`（改动前 / 只含纯 Python 改动 / 改动后三套配置在同一份
+冻结源上的对照）。
+
+**行为变更**
+
+- **修复：多线程同时解码消息正文会报「Data corruption detected」甚至段错误退出**。zstd 解压器此前是
+  模块级单例，MCP 里后台导出线程与并发工具调用会互相踩它的上下文（改动前的版本同样复现）。现在每线程
+  一个解压器。
+- **首次导出更快**：消息表为空时拆掉 FTS 触发器灌库、最后一次 `rebuild`。中断标记与拆触发器同一事务
+  持久化；进程被杀后，下次打开索引（任何检索 / 导出）自动补建，`doctor` 报告这一状态。已有数据的
+  `--full` 重扫不走这条路（那时触发器几乎不触发，整表重建反而更慢）。
+- **快照改用 APFS 克隆**（`clonefile(2)`，写时复制）：237 MB 分片从 120–470 ms 降到约 1 ms；
+  跨卷或非 APFS 时自动回退普通复制。
+- **语义检索改为可选安装项 `[semantic]`**：基础安装 179 MB → 37 MB。要语义检索：
+  `uv sync --extra semantic`。不装时 `vector-build` / `semantic` 报「未安装语义检索组件」，
+  `retrieve --mode hybrid` 只剩关键词一路并在 `degraded` 里说明；`doctor` 新增 `vector.installed`，
+  已建过向量索引却没装时列为问题。**升级注意**：已在用语义检索的，升级后要补一次
+  `uv sync --extra semantic`（不带它的 `uv sync` 会把 fastembed 卸掉）。
+- **页校验失败不再被 `sync` 归为 `key_invalid`**（叫人重新 bootstrap），改归 `source_unavailable`，
+  下一轮自动重试。
+- **`decrypt`（不带 `--out`）与 `inspect` 改走 `open_db`**：没装 brew sqlcipher 也能用；只有
+  `decrypt --out` 仍需要 sqlcipher CLI。
+
 ### 性能：进程内解密、Time Machine 查询、嵌入批大小（2026-11-23）
 
 依据 `docs/audit/` 的 Phase 00 审计与 Phase 01 原型对照（含一次 Rust/PyO3 对照实验：导出只快
@@ -15,7 +40,7 @@
   MCP 常驻进程里第二次起的调用中位 0.64 s → 0.18 s。两个后端在真机 36 个库 / 480 万行上逐字节一致。
   派生密钥按 (passphrase, salt) 进程内缓存。
 - **保留 sqlcipher CLI 作为回退**：`AGENT_WECHAT_DECRYPT=cli` 强制回退；sqlcipher3 不可用（例如
-  Python ≥ 3.15 还没有它的 wheel）时自动回退。`decrypt` / `inspect` 两个调试命令仍走 CLI。
+  Python ≥ 3.15 还没有它的 wheel）时自动回退。`decrypt` / `inspect` 两个调试命令仍走 CLI（2026-11-24 起只剩 `decrypt --out`）。
   `brew install sqlcipher` 因此从必需变为可选。`agent-wechat doctor` 新增 `decrypt` 一项。
 - **页校验失败**（快照那一刻微信正在写）现在可能在查询中途出现，报 `DecryptError`
   「读取微信库时页校验失败」——与 CLI 后端在导出那一步失败时的异常类型相同，重试即可。

@@ -1,0 +1,8 @@
+[build-system]
+requires = ["maturin>=1.16,<2"]
+build-backend = "maturin"
+
+[project]
+name = "native_decode"
+version = "0.0.1"
+requires-python = ">=3.12"

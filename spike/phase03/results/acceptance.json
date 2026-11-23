@@ -1,0 +1,354 @@
+{
+ "_env": {
+  "load_before": "load averages: 14.24 10.98 9.22",
+  "note": "Apple M3 8 核 / 16 GB；微信在跑、负载高（load 10–14）"
+ },
+ "startup": {
+  "base:agent_wechat.cli": 0.151,
+  "base:agent_wechat.mcp_server": 0.637,
+  "base:status_wall": 0.28,
+  "cur:agent_wechat.cli": 0.075,
+  "cur:agent_wechat.mcp_server": 0.642,
+  "cur:status_wall": 0.36
+ },
+ "export": {
+  "base": {
+   "rc": 0,
+   "real": 103.95,
+   "user": 49.25,
+   "sys": 36.58,
+   "rss_mb": 83.4,
+   "tmp_peak_mb": 410.0,
+   "plain_peak_mb": 168.4,
+   "index": {
+    "rows": 777263,
+    "digest": "3b04a4c4e694454b",
+    "fts_hits": 3007,
+    "fts_consistent": true,
+    "fts_triggers": true,
+    "size_mb": 586.5
+   },
+   "incremental": {
+    "rc": 0,
+    "real": 19.92,
+    "user": 3.72,
+    "sys": 4.4,
+    "rss_mb": 58.2
+   },
+   "full_on_populated": {
+    "rc": 0,
+    "real": 29.93,
+    "user": 11.56,
+    "sys": 4.91,
+    "rss_mb": 82.5
+   }
+  },
+  "cur_cli": {
+   "rc": 0,
+   "real": 59.63,
+   "user": 22.42,
+   "sys": 19.2,
+   "rss_mb": 83.3,
+   "tmp_peak_mb": 410.0,
+   "plain_peak_mb": 168.4,
+   "index": {
+    "rows": 777263,
+    "digest": "3b04a4c4e694454b",
+    "fts_hits": 3007,
+    "fts_consistent": true,
+    "fts_triggers": true,
+    "size_mb": 587.3
+   },
+   "incremental": {
+    "rc": 0,
+    "real": 13.34,
+    "user": 3.5,
+    "sys": 4.43,
+    "rss_mb": 58.7
+   },
+   "full_on_populated": {
+    "rc": 0,
+    "real": 22.2,
+    "user": 11.72,
+    "sys": 4.93,
+    "rss_mb": 83.3
+   }
+  },
+  "cur": {
+   "rc": 0,
+   "real": 56.29,
+   "user": 23.32,
+   "sys": 16.99,
+   "rss_mb": 92.6,
+   "tmp_peak_mb": 241.6,
+   "plain_peak_mb": 0.0,
+   "index": {
+    "rows": 777263,
+    "digest": "3b04a4c4e694454b",
+    "fts_hits": 3007,
+    "fts_consistent": true,
+    "fts_triggers": true,
+    "size_mb": 587.3
+   },
+   "incremental": {
+    "rc": 0,
+    "real": 2.62,
+    "user": 1.46,
+    "sys": 0.24,
+    "rss_mb": 72.5
+   },
+   "full_on_populated": {
+    "rc": 0,
+    "real": 12.53,
+    "user": 10.36,
+    "sys": 0.54,
+    "rss_mb": 96.1
+   }
+  }
+ },
+ "recent_cold": {
+  "base": {
+   "wall_med": 10.78,
+   "wall_max": 12.42,
+   "cpu_med": 0.67,
+   "rss_med": 60.1,
+   "tmp_peak_mb": 410.0,
+   "plain_peak_mb": 168.4,
+   "fails": 0
+  },
+  "cur_cli": {
+   "wall_med": 1.01,
+   "wall_max": 4.47,
+   "cpu_med": 0.71,
+   "rss_med": 60.3,
+   "tmp_peak_mb": 410.0,
+   "plain_peak_mb": 168.4,
+   "fails": 0
+  },
+  "cur": {
+   "wall_med": 0.57,
+   "wall_max": 0.87,
+   "cpu_med": 0.44,
+   "rss_med": 71.6,
+   "tmp_peak_mb": 241.6,
+   "plain_peak_mb": 0.0,
+   "fails": 0
+  },
+  "outputs_identical": true
+ },
+ "recent_warm": {
+  "base": {
+   "seq": {
+    "calls": 15,
+    "errors": [],
+    "wall_s": 34.4,
+    "first_s": 13.912,
+    "p50_s": 0.605,
+    "p90_s": 3.91,
+    "max_s": 13.912,
+    "rss_mb": 57.5
+   },
+   "par8": {
+    "calls": 72,
+    "errors": [],
+    "wall_s": 65.46,
+    "first_s": 9.941,
+    "p50_s": 2.73,
+    "p90_s": 18.087,
+    "max_s": 22.755,
+    "rss_mb": 111.9
+   },
+   "par_tmp_peak_mb": 2490.5,
+   "par_plain_peak_mb": 803.1
+  },
+  "cur_cli": {
+   "seq": {
+    "calls": 15,
+    "errors": [],
+    "wall_s": 43.36,
+    "first_s": 7.639,
+    "p50_s": 0.779,
+    "p90_s": 7.689,
+    "max_s": 7.736,
+    "rss_mb": 62.5
+   },
+   "par8": {
+    "calls": 72,
+    "errors": [],
+    "wall_s": 84.31,
+    "first_s": 25.961,
+    "p50_s": 3.106,
+    "p90_s": 26.137,
+    "max_s": 26.686,
+    "rss_mb": 151.2
+   },
+   "par_tmp_peak_mb": 3264.5,
+   "par_plain_peak_mb": 1335.2
+  },
+  "cur": {
+   "seq": {
+    "calls": 15,
+    "errors": [],
+    "wall_s": 6.84,
+    "first_s": 1.205,
+    "p50_s": 0.411,
+    "p90_s": 0.53,
+    "max_s": 1.205,
+    "rss_mb": 73.3
+   },
+   "par8": {
+    "calls": 72,
+    "errors": [],
+    "wall_s": 35.63,
+    "first_s": 4.162,
+    "p50_s": 3.932,
+    "p90_s": 4.634,
+    "max_s": 5.019,
+    "rss_mb": 233.8
+   },
+   "par_tmp_peak_mb": 1933.0,
+   "par_plain_peak_mb": 0.0
+  }
+ },
+ "contacts": {
+  "base": {
+   "wall_med": 10.26
+  },
+  "cur_cli": {
+   "wall_med": 0.34
+  },
+  "cur": {
+   "wall_med": 0.28
+  },
+  "outputs_identical": true
+ },
+ "search": {
+  "base": {
+   "wall_med": 10.17,
+   "wall_max": 11.11
+  },
+  "cur": {
+   "wall_med": 0.18,
+   "wall_max": 1.09
+  },
+  "outputs_identical": true
+ },
+ "vector": {
+  "cur": {
+   "embedded": 3155,
+   "s": 47.7,
+   "rate": 66.1,
+   "rss_mb": 338.9,
+   "infer_batch": 8,
+   "cpu_s": 129.2,
+   "time_rss_mb": 369.2,
+   "rc": 0,
+   "err": null
+  },
+  "base": {
+   "embedded": 3155,
+   "s": 319.5,
+   "rate": 9.9,
+   "rss_mb": 5713.5,
+   "infer_batch": 256,
+   "cpu_s": 883.2,
+   "time_rss_mb": 5713.5,
+   "rc": 0,
+   "err": null
+  }
+ },
+ "kill_at_20s": {
+  "base": {
+   "at_kill": {
+    "rows": 64260,
+    "fts_rows": 64260,
+    "bulk_marker": 0
+   },
+   "leftover_files": 2,
+   "leftover_plaintext_mb": 118.9,
+   "resume_rc": 0,
+   "resume_index": {
+    "rows": 777263,
+    "digest": "3b04a4c4e694454b",
+    "fts_hits": 3007,
+    "fts_consistent": true,
+    "fts_triggers": true,
+    "size_mb": 586.5
+   },
+   "same_as_clean_export": true,
+   "tmp_dirs_after_resume": 0
+  },
+  "cur": {
+   "at_kill": {
+    "rows": 258902,
+    "fts_rows": 0,
+    "bulk_marker": 1
+   },
+   "leftover_files": 3,
+   "leftover_plaintext_mb": 0.0,
+   "resume_rc": 0,
+   "resume_index": {
+    "rows": 777263,
+    "digest": "3b04a4c4e694454b",
+    "fts_hits": 3007,
+    "fts_consistent": true,
+    "fts_triggers": true,
+    "size_mb": 584.0
+   },
+   "same_as_clean_export": true,
+   "tmp_dirs_after_resume": 0
+  }
+ },
+ "no_cli": {
+  "base": {
+   "rc": 1,
+   "err": "            29835840  peak memory footprint"
+  },
+  "cur": {
+   "rc": 0,
+   "err": ""
+  }
+ },
+ "kill_at_45s": {
+  "base": {
+   "at_kill": {
+    "rows": 364631,
+    "fts_rows": 364631,
+    "bulk_marker": 0
+   },
+   "leftover_files": 2,
+   "leftover_plaintext_mb": 22.9,
+   "resume_rc": 0,
+   "resume_index": {
+    "rows": 777263,
+    "digest": "3b04a4c4e694454b",
+    "fts_hits": 3007,
+    "fts_consistent": true,
+    "fts_triggers": true,
+    "size_mb": 586.5
+   },
+   "same_as_clean_export": true,
+   "tmp_dirs_after_resume": 0
+  },
+  "cur": {
+   "at_kill": {
+    "rows": 777263,
+    "fts_rows": 0,
+    "bulk_marker": 1
+   },
+   "leftover_files": 0,
+   "leftover_plaintext_mb": 0.0,
+   "resume_rc": 0,
+   "resume_index": {
+    "rows": 777263,
+    "digest": "3b04a4c4e694454b",
+    "fts_hits": 3007,
+    "fts_consistent": true,
+    "fts_triggers": true,
+    "size_mb": 587.3
+   },
+   "same_as_clean_export": true,
+   "tmp_dirs_after_resume": 0
+  }
+ }
+}

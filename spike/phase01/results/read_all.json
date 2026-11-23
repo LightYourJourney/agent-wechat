@@ -1,0 +1,467 @@
+{
+ "tables": {
+  "baseline": {
+   "elapsed_s": 15.29,
+   "dbs": {
+    "biz/biz.db": {
+     "tables": 1,
+     "rows": 0,
+     "digest": "0b8e49507fae5420"
+    },
+    "bizchat/bizchat.db": {
+     "tables": 4,
+     "rows": 5,
+     "digest": "07879c5311d987f0"
+    },
+    "chatbot/chatbot_message.db": {
+     "tables": 4,
+     "rows": 0,
+     "digest": "31cf488127ed494b"
+    },
+    "contact/contact.db": {
+     "tables": 19,
+     "rows": 47589,
+     "digest": "f6513f35b8849446"
+    },
+    "contact/contact_fts.db": {
+     "tables": 37,
+     "rows": 161735,
+     "digest": "6f541eb36329df12"
+    },
+    "contact/fmessage_new.db": {
+     "tables": 1,
+     "rows": 2,
+     "digest": "51af7e7c81876ed6"
+    },
+    "contact/wa_contact_new.db": {
+     "tables": 2,
+     "rows": 18,
+     "digest": "08c3f1bc7d6c636c"
+    },
+    "emoticon/emoticon.db": {
+     "tables": 7,
+     "rows": 2544,
+     "digest": "68207dba72115792"
+    },
+    "favorite/favorite.db": {
+     "tables": 9,
+     "rows": 263,
+     "digest": "9bb0cb6b2d4268dc"
+    },
+    "favorite/favorite_fts.db": {
+     "tables": 7,
+     "rows": 479,
+     "digest": "dacc33ca926a95ff"
+    },
+    "general/general.db": {
+     "tables": 25,
+     "rows": 1268,
+     "digest": "7bd61b0866f5bb45"
+    },
+    "hardlink/hardlink.db": {
+     "tables": 8,
+     "rows": 29876,
+     "digest": "6e49d8c471af3783"
+    },
+    "head_image/head_image.db": {
+     "tables": 1,
+     "rows": 1505,
+     "digest": "332fd73eb023eced"
+    },
+    "ilinkvoip/ilinkvoip.db": {
+     "tables": 1,
+     "rows": 0,
+     "digest": "8fc89858fdf62bb2"
+    },
+    "message/biz_message_0.db": {
+     "tables": 113,
+     "rows": 5835,
+     "digest": "745385323accde75"
+    },
+    "message/biz_message_1.db": {
+     "tables": 44,
+     "rows": 241,
+     "digest": "1911bfccf77e86bb"
+    },
+    "message/media_0.db": {
+     "tables": 3,
+     "rows": 1047,
+     "digest": "cdae3d3655009113"
+    },
+    "message/media_1.db": {
+     "tables": 3,
+     "rows": 4898,
+     "digest": "7d8b42e2a9ed445a"
+    },
+    "message/media_2.db": {
+     "tables": 3,
+     "rows": 13,
+     "digest": "110e7bf47707fb26"
+    },
+    "message/message_0.db": {
+     "tables": 297,
+     "rows": 201799,
+     "digest": "188687d5fd47c33a"
+    },
+    "message/message_1.db": {
+     "tables": 223,
+     "rows": 167452,
+     "digest": "f88899e8ec16cd46"
+    },
+    "message/message_2.db": {
+     "tables": 165,
+     "rows": 51788,
+     "digest": "b9baa717e395fa1b"
+    },
+    "message/message_3.db": {
+     "tables": 100,
+     "rows": 30491,
+     "digest": "ad42a7bb9eb9f475"
+    },
+    "message/message_4.db": {
+     "tables": 488,
+     "rows": 331085,
+     "digest": "3ecd1706fbfdaafa"
+    },
+    "message/message_5.db": {
+     "tables": 61,
+     "rows": 6013,
+     "digest": "f88a587ad656fc09"
+    },
+    "message/message_fts.db": {
+     "tables": 90,
+     "rows": 3571216,
+     "digest": "aa07b2ecef5c0ee7"
+    },
+    "message/message_resource.db": {
+     "tables": 7,
+     "rows": 155397,
+     "digest": "f1fa37a9a7f23b80"
+    },
+    "message/message_revoke.db": {
+     "tables": 1,
+     "rows": 0,
+     "digest": "6fa2428b4558afd1"
+    },
+    "message/weclaw.db": {
+     "tables": 1,
+     "rows": 0,
+     "digest": "aa59d5fa8df1ca48"
+    },
+    "migrate/unspportmsg.db": {
+     "tables": 1,
+     "rows": 49,
+     "digest": "03c1138829be0929"
+    },
+    "newtips/newtips.db": {
+     "tables": 1,
+     "rows": 2,
+     "digest": "d5d67215796a20e6"
+    },
+    "session/session.db": {
+     "tables": 8,
+     "rows": 20414,
+     "digest": "b9f7e7b4e6e4b34d"
+    },
+    "sns/sns.db": {
+     "tables": 13,
+     "rows": 15600,
+     "digest": "c37d6a55560d2d09"
+    },
+    "solitaire/solitaire.db": {
+     "tables": 12,
+     "rows": 132,
+     "digest": "6312b90b6b85401e"
+    },
+    "third_app_icon/third_app_icon.db": {
+     "tables": 1,
+     "rows": 0,
+     "digest": "98490e70305a1775"
+    },
+    "wcfinder/wcfinder.db": {
+     "tables": 2,
+     "rows": 2,
+     "digest": "f4b4a16afb62737f"
+    }
+   },
+   "rss_self_mb": 47.9,
+   "rss_children_mb": 12.9,
+   "process_wall_s": 15.4
+  },
+  "inproc": {
+   "elapsed_s": 10.94,
+   "dbs": {
+    "biz/biz.db": {
+     "tables": 1,
+     "rows": 0,
+     "digest": "0b8e49507fae5420"
+    },
+    "bizchat/bizchat.db": {
+     "tables": 4,
+     "rows": 5,
+     "digest": "07879c5311d987f0"
+    },
+    "chatbot/chatbot_message.db": {
+     "tables": 4,
+     "rows": 0,
+     "digest": "31cf488127ed494b"
+    },
+    "contact/contact.db": {
+     "tables": 19,
+     "rows": 47589,
+     "digest": "f6513f35b8849446"
+    },
+    "contact/contact_fts.db": {
+     "tables": 37,
+     "rows": 161735,
+     "digest": "6f541eb36329df12"
+    },
+    "contact/fmessage_new.db": {
+     "tables": 1,
+     "rows": 2,
+     "digest": "51af7e7c81876ed6"
+    },
+    "contact/wa_contact_new.db": {
+     "tables": 2,
+     "rows": 18,
+     "digest": "08c3f1bc7d6c636c"
+    },
+    "emoticon/emoticon.db": {
+     "tables": 7,
+     "rows": 2544,
+     "digest": "68207dba72115792"
+    },
+    "favorite/favorite.db": {
+     "tables": 9,
+     "rows": 263,
+     "digest": "9bb0cb6b2d4268dc"
+    },
+    "favorite/favorite_fts.db": {
+     "tables": 7,
+     "rows": 479,
+     "digest": "dacc33ca926a95ff"
+    },
+    "general/general.db": {
+     "tables": 25,
+     "rows": 1268,
+     "digest": "7bd61b0866f5bb45"
+    },
+    "hardlink/hardlink.db": {
+     "tables": 8,
+     "rows": 29876,
+     "digest": "6e49d8c471af3783"
+    },
+    "head_image/head_image.db": {
+     "tables": 1,
+     "rows": 1505,
+     "digest": "332fd73eb023eced"
+    },
+    "ilinkvoip/ilinkvoip.db": {
+     "tables": 1,
+     "rows": 0,
+     "digest": "8fc89858fdf62bb2"
+    },
+    "message/biz_message_0.db": {
+     "tables": 113,
+     "rows": 5835,
+     "digest": "745385323accde75"
+    },
+    "message/biz_message_1.db": {
+     "tables": 44,
+     "rows": 241,
+     "digest": "1911bfccf77e86bb"
+    },
+    "message/media_0.db": {
+     "tables": 3,
+     "rows": 1047,
+     "digest": "cdae3d3655009113"
+    },
+    "message/media_1.db": {
+     "tables": 3,
+     "rows": 4898,
+     "digest": "7d8b42e2a9ed445a"
+    },
+    "message/media_2.db": {
+     "tables": 3,
+     "rows": 13,
+     "digest": "110e7bf47707fb26"
+    },
+    "message/message_0.db": {
+     "tables": 297,
+     "rows": 201799,
+     "digest": "188687d5fd47c33a"
+    },
+    "message/message_1.db": {
+     "tables": 223,
+     "rows": 167452,
+     "digest": "f88899e8ec16cd46"
+    },
+    "message/message_2.db": {
+     "tables": 165,
+     "rows": 51788,
+     "digest": "b9baa717e395fa1b"
+    },
+    "message/message_3.db": {
+     "tables": 100,
+     "rows": 30491,
+     "digest": "ad42a7bb9eb9f475"
+    },
+    "message/message_4.db": {
+     "tables": 488,
+     "rows": 331085,
+     "digest": "3ecd1706fbfdaafa"
+    },
+    "message/message_5.db": {
+     "tables": 61,
+     "rows": 6013,
+     "digest": "f88a587ad656fc09"
+    },
+    "message/message_fts.db": {
+     "tables": 90,
+     "rows": 3571216,
+     "digest": "aa07b2ecef5c0ee7"
+    },
+    "message/message_resource.db": {
+     "tables": 7,
+     "rows": 155397,
+     "digest": "f1fa37a9a7f23b80"
+    },
+    "message/message_revoke.db": {
+     "tables": 1,
+     "rows": 0,
+     "digest": "6fa2428b4558afd1"
+    },
+    "message/weclaw.db": {
+     "tables": 1,
+     "rows": 0,
+     "digest": "aa59d5fa8df1ca48"
+    },
+    "migrate/unspportmsg.db": {
+     "tables": 1,
+     "rows": 49,
+     "digest": "03c1138829be0929"
+    },
+    "newtips/newtips.db": {
+     "tables": 1,
+     "rows": 2,
+     "digest": "d5d67215796a20e6"
+    },
+    "session/session.db": {
+     "tables": 8,
+     "rows": 20414,
+     "digest": "b9f7e7b4e6e4b34d"
+    },
+    "sns/sns.db": {
+     "tables": 13,
+     "rows": 15600,
+     "digest": "c37d6a55560d2d09"
+    },
+    "solitaire/solitaire.db": {
+     "tables": 12,
+     "rows": 132,
+     "digest": "6312b90b6b85401e"
+    },
+    "third_app_icon/third_app_icon.db": {
+     "tables": 1,
+     "rows": 0,
+     "digest": "98490e70305a1775"
+    },
+    "wcfinder/wcfinder.db": {
+     "tables": 2,
+     "rows": 2,
+     "digest": "f4b4a16afb62737f"
+    }
+   },
+   "rss_self_mb": 59.5,
+   "rss_children_mb": 2.2,
+   "process_wall_s": 11.11
+  },
+  "mismatch": []
+ },
+ "export": {
+  "baseline": {
+   "elapsed_s": 71.34,
+   "exported": 778451,
+   "digests": {
+    "messages": [
+     778451,
+     "c64291b1bc55f401"
+    ],
+    "media_refs": [
+     99233,
+     "9a811b36c452cb4f"
+    ],
+    "display_names": [
+     0,
+     "e3b0c44298fc1c14"
+    ],
+    "fts_hits": [
+     3011,
+     "a1c1909eee1a8578"
+    ]
+   },
+   "rss_self_mb": 85.2,
+   "rss_children_mb": 13.1,
+   "process_wall_s": 73.62
+  },
+  "inproc": {
+   "elapsed_s": 62.86,
+   "exported": 778451,
+   "digests": {
+    "messages": [
+     778451,
+     "c64291b1bc55f401"
+    ],
+    "media_refs": [
+     99233,
+     "9a811b36c452cb4f"
+    ],
+    "display_names": [
+     0,
+     "e3b0c44298fc1c14"
+    ],
+    "fts_hits": [
+     3011,
+     "a1c1909eee1a8578"
+    ]
+   },
+   "rss_self_mb": 100.7,
+   "rss_children_mb": 2.2,
+   "process_wall_s": 65.24
+  },
+  "same": true
+ },
+ "recent": {
+  "baseline": {
+   "import_s": 0.058,
+   "first_call_s": 3.403,
+   "warm_median_s": 0.639,
+   "warm_max_s": 4.221,
+   "calls": 15,
+   "digests": [
+    "f7839fb5189de082",
+    "5b379dcd9b774c83",
+    "db42c8384803fe2d"
+   ],
+   "rss_self_mb": 62.4,
+   "rss_children_mb": 13.1,
+   "process_wall_s": 26.05
+  },
+  "inproc": {
+   "import_s": 0.066,
+   "first_call_s": 0.667,
+   "warm_median_s": 0.181,
+   "warm_max_s": 0.304,
+   "calls": 15,
+   "digests": [
+    "f7839fb5189de082",
+    "5b379dcd9b774c83",
+    "db42c8384803fe2d"
+   ],
+   "rss_self_mb": 73.7,
+   "rss_children_mb": 2.2,
+   "process_wall_s": 3.77
+  },
+  "same": true
+ }
+}

@@ -2,6 +2,10 @@
 
 > 日期：2026-11-23 ｜ 基线提交：`97b78dc` ｜ 原型代码：[`spike/phase01/`](../../spike/phase01/README.md)
 > （独立实验，**`src/`、`pyproject.toml`、`uv.lock` 均未改动**）
+>
+> **2026-11-24 补注**：除 Rust 对照组（`native_decode/`、`bench_native.py`）外，本报告提到的原型与基准脚本已在
+> 正式集成后删除（它们猴补丁的接口已变，留着会给出错误的对照）；`results/*.json` 作为原始数据保留。
+> 集成后的复测见 [phase-03-acceptance-report.md](phase-03-acceptance-report.md)。
 
 ## 0. 结论
 
