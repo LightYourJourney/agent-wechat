@@ -229,6 +229,30 @@ def test_excluded_messages_are_never_derived(tmp_path, monkeypatch):
     assert res["counts"].get("asr") == 1
 
 
+def test_purge_during_recognition_does_not_write_the_text_back(tmp_path, monkeypatch):
+    """识别（单条最长 60s）期间会话被销毁：结果不许写回来。
+
+    `derived ingest` 不登记任务，`purge --chat` 的闸门看不见它；调引擎之前那次
+    `is_excluded` 早就过了。注入点：引擎被调用时另开连接写墓碑、删消息并提交——
+    与 purge 的两段式落下的状态一致。
+    """
+    _env(tmp_path, monkeypatch)
+    victim = _keys()[0]
+
+    class PurgeMidway(FakeOcr):
+        def extract(self, path):
+            with store.open() as other:
+                exclusions.add_from_messages(other, ACCT, CHAT)
+                store.delete_chat(other, account=ACCT, chat_id=CHAT)
+            return super().extract(path)
+
+    res = derived.ingest(ACCT, CHAT, kinds=("ocr",), ocr=PurgeMidway("被删图片里的隐私文字"))
+    assert res["counts"] == {} and res["skipped"].get("excluded") == 1, res
+    with store.open() as con:
+        assert con.execute("SELECT count(*) FROM derived_text WHERE msg_key=?",
+                           (victim,)).fetchone()[0] == 0, "被删图片的 OCR 正文写回来了"
+
+
 # ---------------------------------------------------------------- 真实引擎冒烟
 
 @pytest.mark.skipif(not derived.TesseractOcr().available(),

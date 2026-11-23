@@ -301,9 +301,13 @@ def _vector_watermark(con: sqlite3.Connection, account: str) -> int:
 
 
 def _set_vector_watermark(con: sqlite3.Connection, account: str, rowid: int) -> None:
+    # 写入值封顶在 `max(messages.id)`：扫描期间 `purge --chat` 删掉了**最高的那几行**时，
+    # 扫到的 last_id 会高过库里现存的最大 id，而 messages.id 不是 AUTOINCREMENT——新消息
+    # 复用这段 id、全部落在水位线之下，从此静默不被嵌入。全局 max 是 O(1)（rowid B 树），
+    # 且新行的 id 恒大于写入时刻的全局 max，所以封顶不会让任何存活行被重嵌。
     con.execute(
         """INSERT INTO vector_watermark(model_id, account, last_rowid, updated_at)
-           VALUES (?,?,?,?)
+           VALUES (?,?, min(?, (SELECT COALESCE(max(id), 0) FROM messages)), ?)
            ON CONFLICT(model_id, account) DO UPDATE SET
              last_rowid = max(last_rowid, excluded.last_rowid),
              updated_at = excluded.updated_at""",
@@ -312,12 +316,25 @@ def _set_vector_watermark(con: sqlite3.Connection, account: str, rowid: int) -> 
 
 _SELECT_ROWS = (
     "SELECT " + messages.column_list(
-        "id", "account", "chat_md5", "chat_id", "ts", "msg_type", "sender_id",
+        "id", "msg_key", "account", "chat_md5", "chat_id", "ts", "msg_type", "sender_id",
         "sender_name", "is_self", "content", "media_hint")
     + " FROM messages WHERE account = ? AND id > ? ORDER BY id")
 
 _INSERT_VEC = ("INSERT INTO vec_messages(msg_rowid, embedding, acct_chat, account, ts, preview) "
                "VALUES (?,?,?,?,?,?)")
+
+
+def _alive_ids(con: sqlite3.Connection, pairs: list[tuple[int, str]]) -> set[int]:
+    """`pairs` 里 (id, msg_key) **仍在 messages 里**的那些 id。分块查，避开变量数上限。"""
+    alive: set[int] = set()
+    want = dict(pairs)
+    ids = list(want)
+    for i in range(0, len(ids), 500):
+        chunk = ids[i:i + 500]
+        alive.update(r[0] for r in con.execute(
+            f"SELECT id, msg_key FROM messages WHERE id IN ({','.join('?' * len(chunk))})",
+            chunk) if want.get(r[0]) == r[1])
+    return alive
 
 
 def _build_account(con: sqlite3.Connection, acct: str, embedder: FastEmbedEmbedder,
@@ -365,13 +382,19 @@ def _build_account(con: sqlite3.Connection, acct: str, embedder: FastEmbedEmbedd
             raise VectorError(
                 f"嵌入返回的向量数不足（{len(vecs)} != {len(order)}）：索引不完整。"
                 "重跑一次即可从上次提交处续跑（不带 rebuild）；反复出现再用 rebuild 重建")
+        # **写入时复查消息还在**（与下面的 INSERT 同一个写事务）：本函数不登记任务，`purge --chat`
+        # 的闸门看不见它——嵌入期间被销毁的会话，其向量（preview 列是真正文）否则会被写回来。
+        # 按 (id, msg_key) 对：messages.id 不是 AUTOINCREMENT，被删的 id 会被新消息复用。
+        if not con.in_transaction:
+            con.execute("BEGIN IMMEDIATE")
+        alive = _alive_ids(con, [(r[0], r[4]) for r in buf_rows])
         con.executemany(_INSERT_VEC,
                         # serialize_float32 注解成 List，实际只做 `pack(*v)`：numpy 数组照收
                         [(buf_rows[i][0], sqlite_vec.serialize_float32(v),  # pyright: ignore[reportArgumentType]
                           buf_rows[i][1],
                           acct, buf_rows[i][2], buf_rows[i][3])
-                         for i, v in zip(order, vecs)])
-        embedded += len(buf_rows)
+                         for i, v in zip(order, vecs) if buf_rows[i][0] in alive])
+        embedded += len(alive)
         buf_texts.clear()
         buf_rows.clear()
 
@@ -386,7 +409,8 @@ def _build_account(con: sqlite3.Connection, acct: str, embedder: FastEmbedEmbedd
             prev = prev_by_chat.get(chat_key)
             if should_embed(row):
                 buf_texts.append(doc_text(row, prev))
-                buf_rows.append((row["id"], chat_key, row["ts"], (prev or "")[:80]))
+                buf_rows.append((row["id"], chat_key, row["ts"], (prev or "")[:80],
+                                 row["msg_key"]))
                 # 只有「有意义的消息」才作为后一条的上文：否则媒体占位（[image] 之类）
                 # 会污染前缀，让所有短消息都带上「上文: [image]…」的噪声
                 prev_by_chat[chat_key] = display_text(row)

@@ -109,6 +109,21 @@ def add_from_messages(con: sqlite3.Connection, account: str, chat_id: str) -> in
     return cur.rowcount
 
 
+def count_unblocked(con: sqlite3.Connection, account: str, chat_id: str) -> int:
+    """该会话**谓词命中、却不在清单里**的消息条数——与 `add_from_messages` 同一个谓词。
+
+    `purge` 在删除事务里、DELETE 之前要它为 0：「墓碑总数 ≥ 计划条数」那种判据会被同一
+    会话的**历史墓碑**垫高（上一次 purge 留下 5 条，这次新来 3 条且一条没挡住，5 ≥ 3 照样
+    报 ✅），这 3 条随后被删、下次导出复活。逐条判 `NOT EXISTS` 才没有这个盲区。
+    """
+    ident = messages.ChatIdentity.of(account, chat_id)
+    return con.execute(
+        "SELECT count(*) FROM messages m "
+        f"WHERE m.account=? AND {ident.messages_where} "
+        "AND NOT EXISTS (SELECT 1 FROM exclusions.excluded x WHERE x.msg_key = m.msg_key)",
+        ident.messages_args).fetchone()[0]
+
+
 def add(con: sqlite3.Connection, rows: list[tuple[str, str, str]]) -> int:
     """批量写墓碑（**仅供测试播种/夹具**——生产写入端是 `add_from_messages`）。幂等
     （`INSERT OR IGNORE`）。不 commit：由调用方收口。

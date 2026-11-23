@@ -47,11 +47,14 @@ def purge_chat_targets(contact: str, account: str | None = None) -> list[dict] |
     md5 = messages.chat_md5(chat_id)
     try:
         if store.DB_PATH.exists():
+            # 判据与 `ChatIdentity.messages_where` 同源（去掉账号那一列）：只按 `chat_id=?`
+            # 找会漏掉**只剩退化 id** 的账号——计划 0 条、核查 ✅，正文原样留着。
+            ident = messages.ChatIdentity.of("", chat_id)
             with store.open() as con:
                 rows = con.execute(
-                    "SELECT account FROM messages WHERE chat_id=? "
+                    f"SELECT account FROM messages WHERE {ident.messages_where} "
                     "UNION SELECT account FROM exclusions.excluded WHERE chat_md5=? "
-                    "ORDER BY account", (chat_id, md5)).fetchall()
+                    "ORDER BY account", (*ident.messages_args[1:], md5)).fetchall()
         else:
             with exclusions.standalone(store.DB_PATH) as con:
                 rows = con.execute(

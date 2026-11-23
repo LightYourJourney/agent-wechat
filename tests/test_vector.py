@@ -230,6 +230,36 @@ def test_build_index_second_run_is_noop(env):
     assert vector.build_index(embedder=FakeEmbedder())["embedded_this_run"] == 0   # 水位线生效
 
 
+def test_build_does_not_write_back_rows_purged_while_embedding(env):
+    """嵌入期间被销毁的会话，向量不许写回来；水位线也不许停在已删的高位。
+
+    `build_index` 不登记任务（CLI 与 launchd 的 sync 直接调它），`purge --chat` 的闸门看不见
+    它。注入点：embedder 被调用时另开连接把 victim 会话删掉并提交——等价于 purge 在嵌入
+    （无锁、可长达分钟）的窗口里完成。victim 占着**最高的 id**：删掉后新消息复用这段 id，
+    水位线若停在旧高位，它们从此静默不被嵌入。
+    """
+    store.upsert_batch(env, [mk_row("acct", "keeper", 1, "留下来的消息")]
+                       + [mk_row("acct", "victim", i, f"被删的正文{i}") for i in (2, 3, 4)])
+    env.commit()
+
+    class _PurgeMidway(FakeEmbedder):
+        def embed(self, texts):
+            other = sqlite3.connect(store.DB_PATH)
+            other.execute("DELETE FROM messages WHERE chat_id='victim'")
+            other.commit(); other.close()
+            return super().embed(texts)
+
+    res = vector.build_index(embedder=_PurgeMidway())
+    assert res["embedded_this_run"] == 1
+    previews = [r[0] for r in env.execute("SELECT msg_rowid FROM vec_messages")]
+    assert len(previews) == 1, f"被删会话的向量写回来了：{previews}"
+
+    store.upsert_batch(env, [mk_row("acct", "keeper", 9, "删除之后的新消息")])
+    env.commit()
+    assert vector.build_index(embedder=FakeEmbedder())["embedded_this_run"] == 1, \
+        "复用了被删 id 的新消息没被嵌入：水位线停在了已删的高位"
+
+
 def test_build_index_resumes_after_new_rows(env):
     store.upsert_batch(env, [mk_row("acct", "chatA", 1, "第一条消息")])
     vector.build_index(embedder=FakeEmbedder())

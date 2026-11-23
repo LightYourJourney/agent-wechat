@@ -1064,6 +1064,15 @@ def execute_chat(plan: ChatPlan) -> tuple[ChatReport, ...]:
                 # 谓词 DELETE 删掉，必须同时被墓碑挡住。INSERT OR IGNORE，幂等。
                 con.execute("BEGIN IMMEDIATE")
                 written += _write_tombstone(con, e.account, e.chat_id)
+                # 删之前**逐条**确认全被挡住（同一把写锁内，判据与写墓碑同一个谓词）：
+                # 墓碑写入出了任何岔子，这里拒绝并回滚（`store.open()` 的 except 分支），
+                # 停在「没删」这一侧——不许删一批没挡住的行。
+                unblocked = exclusions.count_unblocked(con, e.account, e.chat_id)
+                if unblocked:
+                    raise errors.PurgeRefused(
+                        f"删除未执行：{e.account}/{e.chat_id} 有 {unblocked} 条消息没能写进"
+                        f"排除清单（本次计划 {len(plan.entries)} 项，此前已完成 {len(out)} 项）",
+                        hint=f"删掉它们下次导出就会复活；检查 {exclusions.path()} 是否可写后重试")
                 deleted = store.delete_chat(con, account=e.account, chat_id=e.chat_id)
                 try:
                     con.commit()

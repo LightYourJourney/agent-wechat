@@ -896,8 +896,11 @@ def test_verify_chat_flags_a_missing_tombstone(tmp_path, monkeypatch):
     # 桩打在 exclusions.add 上没用——execute_chat 走的是裸 SQL（见 _write_tombstone 的 docstring）。
     monkeypatch.setattr(purge, "_write_tombstone", lambda *a, **k: 0)
     plan = purge.plan_chat([{"account": "a", "chat_id": VICTIM, "chat_md5": VICTIM_MD5}])
-    purge.execute_chat(plan)
+    # 执行侧先拦：没挡住的行**不许删**（删了就是「删了但没挡」，下次导出复活）。
+    with pytest.raises(errors.PurgeRefused, match="没能写进排除清单"):
+        purge.execute_chat(plan)
     res = purge.verify_chat(plan)
+    assert res.leftover, "拒绝执行 = 一条没删，核查要看得见"
     assert res.tombstone_ok is False
     assert "不可逆性未建立" in cli._render_chat_residue(res)
 
@@ -1007,11 +1010,34 @@ def test_verify_chat_counts_only_this_chats_exclusions(tmp_path, monkeypatch):
                              (f"a|{other}|message_0.db|2", "a", other)])
     monkeypatch.setattr(purge, "_write_tombstone", lambda *a, **k: 0)
     plan = purge.plan_chat([{"account": "a", "chat_id": VICTIM, "chat_md5": VICTIM_MD5}])
-    purge.execute_chat(plan)
+    with pytest.raises(errors.PurgeRefused):
+        purge.execute_chat(plan)
     res = purge.verify_chat(plan)
     assert res.tombstone_written == 0, "别的会话的 2 条不能算进本次"
     assert res.tombstone_ok is False
     assert "不可逆性未建立" in cli._render_chat_residue(res)
+
+
+def test_execute_chat_refuses_when_history_tombstones_mask_new_unblocked_rows(tmp_path, monkeypatch):
+    """同一会话的**历史墓碑**不能替这次没挡住的新行作保。
+
+    第一次 purge 留下 2 条墓碑；之后又来 1 条新消息。第二次 purge 若墓碑写入失败，
+    「本会话墓碑总数 ≥ 计划条数」（2 ≥ 1）照样成立——那一条被删掉、却没被挡住，下次导出复活。
+    执行侧必须逐条确认、拒绝删除。
+    """
+    home = tmp_path / "home"; home.mkdir(parents=True)
+    plan_of = lambda: purge.plan_chat([{"account": "a", "chat_id": VICTIM, "chat_md5": VICTIM_MD5}])
+    with store.open() as con:
+        store.upsert_batch(con, [_victim_row(1), _victim_row(2)])
+    purge.execute_chat(plan_of())
+    with store.open() as con:
+        assert exclusions.count_chat(con, "a", VICTIM_MD5) == 2, "前提：历史墓碑 2 条在"
+        store.upsert_batch(con, [_victim_row(3)])   # 新消息：msg_key 不在清单里，照常入库
+    monkeypatch.setattr(purge, "_write_tombstone", lambda *a, **k: 0)
+    with pytest.raises(errors.PurgeRefused, match="1 条消息没能写进"):
+        purge.execute_chat(plan_of())
+    with store.open() as con:
+        assert store.chat_row_counts(con, "a", VICTIM)["messages"] == 1, "没挡住就不许删"
 
 
 def test_execute_chat_is_idempotent_and_tolerates_missing_export(tmp_path):
@@ -1427,6 +1453,32 @@ def test_verify_chat_derives_chat_md5_instead_of_trusting_the_plan(tmp_path):
     res = purge.verify_chat(plan)
     assert res.tombstone_written == 1, "墓碑就在那儿，只是键要用派生的那个"
     assert res.tombstone_ok is True
+
+
+def test_targets_find_an_account_whose_rows_are_all_degraded(tmp_path, monkeypatch):
+    """会话在某账号下**只剩退化 id**（`md5:<hex>`）时，那个账号也必须进 targets。
+
+    找目标按 `chat_id=?` 精确匹配的话只认真名：从没解析出真名的会话（导出时 contact.db
+    恰好读不了、此后也没有真名行来触发自愈）在这里拿到空集 → 计划 0 条、核查一片 ✅，
+    而 5 条正文原样留在索引里。判据必须与 `ChatIdentity.messages_where` 同源。
+    """
+    from agent_wechat import usecases
+    from agent_wechat.usecases import memory
+
+    deg = messages.degraded_chat_id(VICTIM_MD5)
+    with store.open() as con:
+        store.upsert_batch(con, [_row(deg, VICTIM_MD5, n) for n in range(1, 6)]
+                           + [_row(VICTIM, VICTIM_MD5, 9, account="b")])
+    monkeypatch.setattr(memory, "pkg_context", lambda account=None: type(
+        "C", (), {"resolve_optional": staticmethod(lambda c: VICTIM)})())
+
+    targets = usecases.purge_chat_targets("victim")
+    assert sorted(t["account"] for t in targets) == ["a", "b"], \
+        "只有退化行的账号 a 被漏掉了"
+    plan = purge.plan_chat(targets)
+    purge.execute_chat(plan)
+    with store.open() as con:
+        assert con.execute("SELECT count(*) FROM messages").fetchone()[0] == 0
 
 
 def test_media_rebuild_refs_cannot_revive_a_purged_chat(tmp_path, monkeypatch):

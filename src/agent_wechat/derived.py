@@ -268,18 +268,28 @@ def _media_path(row: sqlite3.Row, out_root: pathlib.Path) -> pathlib.Path | None
 
 def _insert(con: sqlite3.Connection, *, row: sqlite3.Row, kind: str, text: str,
             engine: str, version: str | None, source: pathlib.Path,
-            quality: float | None, now: int) -> None:
-    con.execute(
+            quality: float | None, now: int) -> bool:
+    """写一条派生文本；**源消息已不在或已被排除时不写**，返回是否写入。
+
+    判据与写入是**同一条语句**（`INSERT … SELECT … WHERE`）：识别引擎单条最长跑 60s，
+    调引擎之前那次 `is_excluded` 管不到这段窗口——`purge --chat` 在窗口里完成的话
+    （本命令不登记任务，purge 的闸门看不见它），被删图片的 OCR 正文会被写回来。
+    """
+    cur = con.execute(
         "INSERT INTO derived_text(derivation_id, msg_key, account, chat_id, kind,"
         " text, engine, engine_version, source, quality, status, created_at)"
-        " VALUES(?,?,?,?,?,?,?,?,?,?, 'auto', ?)"
+        " SELECT ?,?,?,?,?,?,?,?,?,?, 'auto', ?"
+        " WHERE EXISTS (SELECT 1 FROM messages WHERE msg_key = ?)"
+        " AND NOT EXISTS (SELECT 1 FROM exclusions.excluded WHERE msg_key = ?)"
         " ON CONFLICT(derivation_id) DO UPDATE SET"
         " text=excluded.text, engine=excluded.engine,"
         " engine_version=excluded.engine_version, source=excluded.source,"
         " quality=excluded.quality, status='auto', created_at=excluded.created_at"
         " WHERE derived_text.status != 'deleted'",
         (f"{row['msg_key']}|{kind}", row["msg_key"], row["account"], row["chat_id"],
-         kind, text, engine, version, str(source), quality, now))
+         kind, text, engine, version, str(source), quality, now,
+         row["msg_key"], row["msg_key"]))
+    return cur.rowcount > 0
 
 
 def ingest(account: str, chat: str | None = None, *,
@@ -392,11 +402,14 @@ def ingest(account: str, chat: str | None = None, *,
                 if not text.strip():
                     skip("empty_output")      # 白图/静音：不落空行
                     continue
-                _insert(con, row=row, kind=kind, text=text, engine=eng.name,
-                        version=eng.version(), source=path, quality=quality,
-                        now=int(now if now is not None else time.time()))
+                written = _insert(con, row=row, kind=kind, text=text, engine=eng.name,
+                                  version=eng.version(), source=path, quality=quality,
+                                  now=int(now if now is not None else time.time()))
                 _commit(con)
-                hit(kind)
+                if written:
+                    hit(kind)
+                else:
+                    skip("excluded")      # 识别期间被销毁（见 `_insert`）
 
     if result["skipped"].get("engine_unavailable"):
         result["degraded"].append(
