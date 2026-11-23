@@ -11,12 +11,12 @@
 | 微信 | **macOS 4.1.x**（实测版本 4.1.13.63） | 4.1+ 是硬性要求：该版本起密钥只以 passphrase 形式存在内存中，本项目按此路线实现。**其他 4.x 小版本路径/结构可能不同，需自行验证**（见 §4） |
 | Python | ≥ 3.12（经 `uv` 自动管理） | 无需手动装 Python |
 | uv | 最新版 | `curl -LsSf https://astral.sh/uv/install.sh \| sh` |
-| sqlcipher CLI | 4.x（`brew install sqlcipher`） | 用于数据库解密导出 |
+| sqlcipher CLI | 4.x（`brew install sqlcipher`）——**可选** | 日常读取走进程内 SQLCipher（`sqlcipher3-wheels`，随 `uv sync` 安装，无需 brew）。只有 `decrypt` / `inspect` 两个调试命令、`AGENT_WECHAT_DECRYPT=cli` 回退，以及 Python ≥ 3.15（该依赖尚无 wheel，自动回退）时才需要它；开发者跑测试也需要 |
 | Xcode Command Line Tools | 提供 lldb | `xcode-select --install` |
 | FileVault | **建议开启** | 本地索引库为明文，依赖全盘加密保护；代码不校验也不阻断，建议用 `fdesetup status` 确认（见 SECURITY.md） |
 
 > 💡 检查环境：`csrutil status`（SIP 保持 enabled 即可，**不需要关闭 SIP**）；
-> `fdesetup status`（FileVault）；`sqlcipher -version`。
+> `fdesetup status`（FileVault）；`agent-wechat doctor`（含当前解密后端）。
 
 ## 2. 安装步骤
 

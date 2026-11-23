@@ -204,6 +204,21 @@ def test_doctor_reports_schema_fts_watermarks_and_sync_state(tmp_path, monkeypat
     assert info["permissions"]["private"] is True
 
 
+def test_doctor_reports_the_decrypt_backend(tmp_path, monkeypatch):
+    """Phase 02：回退到 CLI 后端而本机没有 sqlcipher 命令 = 什么都读不了，必须进 problems。"""
+    _env(tmp_path, monkeypatch)
+    monkeypatch.delenv("AGENT_WECHAT_DECRYPT", raising=False)
+    assert sync.diagnose(ACCT)["decrypt"]["backend"] == "inproc"
+
+    monkeypatch.setenv("AGENT_WECHAT_DECRYPT", "cli")
+    real_which = sync.shutil.which
+    monkeypatch.setattr(sync.shutil, "which",
+                        lambda name: None if name == "sqlcipher" else real_which(name))
+    info = sync.diagnose(ACCT)
+    assert info["decrypt"] == {"backend": "cli", "sqlcipher_cli": False}
+    assert any("sqlcipher" in p for p in info["problems"])
+
+
 def test_doctor_flags_an_fts_desync(tmp_path, monkeypatch):
     _env(tmp_path, monkeypatch)
     sync.run_sync(ACCT)

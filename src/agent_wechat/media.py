@@ -1253,21 +1253,17 @@ def voice_body_keys(account: str) -> frozenset[tuple[str, int]] | None:
     out: set[tuple[str, int]] = set()
     for db in _voice_db_paths(account):
         try:
-            with decrypt.decrypted(db, passphrase) as plain:
-                con = decrypt.open_plain(plain)
+            with decrypt.open_db(db, passphrase) as con:
                 con.text_factory = bytes
-                try:
-                    n2i = {rid: (u.decode("utf-8", "replace")
-                                 if isinstance(u, bytes) else u)
-                           for rid, u in con.execute("SELECT rowid, user_name FROM Name2Id")}
-                    for cid, lid in con.execute(
-                            "SELECT chat_name_id, local_id FROM VoiceInfo "
-                            "WHERE voice_data IS NOT NULL"):
-                        u = n2i.get(cid)
-                        if u:
-                            out.add((messages.md5_of(u), lid))
-                finally:
-                    con.close()
+                n2i = {rid: (u.decode("utf-8", "replace")
+                             if isinstance(u, bytes) else u)
+                       for rid, u in con.execute("SELECT rowid, user_name FROM Name2Id")}
+                for cid, lid in con.execute(
+                        "SELECT chat_name_id, local_id FROM VoiceInfo "
+                        "WHERE voice_data IS NOT NULL"):
+                    u = n2i.get(cid)
+                    if u:
+                        out.add((messages.md5_of(u), lid))
         except (errors.AgentWeChatError, sqlite3.Error, OSError):
             # 与 _export_voices 同一口径：任一分片打不开 → 整体判为「读不到」，
             # 不做部分可信（半个集合会被上层当成完整事实）。
@@ -1344,10 +1340,11 @@ def sticker_cdn_urls(account: str, items: Sequence[tuple[str, str, int]]
     里」在下游完全同形，而前者是能力级失败（分片损坏 / 密钥失效 / 结构漂移），本应公告
     （对照：语音侧同类失败**有**护栏且有用例）。文案与「本机没有凭据」区分开。
 
-    **为什么必须批量**：回源要解密分片，而 `reader._open` 走的是 `decrypt.decrypted`
-    ——那是一次**完整分片**的 sqlcipher_export。本机 `message_4.db` 有 **235 MB**，
+    **为什么必须批量**：回源要打开分片，每次 `reader._open` 都要快照 + 派生密钥；CLI 后端下
+    更是一次**完整分片**的 sqlcipher_export（本机 `message_4.db` 有 **235 MB**）——
     逐条回源 = 每条贴纸解密一整个分片：实测 120 条跑过 120 秒仍未完成，导出几十条就不可用。
-    **按分片分组、每个分片只解一次**是这条路径可用的前提，不是优化。
+    **按分片分组、每个分片只开一次**是这条路径可用的前提，不是优化（进程内后端下代价小得多，
+    但 CLI 回退路径仍在）。
 
     **凭据只在本函数的栈帧里存在**：`cdnurl`（`filekey` 在其查询串里）取出来交给返回值，
     不落盘、不进日志、不进信封（贴纸 XML 不落库是结构性根治，spec §7.1）。
@@ -1714,17 +1711,13 @@ def _export_voices(st: _ExportState, chat_ids: list[str]) -> None:
         for db in _voice_db_paths(st.account):
             try:
                 passphrase = keys_mod.get_passphrase(st.account)
-                with decrypt.decrypted(db, passphrase) as plain:
-                    con = decrypt.open_plain(plain)
+                with decrypt.open_db(db, passphrase) as con:
                     con.text_factory = bytes
-                    try:
-                        _export_voices_from(st, con, chat_ids, pathlib.Path(td), worker)
-                    finally:
-                        con.close()
+                    _export_voices_from(st, con, chat_ids, pathlib.Path(td), worker)
             except (errors.AgentWeChatError, sqlite3.Error, OSError) as exc:
                 # 这个库打不开（漂移/密钥缺失/库读不了/HOME 的 tmp 建不出来）：跳过该分片，不中断。
-                # OSError 那一支是 Ruling 23a：decrypt.decrypted 里 mkdtemp 与 snapshot 的
-                # copy2/read_bytes 都直接抛 OSError（不包装），漏了它就带 traceback 冲出 core。
+                # OSError 那一支是 Ruling 23a：decrypt.open_db 建快照目录的 mkdtemp 直接抛
+                # OSError（不包装），漏了它就带 traceback 冲出 core。
                 # 但**跳过必须可见**：会话的语音全在这种分片里时 voice 计数为 0，没有这条说明
                 # 就与「这个会话没有语音消息」不可区分（本功能其它能力级失败都会公告）。
                 # 文案经 redact：DecryptError 可能带回 sqlcipher 回显的 `PRAGMA key` 原文。

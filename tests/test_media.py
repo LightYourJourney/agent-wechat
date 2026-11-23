@@ -921,18 +921,15 @@ def _voice_fixture(account: str, rows: list[tuple[int, int, int, bytes]],
 
 
 def _passthrough_decrypted(monkeypatch) -> None:
-    """把 `decrypt.decrypted` 换成「直接 yield 原库」的假上下文（合成库是明文）。
+    """把 `decrypt.open_db` 换成「直接只读打开原库」的假上下文（合成库是明文）。
 
     第二条 setattr 要求 `media.decrypt` 是**模块级**属性（Ruling 17）——函数内 import
     的话它在调用前不存在，这里会直接 AttributeError。
     """
-    import contextlib
     from agent_wechat import decrypt as dec_mod
+    from helpers import plain_open_db
 
-    @contextlib.contextmanager
-    def fake_decrypted(db_path, passphrase, tmpdir=None):
-        yield db_path
-    monkeypatch.setattr(dec_mod, "decrypted", fake_decrypted)
+    monkeypatch.setattr(dec_mod, "open_db", plain_open_db)
     monkeypatch.setattr("agent_wechat.media.decrypt", dec_mod)
 
 
@@ -1463,8 +1460,8 @@ def test_export_media_voice_unreadable_shard_is_skipped(tmp_path, monkeypatch):
     """Ruling 23a：一个分片打不开（库读不了 / HOME/tmp 建不出来）→ 跳过该分片，
     其余分片照常导出，裸 OSError 不得逃出 core 层。
 
-    在 `decrypt.decrypted` 上定点抛 OSError——真机上抛它的是 `tempfile.mkdtemp(dir=HOME/tmp)`
-    与 `snapshot()` 的 copy2/read_bytes，三者都不带包装（decrypt.py）。
+    在 `decrypt.open_db` 上定点抛 OSError——真机上抛它的是快照目录的
+    `tempfile.mkdtemp(dir=HOME/tmp)`，不带包装（decrypt.py）。
     """
     root, account = make_tree(tmp_path, monkeypatch)
     ts = int(datetime.datetime(2026, 9, 15, 12, 0).timestamp())
@@ -1474,15 +1471,17 @@ def test_export_media_voice_unreadable_shard_is_skipped(tmp_path, monkeypatch):
 
     import contextlib
     from agent_wechat import decrypt as dec_mod
+    from helpers import plain_open_db
 
     @contextlib.contextmanager
-    def flaky(db_path, passphrase, tmpdir=None):
+    def flaky(db_path, passphrase):
         if db_path.name == "media_0.db":
             raise OSError(28, "No space left on device", str(db_path))
-        yield db_path
+        with plain_open_db(db_path, passphrase) as con:
+            yield con
 
     # 与 _passthrough_decrypted 同一套 monkeypatch（含 Ruling 17 的模块级属性那条）
-    monkeypatch.setattr(dec_mod, "decrypted", flaky)
+    monkeypatch.setattr(dec_mod, "open_db", flaky)
     monkeypatch.setattr("agent_wechat.media.decrypt", dec_mod)
 
     out = root / "home" / "media"
@@ -1512,11 +1511,11 @@ def test_export_media_voice_broken_shards_are_degraded(tmp_path, monkeypatch):
     from agent_wechat import decrypt as dec_mod
 
     @contextlib.contextmanager
-    def broken(db_path, passphrase, tmpdir=None):
+    def broken(db_path, passphrase):
         raise errors.AgentWeChatError("passphrase 缓存缺失，无法解密 media 分片")
         yield                                    # 生成器协议需要（永不执行到）
 
-    monkeypatch.setattr(dec_mod, "decrypted", broken)
+    monkeypatch.setattr(dec_mod, "open_db", broken)
     monkeypatch.setattr("agent_wechat.media.decrypt", dec_mod)
 
     out = root / "home" / "media"

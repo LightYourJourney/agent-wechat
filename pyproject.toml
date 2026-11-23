@@ -28,6 +28,9 @@ dependencies = [
     "sqlite-vec==0.1.9",
     "cryptography>=50.0.1",
     "pilk>=0.2.4",
+    # 进程内 SQLCipher：只解密查询触及的页、明文不落盘（decrypt.open_db）。上游只发到 cp314 的
+    # wheel——3.15+ 不装它，open_db 自动回退 sqlcipher CLI，而不是让安装去编 sdist 失败。
+    "sqlcipher3-wheels>=0.5.7,<0.6 ; python_full_version < '3.15'",
 ]
 
 [project.scripts]

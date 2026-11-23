@@ -59,13 +59,20 @@ sudo chown -R "$USER" ~/.agent-wechat
 
 该账号未 bootstrap。**切换登录到该账号后**重跑一次 bootstrap（每个账号各自一次）。
 
-### 2.2 `sqlcipher 解密失败`
+### 2.2 `解密失败` / `sqlcipher 解密失败` / `读取微信库时页校验失败`
+
+日常读取默认走**进程内** SQLCipher（`agent-wechat doctor` 的 `decrypt.backend` 为 `inproc`），
+报错文案是「…: 解密失败（…）」；回退到 CLI 后端时是「sqlcipher 解密失败: …」。
 
 1. 密钥失效：**修改微信密码**会使 passphrase 变化——重新 bootstrap
-2. 单库损坏：`agent-wechat inspect <该库>` 复现。注意：**单个库解密失败会中止本轮
-   导出**（此前批次已落库，重跑从水位线继续，但会在同一库再次失败）——先按第 1/3 点
+2. 单库损坏：`agent-wechat inspect <该库>` 复现（它固定走 CLI 后端）。注意：**单个库解密失败会中止本轮
+   导出**（此前批次已落库，重跑从水位线继续，但会在同一库再次失败）——先按第 1/4 点
    排除密钥与版本问题
-3. sqlcipher 版本过旧（< 4.x 默认参数不匹配）：`sqlcipher -version`，`brew upgrade sqlcipher`
+3. 「读取微信库时页校验失败」：快照那一刻微信正在写，复制到的库前后不一致——**重试一次**即可；
+   反复出现再按第 1 点核对密钥
+4. 怀疑是进程内后端的问题：设 `AGENT_WECHAT_DECRYPT=cli` 强制回退到 sqlcipher CLI 对照
+   （需要 `brew install sqlcipher`；CLI 版本过旧（< 4.x）时 `brew upgrade sqlcipher`）。
+   两个后端结果不一致请附 `agent-wechat doctor` 输出反馈
 
 ### 2.3 导出中断 / 进程被杀
 

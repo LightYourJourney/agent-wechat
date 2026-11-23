@@ -49,7 +49,7 @@
 │  account   登录态/账号发现（pgrep + lsof，只读）              │
 │  keys      passphrase 缓存 + PBKDF2 派生 + HMAC 自验证        │
 │  bootstrap lldb 断点捕获 passphrase（唯一需要 sudo 的环节）   │
-│  decrypt   db+wal+shm 快照 → sqlcipher 解密（用后即焚）       │
+│  decrypt   db+wal+shm 快照 → 进程内 SQLCipher（明文不落盘）   │
 │  reader    消息解码（zstd/类型掩码/群前缀）与流式产出          │
 │  export    流式导出管道（幂等 upsert + 水位线 + 长任务）      │
 │  store     本地检索库（SQLite + FTS5 trigram）                │

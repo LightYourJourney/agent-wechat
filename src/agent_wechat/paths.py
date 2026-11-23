@@ -290,8 +290,14 @@ def ensure_home_dirs() -> None:
                 # **不当状态**——F2（T9 复审）实测本机 addexclusion 对已存在目录需 ~11s >
                 # timeout=10，拿它的成败当状态会报出假 ✗，而状态只在进程内、CLI 一次一进程，
                 # 消费点永远看不到。真实状态由 `time_machine_excluded()` 的只读查询回答。
-                subprocess.run(["tmutil", "addexclusion", str(HOME_DIR)],
-                               capture_output=True, timeout=10)
+                # **先查再排**（Phase 02）：那 ~11s 此前**每个进程**都要付满 10s 超时——CLI 每次
+                # 调用、MCP 每个会话的首次调用都卡 10s（Phase 00 实测占 `recent` 墙钟的 82%）。
+                # 只读查询 ~0.05s；已经 `[Excluded]` 就不再 addexclusion。判不出来（None）
+                # 照旧尝试排除——宁可多花时间，也不放过一个该排除的目录。
+                state = time_machine_excluded()
+                if not (state or "").startswith("[Excluded]"):
+                    subprocess.run(["tmutil", "addexclusion", str(HOME_DIR)],
+                                   capture_output=True, timeout=10)
             except Exception:                  # noqa: BLE001 — 备份排除失败不该挡住任何命令
                 pass
 

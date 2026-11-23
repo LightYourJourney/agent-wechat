@@ -120,10 +120,10 @@ def test_ensure_home_dirs_tries_the_exclusion_but_never_blocks(tmp_path, monkeyp
     monkeypatch.setattr(paths, "_tm_exclusion_checked", False)
     monkeypatch.setattr(paths.shutil, "which", lambda name: "/usr/bin/tmutil")
     ran = []
-    monkeypatch.setattr(paths.subprocess, "run",
-                        lambda argv, **kw: ran.append(argv) or SimpleNamespace(returncode=0))
+    monkeypatch.setattr(paths.subprocess, "run", lambda argv, **kw: ran.append(argv) or (
+        SimpleNamespace(returncode=0, stdout=f"[Included] {home}\n")))
     paths.ensure_home_dirs()
-    assert ran == [["tmutil", "addexclusion", str(home)]]
+    assert ran == [["tmutil", "isexcluded", str(home)], ["tmutil", "addexclusion", str(home)]]
     assert home.is_dir()
 
     # 失败形态（超时）：照常返回，目录照旧可用
@@ -145,6 +145,28 @@ def test_ensure_home_dirs_tries_the_exclusion_but_never_blocks(tmp_path, monkeyp
     paths.ensure_home_dirs()
     assert home.is_dir()
     assert calls == [], f"tmutil 都不在，不该起子进程：{calls}"
+
+
+def test_ensure_home_dirs_skips_addexclusion_when_already_excluded(tmp_path, monkeypatch):
+    """Phase 02：已 `[Excluded]` 就**不再** addexclusion——它对已排除目录实测要 ~11s，
+    此前每个进程都付满 10s 超时（CLI 每次调用、MCP 每会话首次调用）。
+    判不出来（isexcluded 非零退出）时照旧尝试排除：宁可慢，不漏排除。"""
+    home = tmp_path / "home"
+    monkeypatch.setattr(paths, "HOME_DIR", home)
+    monkeypatch.setattr(paths, "_tm_exclusion_checked", False)
+    monkeypatch.setattr(paths.shutil, "which", lambda name: "/usr/bin/tmutil")
+    ran = []
+    monkeypatch.setattr(paths.subprocess, "run", lambda argv, **kw: ran.append(argv) or (
+        SimpleNamespace(returncode=0, stdout=f"[Excluded]  {home}\n")))
+    paths.ensure_home_dirs()
+    assert ran == [["tmutil", "isexcluded", str(home)]], "已排除：只查不排"
+
+    monkeypatch.setattr(paths, "_tm_exclusion_checked", False)
+    ran.clear()
+    monkeypatch.setattr(paths.subprocess, "run", lambda argv, **kw: ran.append(argv) or (
+        SimpleNamespace(returncode=1, stdout="")))
+    paths.ensure_home_dirs()
+    assert ran[-1] == ["tmutil", "addexclusion", str(home)], "判不出来：照旧尝试排除"
 
 
 def test_all_dbs_does_not_swallow_a_subdirectory_eacces(tmp_path, monkeypatch):

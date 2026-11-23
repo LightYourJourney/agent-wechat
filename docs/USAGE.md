@@ -97,7 +97,7 @@ agent-wechat export --full
 
 **特性**：
 
-- **流式落库**：逐分片解密（用后即焚），内存占用恒定，与库大小无关
+- **流式落库**：逐分片读取（进程内解密、明文不落盘；快照用后即焚），内存占用恒定，与库大小无关
 - **幂等**：主键去重，重复导出不产生重复行
 - **断点续传**：中断后直接重跑 `export`，从水位线继续
 - **增量**：再次运行只导出新消息（秒级）——**前向判据是「分片内 `local_id` 有没有超过
@@ -503,8 +503,8 @@ agent-wechat media export --chat 小李
 MCP 侧的信封另带 `hint` 说明「本地索引为空」——别把它当成「这个会话没有媒体」。
 
 它只做路径探测与索引只读查询：**不写微信目录、不写 `--out`、不联网**。唯一的例外是
-**语音本体的判定**——要解密 `media_*.db`，明文只在 `~/.agent-wechat/tmp/`（0700）短暂
-存在、用后即焚（见 SECURITY.md §4）。
+**语音本体的判定**——要解密 `media_*.db`：默认只有密文快照在 `~/.agent-wechat/tmp/`（0700）
+短暂存在（CLI 回退时是明文），用后即焚（见 SECURITY.md §4）。
 
 ```bash
 agent-wechat media locate --chat 小李
@@ -682,7 +682,7 @@ agent-wechat purge --excluded              # 列出排除清单的规模（按�
 它不读索引库，也就不会建出这个文件。）只有 `purge --excluded`（以及索引库不在时的 `purge --chat` /
 `--undo`）走独立连接（`exclusions.standalone()`，不经 `store.connect()`），**不会建出 `index.db`
 或 `exclusions.db`**——注意它**不是只读连接**：`--undo --yes` 正是经它把墓碑删掉的。但后两条
-仍要解析会话名（`reader` 要解密一份 `contact.db` 快照），明文会在 `tmp/` 下短暂出现、用后即焚——
+仍要解析会话名（`reader` 要打开一份 `contact.db` 快照），快照会在 `tmp/` 下短暂出现（CLI 回退时是明文）、用后即焚——
 「不建索引与清单」不等于「磁盘零活动」。
 
 ## 8. 账号切换

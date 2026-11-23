@@ -3,6 +3,28 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 风格，
 版本号语义为 0.x 阶段（API 可能变动）。
 
+### 性能：进程内解密、Time Machine 查询、嵌入批大小（2026-11-23）
+
+依据 `docs/audit/` 的 Phase 00 审计与 Phase 01 原型对照（含一次 Rust/PyO3 对照实验：导出只快
+<1%，**不引入 Rust**）。真实数据（约 78 万条消息）上的结果：
+
+**行为变更**
+
+- **读微信库改为进程内 SQLCipher**（新依赖 `sqlcipher3-wheels`）：快照不再整库导出成明文，查询
+  只解密触及的页，**明文不落盘**。`recent` 从约 12 s 降到约 0.6 s（其中 10 s 是下一条的 tmutil），
+  MCP 常驻进程里第二次起的调用中位 0.64 s → 0.18 s。两个后端在真机 36 个库 / 480 万行上逐字节一致。
+  派生密钥按 (passphrase, salt) 进程内缓存。
+- **保留 sqlcipher CLI 作为回退**：`AGENT_WECHAT_DECRYPT=cli` 强制回退；sqlcipher3 不可用（例如
+  Python ≥ 3.15 还没有它的 wheel）时自动回退。`decrypt` / `inspect` 两个调试命令仍走 CLI。
+  `brew install sqlcipher` 因此从必需变为可选。`agent-wechat doctor` 新增 `decrypt` 一项。
+- **页校验失败**（快照那一刻微信正在写）现在可能在查询中途出现，报 `DecryptError`
+  「读取微信库时页校验失败」——与 CLI 后端在导出那一步失败时的异常类型相同，重试即可。
+- **不再每个进程卡 10 s**：此前每个进程都无条件 `tmutil addexclusion`，它对已排除的目录要 ~11 s、
+  每次都撞满 10 s 超时。现在先 `tmutil isexcluded`（~0.05 s），已排除就跳过。
+- **向量构建的推理批从 256 降到 8**（`vector.EMBED_BATCH`；flush 仍是 256 行）：此前整组 256 条被
+  padding 到组内最长的一条。均匀 2% 抽样实测吞吐 14 → 86–94 条/s、峰值内存 6.0 GB → 0.4–0.5 GB；
+  向量数值等价（余弦 ≥ 0.9999998），**已有索引不需要 rebuild**。
+
 ### 第二轮独立审查的修复（2026-11-23）
 
 **行为变更**

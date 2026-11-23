@@ -5,7 +5,9 @@
 参数序以调用点更多的 test_vector 那版为准 (acct, chat, lid, content, *)，
 原 reader 那版的第 3 个位置参数 shard 改为关键字参数。
 """
+import contextlib
 import hashlib
+import sqlite3
 
 from agent_wechat import messages
 
@@ -52,3 +54,16 @@ def ext_buffer(*members: bytes) -> bytes:
     """把一个群的成员拼成 ext_buffer，末尾附上实测见到的两个群级字段（f3/f4）。"""
     return b"".join(members) + varint(3 << 3 | 0) + varint(10001) \
         + varint(4 << 3 | 0) + varint(10001)
+
+
+# ---------- decrypt.open_db 的明文直通桩 ----------
+
+@contextlib.contextmanager
+def plain_open_db(db_path, passphrase):
+    """`decrypt.open_db` 的直通桩：合成库本来就是明文，直接只读打开它（与 CLI 后端
+    `open_plain` 同样的 `mode=ro`），退出时关闭——与真 `open_db`「调用方不必 close」同契约。"""
+    con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        yield con
+    finally:
+        con.close()

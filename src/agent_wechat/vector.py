@@ -22,7 +22,12 @@ DIM = store.VECTOR_DIM                      # 单一真值在 store；本模块�
 MODEL_ID = f"fastembed:{MODEL_NAME}:{DIM}"
 QUERY_INSTRUCTION = "为这个句子生成表示以用于检索相关文章："   # BGE 官方 s2p 指令，仅查询侧加
 MODEL_CACHE_DIR = paths.HOME_DIR / "models"   # 固定目录：不用 $TMPDIR（重启即清）
-BATCH = 256                                  # fastembed 实测最优批大小
+BATCH = 256                                  # 一次 flush（分页 + 排序窗口）的行数
+# 送进 fastembed 的**推理**批大小，与 BATCH 分开（Phase 02）。此前整组 256 条作一个推理批：
+# 组内按长度排了序，却仍被 padding 到组里最长的那条，注意力张量随之膨胀——真实数据均匀抽样
+# 实测 14 条/s、峰值 RSS 6.0 GB；切成 8 条一批后 86–94 条/s、0.4–0.5 GB，向量逐条余弦 ≥ 0.9999998
+# （数值等价，**已有索引不需要 rebuild**）。见 docs/audit/phase-02-integration-report.md §2.3。
+EMBED_BATCH = 8
 COMMIT_ROWS = 5120                           # 每 ~20 批一个事务：频繁 commit 会让插入掉 ~43%
 K_MAX = 4096                                 # sqlite-vec 硬上限
 DIRTY_BATCH = 64                             # 一轮最多消费多少条脏行
@@ -220,7 +225,7 @@ class FastEmbedEmbedder:
 
     def embed(self, texts: list[str]) -> list[Sequence[float]]:
         with self._lock:
-            return list(self._ensure().embed(texts, batch_size=BATCH))
+            return list(self._ensure().embed(texts, batch_size=EMBED_BATCH))
 
     def embed_query(self, text: str) -> Sequence[float]:
         with self._lock:

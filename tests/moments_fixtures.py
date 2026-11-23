@@ -14,19 +14,21 @@ import sqlite3
 import pytest
 
 from agent_wechat import keys, paths
+from helpers import plain_open_db
 
 ACCT = "wxid_testacct01_ab12"
 
 
 @contextlib.contextmanager
 def _passthrough(db_path, passphrase):
-    """`decrypt.decrypted` 的直通桩（原样搬自四个文件）。
+    """`decrypt.open_db` 的直通桩（合成 sns.db 是明文，直接只读打开）。
 
     **不带 `tmpdir=` 形参**（EA-048 已把那个形参从 `decrypt.decrypted` 删掉，全仓零调用方）：
     review-code 的 Standards 轴 #11 指出，上一版留着它并给了一句「外部桩同签名」的理由——
     而那是个**编出来的理由**（签名早就不一样了），死形参被新共享夹具「合法化」了。
     """
-    yield db_path
+    with plain_open_db(db_path, passphrase) as con:
+        yield con
 
 
 @pytest.fixture()
@@ -51,7 +53,7 @@ def build_env(tmp_path, monkeypatch, xml):
     monkeypatch.setattr(paths, "XWECHAT_FILES", wx)
     monkeypatch.setattr(paths, "HOME_DIR", home)
     monkeypatch.setattr(keys, "CACHE_FILE", home / "passphrase.json")
-    monkeypatch.setattr(dec_mod, "decrypted", _passthrough)
+    monkeypatch.setattr(dec_mod, "open_db", _passthrough)
     # 超集：三个调用方原来各自 patch 一或两个模块，统一成两个（raising=False 对谁都不伤）
     for mod in ("agent_wechat.moments", "agent_wechat.usecases"):
         monkeypatch.setattr(f"{mod}.decrypt", dec_mod, raising=False)

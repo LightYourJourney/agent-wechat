@@ -27,7 +27,7 @@ import time
 from collections.abc import Iterator
 
 from . import account as account_mod
-from . import errors, export, keys, migrations, paths, store, tasks, vector
+from . import decrypt, errors, export, keys, migrations, paths, store, tasks, vector
 
 MIN_FREE_BYTES = 200 * 1024 * 1024        # 同步前至少留 200 MB
 LOCK_NAME = "sync.lock"
@@ -216,6 +216,12 @@ def diagnose(account: str | None = None) -> dict:
     except errors.AgentWeChatError as exc:
         out["problems"].append(f"源目录读不了：{exc}")
     out["source"]["container"] = paths.XWECHAT_FILES.exists()
+    # 解密后端（Phase 02）：进程内是默认；回退到 CLI 时没有 sqlcipher 命令就什么都读不了
+    backend = decrypt.backend()
+    out["decrypt"] = {"backend": backend, "sqlcipher_cli": shutil.which("sqlcipher") is not None}
+    if backend == "cli" and not out["decrypt"]["sqlcipher_cli"]:
+        out["problems"].append("解密回退到了 sqlcipher CLI，但找不到 sqlcipher 命令"
+                               "（`uv sync` 装回 sqlcipher3-wheels，或 brew install sqlcipher）")
 
     try:
         stat = os.stat(paths.HOME_DIR)

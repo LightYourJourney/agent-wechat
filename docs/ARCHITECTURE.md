@@ -23,7 +23,7 @@ src/agent_wechat/
 ├── account.py      登录态检测：pgrep -x WeChat + lsof -n -P 判定当前账号
 ├── keys.py         passphrase 缓存、PBKDF2 派生、page1 HMAC 自验证
 ├── bootstrap.py    lldb 断点捕获 passphrase（唯一 sudo 环节）
-├── decrypt.py      db+wal+shm 三元组快照 → sqlcipher raw-key 解密导出
+├── decrypt.py      db+wal+shm 三元组快照 → 进程内 SQLCipher 只读连接（`open_db`；CLI 导出为回退）
 ├── errors.py       统一错误契约：core 只抛项目异常，适配层翻译成各自介质
 ├── messages.py     messages 行契约：列清单、行构造器、三条哨兵编解码（`md5:` 退化会话 id、
 │                   `[appmsg: 标题]` 提示、`[贴纸:名称]` / `[贴纸#短ID]` 显示串）、类型词汇表
@@ -106,12 +106,13 @@ codesign 重签名微信（去 Hardened Runtime）
 blob，66,752 次 raw-key + 1,402 次 passphrase 候选全部未通过 HMAC 验证），确认
 纯文件解析不可行，spike 脚本留档于 `spike/`。
 
-### 3.3 近期读取（在线路径，秒级）
+### 3.3 近期读取（在线路径，亚秒级）
 
 ```
 reader.recent(chat_id, limit)
   → md5(chat_id) 定位 Msg_<md5> 表
-  → 分片按时间分区：从最新分片起，快照→解密→读表尾 N 条，够数即停
+  → 分片按时间分区：从最新分片起，快照→进程内打开加密快照→读表尾 N 条，够数即停
+    （只解密查询触及的页：237 MB 分片取 20 条约 12 ms，见 §3.10）
   → 解码（zstd / 类型掩码 / 群前缀）→ 时间正序返回
 ```
 
@@ -119,13 +120,13 @@ reader.recent(chat_id, limit)
 
 ```
 export.run_export
-  → 逐分片：快照（db+wal+shm）→ sqlcipher raw-key 解密到 0700 临时目录（**一次**）
+  → 逐分片：快照（db+wal+shm）→ 进程内 SQLCipher 打开（**一次**；明文不落盘）
   → 逐表（Msg_<md5>）两段读：
       ① 前向：local_id > 导出水位线 → 新消息
       ② 回看：local_id > audit_cursor 的一小段旧行（默认 100 行/会话/轮）
   → fetchmany(batch) 分批解码 → 批量幂等 upsert + 水位线推进（同一事务）
   → 数据提交之后才推进 audit_cursor（回看游标；绕圈覆盖整段历史）
-  → 临时明文删除；进度写 tasks.json（进程重启后从该文件载入，遗留的 running 记为 failed）；
+  → 快照删除；进度写 tasks.json（进程重启后从该文件载入，遗留的 running 记为 failed）；
   中断后重跑自动续传
 ```
 
@@ -214,12 +215,32 @@ moments.iter_posts(account, report=…)       # 复用 passphrase 解密 sns/sns
 
 细节见 [DATA_MODEL.md](DATA_MODEL.md) §10。
 
+### 3.10 解密后端（Phase 02）
+
+```
+decrypt.open_db(db, passphrase)                     # reader / 语音 / 朋友圈的唯一入口
+  → 快照 db+wal+shm 到 tmp/awdec-<pid>-*（0700）→ 读 page1 的 salt → PBKDF2（进程内按 salt 缓存）
+  → 默认：sqlcipher3 只读打开**加密快照**，查询只解密触及的页，明文不落盘
+     回退：AGENT_WECHAT_DECRYPT=cli 或 sqlcipher3 不可用 → sqlcipher CLI 整库导出明文副本再只读打开
+  → 退出：关连接、删快照（两个后端都一样）
+```
+
+- **两个后端读出的内容逐字节一致**：真机 36 个库 / 1,763 张表 / 480 万行核对过
+  （`tests/test_decrypt_real.py`，`-m real`）。
+- **异常口径不变**：sqlcipher3 的异常不是 `sqlite3.Error` 的子类，连接代理把它们翻成同名的
+  `sqlite3` 异常；页 HMAC 校验失败（快照撕裂）翻成 `DecryptError`——CLI 后端在整库导出那一步
+  就以同一个异常失败，进程内只是把它推迟到了查询中途。
+- **不做运行期自动回退**：密钥不对时两个后端一样失败，静默重试只会多花一次整库导出、藏住真问题。
+- `decrypt` / `inspect` 两个调试命令仍走 CLI 后端（它们要的就是明文库文件），所以 `sqlcipher`
+  CLI 从「必需」降为「这两个命令与回退时需要」。
+
 ## 4. 关键设计决策与取舍
 
 | 决策 | 备选 | 理由 |
 |---|---|---|
 | LLDB 断点捕获（sudo 一次性） | 内存模式扫描（4.0 路线）/ 纯文件解析 | 4.1+ 内存无 raw key；文件路线已用 HMAC 验证排除（见 §3.2）；断系统符号跨微信版本最稳 |
 | 每库独立 PBKDF2 派生 + raw-key 形式喂 sqlcipher | 把 passphrase 当字符串传给 CLI | passphrase 是任意 32 字节，作字符串有转义风险；raw-key（`PRAGMA key = "x'...'"`）与我们的派生公式闭环 |
+| 进程内 SQLCipher 读加密快照（CLI 整库导出为回退） | 每次整库 `sqlcipher_export` 成明文 / 把热点改写成 Rust | 只解密触及的页：`recent` 12 s → 0.6 s（含 tmutil 修复）、明文不落盘；Rust 对照实验只能让导出快 <1%（热点本就在 C 里），见 docs/audit/ |
 | 快照整个 db+wal+shm 三元组 | 直接只读打开源库 | 微信运行在 WAL 模式：不拷 -wal 会漏最新消息；只读打开 WAL 需要写 -shm，违反"零写入" |
 | SQLite + FTS5（单文件） | PostgreSQL / 独立向量库 | 个人数据量级（百万条内）下零运维、单文件易备份/销毁；trigram 无需分词词典，对中文子串匹配和人名/专名表现稳 |
 | 每会话一张表的全量枚举（不解析表名来源） | 只导出 session 列表中的会话 | Msg_ 表含历史会话；未解析 md5 的会话以 `md5:xxx` 为 id 仍完整导出，不丢数据 |
@@ -239,8 +260,9 @@ moments.iter_posts(account, report=…)       # 复用 passphrase 解密 sns/sns
 - **自验证门**：任何密钥候选必须通过 page1 HMAC-SHA512 校验才被接受（唯一真值判据）；
   该公式经合成加密库对照实验做了真/假双向验证
 - **缓存**：passphrase 文件 0600；目录 0700；不写日志、不进错误信息
-- **临时明文**：单分片、0700 目录、用后即焚；`~/.agent-wechat/` 由代码在首次使用时
-  自动加入 Time Machine 排除（`tmutil addexclusion`，失败需手动执行）；索引明文依赖
+- **临时文件**：默认后端只在 0700 目录放**密文**快照（明文不落盘）；CLI 回退与 `decrypt`/`inspect`
+  才产生单分片明文，用后即焚；`~/.agent-wechat/` 由代码在首次使用时
+  自动加入 Time Machine 排除（先 `tmutil isexcluded` 查询，未排除才 `addexclusion`；失败需手动执行）；索引明文依赖
   FileVault
 - **MCP 传输**：stdio，无网络端口
 

@@ -134,8 +134,8 @@ def test_iter_posts_wraps_a_corrupt_db_as_schema_drift(tmp_path, monkeypatch):
     monkeypatch.setattr(paths, "XWECHAT_FILES", wx)
     fake = d / "sns.db"
     fake.write_bytes(b"this is not a database" * 64)       # `iter_posts` 先探存在再解密
-    monkeypatch.setattr(moments.decrypt, "decrypted",
-                        lambda *a, **k: contextlib.nullcontext(fake))
+    monkeypatch.setattr(moments.decrypt, "open_db",
+                        lambda *a, **k: contextlib.closing(sqlite3.connect(fake)))
     monkeypatch.setattr(moments.keys, "get_passphrase", lambda a: b"x" * 32)
 
     with pytest.raises(errors.SchemaDrift):
@@ -273,7 +273,7 @@ def sns(tmp_path, monkeypatch):
     monkeypatch.setattr(paths, "XWECHAT_FILES", wx)
     monkeypatch.setattr(paths, "HOME_DIR", home)
     monkeypatch.setattr(keys, "CACHE_FILE", home / "passphrase.json")
-    monkeypatch.setattr(dec_mod, "decrypted", _passthrough)
+    monkeypatch.setattr(dec_mod, "open_db", _passthrough)
     monkeypatch.setattr("agent_wechat.moments.decrypt", dec_mod)
     con = sqlite3.connect(d / "sns.db")
     con.execute("CREATE TABLE SnsTimeLine(tid INTEGER PRIMARY KEY DESC, user_name TEXT,"

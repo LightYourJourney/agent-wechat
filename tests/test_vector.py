@@ -507,6 +507,25 @@ def test_offline_load_missing_entry_still_falls_back_to_download(monkeypatch):
     assert [c["local_files_only"] for c in calls] == [True, False]
 
 
+def test_fastembed_inference_batch_is_small_not_the_flush_size(monkeypatch):
+    """Phase 02：推理批（EMBED_BATCH）与 flush 行数（BATCH）是两回事。把推理批改回 BATCH，
+    整组 256 条又会被 padding 到组内最长的那条（实测吞吐约 1/6、峰值内存约 13 倍）——本测试必红。"""
+    seen = []
+
+    class FakeTE:
+        def __init__(self, **kwargs):
+            pass
+
+        def embed(self, texts, batch_size=None):
+            seen.append(batch_size)
+            return [[0.0] * vector.DIM for _ in texts]
+    monkeypatch.setattr("fastembed.TextEmbedding", FakeTE)
+
+    vector.FastEmbedEmbedder().embed(["x"] * 300)
+    assert seen == [vector.EMBED_BATCH]
+    assert vector.EMBED_BATCH < vector.BATCH
+
+
 def test_build_index_account_scoped(env):
     store.upsert_batch(env, [mk_row("acct1", "chatA", 1, "账号一的消息"),
                              mk_row("acct2", "chatA", 2, "账号二的消息")])

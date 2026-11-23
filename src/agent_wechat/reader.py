@@ -181,13 +181,9 @@ class MessageReader:
         db = paths.db_storage(self.acct) / rel
         if not db.exists():
             raise DataNotFound(f"{db} 不存在")
-        with decrypt.decrypted(db, self.passphrase) as plain:
-            con = decrypt.open_plain(plain)
+        with decrypt.open_db(db, self.passphrase) as con:
             con.text_factory = bytes   # 库内 TEXT 含非 UTF-8 字节，统一按 bytes 取
-            try:
-                yield con
-            finally:
-                con.close()
+            yield con
 
     def _check(self, capability: str, rel: str, con: sqlite3.Connection, *,
                table: str | None = None, only: str | None = None) -> None:
