@@ -333,3 +333,19 @@ def test_post_error_envelope_has_the_same_shape_as_get(srv):
     data = _json(res, body)
     assert res.status == 400 and "error" in data
     assert data.get("hint"), "项目异常必须带下一步指引（与 GET 同一份信封）"
+
+
+@pytest.mark.parametrize("body", [[1], 1, "x"])
+def test_a_non_object_post_body_is_a_400_not_a_dropped_connection(srv, body):
+    headers = {"Origin": f"http://127.0.0.1:{srv.port}", "X-AW-CSRF": srv.csrf}
+    res, raw = _req(srv, "/api/derived/delete", method="POST", headers=headers, body=body)
+    assert res.status == 400 and "JSON 对象" in _json(res, raw)["error"]
+
+
+@pytest.mark.parametrize("path", [
+    f"/api/search?account={ACCT}&q=消息&after=99999999999999999999",
+    f"/api/timeline?account={ACCT}&chat={CHAT}&ts=99999999999999999999&local_id=1",
+])
+def test_out_of_range_integers_are_a_400_not_a_dropped_connection(srv, path):
+    res, raw = _req(srv, path)
+    assert res.status == 400 and "超出范围" in _json(res, raw)["error"]

@@ -409,8 +409,9 @@ def _transfer(appmsg_el: ET.Element) -> Transfer:
 def parse(raw: str) -> ParseResult:
     """把一条 appmsg 载荷解析成结构化数据。**对任意 `str` 全定义、不抛。**
 
-    三步顺序**不可换**：`is_dangerous` 看的是**原文**（规范化不会删掉 DTD 声明，但不该依赖
-    这一点）→ `normalize` → `ET.fromstring`。
+    `is_dangerous` 判两次：原文一次，**交给解析器的那个串**再一次。只判原文是不够的——
+    `normalize` 会删掉 `<?xml…?>` 与非法数值引用（`&#1;`），`<!DOC&#1;TYPE` 删完就是一个真的
+    `<!DOCTYPE`：600 字节的一条消息实测展开成 500 万字符。
     """
     if is_dangerous(raw):
         return ParseResult(None, "rejected")
@@ -419,6 +420,8 @@ def parse(raw: str) -> ParseResult:
         # 把它挪到 try 外，这个分支就失去它**唯一真正接住的东西**，裸 `ValueError` 直接逃出
         # core 层——`appmsg_rebuild_parts` 对每条载荷调 `parse` 且无外层 try，整次回填会崩。
         norm = normalize(raw)
+        if is_dangerous(norm):
+            return ParseResult(None, "rejected")
         root = ET.fromstring(norm)
     except (ET.ParseError, ValueError):
         # `ValueError` 这一支**不是纯防御性的**：它接住的主要是 **`normalize` 自己的

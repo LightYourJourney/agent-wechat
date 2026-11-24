@@ -52,7 +52,7 @@ def cmd_status(args: argparse.Namespace) -> int:
             if unreadable:
                 line += f"（另有 {unreadable} 个库读不到）"   # EA-051：读不到 ≠ 不过
         print(line)
-    tm = paths.time_machine_excluded()
+    tm = paths.time_machine_state()
     if tm is not None:
         # EA-054（F2 修法）：印**只读查询**到的真实状态（与 purge 的核查同源）。查不出来时
         # 不印——「判不出来」与「没排除」是两件事，混成一行正是本仓在消灭的那种假象。

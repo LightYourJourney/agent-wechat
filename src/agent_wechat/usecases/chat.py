@@ -1,6 +1,7 @@
 """会话类用例：账号状态、联系人、时间线、导出、会话导出与总目录页。"""
 from __future__ import annotations
 
+import pathlib
 import sqlite3
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -342,10 +343,35 @@ def chat_export(contact: str, *, months: list[str] | None = None, limit: int = 5
         refs=refs,
         extras=extras)
     files = chatview.write(view, formats=formats)
+    _discard_if_purged_meanwhile(keys, files)
     return ChatExportResult(
         chat_id=chat_id, out_dir=view.out_dir, files=tuple(str(p) for p in files),
         counts=view.counts, truncated=truncated, unparsed=unparsed, rejected=rejected,
         degraded=view.degraded)
+
+
+def _discard_if_purged_meanwhile(keys: list[str], files: list) -> None:
+    """读完索引、写完产物之间 `purge --chat` 删掉了这个会话：删掉本次写的产物，然后拒绝。
+
+    产物里是读出来的正文，purge 的 rmtree 若早于这次写，核查报 ✅ 之后已删的正文又落回
+    `media/<md5>/`。判据是**本次读到的 key** 现在有没有墓碑——读的时候它们还在 `messages` 里，
+    所以有墓碑只可能是读之后立的；不按会话判（purge 之后新到的消息照常可导）。在最后一次写
+    之后判，两种先后都不留东西（同 `media._discard_if_purged_meanwhile`）。判不了就按销毁处理。
+    """
+    if not keys:
+        return
+    try:
+        with store.open() as con:
+            purged = any(exclusions.is_excluded(con, k) for k in keys)
+    except (sqlite3.Error, OSError):
+        purged = True
+    if not purged:
+        return
+    for f in files:
+        pathlib.Path(f).unlink(missing_ok=True)
+    raise errors.ScopeDenied(
+        "导出期间会话被 purge --chat 销毁（或排除清单读不出来），本次写出的产物已删除",
+        hint="确需导出：先 `agent-wechat purge --chat <会话> --undo --yes` 解除墓碑后重导")
 
 
 @dataclass(frozen=True)

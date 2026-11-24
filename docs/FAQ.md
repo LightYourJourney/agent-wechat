@@ -85,7 +85,8 @@ lldb attach 需要 `task_for_pid` 权限；Hardened Runtime 会阻止它，所�
 重新 bootstrap 一次即可。
 
 **Q11：读取和导出会让微信变慢或崩溃吗？**
-不会修改微信状态。快照读取期间微信正常可用；最坏情况是导出瞬间占用几秒磁盘带宽。
+不会修改微信状态。快照读取期间微信正常可用；默认走 APFS 写时复制（克隆，毫秒级），只有
+跨卷或非 APFS 才回退成整份复制，那时才短暂占用磁盘带宽。
 
 **Q12：如何彻底删除本工具产生的所有数据？只想删某一个会话怎么办？**
 全部数据：`agent-wechat purge --all --yes`（`~/.agent-wechat` 目录包含密钥缓存、索引库与临时
@@ -94,7 +95,7 @@ lldb attach 需要 `task_for_pid` 权限；Hardened Runtime 会阻止它，所�
 该目录已排除出 Time Machine 备份。
 
 只删某一个会话：`agent-wechat purge --chat 小李`（预览）→ `--yes`（执行）——它删的是**本工具里的
-副本**（索引行、向量、appmsg 部件、媒体引用、群成员显示名、`media/<会话md5>/`），**不是微信里
+副本**（索引行、向量、appmsg 部件、位置/名片载荷 `msg_extras`、媒体引用、群成员显示名、`media/<会话md5>/`），**不是微信里
 的记录**（微信目录只读）；**朋友圈导出不在范围内**（`moments/` 是一份 HTML 装所有人，那个人的
 动态与互动仍可能留在其中）。那批内容的 `msg_key` 会写进 `~/.agent-wechat/exclusions.db`，
 所以重跑 `export --full` / `appmsg rebuild` / `media rebuild-refs` 都不会把它们带回来，而删除

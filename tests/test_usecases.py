@@ -105,6 +105,11 @@ def test_unbounded_tools_only_clamp_lower(n, expected):
     assert usecases.clamp_limit(n) == expected
 
 
+def test_an_unbounded_limit_still_fits_in_a_sqlite_integer():
+    """`limit=10**20` 此前直通 `LIMIT ?`，绑定时抛裸 OverflowError（MCP 报「内部错误」）。"""
+    assert usecases.clamp_limit(10**20) == 2**31 - 1
+
+
 def test_chat_context_reader_is_lazy_and_reused(stub):
     """上下文本身不构造 reader（无 contact 的检索不该碰密钥），构造后实例内复用。"""
     _unique(stub)

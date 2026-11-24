@@ -55,6 +55,18 @@ def _runtime_failure(msg: str) -> errors.IndexUnavailable:
         hint="索引库可能被占用或损坏：等导出/构建结束后重试；持续失败则删除 index.db 后重跑一次导出")
 
 
+_INT64_MIN, _INT64_MAX = -(1 << 63), (1 << 63) - 1
+
+
+def check_ts(name: str, value: int | None) -> int | None:
+    """时间窗入参的值域闸：超出 SQLite INTEGER（int64）的值此前在绑定时抛裸 `OverflowError`，
+    穿出 core 层（MCP 报「内部错误」、web 界面直接断连接）。"""
+    if value is not None and not _INT64_MIN <= int(value) <= _INT64_MAX:
+        raise SearchInputError(f"{name} 超出范围（须在 64 位整数内）",
+                               hint="时间窗参数是 unix 秒")
+    return value
+
+
 def search(query: str, chat_id: str | None = None, limit: int = 20,
            account: str | None = None, *,
            after_ts: int | None = None, before_ts: int | None = None,
@@ -78,6 +90,8 @@ def search(query: str, chat_id: str | None = None, limit: int = 20,
     if "\x00" in query:
         # F6：NUL 是**入参**问题（FTS 的 MATCH 会拒它）——按入参拒，不混进「库侧失败」。
         raise SearchInputError("检索串不能包含 NUL 字符")
+    check_ts("after_ts", after_ts)
+    check_ts("before_ts", before_ts)
     where: list[str] = ["m.account = ?"]
     args: list[object] = [account]
     if chat_id:

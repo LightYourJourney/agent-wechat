@@ -697,3 +697,20 @@ def test_filter_order_credential_wins_over_blob():
     r = appmsg.parse(_emoji_appmsg(kind=8, aeskey=_b64_of(200)))
     assert r.dropped_blobs == 0
     assert [p for p, _ in r.appmsg.fields] == []
+
+
+def _split_doctype(body: str, splitter: str) -> str:
+    """`<!DOCTYPE` / `<!ENTITY` 被规范化会删掉的东西拆开：原文里没有那两个关键字，
+    规范化之后又拼回来。"""
+    ents = (f'<!ENT{splitter}ITY a0 "{"x" * 50}">'
+            + "".join(f'<!ENT{splitter}ITY a{i} "{f"&a{i - 1};" * 10}">' for i in range(1, 6)))
+    return f'<!DOC{splitter}TYPE msg [{ents}]>{body}'
+
+
+@pytest.mark.parametrize("splitter", ["&#1;", '<?xml version="1.0"?>'])
+def test_a_doctype_reassembled_by_normalisation_is_still_rejected(splitter):
+    """此前守卫只看原文：600 字节的一条消息，`title` 展开成 500 万字符，`appmsg rebuild` 还把它
+    记成成功（存下的规范化正文里有真的 `<!DOCTYPE`，导出时又被判 rejected——两边计数对不上）。"""
+    raw = _split_doctype("<msg><appmsg><title>&a5;</title><type>5</type></appmsg></msg>", splitter)
+    assert not appmsg.is_dangerous(raw), "前提：原文里没有那两个关键字"
+    assert appmsg.parse(raw).reason == "rejected"

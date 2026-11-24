@@ -72,7 +72,10 @@ def parse(msg_type: int, raw: str) -> Extra | None:
     if appmsg.is_dangerous(raw):
         return None
     try:
-        root = ET.fromstring(appmsg.normalize(raw))
+        norm = appmsg.normalize(raw)
+        if appmsg.is_dangerous(norm):     # 规范化会把 `<!DOC&#1;TYPE` 拼回去，见 `appmsg.parse`
+            return None
+        root = ET.fromstring(norm)
     except (ET.ParseError, ValueError):
         # ValueError 是 `normalize` 没滤净的畸形容引（EA-033 那族）；core 层不许裸抛，
         # 而这里的语义就是「这条解不开」——与 `appmsg.parse` 同一处置。

@@ -304,6 +304,8 @@ class _Handler(BaseHTTPRequestHandler):
             if length <= 0 or length > 4096:
                 raise errors.DerivedInputError("请求体缺失或过大")
             body = json.loads(self.rfile.read(length))
+            if not isinstance(body, dict):   # `[1]` / `1`：此前 `.get` 抛裸 AttributeError、连接断开
+                raise errors.DerivedInputError("请求体必须是 JSON 对象")
             derivation_id = str(body.get("derivation_id") or "")
             _json(self, 200, derived.delete_derived(derivation_id))
         except (ValueError, errors.AgentWeChatError) as exc:
@@ -386,9 +388,12 @@ def _int(qs: dict, name: str) -> int | None:
     if not raw:
         return None
     try:
-        return int(raw)
+        n = int(raw)
     except ValueError as exc:
         raise errors.SearchInputError(f"{name} 必须是整数") from exc
+    if not -(1 << 63) <= n < 1 << 63:     # 绑进 SQLite 时会抛裸 OverflowError，连接直接断开
+        raise errors.SearchInputError(f"{name} 超出范围")
+    return n
 
 
 def _limit(qs: dict, default: int = 30) -> int:

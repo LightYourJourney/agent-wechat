@@ -343,8 +343,8 @@ def _set_vector_watermark(con: sqlite3.Connection, account: str, rowid: int) -> 
 # 取满 LIMIT 即停；不加时规划器选 idx_msg_ts 再整段临时排序，每页都要 O(账号行数)。
 _SELECT_PAGE = (
     "SELECT " + messages.column_list(
-        "id", "msg_key", "account", "chat_md5", "chat_id", "ts", "msg_type", "sender_id",
-        "sender_name", "is_self", "content", "media_hint")
+        "id", "msg_key", "account", "chat_md5", "chat_id", "ts", "local_id", "msg_type",
+        "sender_id", "sender_name", "is_self", "content", "media_hint")
     + " FROM messages NOT INDEXED WHERE account = ? AND id > ? ORDER BY id LIMIT ?")
 
 _INSERT_VEC = ("INSERT INTO vec_messages(msg_rowid, embedding, acct_chat, account, ts, preview) "
@@ -377,7 +377,10 @@ def _build_account(con: sqlite3.Connection, acct: str, embedder: FastEmbedEmbedd
     batch 同时是分页步长与单次嵌入的行数上限（默认取模块常量，由 build_index 注入）。
     """
     last_id = _vector_watermark(con, acct)
-    prev_by_chat: dict[str, str] = {}
+    # 续跑（水位线 > 0）时，每个会话本轮第一条的上文在水位线之下、不在内存里：回查一次，
+    # 否则增量嵌入的那一条永远不带前缀，与全量重建的向量不一致。首次构建不查（之前没有东西）。
+    resumed = last_id > 0
+    prev_by_chat: dict[str, str | None] = {}
     buf_texts: list[str] = []
     buf_rows: list[tuple] = []
     pending: list[tuple] = []          # (msg_rowid, blob, acct_chat, ts, preview, msg_key)
@@ -442,6 +445,11 @@ def _build_account(con: sqlite3.Connection, acct: str, embedder: FastEmbedEmbedd
                 store.enqueue_reembed(con, key, reason="reused")
         scanned.clear()
         _set_vector_watermark(con, acct, upto)
+        # 总行数与向量同一笔提交：`vector_meta.embedded` 此前只在整轮结束时写，首次构建中途
+        # 被打断就一直是 0——`sync` 据此判「没建过索引」、从此跳过向量阶段，`doctor` 也只报「未建」，
+        # 而那几小时已经嵌好的向量与水位线都在库里。
+        con.execute("UPDATE vector_meta SET embedded = embedded + ? WHERE model_id = ?",
+                    (len(alive), MODEL_ID))
         try:
             con.commit()
         except (sqlite3.Error, OSError) as exc:
@@ -459,6 +467,8 @@ def _build_account(con: sqlite3.Connection, acct: str, embedder: FastEmbedEmbedd
             last_id = row["id"]
             scanned.append((row["id"], row["msg_key"]))
             chat_key = messages.acct_chat(row["account"], row["chat_md5"])
+            if resumed and chat_key not in prev_by_chat and should_embed(row):
+                prev_by_chat[chat_key] = _prev_text(con, row)
             prev = prev_by_chat.get(chat_key)
             if should_embed(row):
                 buf_texts.append(doc_text(row, prev))
@@ -626,11 +636,13 @@ def _prev_text(con: sqlite3.Connection, row: Mapping) -> str | None:
     全量构建在内存里累积 prev；队列消费只有零散几条，必须回查。上限 `DIRTY_PREV_SCAN`：
     只有连续 500 条不可嵌入（媒体/系统）的会话才会取到 None——那时前缀本来也是空的。
     """
+    # 按 chat_id 查走 `idx_msg_chat_ts`（chat_md5 上没有索引，按它查是整账号扫描——前向扫描续跑时
+    # 每个会话都要查一次）。同一会话的退化名 `md5:` 与真名并存时只看本行那一种：取不到就是没前缀。
     cand = con.execute(
         "SELECT msg_type, content, ts, local_id FROM messages "
-        "WHERE account=? AND chat_md5=? AND (ts < ? OR (ts = ? AND local_id < ?)) "
+        "WHERE account=? AND chat_id=? AND (ts < ? OR (ts = ? AND local_id < ?)) "
         "ORDER BY ts DESC, local_id DESC LIMIT ?",
-        (row["account"], row["chat_md5"], row["ts"], row["ts"], row["local_id"],
+        (row["account"], row["chat_id"], row["ts"], row["ts"], row["local_id"],
          DIRTY_PREV_SCAN)).fetchall()
     for r in cand:
         if should_embed(r):

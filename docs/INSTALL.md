@@ -53,7 +53,7 @@ uv run agent-wechat status
 [USAGE.md](USAGE.md) §0）。若想在**任何目录**裸敲 `agent-wechat`，做一次性全局安装：
 
 ```bash
-uv tool install --editable ~/agent-wechat            # 要语义检索：--editable '~/agent-wechat[semantic]'
+uv tool install --editable ~/agent-wechat            # 要语义检索：--editable "$HOME/agent-wechat[semantic]"
 # 生成 ~/.local/bin/agent-wechat 与 agent-wechat-mcp；--editable 改代码即时生效
 ```
 
@@ -178,6 +178,7 @@ AGENT_WECHAT_HOME = "/Users/you/.agent-wechat"
 | `AGENT_WECHAT_DENY` | 空 | 逗号分隔的 chat_id；**只约束 Phase 05 的 `retrieve` / `context`**，不给既有工具加行为 |
 | `AGENT_WECHAT_MCP_OUT_ROOTS` | 空 | `:` 分隔的**绝对**路径；MCP 导出类工具的 `out_dir` 除数据目录外还允许落在这些目录之下（CLI 的 `--out` 不受它约束） |
 | `AGENT_WECHAT_WHISPER_MODEL` | 自动探测本地模型 | Phase 06 的 ASR 模型路径；**只读本地文件，绝不下载** |
+| `AGENT_WECHAT_DECRYPT` | 空（进程内 sqlcipher3） | 设为 `cli` 时强制回退 sqlcipher 命令行后端（整库导出明文副本再只读打开；排障用，见 ARCHITECTURE.md §3.10） |
 
 ### 6.4 本地工作台（可选）
 

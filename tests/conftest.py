@@ -48,6 +48,7 @@ def _forbid_real_tmutil(monkeypatch):
     """见模块 docstring「第四个闸」：测试期不起真实 tmutil。"""
     from types import SimpleNamespace
     monkeypatch.setattr(paths, "shutil", SimpleNamespace(which=lambda name: None))
+    monkeypatch.setattr(paths, "_tm_seen", None)     # 进程级缓存：别让一条用例的桩值漏给下一条
 
 
 @pytest.fixture(autouse=True)

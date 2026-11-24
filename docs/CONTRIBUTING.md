@@ -8,8 +8,8 @@
 ```bash
 git clone https://github.com/LightYourJourney/agent-wechat.git ~/agent-wechat
 cd ~/agent-wechat
-uv sync --all-extras             # 运行时依赖 + 可选的语义检索组件（门禁的类型检查要它）
-uv add --dev pytest              # 开发依赖按需
+uv sync --all-extras             # 运行时依赖 + 可选的语义检索组件（门禁的类型检查要它）；
+                                 # dev 组（pytest 等，见 pyproject 的 [dependency-groups].dev）默认一并装
 uv run pytest tests/ -q          # 运行测试
 ```
 

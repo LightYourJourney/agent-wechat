@@ -244,3 +244,12 @@ def test_a_corrupt_payload_in_the_table_does_not_raise(con, monkeypatch):
     got = store.extras_by_keys(con, [k for k, _, _ in bad])
     assert len(got) == 3
     assert [usecases._decode_extra(t, b) for t, b in got.values()] == [None, None, None]
+
+
+def test_a_doctype_reassembled_by_normalisation_is_rejected():
+    """同 `test_appmsg` 的那条：`&#1;` 被规范化删掉后 `<!DOC&#1;TYPE` 就是真的 DTD，此前位置的
+    `label` 展开成 500 万字符，每次 `export_chat` / `get_message_parts` 都重新展开一遍。"""
+    ents = ('<!ENT&#1;ITY a0 "' + "x" * 50 + '">'
+            + "".join(f'<!ENT&#1;ITY a{i} "' + f"&a{i - 1};" * 10 + '">' for i in range(1, 6)))
+    raw = f'<!DOC&#1;TYPE msg [{ents}]><msg><location x="1" y="2" label="&a5;"/></msg>'
+    assert msgextra.parse(48, raw) is None

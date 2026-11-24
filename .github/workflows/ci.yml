@@ -37,3 +37,19 @@ jobs:
         env:
           AGENT_WECHAT_HOME: ${{ runner.temp }}/aw-home-cli
           AGENT_WECHAT_DECRYPT: cli
+  # 基础安装（不带 `[semantic]`）：没有 fastembed 时检索降级成关键词、`doctor` 报「未装」——
+  # 这条路径此前只在本地验证过。只跑用例：pyright / vulture 要看到 fastembed 的类型，留在 gate。
+  base-install:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: brew install sqlcipher
+      - run: uv sync --frozen
+      - run: uv run --frozen --no-sync python -c "import importlib.util as u, sys; sys.exit(u.find_spec('fastembed') is not None)"
+      - run: uv run --frozen --no-sync python -m pytest tests -q
+        env:
+          AGENT_WECHAT_HOME: ${{ runner.temp }}/aw-home-base

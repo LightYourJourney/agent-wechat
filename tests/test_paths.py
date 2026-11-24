@@ -534,3 +534,63 @@ def test_sweep_stale_tmp_only_reclaims_dead_pids(tmp_path, monkeypatch):
     monkeypatch.setattr(paths, "pid_alive", lambda pid: pid == 222)
     paths.sweep_stale_tmp(dest)
     assert not dead.exists() and live.exists() and other.exists()
+
+
+def test_two_threads_writing_the_same_file_do_not_trip_over_each_other(tmp_path):
+    """tmp 名此前只带 pid：同进程两个线程写同一目标（MCP 并发导出同一会话的媒体），一方的
+    O_TRUNC / replace / 失败清理踩掉另一方的 tmp，成功的写被报成 FileNotFoundError。"""
+    import threading
+    dest, errs = tmp_path / "f.bin", []
+
+    def write():
+        try:
+            paths.atomic_write(dest, b"x" * 2_000_000)
+        except OSError as exc:
+            errs.append(exc)
+    for _ in range(20):
+        ts = [threading.Thread(target=write) for _ in range(2)]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join()
+    assert errs == []
+    assert dest.read_bytes() == b"x" * 2_000_000
+    assert [p.name for p in tmp_path.iterdir()] == ["f.bin"]
+
+
+def test_sweep_stale_tmp_reads_the_pid_out_of_a_thread_qualified_name(tmp_path, monkeypatch):
+    dest = tmp_path / "passphrase.json"
+    dead, live = tmp_path / "passphrase.json.111.7.tmp", tmp_path / "passphrase.json.222.7.tmp"
+    for p in (dead, live):
+        p.write_text("x")
+    monkeypatch.setattr(paths, "pid_alive", lambda pid: pid == 222)
+    paths.sweep_stale_tmp(dest)
+    assert not dead.exists() and live.exists()
+
+
+def test_status_reuses_the_exclusion_state_ensure_home_dirs_just_read(tmp_path, monkeypatch):
+    """`status` 此前对同一目录查两遍 `tmutil isexcluded`（`ensure_home_dirs` 一次、自己一次）。"""
+    home = tmp_path / "home"
+    monkeypatch.setattr(paths, "HOME_DIR", home)
+    monkeypatch.setattr(paths, "_tm_exclusion_checked", False)
+    monkeypatch.setattr(paths.shutil, "which", lambda name: "/usr/bin/tmutil")
+    ran = []
+    monkeypatch.setattr(paths.subprocess, "run", lambda argv, **kw: ran.append(argv) or (
+        SimpleNamespace(returncode=0, stdout=f"[Excluded]  {home}\n")))
+    paths.ensure_home_dirs()
+    assert paths.time_machine_state() == f"[Excluded]  {home}"
+    assert ran == [["tmutil", "isexcluded", str(home)]]
+
+
+def test_status_queries_again_when_ensure_home_dirs_had_to_add_the_exclusion(tmp_path, monkeypatch):
+    """刚跑过 addexclusion（结果可能没生效）就不复用那次的 `[Included]`：重查真实状态。"""
+    home = tmp_path / "home"
+    monkeypatch.setattr(paths, "HOME_DIR", home)
+    monkeypatch.setattr(paths, "_tm_exclusion_checked", False)
+    monkeypatch.setattr(paths.shutil, "which", lambda name: "/usr/bin/tmutil")
+    ran = []
+    monkeypatch.setattr(paths.subprocess, "run", lambda argv, **kw: ran.append(argv) or (
+        SimpleNamespace(returncode=0, stdout=f"[Included] {home}\n")))
+    paths.ensure_home_dirs()
+    paths.time_machine_state()
+    assert [a[1] for a in ran] == ["isexcluded", "addexclusion", "isexcluded"]

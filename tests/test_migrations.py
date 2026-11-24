@@ -17,6 +17,11 @@ import pytest
 from agent_wechat import errors, exclusions, migrations, store, vector
 
 
+class _NoEmbedder:
+    def embed(self, texts):
+        raise AssertionError("不该被调用")
+
+
 def _legacy_db(db: pathlib.Path) -> sqlite3.Connection:
     """旧版路径：整套 DDL 跑一遍，但**不 stamp 版本**。"""
     con = sqlite3.connect(db)
@@ -357,7 +362,8 @@ def test_vector_rebuild_restamps_the_vector_scope(tmp_path):
     finally:
         con.close()
 
-    assert vector.build_index(accounts=[], rebuild=True) == {
+    # 显式给一个嵌入器：不索引任何账号、用不到它，但默认的那个在基础安装（没有 fastembed）里会被拒
+    assert vector.build_index(accounts=[], rebuild=True, embedder=_NoEmbedder()) == {
         "embedded_this_run": 0, "skipped_this_run": 0}
     con = vector.connect()
     try:
@@ -391,5 +397,35 @@ def test_v5_upgrades_a_v4_queue_table_without_losing_rows(tmp_path):
         sql = con.execute(
             "SELECT sql FROM sqlite_master WHERE name='msg_reembed_au'").fetchone()[0]
         assert "reason" in sql, "触发器要换成写原因的新体"
+    finally:
+        con.close()
+
+
+def test_v9_replaces_a_reembed_trigger_that_fires_on_chat_id(tmp_path):
+    """v8 的库还挂着旧触发器：会话名从 `md5:` 自愈成真名时整个会话的每一行都进重嵌队列。
+    升到 v9 之后，只改会话名的更新不再入队，正文改写照旧入队。"""
+    db = tmp_path / "i.db"
+    con = _legacy_db(db)
+    old = store.REEMBED_TRIGGER.replace(
+        "AFTER UPDATE OF content, sender_name, msg_type",
+        "AFTER UPDATE OF content, chat_id, sender_name, msg_type").replace(
+        "WHEN old.content IS NOT new.content",
+        "WHEN old.content IS NOT new.content OR old.chat_id IS NOT new.chat_id")
+    assert old != store.REEMBED_TRIGGER
+    con.executescript("DROP TRIGGER msg_reembed_au;\n" + old)
+    con.execute(f"CREATE TABLE IF NOT EXISTS {migrations.VERSION_TABLE}"
+                "(scope TEXT PRIMARY KEY, version INTEGER NOT NULL, applied_at INTEGER)")
+    con.execute(f"INSERT INTO {migrations.VERSION_TABLE} VALUES ('main', 8, 0)")
+    con.commit()
+    con.close()
+
+    con = store.connect(db)
+    try:
+        assert migrations.stored_version(con, migrations.SCOPE_MAIN) == 9
+        key = _insert_message(con)
+        con.execute("UPDATE messages SET chat_id='md5:x' WHERE msg_key=?", (key,))
+        assert con.execute("SELECT count(*) FROM pending_reembed").fetchone()[0] == 0
+        con.execute("UPDATE messages SET content='改了' WHERE msg_key=?", (key,))
+        assert [tuple(r) for r in con.execute("SELECT reason FROM pending_reembed")] == [("content",)]
     finally:
         con.close()

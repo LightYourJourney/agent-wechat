@@ -174,6 +174,8 @@ def search_messages(query: str, *, account: str, chat_id: str | None = None,
         raise errors.SearchInputError(
             "检索串不能为空（或全空白）",
             hint="给一个非空查询；多段文本请拆成多次检索")
+    search.check_ts("after_ts", after_ts)     # 语义一路也要绑定它，不能只靠关键词一路的闸
+    search.check_ts("before_ts", before_ts)
     if len(query) > MAX_QUERY_CHARS:
         raise errors.SearchInputError(
             f"检索串过长（{len(query)} > {MAX_QUERY_CHARS} 字符）",

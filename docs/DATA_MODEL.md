@@ -14,6 +14,8 @@
 ├── tasks.json              # 导出长任务的状态与进度（已结束的最多留 200 条、30 天）
 ├── media/                  # 媒体导出产物（图片/语音 WAV/视频，0700，明文）
 ├── moments/                # 朋友圈导出产物（单文件 HTML + 媒体，0700，明文）
+├── models/                 # 向量模型缓存（fastembed，0700；首次构建索引时下载约 95 MB，之后离线）
+├── sync.log                # 同步日志（JSONL，只记计数：不写正文、密钥、媒体路径；见 sync.py）
 └── tmp/                    # 解密临时目录（默认只放密文快照；CLI 回退时是单分片明文；用后即焚）
 ```
 
@@ -74,7 +76,9 @@ CREATE VIRTUAL TABLE messages_fts USING fts5(
 );
 ```
 
-配三个触发器（AI/AD/AU）保持虚表与主表同步。**选 trigram 的理由**：无词典、
+配三个触发器（AI/AD/AU）保持虚表与主表同步。**首次导出例外**：消息表为空时会先删掉触发器
+批量灌库，结束时整表 `rebuild` FTS 再装回触发器；进行中由 `fts_bulk_pending` 表标记，此期间
+关键词检索退化为 LIKE（结果只含已入库的部分）。**选 trigram 的理由**：无词典、
 天然支持中文子串与专名/人名匹配；代价是无法匹配 <3 字符的查询——由 `search.py`
 的 LIKE 路由兜底（1-2 字查询）。见 ARCHITECTURE.md §4。
 
@@ -203,16 +207,19 @@ CREATE INDEX IF NOT EXISTS exclusions.idx_excluded_chat ON excluded(account, cha
   `index.db` 能重扫微信库重建、`media/` 能联网重抓、密钥能重新 bootstrap，而这张表没了，
   被删的会话会在下一次全量导出时**整批复活**（见 §9）。
 - `account` / `chat_md5` 两列是 `msg_key` 前两段的投影，存下来只为能建上面那条索引：
-  四条复活路径里的名册重建那条按 **`(account, chat_md5)` 整会话**判（逐条判要解析全表
+  五条复活路径里的名册重建那条按 **`(account, chat_md5)` 整会话**判（逐条判要解析全表
   `msg_key`）。投影失真会让那条判据错拦或漏拦，所以**删除按前缀谓词**
   （`substr(msg_key, 1, ?) = ?`，与 `store.delete_chat` / `chat_row_counts` 同源），
   不把**删除**的正确性押在这两列忠实上——在删除这条路上它们只服务于查询性能。
   （名册那条判据仍读它们，所以「投影失真」在这里有两处后果：删除侧不再受影响，
   名册侧会**错拦或漏拦**——那是另一个消费者的账，别混起来读。）
-- 写入端只有 `purge --chat`，且用 `INSERT … SELECT … FROM messages WHERE account=? AND
+- 写入端是 `purge --chat`：用 `INSERT … SELECT … FROM messages WHERE account=? AND
   chat_id=?` **从同一谓词派生**（不是先在内存里读一个 `msg_key` 集合再照着写）；
-  读出端是那四条复活路径上的拦截判据（模块职责见 ARCHITECTURE.md 的模块清单）
-  与 `purge --excluded`。
+  同一轮还会由 `exclusions.add_from_side_tables` 把该会话在 `msg_parts` / `media_refs` /
+  `msg_extras` 里的**孤儿** `msg_key` 也写进清单（`messages` 里有的那些已由
+  `add_from_messages` 写过，`OR IGNORE` 跳过）——不挡的话，下次回填命令会把刚删掉的
+  载荷原样写回来。读出端是那五条复活路径上的拦截判据（模块职责见 ARCHITECTURE.md 的
+  模块清单）与 `purge --excluded`。
 
 ## 4. 去重主键与增量策略
 
@@ -398,14 +405,14 @@ CREATE TABLE IF NOT EXISTS schema_version (
 ) WITHOUT ROWID;
 ```
 
-- **三个 scope**：`main`（`index.db` 主表，当前 **7**）、`vector`（vec0 三表，当前 **1**）、
+- **三个 scope**：`main`（`index.db` 主表，当前 **9**）、`vector`（vec0 三表，当前 **1**）、
   `exclusions`（在 `exclusions.db` 里，SQL 写作 `exclusions.schema_version`，当前 **1**）。
 - **ensure 与 migrate 分工**：`CREATE … IF NOT EXISTS` 每次连接照跑（缺对象就补建的自愈）；
   迁移只处理 `IF NOT EXISTS` **表达不了**的变更（改触发器体、加列、重建表），每条只跑一次。
   版本迁移：`main v2` 把 FTS 三条触发器重建为代码里的最新定义（EA-077 的旧体漂移）；
   `main v3`（Phase 02）建立历史回看游标与重嵌队列（`audit_cursor` / `pending_reembed`）
   并重建重嵌触发器；`main v4`（Phase 03）新增重嵌失败账本 `reembed_failures`；
-  `main v5`（Phase 03）给队列加 `reason` 列（表重建）；`main v6`（Phase 04）新增同步终态表 `sync_state`；`main v7`（Phase 06）新增派生文本（`derived_text` / `derived_tombstone` / `derived_fts`）与事实记忆（`fact_claim` / `fact_evidence`）；`main v8` 给 `messages_fts` / `derived_fts` 开 FTS5 `secure-delete`（删除时连倒排索引里的 trigram 一起抹掉；SQLite < 3.42 时为空迁移，只记版本）。
+  `main v5`（Phase 03）给队列加 `reason` 列（表重建）；`main v6`（Phase 04）新增同步终态表 `sync_state`；`main v7`（Phase 06）新增派生文本（`derived_text` / `derived_tombstone` / `derived_fts`）与事实记忆（`fact_claim` / `fact_evidence`）；`main v8` 给 `messages_fts` / `derived_fts` 开 FTS5 `secure-delete`（删除时连倒排索引里的 trigram 一起抹掉；SQLite < 3.42 时为空迁移，只记版本）；`main v9` 换掉重嵌触发器，会话名（`chat_id`）变化不再入队（向量文本与向量行都不含它，此前自愈一次就整会话重嵌）。
 - **整次升级 = 一笔事务**：`BEGIN IMMEDIATE; <本次全部待执行迁移的 DDL>; <逐条写版本行>;
   COMMIT`。任一句失败整次回滚（版本停在升级前），抛 `SchemaMigrationError`；下次连接重做。
   已是最新的库走只读快路径，**不拿写锁**；重复执行是 no-op（`applied_at` 都不变）。
@@ -465,7 +472,7 @@ CREATE TABLE IF NOT EXISTS reembed_failures (
 
 消费成功时与队列行一起删；失败只累计次数与最近原因，队列行留在原处等下一轮。
 
-`reason` 除触发器写的 `content` / `msg_type` / `sender` / `chat_id` 外还有两种：`prefix`（自己没变、
+`reason` 除触发器写的 `content` / `msg_type` / `sender` 外还有两种（v9 之前的库里还可能留着 `chat_id`）：`prefix`（自己没变、
 上一条的正文变了，上文前缀过时）与 `reused`（向量构建扫过之后被删、`id` 又被新消息复用的行——
 前向扫描不会再看见它）。消费时只有 `prefix` 不再级联到后继；已在队列里的行不会被级联降级成
 `prefix`。前向扫描**开始之后**才进队列的行，即使 `id` 落在本轮刚嵌过的区间里也照常重嵌
@@ -516,4 +523,4 @@ fact_evidence(claim_id, msg_key, role, created_at)   -- 至少一条
 没有证据的主张自动转 `retracted`（`note=evidence_purged`）。
 
 
-> Phase 07 没有 schema 变更（仍为 main v7）；工作台只读索引库，唯一写操作是派生文本删除。
+> Phase 07 没有 schema 变更（当时为 main v7，当前最新为 v9）；工作台只读索引库，唯一写操作是派生文本删除。

@@ -15,6 +15,7 @@ import pathlib
 import re
 import shutil
 import subprocess
+import threading
 from collections.abc import Callable
 from shutil import copyfile as _copyfile   # 单独绑定：conftest 会把 `paths.shutil` 整个换成桩
 
@@ -43,6 +44,7 @@ HOME_DIR = pathlib.Path(
     os.environ.get("AGENT_WECHAT_HOME") or (pathlib.Path.home() / ".agent-wechat"))
 
 _tm_exclusion_checked = False
+_tm_seen: str | None = None    # 本进程 `ensure_home_dirs` 查到的 `[Excluded]`（见 `time_machine_state`）
 
 
 def in_wechat_container(p: str | pathlib.Path) -> bool:
@@ -256,7 +258,7 @@ def ensure_home_dirs() -> None:
     数据目录会整体落在容器里（`index.db`、密钥缓存、`tmp/`、默认产物根）——那是配置
     选择，但不是一次「只读」的操作。判据在 mkdir 之前，被拒时容器里不留任何东西。
     """
-    global _tm_exclusion_checked
+    global _tm_exclusion_checked, _tm_seen
     if not HOME_DIR.is_absolute():
         # EA-003：相对路径（`.`、`""`、`foo/bar`）在本仓没有合法用例——它会让密钥缓存与
         # 明文索引落到进程的当前工作目录。判据上移到路径的收口处；purge 自带的
@@ -298,6 +300,8 @@ def ensure_home_dirs() -> None:
                 if not (state or "").startswith("[Excluded]"):
                     subprocess.run(["tmutil", "addexclusion", str(HOME_DIR)],
                                    capture_output=True, timeout=10)
+                else:
+                    _tm_seen = state
             except Exception:                  # noqa: BLE001 — 备份排除失败不该挡住任何命令
                 pass
 
@@ -460,7 +464,10 @@ def atomic_copy(src: pathlib.Path, dest: pathlib.Path, *, mode: int = 0o600) -> 
 
 
 def _atomic(dest: pathlib.Path, fill: Callable[[pathlib.Path], object], mode: int) -> None:
-    tmp = dest.with_name(f"{dest.name}.{os.getpid()}.tmp")
+    # 名字里带线程号：同一进程的两个线程写同一个目标（MCP 的同步工具跑在工作线程里，两次并发的
+    # 媒体导出会撞上同一个文件）时，各写各的 tmp；只带 pid 的话一方的 `O_TRUNC` / `replace` /
+    # 失败清理会踩掉另一方的，成功的写被报成失败。`sweep_stale_tmp` 只看第一段的 pid。
+    tmp = dest.with_name(f"{dest.name}.{os.getpid()}.{threading.get_native_id()}.tmp")
     try:
         os.close(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode))
         fill(tmp)
@@ -475,7 +482,7 @@ def _atomic(dest: pathlib.Path, fill: Callable[[pathlib.Path], object], mode: in
 
 
 def sweep_stale_tmp(dest: pathlib.Path) -> None:
-    """清掉崩溃遗留的 `<dest>.<pid>.tmp`（`atomic_write` 的产物）。**只清死 pid 的**——活进程的
+    """清掉崩溃遗留的 `<dest>.<pid>.<tid>.tmp`（`atomic_write` 的产物）。**只清死 pid 的**——活进程的
     tmp 可能正在被写，绝不碰（与 `decrypt.sweep_stale_tempdirs` 同一立场）。尽力而为。"""
     prefix = dest.name + "."
     try:
@@ -486,13 +493,19 @@ def sweep_stale_tmp(dest: pathlib.Path) -> None:
         n = p.name
         if not n.startswith(prefix) or not n.endswith(".tmp"):
             continue
-        pid = n[len(prefix):-len(".tmp")]
+        pid = n[len(prefix):-len(".tmp")].split(".", 1)[0]   # `<pid>` 或 `<pid>.<tid>`
         if not pid.isdigit() or pid_alive(int(pid)):
             continue
         try:
             p.unlink()
         except OSError:
             pass
+
+
+def time_machine_state() -> str | None:
+    """同 `time_machine_excluded`，但本进程的 `ensure_home_dirs` 刚查到过 `[Excluded]`（且没去改它）
+    时直接用那一次的结果：`status` 此前对同一个目录查两遍 `tmutil isexcluded`。"""
+    return _tm_seen if _tm_seen is not None else time_machine_excluded()
 
 
 def time_machine_excluded() -> str | None:

@@ -903,3 +903,30 @@ def test_chat_index_cli_prints_the_artifact_path(con, chat_env, capsys):
     out = capsys.readouterr().out
     assert "已导出的会话：1 个" in out
     assert f"产物：{chat_env}/index.html" in out
+
+
+def test_a_purge_between_reading_and_writing_leaves_no_artifact(con, chat_env, monkeypatch):
+    """读完索引之后、写产物之前 `purge --chat` 删完了这个会话：此前照样把读到的正文写进
+    `media/<md5>/chat/`（purge 的 rmtree 已经跑过，核查报 ✅）。"""
+    from agent_wechat import chatview, errors, exclusions
+    _seed(con, n=2)
+    real = chatview.write
+
+    def purge_then_write(view, **kw):
+        exclusions.add(con, [(f"acct|aaaa|message_0.db|{i}", "acct", "aaaa") for i in (1, 2)])
+        con.commit()
+        return real(view, **kw)
+    monkeypatch.setattr(chatview, "write", purge_then_write)
+    with pytest.raises(errors.ScopeDenied, match="导出期间"):
+        usecases.chat_export("wxid_testacct02", out_dir=str(chat_env), account="acct")
+    chat_dir = chat_env / "aaaa" / "chat"
+    assert not chat_dir.exists() or not any(chat_dir.iterdir())
+
+
+def test_messages_that_arrived_after_an_old_purge_still_export(con, chat_env):
+    """判据是**本次读到的 key**，不是「这个会话有没有墓碑」：purge 之后新到的消息照常可导。"""
+    from agent_wechat import exclusions
+    exclusions.add(con, [("acct|aaaa|message_0.db|99", "acct", "aaaa")])
+    _seed(con)
+    res = usecases.chat_export("wxid_testacct02", out_dir=str(chat_env), account="acct")
+    assert "第1条" in _html(res)

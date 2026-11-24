@@ -490,3 +490,36 @@ def test_a_cascade_does_not_downgrade_a_queued_content_change(con):
     c.commit()
     assert c.execute("SELECT reason FROM pending_reembed WHERE msg_key=?",
                      (_key(2),)).fetchone()[0] == "content"
+
+
+# ---------------------------------------------------------------- 中断、续跑与前缀
+
+def test_an_interrupted_first_build_still_counts_as_an_index(con):
+    """首次构建中途被打断：已提交的向量与水位线都在，`vector_meta.embedded` 此前却停在 0——
+    `sync` 判「没建过索引」从此跳过向量阶段，`doctor` 也只报「未建」。"""
+    from agent_wechat import sync
+    c = con
+    _seed(c, [f"第{i}句正文内容" for i in range(1, 7)])
+
+    class Dies(FakeEmbedder):
+        def embed(self, texts):
+            if self.calls:
+                raise RuntimeError("进程被杀")
+            return super().embed(texts)
+    with pytest.raises(RuntimeError):
+        vector.build_index(accounts=[ACCT], embedder=Dies(), batch=2, commit_rows=2)
+    assert _vec_count(c) == 2, "前提：第一批已提交"
+    assert c.execute("SELECT embedded FROM vector_meta").fetchone()[0] == 2
+    assert sync._vector_ready(c)
+
+
+def test_an_incremental_build_gives_the_first_new_row_its_prefix(con):
+    """续跑时每个会话本轮第一条的上文在水位线之下：此前它不带前缀，与全量重建的向量不一致。"""
+    c = con
+    _seed(c, ["第一句正文", "第二句正文", "第三句正文"])
+    vector.build_index(accounts=[ACCT], embedder=FakeEmbedder())
+    row = _row(ACCT, CHAT, 4, "第四句正文")
+    store.upsert_batch(c, [row])
+    fake = FakeEmbedder()
+    vector.build_index(accounts=[ACCT], embedder=fake)
+    assert _texts(fake) == [vector.doc_text(row, "第三句正文")]

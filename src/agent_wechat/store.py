@@ -274,12 +274,14 @@ END;""",
 END;""",
 )
 
-# Phase 02：内容/会话名被改写时，**在更新它的同一事务里**投递一条重嵌标记。
+# Phase 02：内容/发送者/类型被改写时，**在更新它的同一事务里**投递一条重嵌标记。
 # 不在 Python 里比对前后值：upsert 的 WHERE 已经保证「值没变就不更新」，触发器只需要
 # 在真的更新发生时记一笔——这样标记、消息行与 FTS（既有三条触发器）三者天然同事务。
+# **会话名（chat_id）不在内**（v9 起）：向量文本（`vector.doc_text`）与向量行都不含它（分区键用
+# chat_md5），会话名从 `md5:` 自愈成真名时此前把整个会话的每一行都投进队列、白嵌一遍。
 REEMBED_TRIGGER = """CREATE TRIGGER IF NOT EXISTS msg_reembed_au
-AFTER UPDATE OF content, chat_id, sender_name, msg_type ON messages
-WHEN old.content IS NOT new.content OR old.chat_id IS NOT new.chat_id
+AFTER UPDATE OF content, sender_name, msg_type ON messages
+WHEN old.content IS NOT new.content
   OR old.sender_name IS NOT new.sender_name OR old.msg_type IS NOT new.msg_type
 BEGIN
     INSERT INTO pending_reembed(msg_key, changed_at, reason)
@@ -287,8 +289,7 @@ BEGIN
             CASE
                 WHEN old.content IS NOT new.content THEN 'content'
                 WHEN old.msg_type IS NOT new.msg_type THEN 'msg_type'
-                WHEN old.sender_name IS NOT new.sender_name THEN 'sender'
-                ELSE 'chat_id'
+                ELSE 'sender'
             END)
     ON CONFLICT(msg_key) DO UPDATE SET
         changed_at=excluded.changed_at, reason=excluded.reason;
@@ -313,7 +314,7 @@ SCHEMA = _SCHEMA_SANS_FTS_TRIGGERS + "\n" + "\n".join(FTS_TRIGGERS)
 
 # 本程序已知的 main scope 最新版本。迁移只列**IF NOT EXISTS 表达不了**的变更；
 # 基线（v1）由 `migrations.apply` 隐式 stamp——那代表「整套 DDL 已由 ensure 建好」。
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 # FTS5 的 `secure-delete`（SQLite ≥ 3.42）：删除时把被删行的 token 从索引段里**当场**抹掉。
 # 不开的话 `purge --chat` 之后，被删正文的 trigram 仍留在 `*_fts_data` 的活跃页里（实测 8 个里
@@ -384,6 +385,13 @@ MIGRATIONS: tuple[migrations.Migration, ...] = (
         version=8,
         name="FTS 开启 secure-delete（被删正文不留 trigram）",
         statements=FTS_SECURE_DELETE,
+    ),
+    migrations.Migration(
+        version=9,
+        name="重嵌触发器不再因会话名自愈触发",
+        # 只换触发器体（见 `REEMBED_TRIGGER`）。已在队列里的 `chat_id` 行留着：旧触发器的
+        # ON CONFLICT 会用它覆盖更早的 `content`，删掉可能丢一次真正的重嵌。
+        statements=("DROP TRIGGER IF EXISTS msg_reembed_au", REEMBED_TRIGGER),
     ),
 )
 

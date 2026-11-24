@@ -335,6 +335,10 @@ def diagnose(account: str | None = None) -> dict:
     return out
 
 
+SOURCE_RETRIES = 1          # 源侧瞬时失败（`SourceUnreadable`）在同一轮内的重试次数
+SOURCE_RETRY_DELAY = 1.0    # 秒：给微信一点时间写完
+
+
 def _decrypt_status(exc: errors.DecryptError) -> str:
     """解密失败再分一层：**快照读不动**与**页校验失败**（快照那一刻微信正在写，重试即可）
     是源的问题，**解不开**才像密钥的问题——后者才该叫用户重新 bootstrap。"""
@@ -409,11 +413,22 @@ def run_sync(account: str | None = None, *, full: bool = False,
             from . import usecases                 # 函数内导入：core 不静态依赖入口层
 
             try:
-                res.exported = export.run_export(
-                    acct, full=full,
-                    on_reader=lambda r: res.degraded.extend(
-                        d.envelope() for d in usecases.collect_degradations(r)),
-                    on_skipped=lambda n: skipped_rows.__setitem__("n", n))
+                # 源侧的瞬时失败（页校验不过、快照期间主库被反复改写：微信正在写）本轮内再试一次，
+                # 不等下一轮。导出幂等、已提交的批次不重做；第一次读到的降级不重复计。
+                base = len(res.degraded)
+                for attempt in range(1 + SOURCE_RETRIES):
+                    try:
+                        res.exported = export.run_export(
+                            acct, full=full,
+                            on_reader=lambda r: res.degraded.extend(
+                                d.envelope() for d in usecases.collect_degradations(r)),
+                            on_skipped=lambda n: skipped_rows.__setitem__("n", n))
+                        break
+                    except errors.SourceUnreadable:
+                        if attempt == SOURCE_RETRIES:
+                            raise
+                        del res.degraded[base:]
+                        time.sleep(SOURCE_RETRY_DELAY)
                 res.skipped = skipped_rows["n"]
                 stats.update(exported=res.exported, skipped=res.skipped)
             except errors.KeyNotFound as exc:
@@ -421,7 +436,7 @@ def run_sync(account: str | None = None, *, full: bool = False,
             except errors.DecryptError as exc:
                 raise _Abort(_decrypt_status(exc), str(exc),
                              "若是密钥失效：重新 bootstrap 后重试；若是源不可读：检查完全磁盘访问"
-                             "权限与容器路径；若是页校验失败：微信正在写，下一轮会自动重试") from exc
+                             "权限与容器路径；若是页校验失败：微信正在写（本轮已重试过一次），下一轮会再试") from exc
             except errors.DataNotFound as exc:
                 raise _Abort(SOURCE_UNAVAILABLE, str(exc),
                              "确认微信数据目录存在、且具备完全磁盘访问权限") from exc

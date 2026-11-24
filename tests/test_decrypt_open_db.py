@@ -6,6 +6,7 @@
   造出「还在 WAL 里、没 checkpoint」的行，模拟微信正在写的库。
 """
 import os
+import pathlib
 import shutil
 import sqlite3
 import sys
@@ -350,3 +351,64 @@ def test_open_db_reads_the_same_rows_whichever_way_the_snapshot_was_taken(tmp_pa
     enc, pp = build_fake_wechat_db(tmp_path)
     with decrypt.open_db(enc, pp) as con:
         assert _rows(con)
+
+
+# ---------- 并发上限 ----------
+
+def _counting_backend(monkeypatch, hold):
+    import contextlib
+    import threading
+    state = {"now": 0, "peak": 0}
+    lock = threading.Lock()
+
+    @contextlib.contextmanager
+    def fake(db, passphrase):
+        with lock:
+            state["now"] += 1
+            state["peak"] = max(state["peak"], state["now"])
+        try:
+            hold()
+            yield object()
+        finally:
+            with lock:
+                state["now"] -= 1
+    monkeypatch.setattr(decrypt, "_open_db_unbounded", fake)
+    return state
+
+
+def test_at_most_a_bounded_number_of_threads_hold_a_snapshot(monkeypatch):
+    """MCP 的同步工具跑在工作线程里：8 路并发此前各拍一份快照、同时解密（峰值 RSS 234 MB）。"""
+    import threading
+    import time
+    state = _counting_backend(monkeypatch, lambda: time.sleep(0.05))
+
+    def use():
+        with decrypt.open_db(pathlib.Path("x.db"), b"k"):
+            pass
+    ts = [threading.Thread(target=use) for _ in range(3 * decrypt.OPEN_DB_CONCURRENCY)]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join(10)
+    assert state["peak"] == decrypt.OPEN_DB_CONCURRENCY and state["now"] == 0
+
+
+def test_nested_opens_in_one_thread_do_not_take_a_second_slot(monkeypatch):
+    """每个线程都先占满名额、再在里面打开第二个库：按「每次打开」计数的话这里当场死锁。"""
+    import threading
+    n = decrypt.OPEN_DB_CONCURRENCY
+    barrier = threading.Barrier(n, timeout=5)
+    _counting_backend(monkeypatch, lambda: None)
+    done = []
+
+    def nested():
+        with decrypt.open_db(pathlib.Path("a.db"), b"k"):
+            barrier.wait()
+            with decrypt.open_db(pathlib.Path("b.db"), b"k"):
+                done.append(1)
+    ts = [threading.Thread(target=nested, daemon=True) for _ in range(n)]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join(5)
+    assert len(done) == n

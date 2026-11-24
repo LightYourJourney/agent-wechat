@@ -390,3 +390,12 @@ def test_token_budget_is_reported_as_an_approximation(tmp_path, monkeypatch):
     assert budget["approx_tokens"] == __import__("math").ceil(
         budget["used_chars"] / retrieval.CHARS_PER_TOKEN)
     assert "粗估" in budget["token_basis"]
+
+
+@pytest.mark.parametrize("mode", ["keyword", "hybrid"])
+def test_out_of_range_timestamps_are_input_errors_not_overflow(tmp_path, monkeypatch, mode):
+    """超出 int64 的时间窗此前在绑定进 SQLite 时抛裸 OverflowError，穿出 core 层。"""
+    _env(tmp_path, monkeypatch, with_vector=False)
+    for kw in ({"after_ts": 10**20}, {"before_ts": -10**20}):
+        with pytest.raises(errors.SearchInputError, match="超出范围"):
+            retrieval.search_messages("爬山", account=ACCT, mode=mode, **kw)

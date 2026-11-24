@@ -22,6 +22,11 @@ def _isolate_model_cache(tmp_path, monkeypatch):
 from helpers import mk_row
 
 
+# 这几条桩的是 `fastembed.TextEmbedding` 本身：基础安装（不带 `[semantic]`）里没有这个模块可桩。
+_needs_fastembed = pytest.mark.skipif(not vector.semantic_installed(),
+                                      reason="需要可选安装项 [semantic]（fastembed）")
+
+
 def vec(*xs):
     """构造 512 维测试向量（前几维可控，其余为 0）。"""
     v = [0.0] * vector.DIM
@@ -117,6 +122,7 @@ def test_query_text_adds_instruction():
     assert vector.query_text(" 爬山安排 ") == vector.QUERY_INSTRUCTION + "爬山安排"
 
 
+@_needs_fastembed
 def test_embedder_prefers_offline_loading_when_model_cached(monkeypatch):
     """模型已在本地时，默认 embedder 必须走 local_files_only=True（运行期零网络请求）。"""
     calls = []
@@ -133,6 +139,7 @@ def test_embedder_prefers_offline_loading_when_model_cached(monkeypatch):
     assert len(calls) == 1 and calls[0]["local_files_only"] is True
 
 
+@_needs_fastembed
 def test_embedder_falls_back_to_download_only_when_cache_missing(monkeypatch):
     """缓存缺失（离线加载抛错）时才允许下载；显式 local_files_only 调用必须保持失败语义。"""
     calls = []
@@ -434,6 +441,7 @@ def test_flush_rejects_a_short_vector_batch(env):
     assert "重跑" in msg and "rebuild" in msg, msg
 
 
+@_needs_fastembed
 def test_a_cache_dir_that_cannot_be_read_does_not_fall_back_to_download(tmp_path, monkeypatch):
     """EA-060（复审 F1 定稿）：**夹具照生产形态**——真 fastembed 把「缺缓存 / 权限错 /
     半份快照 / 坏文件」在 `download_model` 里两级 `except Exception` 之后**统一压成同一个
@@ -466,6 +474,7 @@ def test_a_cache_dir_that_cannot_be_read_does_not_fall_back_to_download(tmp_path
         cache.chmod(0o700)          # 让 pytest 的清理能删掉它
 
 
+@_needs_fastembed
 def test_a_non_missing_exception_is_raised_as_is(monkeypatch):
     """另一支：**不在**「缓存缺失」两类里的异常（如 `PermissionError`）原样抛出。
     这一条桩的是 `TextEmbedding` 的**抛错面**，不是缓存形态——真组件不会这么抛（见上一条），
@@ -485,6 +494,7 @@ def test_a_non_missing_exception_is_raised_as_is(monkeypatch):
     assert len(calls) == 1
 
 
+@_needs_fastembed
 def test_offline_load_missing_entry_still_falls_back_to_download(monkeypatch):
     """EA-060 的反向守卫（防收窄过头）：`FileNotFoundError` 一类（含 huggingface_hub 的
     `LocalEntryNotFoundError`，其 MRO 是 `(FileNotFoundError, EntryNotFoundError)`——**不含**
@@ -507,6 +517,7 @@ def test_offline_load_missing_entry_still_falls_back_to_download(monkeypatch):
     assert [c["local_files_only"] for c in calls] == [True, False]
 
 
+@_needs_fastembed
 def test_fastembed_inference_batch_is_small_not_the_flush_size(monkeypatch):
     """Phase 02：推理批（EMBED_BATCH）与 flush 行数（BATCH）是两回事。把推理批改回 BATCH，
     整组 256 条又会被 padding 到组内最长的那条（实测吞吐约 1/6、峰值内存约 13 倍）——本测试必红。"""

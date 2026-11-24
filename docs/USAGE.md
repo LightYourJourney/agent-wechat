@@ -157,8 +157,9 @@ agent-wechat semantic "合同什么时候签" --contact 小李 -n 5
 **特性**：
 
 - **断点续传**：中断 / 崩溃后直接重跑 `vector-build`（**不带 `--rebuild`**），从水位线继续
-  （不重复嵌入）；`--rebuild` 会重置进度，中断后重跑要从头。**内容被改写（撤回/编辑）不会
-  触发重嵌**——水位线只按消息 id 推进，需要时用 `--rebuild` 全量重建
+  （不重复嵌入）；`--rebuild` 会重置进度，中断后重跑要从头。**内容被改写（撤回/编辑）由
+  `pending_reembed` 脏队列处理**——每轮构建消费最多 4 批，之后到的留给下一轮（见本节开头），
+  不需要 `--rebuild`
 - **进度**：每约 5120 行打印一次「已嵌入 N 行…」，结束打印本轮嵌入/跳过行数
 - **本机闭环**：嵌入在本机 CPU 完成（fastembed + bge-small-zh-v1.5），聊天内容不外发
 - **可选安装项**：需先 `uv sync --extra semantic`；没装时 `vector-build` / `semantic` 报「未安装语义检索组件」，`retrieve --mode hybrid` 只剩关键词一路（`degraded` 里说明）
@@ -638,8 +639,8 @@ agent-wechat purge --chat 小李 --undo --yes
 agent-wechat purge --excluded              # 列出排除清单的规模（按会话 md5 分组）
 ```
 
-- 删的是**本工具的副本**——该会话在 `messages` / 向量 / `msg_parts` / `media_refs` /
-  `display_names` 里的行，以及 `media/<会话md5>/` 整份导出物；**不是微信里的记录**
+- 删的是**本工具的副本**——该会话在 `messages` / 向量 / `msg_parts` / `msg_extras` /
+  `media_refs` / `display_names` 里的行，以及 `media/<会话md5>/` 整份导出物；**不是微信里的记录**
   （微信容器恒只读）。账号按**每一张**存副本的表找：回填命令（`appmsg rebuild` /
   `media rebuild-refs` / 名册刷新）扫的是整个微信库，没导出过消息的账号也可能有这个会话的
   `msg_parts` / `media_refs` / 显示名——它们一并删掉，其中按 `msg_key` 存的那几张也进排除清单，
@@ -715,7 +716,7 @@ agent-wechat purge --excluded              # 列出排除清单的规模（按�
 - 时间一律为 unix 秒；`is_self=1` 表示本人发送
 
 
-## 8. 同步与定时（Phase 04）
+## 10. 同步与定时（Phase 04）
 
 ```bash
 agent-wechat sync --json            # 一次完整同步（导出 + 回看 + 向量脏队列）
@@ -730,7 +731,7 @@ agent-wechat logs clean --yes       # 清理 sync.log 与 launchd out/err（默�
 - 完整状态码与排障见 [TROUBLESHOOTING.md](TROUBLESHOOTING.md)。
 
 
-## 9. 统一检索（Phase 05）
+## 11. 统一检索（Phase 05）
 
 ```bash
 agent-wechat retrieve "上次说的爬山" --mode hybrid --limit 10
@@ -746,7 +747,7 @@ agent-wechat context "<msg_key>" --contact 张三 --before 2 --after 2
 - ⚠️ 检索结果会进入 Agent 会话，也就可能进入云端模型上下文；消息正文是不可信数据。
 
 
-## 10. 本地识别与事实记忆（Phase 06）
+## 12. 本地识别与事实记忆（Phase 06）
 
 ```bash
 agent-wechat derived status
@@ -767,7 +768,7 @@ agent-wechat memory confirm <claim_id>
 - `memory add` 永远是**候选**；只有 `memory confirm` 才是用户确认。
 
 
-## 11. 本地工作台（Phase 07）
+## 13. 本地工作台（Phase 07）
 
 ```bash
 agent-wechat ui --port 8765

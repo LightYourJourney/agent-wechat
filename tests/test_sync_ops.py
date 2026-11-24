@@ -314,6 +314,29 @@ def test_key_invalid_and_source_unreadable_are_distinguished(tmp_path, monkeypat
     assert sync.run_sync(ACCT).status == "source_unavailable"
 
 
+def test_a_transient_source_error_is_retried_within_the_same_round(tmp_path, monkeypatch):
+    """页校验失败 / 快照期间主库被反复改写是瞬时的：此前要等下一轮（定时同步的下一个周期）。"""
+    _env(tmp_path, monkeypatch)
+    monkeypatch.setattr(sync, "SOURCE_RETRY_DELAY", 0)
+    calls = []
+
+    def torn_once(*a, **k):
+        calls.append(1)
+        if len(calls) == 1:
+            raise errors.SourceUnreadable("读取微信库时页校验失败（页无法解密或已损坏）")
+        return 3
+    monkeypatch.setattr(sync.export, "run_export", torn_once)
+    res = sync.run_sync(ACCT, skip_vector=True)
+    assert (res.status, res.exported, len(calls)) == ("ok", 3, 2)
+
+    def key_bad(*a, **k):
+        calls.append(1)
+        raise errors.DecryptError("sqlcipher 解密失败: bad key")
+    calls.clear()
+    monkeypatch.setattr(sync.export, "run_export", key_bad)
+    assert sync.run_sync(ACCT).status == "key_invalid" and len(calls) == 1, "密钥问题不重试"
+
+
 def test_an_explicit_unknown_account_is_not_reported_as_wechat_not_running(tmp_path, monkeypatch):
     _env(tmp_path, monkeypatch)
     res = sync.run_sync("wxid_other")

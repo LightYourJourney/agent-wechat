@@ -131,7 +131,7 @@ agent-wechat/
 │   ├── reader.py          消息读取与解码
 │   ├── media.py           媒体导出（图片解密 / 语音 SILK→WAV / 视频定位）
 │   ├── moments.py         朋友圈解析（sns.db，只读不联网）
-│   ├── sns_media.py       朋友圈远程媒体下载与解密（HTTP、默认关；media.py 另有贴纸 CDN 取件一条，同为 HTTP、默认关——两者是本项目仅有的两条外发路径）
+│   ├── sns_media.py       朋友圈远程媒体下载与解密（HTTP、默认关；media.py 另有贴纸 CDN 取件一条，同为 HTTP、默认关——加上首次建索引时下载模型，共三条零网络例外，全部是入站下载、不上传任何内容，见 SECURITY.md §1）
 │   ├── moments_html.py    朋友圈渲染（单文件 HTML）
 │   ├── chat_text.py       两个会话模板共享的措辞与纯函数
 │   ├── chatview.py        会话时间线组装与落盘

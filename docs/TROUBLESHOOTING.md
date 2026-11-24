@@ -89,9 +89,11 @@ sudo chown -R "$USER" ~/.agent-wechat
 
 ### 2.5 导出时微信卡顿
 
-快照过程是顺序读盘（约 500MB），可能占用数秒磁盘带宽；导出期间正常使用微信即可。
-正常情况下快照是自洽的；微信重度写入的瞬间偶发不一致时，导出会直接报错——
-重跑即可（详见 ARCHITECTURE.md §7 已知边界）。
+快照默认走 APFS `clonefile`（写时复制，与文件大小无关，本机实测约 1 ms）；只有数据目录
+不在 APFS 卷上（跨卷或非 APFS）才回退成整份复制，那时才占用数百 MB 的磁盘带宽。导出期间
+正常使用微信即可。正常情况下快照是自洽的；微信重度写入的瞬间偶发不一致时，主库在拷贝
+前后变了就整组重拍，最多 5 次（`SNAPSHOT_TRIES`），仍在变才以 `source_unavailable` 报错
+——重跑即可（详见 ARCHITECTURE.md §3.10 / §7 已知边界）。
 
 ## 3. 检索相关
 
@@ -151,7 +153,7 @@ agent-wechat recent filehelper -n 3           # 端到端读取
 
 ## 7. 本地索引库 schema 迁移（`SchemaMigrationError`）
 
-本地库带版本表（`schema_version`），首次连接旧库时会自动升级（当前最新为 `main v7`；
+本地库带版本表（`schema_version`），首次连接旧库时会自动升级（当前最新为 `main v9`；
 各版内容见 `store.MIGRATIONS`）。迁移在**同一个库内的一笔事务**里完成，失败即整条回滚、版本停在上一版。
 
 | 现象 | 原因 | 处置 |
@@ -193,15 +195,17 @@ agent-wechat recent filehelper -n 3           # 端到端读取
 | `key_invalid` | 解密失败（sqlcipher/密钥） | 重新 bootstrap；确认微信升级过 |
 | `source_unavailable` | 微信数据目录/分片读不到（含快照复制失败） | 检查完整磁盘访问权限与容器路径 |
 | `index_unavailable` | 索引库打不开 / 迁移失败 | 看 `doctor` 的 schema 段；必要时恢复备份 |
-| `vector_unavailable` | 消息已同步，向量阶段失败 | 准备本地模型缓存后重跑 `vector-build` |
+| `vector_unavailable` | 消息已同步，向量阶段失败（含**没装**可选组件 `[semantic]` 的情形） | 没装语义检索组件时先装：`uv sync --extra semantic`（或 INSTALL.md §2.1 的安装方式）；否则准备本地模型缓存后重跑 `vector-build` |
 | `disk_low` | 可用空间 < 200 MB | 清理磁盘 |
 | `concurrent` | 另一个同步在跑（全局锁） | 等它结束；`doctor` 看 `sync_state`（本次不覆盖） |
 | `disk_error` | 磁盘错误（EIO/ENOSPC 等） | 修磁盘/权限后重跑 |
 | `failed` | 未预期异常（详情带类型） | 看 `detail` 后重跑；持续失败请报 issue |
 
 `agent-wechat doctor` 只读、不建库：先看它的 `problems` 数组，再按上面的表处置。
-`problems` 里出现「FTS 行数不一致」时，重跑一次导出即可重建；出现「版本高于本程序」时
-必须升级程序，不要用旧版继续写库。
+`problems` 里出现「FTS 行数不一致」时，重跑一次导出即可重建；出现「首次导出的 FTS 批量
+重建被中断」时不用管——那是上次导出中途被杀留下的标记，下一次以读写方式打开索引（任何
+检索 / 导出）会自动补建（约每 10 万条 1 秒），`doctor` 本身只读、不修；出现「版本高于
+本程序」时必须升级程序，不要用旧版继续写库。
 
 
 ## 10. 本地识别（`derived`）不产出文字

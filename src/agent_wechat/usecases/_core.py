@@ -31,11 +31,14 @@ MONTH_RE = re.compile(r"\d{4}-(?:0[1-9]|1[0-2])")
 LIMIT_RECENT = (1, 500)
 LIMIT_SEMANTIC = (1, 50)
 LIMIT_UNBOUNDED = (1, None)
+# 「不封顶」的实际上限：再大就要在绑定进 SQLite 的 LIMIT 时抛裸 OverflowError（`limit=10**20`
+# 此前让 MCP 报「内部错误」）。留在 int32 内，调用方再做 `limit + 1` 之类的算术也不会越界。
+_UNBOUNDED_CEIL = (1 << 31) - 1
 
 
 def clamp_limit(n: int, bounds: tuple[int, int | None] = LIMIT_UNBOUNDED) -> int:
     lo, hi = bounds
-    return max(lo, n) if hi is None else max(lo, min(n, hi))
+    return max(lo, min(n, _UNBOUNDED_CEIL if hi is None else hi))
 
 
 def pkg_call(name: str, *args, **kwargs):

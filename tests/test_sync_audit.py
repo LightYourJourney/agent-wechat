@@ -169,8 +169,10 @@ def test_audit_repairs_a_degraded_chat_id(tmp_path, monkeypatch):
     with store.open() as con:
         assert con.execute("SELECT chat_id FROM messages WHERE msg_key=?",
                            (_key(),)).fetchone()[0] == FRIEND
+        # v9 起会话名不再触发重嵌：向量文本与向量行都不含 chat_id，此前自愈一次就把整个会话
+        # 白嵌一遍。发送者名或正文跟着变了的话由它们各自的原因入队。
         assert con.execute("SELECT count(*) FROM pending_reembed WHERE msg_key=?",
-                           (_key(),)).fetchone()[0] == 1, "会话名改了也要重嵌"
+                           (_key(),)).fetchone()[0] == 0, "只有会话名变了：不重嵌"
 
 
 def test_a_degraded_name_never_overwrites_a_real_one(tmp_path):

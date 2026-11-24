@@ -174,6 +174,8 @@ def semantic_search(query: str, contact: str | None = None, limit: int = 10,
     is_self, content, media_hint, distance}]，distance 越小越相近（cosine 距离）；
     每条另带稳定标识 msg_key（可用来指名该消息）。
     微信库结构变更导致显示名等能力降级时，另带 degraded: [{capability, effect}]。
+    需要可选安装项 [semantic]（fastembed）；没装时返回错误「未安装语义检索组件（fastembed）」，
+    并提示 uv sync --extra semantic。
     """
     res = usecases.semantic_search(query, contact=contact, limit=limit, account=account)
     return _need_confirm(res) if isinstance(res, usecases.NeedConfirm) else res
@@ -191,6 +193,8 @@ def build_vector_index(rebuild: bool = False, account: str | None = None) -> dic
     被中断后重跑同一条命令要从头。
     立即返回 task_id，用 get_task_status 查进度。
     注意 account 语义与其它工具相反：省略 account 表示索引**全部**账号，而不是当前账号。
+    需要可选安装项 [semantic]（fastembed）；没装时返回错误「未安装语义检索组件（fastembed）」，
+    并提示 uv sync --extra semantic。
     """
     return usecases.build_vector_index(account, rebuild)
 

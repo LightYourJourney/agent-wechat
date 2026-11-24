@@ -28,6 +28,7 @@ import shutil
 import sqlite3
 import subprocess
 import tempfile
+import threading
 from collections.abc import Iterator
 from typing import Any, Protocol
 
@@ -438,6 +439,28 @@ def _connect_encrypted(snap: pathlib.Path, enc_key: bytes) -> _CipherConnection:
     return _CipherConnection(raw)
 
 
+# 同时持有微信库快照的**线程**上限。MCP 的同步工具跑在工作线程里：8 路并发时实测峰值 RSS
+# 234 MB、tmp 里 1.9 GB 快照（Phase 03 验收 §2.3），而推理争的是同几颗 CPU，再多也不更快。
+# 按线程计、同一线程内的嵌套打开不再占名额——否则 4 个线程各持一个、都在等第二个就死锁。
+OPEN_DB_CONCURRENCY = 4
+_open_db_slots = threading.BoundedSemaphore(OPEN_DB_CONCURRENCY)
+_open_db_depth = threading.local()
+
+
+@contextlib.contextmanager
+def _open_db_slot() -> Iterator[None]:
+    depth = getattr(_open_db_depth, "n", 0)
+    if depth == 0:
+        _open_db_slots.acquire()
+    _open_db_depth.n = depth + 1
+    try:
+        yield
+    finally:
+        _open_db_depth.n = depth
+        if depth == 0:
+            _open_db_slots.release()
+
+
 @contextlib.contextmanager
 def open_db(db: pathlib.Path, passphrase: bytes) -> Iterator[ReadConnection]:
     """读微信库的统一入口：yield 一个只读连接，退出时关连接、删快照。
@@ -445,7 +468,15 @@ def open_db(db: pathlib.Path, passphrase: bytes) -> Iterator[ReadConnection]:
     默认进程内后端（明文不落盘、只解密触及的页）；不可用时回退 CLI 后端（整库导出明文副本，
     与 Phase 02 之前的行为逐字节相同）。两条路径上：快照失败 / 密钥不对 → DecryptError；
     查询中的 SQL 错误 → 对应的 sqlite3 异常。调用方按需设 `text_factory`，不必自己 close。
+    同时打开的线程数受 `OPEN_DB_CONCURRENCY` 限制，超出的排队。
     """
+    with _open_db_slot():
+        with _open_db_unbounded(db, passphrase) as con:
+            yield con
+
+
+@contextlib.contextmanager
+def _open_db_unbounded(db: pathlib.Path, passphrase: bytes) -> Iterator[ReadConnection]:
     if backend() == "cli":
         with decrypted(db, passphrase) as plain:
             con = open_plain(plain)

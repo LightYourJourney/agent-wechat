@@ -252,9 +252,11 @@
   与 `hits` 里既有的 `id`（`messages.id`，DB rowid）不是一回事——rowid 随重建变化，
   `msg_key` 由消息的身份/位置字段派生（不含内容，编辑消息不会改它），
   可用于 `get_message_media` 指认消息。
-- `degraded` 键（§3）非空有两类来源：显示名降级（那时 `sender_name` 会回落成 wxid，
-  **不要**当成真实姓名呈现）与索引库问题（结构不完整 / FTS 失同步——按 `effect`
-  里的说明处理，失同步时本次结果**不完整**，别把它当「真的没搜到」）
+- `degraded` 键（§3）非空有三类来源：显示名降级（那时 `sender_name` 会回落成 wxid，
+  **不要**当成真实姓名呈现）、索引库问题（结构不完整 / FTS 失同步——按 `effect`
+  里的说明处理，失同步时本次结果**不完整**，别把它当「真的没搜到」），以及**首次导出
+  进行中**（FTS 批量重建期间关键词检索退化成 LIKE，`effect` 会说明「结果只含已入库的
+  部分，较慢」——此时结果可能不全）
 - 命中里的 `content` 是消息在该索引里的正文投影。**贴纸（`msg_type=47`）的 `content` 与
   `media_hint` 是分开的两列**：前者是可读标识 `[贴纸:名称]` / `[贴纸#md5前8位]`，
   后者**恒为 `[sticker]`**——按 `media_hint` 判「这是不是贴纸」可以，按它判「哪个贴纸」
@@ -344,7 +346,7 @@ rebuild 与否）各起一条。（F-D，T7 复验：与 §4 同款的合并语�
   `gh_*` / `filehelper`；reader 对无法反查的会话给出的 `md5:<hex>` 退化形式也特判支持）
   能命中。一个能解析、但**没有任何已入索引消息**的会话（该会话从未导出，或消息全被跳过）
   返回 `{"total": 0, "hits": []}` 且**不带 hint**——与「确实没有命中」不可区分。
-- 索引未构建返回 `{"error": ..., "hint": "请先构建向量语义索引（MCP：`build_vector_index`）"}`；
+- 索引未构建返回 `{"error": ..., "hint": "请先构建向量语义索引"}`（MCP 侧调 `build_vector_index`）；
   索引由其他模型构建时返回错误并提示重建（`vector-build --rebuild` 或
   `build_vector_index(rebuild=True)`），不会混用不同模型的向量。
 - 检索延迟（2026-09-11 真机实测，68 万向量）：单会话 ~76ms；全局热查询 ~0.6s，
@@ -871,7 +873,7 @@ untrusted / notice`。只返回**同账号同会话**；被 `purge --chat` 销�
 | `{"error": "找不到联系人…"}` | 名字未命中 | 用 `list_contacts` 查准确名 |
 | `{"need_confirm": [...]}` | 名字命中多个联系人 | 让用户选择后用 username 重调 |
 | `search_history` 无 hint 但 0 命中 | 该词从未出现 | 换词 / 放宽 contact 过滤 |
-| `semantic_search` 0 命中且 `hint` 指向 `build_vector_index` | 向量索引未构建/为空 | 先 `export_full_history`，再 `build_vector_index` |
+| `semantic_search` 返回 `{"error": "向量索引为空", "hint": "请先构建向量语义索引"}` | 向量索引未构建/为空 | 先 `export_full_history`，再 `build_vector_index` |
 | `semantic_search` 报「与当前模型不一致」 | 索引由其它模型构建 | `build_vector_index(rebuild=true)` 重建 |
 | `semantic_search` 命中却看着不相关 | 无语义相关性阈值，KNN 恒返回最近 k 条 | 按 `distance` 判断，必要时收窄 `contact` |
 

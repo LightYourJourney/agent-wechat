@@ -33,7 +33,7 @@ src/agent_wechat/
 ├── reader.py       消息读取：表发现、内容解码、流式产出（按语义**解码消息内容**的唯一模块——`inspect` 也会读库，但它只 dump 结构与样例行；结构与探测声明在 schema.py）
 ├── media.py        媒体导出：图片 dat 解密（密钥纯磁盘推导 + 样本验证）、语音 SILK→WAV、视频定位、**贴纸 CDN 取件（本项目唯一为贴纸联网的路径，默认关）**（唯一接触媒体容器与媒体密钥的模块；reader import 它抽 `media_refs`、并借 `extract_sticker_ref` 解析贴纸 XML 的**三个安全字段**，不反向**顶层** import；唯一的反向是 `media` 在贴纸回源一处**函数内惰性** import `reader` 现取原始 XML——为避开模块级环，见 `media.py` 模块头）
 ├── moments.py      朋友圈解析：sns.db 的 `TimelineObject` XML → 结构化动态（纯读取，不联网）
-├── sns_media.py    朋友圈远程媒体：URL 构造 → 下载 → WX-ISAAC64 解密（朋友圈远程媒体：HTTP、默认关；本项目两条外发路径之一——另一条是 `media.py` 的贴纸 CDN 取件。隔离带）
+├── sns_media.py    朋友圈远程媒体：URL 构造 → 下载 → WX-ISAAC64 解密（朋友圈远程媒体：HTTP、默认关；本项目三条零网络例外之一，均为入站下载、不上传任何内容——另两条是 `media.py` 的贴纸 CDN 取件与首次建索引时的模型下载，见 SECURITY.md §1。隔离带）
 ├── moments_html.py 朋友圈渲染：单文件自包含 HTML 时间线（纯函数，不写文件、不联网）
 ├── chat_text.py    两个会话模板共享的措辞与纯函数（时间格式化 / 相对路径 / 媒体状态与降级文案）
 ├── chatview.py     会话时间线：`ChatView` 组装 + `write`（唯一决定产物布局的地方）
@@ -290,14 +290,14 @@ decrypt.open_db(db, passphrase)                     # reader / 语音 / 朋友�
 | 会话时间线导出（appmsg 富文本） | 已实现：`appmsg.py`（三步规范化 + 解析）+ `msg_parts` 原始载荷表 + `chatview.py`（`ChatView` 组装与落盘）+ `chat_html.py` / `chat_md.py`（两个纯模板，措辞共享在 `chat_text.py`）+ `chat_index.py`（索引页）；CLI `chat export` / `chat index` / `appmsg rebuild`，MCP `export_chat` / `get_message_parts` | appmsg（引用 / 链接 / 文件 / 转账）渲染成结构化块，媒体以相对路径引用**同级**的既有媒体树（`chat export` 的 `--out` 必须与 `media export` 同根）；`appmsg rebuild` / `extras rebuild` 是显式的一次性动作（幂等；后者补位置/名片的结构化载荷）；Markdown 有三处固有损失（第四处「语法不转义」已在 EA-037 收口），**不假装与 HTML 等价**（见 USAGE.md §7） |
 | 朋友圈读取与导出 | 已实现：`moments.py`（离线解析 `sns.db`）+ `moments_html.py`（单文件 HTML）+ `sns_media.py`（远程媒体，默认关） | 远程媒体需联网——`--with-media` / `with_media=True` 显式开启，只连微信 CDN——后缀 `*.qpic.cn` / `*.video.qq.com`，加精确主机 `wxapp.tc.qq.com`（**不含子域**）；默认全程零网络；本地缓存图不参与（文件名与动态对不上）；发布 / 删除等写操作不做 |
 | 群成员显示名 | 已实现：索引库存 `display_names` 名册，查询时 join；实时路径 `recent` 用内存名册 | 群昵称在 `contact.db` 的 `chat_room.ext_buffer`（protobuf，字段 f2，可选），回落 `contact.remark` / `nick_name` |
-| 增量自动同步 | 手动重跑 export（秒级） | export 管道与水位线已就绪，加定时触发即可 |
+| 增量自动同步 | 已实现：CLI `agent-wechat sync`（环境检查 → 增量导出含回看 → 向量脏队列）与 `agent-wechat schedule install`（launchd plist，默认不启用、从不调用 `launchctl`） | 手工触发仍是 `export`（秒级）；调度只写 `~/Library/LaunchAgents/com.agent-wechat.sync.plist`，启用 / 停用由用户自己执行 |
 
 ## 7. 已知边界
 
 - 微信升级可能改变库结构/加密参数 → 运行时按 `schema.py` 的声明清单探测（读 `PRAGMA
   table_info`，实例级缓存），受影响的能力降级并在结果里说明；`inspect` 仍是人工对照工具
-- 读取期间微信重度使用时快照可能偶发不一致 → 快照失败自动重试逻辑为规划的加固点
-  （当前实现直接报错，重跑即可）
+- 读取期间微信重度使用时快照可能偶发不一致 → 主库在拷贝前后变了就整组重拍，最多 5 次
+  （`SNAPSHOT_TRIES`，见 §3.10），仍在变才报 `source_unavailable`；重跑即可
 - `key_info.db` 明文库的存在说明微信本地留存了被包裹的密钥材料；若未来微信改为
   更强的包裹算法，LLDB 路线不受影响（它读的是内存中已解出的 passphrase）
 - **增量嵌入的上下文前缀不连续**：`上文:` 前缀在单次运行内按会话累积，增量运行从水位线
