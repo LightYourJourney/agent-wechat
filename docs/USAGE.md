@@ -23,8 +23,8 @@
 帮我回复 XXX
 ```
 
-Agent 会自动执行：`get_account_status` 确认账号 → `list_contacts("XXX")` 消歧 →
-`get_recent_messages` 读近期 50 条 → 生成 2-3 条不同风格的候选回复。
+Agent 会自动执行：`get_account_status` 确认账号 → `get_recent_messages("XXX")` 读近期 50 条
+（名字直接可用，重名时返回候选）→ 生成 2-3 条不同风格的候选回复。
 若「XXX」匹配多个联系人，Agent 会列出让**你**确认，不会猜。
 
 **CLI 方式**：

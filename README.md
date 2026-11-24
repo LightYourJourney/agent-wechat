@@ -177,6 +177,7 @@ agent-wechat/
 | [USAGE.md](docs/USAGE.md) | 典型场景、工作流、命令示例 |
 | [TOOLS.md](docs/TOOLS.md) | 15 个 MCP 工具的参数/返回/错误 |
 | [ARCHITECTURE.md](docs/ARCHITECTURE.md) | 模块划分、数据流、设计决策 |
+| [MCP_EFFICIENCY.md](docs/MCP_EFFICIENCY.md) | MCP 在 Agent 里的上下文占用、往返与延迟：测量方法与优化对比 |
 | [DATA_MODEL.md](docs/DATA_MODEL.md) | 表结构、去重与增量策略 |
 | [SECURITY.md](docs/SECURITY.md) | 隐私、密钥安全、法律风险 |
 | [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | 常见故障与修复 |

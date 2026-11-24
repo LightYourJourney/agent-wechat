@@ -325,13 +325,18 @@ def message_media(contact: str, *, keys: Sequence[str] | None = None,
                 rows = rows[:lim]
             else:
                 type_ph = ",".join("?" * len(_MEDIA_TYPES))
+                # 会话的 msg_key 前缀区间（`account|chat_md5|` 起头）走主键索引，只扫本会话；
+                # `+m.account` 让规划器别为了 ORDER BY 选 idx_msg_ts——那会把整个账号的消息
+                # 按时间倒序扫一遍（30 万条约 70ms，前缀区间约 1ms）。两个列谓词照留。
+                prefix = messages.msg_key_prefix(ctx.account, cm)
                 sql = (f"SELECT {messages.column_list(*messages.COLUMNS, prefix='m.')} "
-                       f"FROM messages m WHERE m.account=? AND m.chat_md5=? "
+                       f"FROM messages m WHERE +m.account=? AND m.chat_md5=? "
+                       f"AND m.msg_key >= ? AND m.msg_key < ? "
                        f"AND m.msg_type IN ({type_ph}){month_sql} "
                        f"ORDER BY m.ts DESC LIMIT ?")
                 rows = [dict(zip(messages.COLUMNS, r))
-                        for r in con.execute(sql,
-                                             [ctx.account, cm, *_MEDIA_TYPES, *month_args, lim])]
+                        for r in con.execute(sql, [ctx.account, cm, prefix, prefix[:-1] + "}",
+                                                   *_MEDIA_TYPES, *month_args, lim])]
                 # 取回条数正好等于 limit ⇒ 库里可能还有更多。这里偏保守（恰好等于总数时也报
                 # True），与 media.MediaReport 的 `produced >= max_files` 同一取舍：宁可多报
                 # 「可能被截断」，也不能漏报一条真的没答完。

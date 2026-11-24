@@ -3,6 +3,24 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 风格，
 版本号语义为 0.x 阶段（API 可能变动）。
 
+### MCP 使用效率（2026-11-24）
+
+测量方法、逐项对比与剩余问题见 [MCP_EFFICIENCY.md](MCP_EFFICIENCY.md)。工具名、参数与返回键都没有变。
+
+**优化**
+
+- 工具定义精简：描述只保留选用与调用所需的要点（实现史与实测轶事留在 TOOLS.md），跨工具约定集中到
+  server instructions 写一次；inputSchema 去掉 pydantic 自动生成的 `title`；描述去缩进。
+  Claude Code `/context` 实测每个会话的固定开销从约 11.2k token 降到约 6.7k。
+- 不再引导 Agent「先 `get_account_status`、再 `list_contacts`」：contact 直接用名字，重名时返回
+  `need_confirm`。合成库上 6 个典型任务的平均工具调用从 2.42 次降到 1.42 次（Sonnet），
+  输入 token 合计减少 39%。`wechat-reply` Skill 与 USAGE.md 的流程同步修改。
+- 返回文本由 `indent=2` 改为紧凑 JSON（中文不转义）：解析结果不变，常见检索结果小 20–30%。
+- `get_message_media` 省略 keys 时按会话的 msg_key 前缀区间走主键索引，不再把整个账号扫一遍
+  （30 万条下从 106ms 降到 4ms）；「索引为空」的判定改为 `EXISTS`，不再做三次全表扫描。
+- 新增 `scripts/mcp_bench.py`（合成库上测定义体积、冷启动、延迟与返回体积）和
+  `scripts/mcp_agent_eval.py`（`claude -p` 端到端评测），以及工具定义体积的回归护栏测试。
+
 ### issue #1 修复复审（2026-11-24）
 
 **修复**

@@ -546,3 +546,24 @@ def test_a_key_count_exactly_equal_to_the_limit_is_not_truncated(tmp_path, monke
         account=ACCT, _ctx=_FakeCtx(), _con=con)
     assert len(exact.states) == len(keys), "该答的都要答回"
     assert exact.truncated is False, "一条没丢却报截断 = 假警"
+
+
+def test_whole_chat_query_scans_only_this_chat(tmp_path, monkeypatch, idx):
+    """省略 keys 时按会话的 msg_key 前缀区间走主键索引——此前规划器为了 ORDER BY 选了
+    idx_msg_ts，把**整个账号**的消息倒序扫一遍（30 万条约 70ms）。答案不变：别的会话的媒体
+    消息不混进来，本会话的照答。"""
+    con, rows = idx
+    other = messages.md5_of("wxid_other")
+    store.upsert_batch(con, [{**_row(9, messages.TYPE_IMAGE), "chat_md5": other,
+                              "chat_id": "wxid_other",
+                              "msg_key": messages.row_key(ACCT, other, "message_0.db", 9, TS)}])
+    con.commit()
+    monkeypatch.setattr(usecases, "_voice_keys_for", lambda acct: frozenset(), raising=False)
+    seen: list[str] = []
+    con.set_trace_callback(seen.append)
+    res = usecases.message_media("wxid_x", account=ACCT, _ctx=_FakeCtx(), _con=con)
+    con.set_trace_callback(None)
+    assert {s.msg_key for s in res.states} == {r["msg_key"] for r in rows[1:]}
+    sql = next(s for s in seen if "msg_type IN" in s)
+    plan = " ".join(str(r[-1]) for r in con.execute(f"EXPLAIN QUERY PLAN {sql}"))
+    assert "msg_key>" in plan.replace(" ", "") and "idx_msg_ts" not in plan, plan

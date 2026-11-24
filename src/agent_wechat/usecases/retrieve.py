@@ -131,6 +131,7 @@ def index_ready() -> bool:
     """本地检索库是否已有消息。空索引的提示文案是 MCP 专属渲染，故不放进用例。"""
     try:
         with store.open() as con:
-            return store.counts(con)["messages"] > 0
+            # 只问「有没有」：`store.counts` 是三次全表扫描（大索引上几十毫秒），这里用不着
+            return con.execute("SELECT EXISTS(SELECT 1 FROM messages)").fetchone()[0] == 1
     except Exception:
         return False
