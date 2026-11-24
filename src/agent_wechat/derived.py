@@ -304,7 +304,7 @@ def _insert(con: sqlite3.Connection, *, row: sqlite3.Row, kind: str, text: str,
         " text, engine, engine_version, source, quality, status, created_at)"
         " SELECT ?,?,?,?,?,?,?,?,?,?, 'auto', ?"
         " WHERE EXISTS (SELECT 1 FROM messages WHERE msg_key = ?)"
-        " AND NOT EXISTS (SELECT 1 FROM exclusions.excluded WHERE msg_key = ?)"
+        " AND NOT EXISTS (SELECT 1 FROM exclusions.excluded WHERE msg_key IN (?, ?))"
         " ON CONFLICT(derivation_id) DO UPDATE SET"
         " text=excluded.text, engine=excluded.engine,"
         " engine_version=excluded.engine_version, source=excluded.source,"
@@ -312,7 +312,7 @@ def _insert(con: sqlite3.Connection, *, row: sqlite3.Row, kind: str, text: str,
         " WHERE derived_text.status != 'deleted'",
         (f"{row['msg_key']}|{kind}", row["msg_key"], row["account"], row["chat_id"],
          kind, text, engine, version, str(source), quality, now,
-         row["msg_key"], row["msg_key"]))
+         row["msg_key"], row["msg_key"], messages.legacy_key(row["msg_key"])))
     return cur.rowcount > 0
 
 
@@ -371,9 +371,10 @@ def ingest(account: str, chat: str | None = None, *,
                 kind = _kind_of(row["msg_type"])
                 if kind is None or kind not in wants:
                     continue
-                if con.execute("SELECT 1 FROM derived_tombstone"
-                               " WHERE msg_key=? AND kind=?",
-                               (row["msg_key"], kind)).fetchone():
+                if con.execute("SELECT 1 FROM derived_tombstone"   # 含 v10 前的 4 段墓碑
+                               " WHERE msg_key IN (?, ?) AND kind=?",
+                               (row["msg_key"], messages.legacy_key(row["msg_key"]),
+                                kind)).fetchone():
                     skip("deleted")
                     continue
                 if exclusions.is_excluded(con, row["msg_key"]):
@@ -471,6 +472,13 @@ def _get(con: sqlite3.Connection, derivation_id: str) -> sqlite3.Row:
     row = con.execute(
         "SELECT * FROM derived_text WHERE derivation_id=?", (derivation_id,)
     ).fetchone()
+    key, _, kind = derivation_id.rpartition("|")
+    kp = messages.split_key(key)
+    if row is None and kp is not None and kp.create_time is None:
+        # v10 前的 `{4 段旧键}|{kind}`：键唯一时换成新键再查一次
+        new_key = store.resolve_msg_key(con, kp.account, key)
+        row = con.execute("SELECT * FROM derived_text WHERE derivation_id=?",
+                          (f"{new_key}|{kind}",)).fetchone()
     if row is None:
         raise errors.DataNotFound(
             f"找不到派生文本 {derivation_id}",
@@ -497,9 +505,9 @@ def edit_derived(derivation_id: str, text: str, *, now: int | None = None) -> di
         con.execute(
             "UPDATE derived_text SET text=?, status='edited', edited_at=?"
             " WHERE derivation_id=?",
-            (text, int(now if now is not None else time.time()), derivation_id))
+            (text, int(now if now is not None else time.time()), row["derivation_id"]))
         _commit(con)
-    return {"derivation_id": derivation_id, "status": "edited"}
+    return {"derivation_id": row["derivation_id"], "status": "edited"}
 
 
 def delete_derived(derivation_id: str, *, now: int | None = None) -> dict:
@@ -509,14 +517,14 @@ def delete_derived(derivation_id: str, *, now: int | None = None) -> dict:
         row = _get(con, derivation_id)
         con.execute(
             "UPDATE derived_text SET text='', status='deleted', edited_at=?"
-            " WHERE derivation_id=?", (stamp, derivation_id))
+            " WHERE derivation_id=?", (stamp, row["derivation_id"]))
         con.execute(
             "INSERT INTO derived_tombstone(msg_key, kind, deleted_at)"
             " VALUES(?,?,?) ON CONFLICT(msg_key, kind) DO UPDATE SET"
             " deleted_at=excluded.deleted_at",
             (row["msg_key"], row["kind"], stamp))
         _commit(con)
-    return {"derivation_id": derivation_id, "status": "deleted"}
+    return {"derivation_id": row["derivation_id"], "status": "deleted"}
 
 
 def search_derived(query: str, *, account: str, chat_id: str | None = None,
@@ -589,9 +597,10 @@ def add_claim(account: str, claim: str, *, evidence: list[str],
     if not evidence:
         raise errors.DerivedInputError(
             "事实记忆必须有原始证据", hint="给至少一个 msg_key（来自检索结果）")
-    evidence = list(dict.fromkeys(evidence))      # 重复 key 去重（PK 冲突会逃出项目异常）
     stamp = int(now if now is not None else time.time())
     with store.open() as con:
+        # v10 前的 4 段旧键唯一时换成新键；重复 key 去重（PK 冲突会逃出项目异常）
+        evidence = list(dict.fromkeys(store.resolve_msg_key(con, account, k) for k in evidence))
         # 证据判据与写入同一把写锁（同 `store.upsert_batch` 的立场）：判完、写之前 `purge --chat`
         # 若删完了证据所在的会话，主张与证据会落在已销毁的会话上，核查早已报过 ✅。
         store._begin_immediate(con)

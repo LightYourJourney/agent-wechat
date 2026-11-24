@@ -117,8 +117,8 @@
 }
 ```
 
-> `msg_key` 是消息的稳定标识（`account|chat_md5|shard|local_id`），
-> 跨导出保持不变；后续 `get_message_media` 靠它指认「这条消息的媒体是什么」。
+> `msg_key` 是消息的稳定标识（`account|chat_md5|shard|local_id|create_time`），
+> 跨导出保持不变（v10 之前的 4 段旧键仍可传入：唯一时自动换成新键）；后续 `get_message_media` 靠它指认「这条消息的媒体是什么」。
 
 **降级说明**：信封**总是**带 `degraded` 键（数组，正常情况下是空数组），每项是
 `{capability, effect}`——例如微信升级改了库结构时
@@ -248,7 +248,7 @@
 - `mode`: `fts`（trigram 命中，含高亮 `snip`）| `like`（1-2 字兜底，`snip` 为 null）
 - 1-2 字查询**建议传 `contact`**，否则全表扫描（秒级）
 - 索引为空时返回 `{"hits": [], "hint": "本地索引为空：请先运行 export_full_history", ...}`
-- `msg_key` 是消息的稳定标识（`account|chat_md5|shard|local_id`），跨导出保持不变；
+- `msg_key` 是消息的稳定标识（`account|chat_md5|shard|local_id|create_time`；v10 之前是前 4 段），跨导出保持不变；
   与 `hits` 里既有的 `id`（`messages.id`，DB rowid）不是一回事——rowid 随重建变化，
   `msg_key` 由消息的身份/位置字段派生（不含内容，编辑消息不会改它），
   可用于 `get_message_media` 指认消息。

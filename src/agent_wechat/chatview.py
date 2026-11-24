@@ -18,7 +18,7 @@ import**，运行期按结构使用（`media` 只读 `.status` / `.kind` / `.pat
 本仓库处处 `from __future__ import annotations`，注解本就是字符串，故这不引入任何运行期依赖。
 **不要改成运行期 import。**
 
-**锚点 = `msg_key` 的 12 位 blake2s。** `msg_key` 是身份派生的（`account|chat_md5|shard|local_id`）、
+**锚点 = `msg_key` 的 12 位 blake2s。** `msg_key` 是身份派生的（`account|chat_md5|shard|local_id|create_time`）、
 跨导出稳定，所以引用锚点**不会因为重新导出而失效**；取短哈希只是为了让它能安全地进
 HTML `id` 与 URL fragment（`msg_key` 里有 `|` 与 `.`）。`anchor_of` 是纯函数：同输入恒同输出。
 """

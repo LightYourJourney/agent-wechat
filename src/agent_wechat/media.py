@@ -422,7 +422,8 @@ _CJK = re.compile(r"[一-鿿]+")
 
 
 def _loc_of_msg_key(msg_key: str) -> tuple[str, str, int] | None:
-    """`account|chat_md5|shard|local_id` → `(chat_md5, shard, local_id)`；形状不合法 → None。
+    """`account|chat_md5|shard|local_id|create_time`（或 v10 前的 4 段）→
+    `(chat_md5, shard, local_id)`；形状不合法 → None。
 
     EA-085：此前 `_locs` 只查「四段」，末段不是数字时 `int()` 裸抛 `ValueError`（core 层
     只抛项目异常）——坏索引会让整批贴纸导出崩。判据收在这里，坏键由调用方按 `failed` 归口。
@@ -430,7 +431,7 @@ def _loc_of_msg_key(msg_key: str) -> tuple[str, str, int] | None:
     Numeric_Type=Digit 的字符，`int()` 照样抛（F5，T6 复审）。
     """
     parts = msg_key.split("|")
-    if len(parts) != 4 or not parts[3].isdecimal():
+    if len(parts) not in (4, 5) or not all(x.isdecimal() for x in parts[3:]):
         return None
     return parts[1], parts[2], int(parts[3])
 
@@ -1502,7 +1503,7 @@ def _export_stickers(st: _ExportState, chat_ids: list[str],
     for chat in chat_ids:
         cm = messages.md5_of(chat)
         for msg_key, _ts, file_key in refs.get(chat, ()):
-            if msg_key.count("|") == 3:
+            if msg_key.count("|") in (3, 4):          # 4 段旧键 / 5 段（v10）
                 all_keys.setdefault((cm, file_key), []).append(msg_key)
 
     order: list[tuple[str, str, str]] = []                  # (cm, mon, md5)，保序
@@ -1516,7 +1517,7 @@ def _export_stickers(st: _ExportState, chat_ids: list[str],
             if st.already(cm, "sticker", mon, file_key):
                 st.report.sticker.skipped += 1
                 continue
-            if msg_key.count("|") != 3:
+            if msg_key.count("|") not in (3, 4):
                 st.report.sticker.missing += 1  # EA-022：形状不对 = 定位不了那一行（一次请求都不会发）
                 continue
             key = (cm, mon, file_key)

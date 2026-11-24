@@ -1472,7 +1472,7 @@ def test_iter_all_yields_refs_for_image_message(env, tmp_path, monkeypatch):
     batches = list(reader.MessageReader(ACCT).iter_all())
     rows = [r for batch, _ in batches for r in batch]
     refs = [ref for _, rf in batches for ref in rf]
-    key = messages.row_key(ACCT, md5(FRIEND), "message_0.db", 1)
+    key = messages.row_key(ACCT, md5(FRIEND), "message_0.db", 1, T0)
     assert refs == [(key, "image", "e" * 32, IMG_MD5)]   # packed 大写 hex 被归一小写
     assert len(rows) == 3                                 # 图片 1 + 分片 1 的旧 2：yield 改形不丢行
     img = next(r for r in rows if r["msg_type"] == 3)
@@ -1516,7 +1516,7 @@ def test_media_rebuild_refs_idempotent_and_does_not_touch_messages(env, tmp_path
     「不碰 messages」断言在**空索引**上做：若实现顺手走了 upsert_batch，这里会凭空长出
     3 行消息——先跑过导出的话，幂等 upsert 会让这一违规不可见。"""
     monkeypatch.setattr(paths, "XWECHAT_FILES", _tree_with_image_message(env, tmp_path))
-    key = messages.row_key(ACCT, md5(FRIEND), "message_0.db", 1)
+    key = messages.row_key(ACCT, md5(FRIEND), "message_0.db", 1, T0)
 
     assert usecases.media_rebuild_refs(account=ACCT) == 1
     with store.open() as con:
@@ -1578,11 +1578,12 @@ def test_iter_parts_input_keys_are_the_same_row_keys_messages_uses(env):
                                  for sid, key, raw in reader.MessageReader(ACCT).iter_parts_input()}
     assert set(scanned) == in_index, (
         "两条路径算出的 msg_key 不同形 —— 回填会写出对不上的行，且不报警")
-    sid, raw = scanned[f"{ACCT}|{md5(FRIEND)}|message_0.db|5"]
+    appmsg_key = messages.row_key(ACCT, md5(FRIEND), "message_0.db", 5, T0 + 14)
+    sid, raw = scanned[appmsg_key]
     assert raw is not None and raw.startswith("<msg>"), "appmsg 载荷没被解出来"
     assert sid == 9005, "server_id 没从微信库带出来（引用回指整条断掉）"
-    # 契约写死成字面量：账号 | chat_md5 | 分片名 | local_id，四段缺一不可。
-    assert f"{ACCT}|{md5(FRIEND)}|message_0.db|5" in scanned
+    # 契约写死成字面量：账号 | chat_md5 | 分片名 | local_id | create_time，五段缺一不可。
+    assert f"{ACCT}|{md5(FRIEND)}|message_0.db|5|{T0 + 14}" in scanned
 
 
 # ---------- T6：msg_key 在 _read_rows 里真实赋值（不能靠字段默认值空转） ----------
@@ -1591,13 +1592,13 @@ def test_recent_messages_msg_key_populated_by_read_rows(env):
     """`reader.py:362` 的 `m.msg_key = messages.row_key(...)` 是 get_recent_messages
     路径上 msg_key 唯一的真实来源。走 `wechat` 夹具的完整库（真 roster + 真 _read_rows），
     删掉那一行字段仍在（默认空串）但毫无用处——这条断言会红：先验非空，再验等于
-    四字段重算值（钉住顺序与组成）。"""
+    五字段重算值（钉住顺序与组成）。"""
     res = usecases.recent_messages(FRIEND, limit=5, account=ACCT)
     assert res.messages, "夹具没建出消息，下面的断言将恒真"
     assert all(m.msg_key for m in res.messages), "msg_key 不能是空串：字段在但没用"
     for m in res.messages:
         assert m.msg_key == messages.row_key(ACCT, messages.md5_of(m.chat_id),
-                                             m.shard, m.local_id)
+                                             m.shard, m.local_id, m.ts)
 
 
 # ---------- T5：emoticon.db 的名字来源 ----------
@@ -1711,7 +1712,7 @@ def test_iter_all_yields_a_sticker_ref_carrying_the_xml_md5(env, tmp_path, monke
     batches = list(reader.MessageReader(ACCT).iter_all())
     rows = [r for batch, _ in batches for r in batch]
     refs = [ref for _, rf in batches for ref in rf]
-    key = messages.row_key(ACCT, md5(FRIEND), "message_0.db", 1)
+    key = messages.row_key(ACCT, md5(FRIEND), "message_0.db", 1, T0)
     assert refs == [(key, "sticker", sticker_md5, None)]
     sticker = next(r for r in rows if r["msg_type"] == 47)
     assert sticker["content"] == "[贴纸#d0f46ed3]"     # 无名 → 短 ID，索引里照写
@@ -1793,7 +1794,7 @@ def test_rewrites_are_caught_by_the_audit_pass_but_not_by_forward_scan(tmp_path,
     monkeypatch.setattr(keys, "CACHE_FILE", home / "passphrase.json")
     monkeypatch.setattr(store, "DB_PATH", home / "index.db")
     keys.save_cached_hex(SELF, PW.encode().hex())
-    key = f"{ACCT}|{md5(FRIEND)}|message_0.db|1"
+    key = messages.row_key(ACCT, md5(FRIEND), "message_0.db", 1, T0 + 10)
 
     assert export.run_export(ACCT) == 1
     with store.open() as con:

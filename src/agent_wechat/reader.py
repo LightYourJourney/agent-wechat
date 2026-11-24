@@ -522,7 +522,7 @@ class MessageReader:
             m = self._decode_row(lid, ltype, sender, ts, mc, ct, md5hex, chat_map, n2i,
                                  sticker_names=sticker_names)
             m.shard = shard
-            m.msg_key = messages.row_key(self.acct, md5hex, shard, m.local_id)
+            m.msg_key = messages.row_key(self.acct, md5hex, shard, m.local_id, m.ts)
             out.append(m)
         return out
 
@@ -576,10 +576,10 @@ class MessageReader:
             got = media.extract_media_ref(m.msg_type, _decode_content(mc, ct), packed)
             if got:
                 kind, fk, xm = got
-                ref = (messages.row_key(self.acct, md5hex, shard, lid), kind, fk, xm)
+                ref = (messages.row_key(self.acct, md5hex, shard, lid, m.ts), kind, fk, xm)
         elif m.sticker_md5:
             # 贴纸引用：`file_key` 位放 md5（它就是这个 kind 的定位键），`xml_md5` 位留 None。
-            ref = (messages.row_key(self.acct, md5hex, shard, lid),
+            ref = (messages.row_key(self.acct, md5hex, shard, lid, m.ts),
                    "sticker", m.sticker_md5, None)
         return messages.make_row(
             account=self.acct, chat_md5=md5hex, chat_id=m.chat_id,
@@ -617,7 +617,9 @@ class MessageReader:
                  batch: int | None = None, *,
                  audit_cursors: Mapping[tuple[str, str], int] | None = None,
                  audit_rows: int = 0,
-                 audit_sink: Callable[[list, list], None] | None = None
+                 audit_sink: Callable[[list, list], None] | None = None,
+                 anchors: Mapping[tuple[str, str], int | None] | None = None,
+                 on_rebuilt: Callable[[str, str], None] | None = None
                  ) -> Iterator[tuple[list[messages.MessageRow], list[RefRow]]]:
         """全量流式导出（生成器）。逐分片→逐表→按批 yield。
 
@@ -628,6 +630,11 @@ class MessageReader:
         **不混进 yield**：`rows` 是「本轮新写入」的已发布计数契约，混进来会让每次增量都
         报出几万行。回看后的游标记在 `self.audit_marks`，由调用方在数据提交后落盘。
         `audit_sink is None` 时完全不回看（`audit_rows` 也就无所谓）。
+        `anchors`（schema v10）：{(shard, chat_md5): 水位线那一行的 create_time}。源表里
+        `local_id = 水位线` 的行**不在或 create_time 对不上** = 表被重建过（local_id 从 1 重来）
+        或最新那条被删了：该会话从 0 重扫（键含 create_time，重扫幂等），并先调
+        `on_rebuilt(shard, chat_md5)` 让调用方把旧水位线清掉——否则它按 max 单调不降，
+        下一轮还会再判一次。锚点为 None（v10 之前的水位线）不判。
 
         yield (rows, refs)：rows 是 list[dict]，字段与 store.upsert_batch 对齐；refs 是
         [(msg_key, media_kind, file_key, xml_md5)]，与 store.upsert_media_refs 对齐——
@@ -654,6 +661,12 @@ class MessageReader:
                     # EA-112：不再逐表比对 want_md5——`_shard_tables(con, want_md5)` 已早退到
                     # 唯一那张表，这里再判一次是恒真分支（同一判据两处维护）。
                     start = resume.get((shard.name, md5hex), 0)
+                    anchor = (anchors or {}).get((shard.name, md5hex))
+                    if start and anchor is not None and self._table_rebuilt(
+                            con, table, start, anchor):
+                        start = 0
+                        if on_rebuilt is not None:
+                            on_rebuilt(shard.name, md5hex)
                     cur = con.execute(
                         f"SELECT {_EXPORT_COLUMNS} FROM '{table}' "
                         f"WHERE local_id > ? ORDER BY local_id", (start,))
@@ -680,6 +693,13 @@ class MessageReader:
                                 got, batch=batch, shard=shard.name, md5hex=md5hex,
                                 chat_map=chat_map, n2i=n2i, sticker_names=sticker_names):
                             audit_sink(a_rows, a_refs)
+
+    @staticmethod
+    def _table_rebuilt(con: decrypt.ReadConnection, table: str, local_id: int,
+                       anchor: int) -> bool:
+        row = con.execute(f"SELECT create_time FROM '{table}' WHERE local_id = ?",
+                          (local_id,)).fetchone()
+        return row is None or int(row[0] or 0) != anchor
 
     def raw_contents(self, shard: str, wanted: Iterable[tuple[str, int]]
                      ) -> dict[tuple[str, int], str | None]:
@@ -718,8 +738,8 @@ class MessageReader:
                     self._check("messages", f"message/{shard.name}", con, table=tables[0])
                 for table in tables:
                     md5hex = table[4:]
-                    for lid, ltype, mc, ct in con.execute(
-                            f"SELECT local_id, local_type, message_content, "
+                    for lid, ltype, ts, mc, ct in con.execute(
+                            f"SELECT local_id, local_type, create_time, message_content, "
                             f"WCDB_CT_message_content FROM '{table}'"):
                         t = ltype & 0xffffffff
                         if t not in msgextra.KINDS or mc is None:
@@ -727,7 +747,7 @@ class MessageReader:
                         raw = _decode_content(mc, ct)
                         if not raw:
                             continue
-                        yield (messages.row_key(self.acct, md5hex, shard.name, lid), t,
+                        yield (messages.row_key(self.acct, md5hex, shard.name, lid, ts), t,
                                zlib.compress(appmsg.normalize(raw).encode(), 6))
 
     def iter_parts_input(self) -> Iterator[tuple[int | None, str, str | None]]:
@@ -754,10 +774,11 @@ class MessageReader:
                     self._check("messages", f"message/{shard.name}", con, table=tables[0])
                 for table in tables:
                     md5hex = table[4:]
-                    for lid, ltype, sid, mc, ct in con.execute(
-                            f"SELECT local_id, local_type, server_id, message_content, "
-                            f"WCDB_CT_message_content FROM '{table}'"):
+                    for lid, ltype, sid, ts, mc, ct in con.execute(
+                            f"SELECT local_id, local_type, server_id, create_time, "
+                            f"message_content, WCDB_CT_message_content FROM '{table}'"):
                         raw = (_decode_content(mc, ct)
                                if (ltype & 0xffffffff) == messages.TYPE_APPMSG
                                and mc is not None else None)
-                        yield sid, messages.row_key(self.acct, md5hex, shard.name, lid), raw
+                        yield (sid, messages.row_key(self.acct, md5hex, shard.name, lid, ts),
+                               raw)

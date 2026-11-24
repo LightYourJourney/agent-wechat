@@ -154,7 +154,7 @@ _SCHEMA_BODY = f"""
 PRAGMA journal_mode=WAL;
 CREATE TABLE IF NOT EXISTS messages (
     id          INTEGER PRIMARY KEY,
-    msg_key     TEXT NOT NULL UNIQUE,      -- account|chat_md5|shard|local_id
+    msg_key     TEXT NOT NULL UNIQUE,      -- account|chat_md5|shard|local_id|create_time（v10）
     account     TEXT NOT NULL,
     chat_md5    TEXT NOT NULL,             -- Msg_<md5> 表的 md5 部分
     chat_id     TEXT NOT NULL,             -- 解析出的会话名（wxid / xxx@chatroom / md5:xxx）
@@ -314,7 +314,7 @@ SCHEMA = _SCHEMA_SANS_FTS_TRIGGERS + "\n" + "\n".join(FTS_TRIGGERS)
 
 # 本程序已知的 main scope 最新版本。迁移只列**IF NOT EXISTS 表达不了**的变更；
 # 基线（v1）由 `migrations.apply` 隐式 stamp——那代表「整套 DDL 已由 ensure 建好」。
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 # FTS5 的 `secure-delete`（SQLite ≥ 3.42）：删除时把被删行的 token 从索引段里**当场**抹掉。
 # 不开的话 `purge --chat` 之后，被删正文的 trigram 仍留在 `*_fts_data` 的活跃页里（实测 8 个里
@@ -326,6 +326,43 @@ FTS_SECURE_DELETE: tuple[str, ...] = (
     "INSERT INTO messages_fts(messages_fts, rank) VALUES('secure-delete', 1)",
     "INSERT INTO derived_fts(derived_fts, rank) VALUES('secure-delete', 1)",
 ) if FTS_SECURE_DELETE_SUPPORTED else ()
+
+# v10：旧 4 段 msg_key → `…|local_id|create_time`（`messages.row_key`）。
+# - **先改旁表、后改 messages**：旁表靠旧键去 messages 取 ts，messages 先改就对不上了。
+#   没有消息行的孤儿（回填命令写的、或 purge 前缀删之外的残留）保持 4 段——没有 ts 可补，
+#   而 purge 的前缀删与排除判据（认 4 段旧键）照样盖得住它们。
+# - 只改**恰好 4 段**的键：新库上迁移也会跑（表是空的），已是 5 段的不会被再追加一次。
+# - `messages.id` 不变：向量行（`msg_rowid`）与 FTS（rowid）不受影响；FTS / 重嵌触发器
+#   不监听 msg_key，这次 UPDATE 不会触发它们。
+# - `watermark.anchor_ts` 只能由迁移加列（`ensure` 在迁移之前跑，`CREATE TABLE IF NOT EXISTS`
+#   不会给老表加列；基础 DDL 里也不写它，否则新库上这条 ALTER 会撞「列已存在」）。
+_IS_LEGACY_KEY = "(length({c}) - length(replace({c}, '|', ''))) = 3"
+_TS_OF = ("(SELECT CAST(COALESCE(m.ts, 0) AS INTEGER) FROM messages m "
+          "WHERE m.msg_key = {t}.{c})")
+
+
+def _v10_rekey(table: str, col: str = "msg_key", extra: str = "") -> str:
+    return (f"UPDATE {table} SET {col} = {col} || '|' || {_TS_OF.format(t=table, c=col)}{extra} "
+            f"WHERE {_IS_LEGACY_KEY.format(c=col)} "
+            f"AND EXISTS (SELECT 1 FROM messages m WHERE m.msg_key = {table}.{col})")
+
+
+_V10_STATEMENTS: tuple[str, ...] = (
+    *(_v10_rekey(t) for t in ("media_refs", "msg_extras", "derived_tombstone",
+                              "fact_evidence", "pending_reembed", "reembed_failures")),
+    _v10_rekey("msg_parts", "ref_msg_key"),
+    _v10_rekey("msg_parts"),
+    # derivation_id = `{msg_key}|{kind}`：两列在同一条 UPDATE 里由同一个 ts 派生
+    _v10_rekey("derived_text", extra=", derivation_id = msg_key || '|' || "
+               + _TS_OF.format(t="derived_text", c="msg_key") + " || '|' || kind"),
+    # 锚点按**旧键**走 msg_key 的唯一索引回填，所以排在 messages 改键之前
+    "ALTER TABLE watermark ADD COLUMN anchor_ts INTEGER",
+    "UPDATE watermark SET anchor_ts = (SELECT CAST(COALESCE(m.ts, 0) AS INTEGER) FROM messages m"
+    " WHERE m.msg_key = watermark.account || '|' || watermark.chat_md5 || '|'"
+    " || watermark.shard || '|' || watermark.max_local_id)",
+    f"UPDATE messages SET msg_key = msg_key || '|' || CAST(COALESCE(ts, 0) AS INTEGER) "
+    f"WHERE {_IS_LEGACY_KEY.format(c='msg_key')}",
+)
 
 MIGRATIONS: tuple[migrations.Migration, ...] = (
     migrations.Migration(
@@ -392,6 +429,11 @@ MIGRATIONS: tuple[migrations.Migration, ...] = (
         # 只换触发器体（见 `REEMBED_TRIGGER`）。已在队列里的 `chat_id` 行留着：旧触发器的
         # ON CONFLICT 会用它覆盖更早的 `content`，删掉可能丢一次真正的重嵌。
         statements=("DROP TRIGGER IF EXISTS msg_reembed_au", REEMBED_TRIGGER),
+    ),
+    migrations.Migration(
+        version=10,
+        name="msg_key 追加 create_time；水位线记锚点（识别表重建）",
+        statements=_V10_STATEMENTS,
     ),
 )
 
@@ -791,16 +833,24 @@ def _filter_excluded(con: sqlite3.Connection, keys: Sequence[str]) -> set[str]:
     读在提交前、写在提交后的话，那份陈旧结果会把被删的行原样写回去（spec §5.4）。
 
     走 `exclusions.excluded` 的主键，按 KEYS_BATCH 分批——与 `media_refs_by_keys` 同一写法。
+    每个键连同它的旧 4 段形态（`messages.legacy_key`）一起查：v10 之前的墓碑只有 4 段。
     """
     if not keys:
         return set()
-    uniq = list(dict.fromkeys(keys))
+    by_form: dict[str, list[str]] = {}
+    for k in dict.fromkeys(keys):
+        by_form.setdefault(k, []).append(k)
+        lk = messages.legacy_key(k)
+        if lk != k:
+            by_form.setdefault(lk, []).append(k)
+    forms = list(by_form)
     out: set[str] = set()
-    for i in range(0, len(uniq), KEYS_BATCH):
-        chunk = uniq[i:i + KEYS_BATCH]
+    for i in range(0, len(forms), KEYS_BATCH):
+        chunk = forms[i:i + KEYS_BATCH]
         sql = ("SELECT msg_key FROM exclusions.excluded "
                f"WHERE msg_key IN ({','.join('?' * len(chunk))})")
-        out.update(r[0] for r in con.execute(sql, chunk))
+        for (hit,) in con.execute(sql, chunk):
+            out.update(by_form[hit])
     return out
 
 
@@ -862,18 +912,22 @@ def upsert_batch(con: sqlite3.Connection, rows: list[messages.MessageRow]) -> in
     if keep:
         con.executemany(_INSERT_SQL, [{**r, "exported_at": now} for r in keep])
         _heal_degraded_chat_ids(con, keep)
-    wm: dict[tuple[str, str, str], int] = {}
+    wm: dict[tuple[str, str, str], tuple[int, int]] = {}
     for r in rows:  # 水位线：批内按会话聚合后一条语句推进（单调 max）
         k = (r["account"], r["shard"], r["chat_md5"])
-        if r["local_id"] > wm.get(k, 0):
-            wm[k] = r["local_id"]
+        if r["local_id"] > wm.get(k, (0, 0))[0]:
+            wm[k] = (r["local_id"], int(r["ts"] or 0))
+    # `anchor_ts` 跟着 max 那一行走（reader 据它识别表重建）；max 没前进就不动。
+    # UPSERT 的 SET 里引用的列都是**旧值**，两条赋值互不影响。
     con.executemany(
-        """INSERT INTO watermark (account, shard, chat_md5, max_local_id, updated_at)
-           VALUES (?,?,?,?,?)
+        """INSERT INTO watermark (account, shard, chat_md5, max_local_id, anchor_ts, updated_at)
+           VALUES (?,?,?,?,?,?)
            ON CONFLICT(account, shard, chat_md5) DO UPDATE SET
+             anchor_ts=CASE WHEN excluded.max_local_id >= max_local_id
+                            THEN excluded.anchor_ts ELSE anchor_ts END,
              max_local_id=max(max_local_id, excluded.max_local_id),
              updated_at=excluded.updated_at""",
-        [(a, s, m, mx, now) for (a, s, m), mx in wm.items()])
+        [(a, s, m, mx, ts, now) for (a, s, m), (mx, ts) in wm.items()])
     try:
         con.commit()
     except (sqlite3.Error, OSError) as exc:
@@ -1229,7 +1283,7 @@ def media_refs_by_chat(con: sqlite3.Connection, account: str,
     """按会话批量取媒体引用：{chat_id: [(msg_key, ts, file_key), …]}（会话内按 ts、local_id 升序）。
 
     **`msg_key` 是第三样必需的**：贴纸走 CDN 取件时要回源到微信库，而定位一行所需的
-    `shard` / `local_id` **只编码在 msg_key 里**（`account|chat_md5|shard|local_id`，
+    `shard` / `local_id` **只编码在 msg_key 里**（`account|chat_md5|shard|local_id|create_time`，
     见 `messages.row_key`）。视频用不到它，但数据源只有这一处，两个调用方共用。
 
     `media_refs` 只有 msg_key（没有 account / chat / ts 维度），所以必须 join `messages`
@@ -1270,7 +1324,7 @@ def count_media_refs(con: sqlite3.Connection, account: str, *,
     为什么必须与 join 无关：`media rebuild-refs` **只写 refs、不写 messages**（它自己不依赖
     messages），所以「账号里一条 refs 都没有」与「refs 在、但那些会话的消息没进索引」是两种
     不同的病，join 出来的 0 把它们混成一种，还会把用户导向错误的修法（重建索引写不出消息）。
-    按 msg_key 前缀计数就分得开：`msg_key = account|chat_md5|shard|local_id`，而 wxid 不可能
+    按 msg_key 前缀计数就分得开：`msg_key = account|chat_md5|shard|local_id|create_time`，而 wxid 不可能
     含 `|`，所以账号前缀与 `account|chat_md5|` 会话前缀都不会串到别的账号或会话
     （也**不能**用 LIKE——account 里的 `_`、`%` 是通配符）。
     """
@@ -1403,7 +1457,7 @@ def count_msg_parts(con: sqlite3.Connection, account: str) -> int:
     「账号里一条都没有」与「有、但那些消息没进索引」是两种不同的病，join 出来的 0 把
     它们混成一种。空表返回 0——上层靠这个 0 判「未回填」并降级。
 
-    **前缀比对而非 LIKE**：`msg_key = account|chat_md5|shard|local_id`，而 account（wxid）
+    **前缀比对而非 LIKE**：`msg_key = account|chat_md5|shard|local_id|create_time`，而 account（wxid）
     里**含下划线**，LIKE 的 `_` 是单字符通配符，会把 `wxid_aXb` 的条目算进 `wxid_a_b`；
     substr 逐字符比对，没有这个问题。
     """
@@ -1425,6 +1479,43 @@ def load_export_watermarks(con: sqlite3.Connection, account: str) -> dict[tuple[
     """
     return {(shard, md5): mx for shard, md5, mx in con.execute(
         "SELECT shard, chat_md5, max_local_id FROM watermark WHERE account=?", (account,))}
+
+
+def load_export_anchors(con: sqlite3.Connection,
+                        account: str) -> dict[tuple[str, str], int | None]:
+    """{(shard, chat_md5): 水位线那一行的 create_time}（v10 之前留下、回填不到的为 None）。"""
+    return {(shard, md5): a for shard, md5, a in con.execute(
+        "SELECT shard, chat_md5, anchor_ts FROM watermark WHERE account=?", (account,))}
+
+
+def reset_export_watermark(con: sqlite3.Connection, account: str, shard: str,
+                           chat_md5: str) -> None:
+    """单个会话表的水位线归零（reader 发现它被重建过）。立即提交：之后的批次从空水位线写起；
+    崩在中间最坏只是下一轮再从 0 扫一遍（键含 create_time，重扫幂等）。"""
+    try:
+        con.execute("DELETE FROM watermark WHERE account=? AND shard=? AND chat_md5=?",
+                    (account, shard, chat_md5))
+        con.commit()
+    except (sqlite3.Error, OSError) as exc:
+        con.rollback()
+        raise index_unavailable(exc) from exc
+
+
+def resolve_msg_key(con: sqlite3.Connection, account: str, msg_key: str) -> str:
+    """调用方给的键 → 库里的键。5 段原样返回；v10 之前的 4 段旧键按前缀找：恰好一条就换成
+    它的新键，一条都没有原样返回（由调用方走「找不到」），多条（会话表被重建过、两代消息
+    同 local_id）报 `SearchInputError`——不猜。"""
+    kp = messages.split_key(msg_key)
+    if kp is None or kp.create_time is not None or kp.account != account:
+        return msg_key
+    p = msg_key + "|"                 # 走 msg_key 唯一索引的范围扫描：'|' 之后是 '}'
+    rows = con.execute("SELECT msg_key FROM messages WHERE msg_key > ? AND msg_key < ? LIMIT 2",
+                       (p, msg_key + "}")).fetchall()
+    if len(rows) > 1:
+        raise errors.SearchInputError(
+            f"旧格式 msg_key 对应多条消息：{msg_key}",
+            hint="该会话的微信消息表被重建过；请重新检索，使用结果里的新 msg_key")
+    return rows[0][0] if rows else msg_key
 
 
 def clear_export_watermarks(con: sqlite3.Connection, account: str) -> None:

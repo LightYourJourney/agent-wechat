@@ -68,7 +68,7 @@ QUERIES = [
 
 def _key(chat: str, lid: int) -> str:
     return messages.row_key(ACCT, hashlib.md5(chat.encode()).hexdigest(),
-                            "message_0.db", lid)
+                            "message_0.db", lid, T0 + lid)   # 造行时 ts=T0+lid
 
 
 def _env(tmp_path, monkeypatch):

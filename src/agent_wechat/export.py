@@ -57,8 +57,10 @@ def run_export(acct: str, chat_id: str | None = None, full: bool = False,
                 # locked/corrupt）。出口共享构造器，**调用点留在原地**——冻结表按调用点记账。
                 raise store.index_unavailable(exc) from exc
         resume = {} if full else None
+        anchors: dict = {}
         if resume is None:
             resume = store.load_export_watermarks(con, acct)
+            anchors = store.load_export_anchors(con, acct)
         # `full` = 前向扫描已经读完整段历史，回看是纯重复（而游标刚被清零，不回看的话
         # 下一轮会从 0 重新走）。全量时不回看，也别读游标。
         audit_window = 0 if full else (store.AUDIT_ROWS if audit_rows is None else audit_rows)
@@ -75,7 +77,10 @@ def run_export(acct: str, chat_id: str | None = None, full: bool = False,
             for rows, refs in r.iter_all(chat_id=chat_id, resume=resume,
                                          audit_cursors=audit_cursors,
                                          audit_rows=audit_window,
-                                         audit_sink=_audit_sink if audit_window > 0 else None):
+                                         audit_sink=_audit_sink if audit_window > 0 else None,
+                                         anchors=anchors,
+                                         on_rebuilt=lambda shard, md5: store.reset_export_watermark(
+                                             con, acct, shard, md5)):
                 if refs:
                     # 先写 refs，再 upsert_batch。refs 自己 BEGIN IMMEDIATE（判据的读也因此落在
                     # 写事务里，Task 4 fix1）；upsert_batch 复用同一事务并在尾部 commit——

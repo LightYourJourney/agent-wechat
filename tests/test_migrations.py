@@ -14,7 +14,7 @@ import sqlite3
 
 import pytest
 
-from agent_wechat import errors, exclusions, migrations, store, vector
+from agent_wechat import errors, exclusions, messages, migrations, store, vector
 
 
 class _NoEmbedder:
@@ -48,7 +48,8 @@ def _expected_triggers() -> dict[str, str]:
 
 def _insert_message(con: sqlite3.Connection, *, local_id: int = 1,
                     content: str = "周末爬山的安排定了吗") -> str:
-    key = f"acct|0123456789abcdef0123456789abcdef|message_0.db|{local_id}"
+    key = messages.row_key("acct", "0123456789abcdef0123456789abcdef",
+                           "message_0.db", local_id, 1700000000 + local_id)
     con.execute(
         "INSERT INTO messages (msg_key, account, chat_md5, chat_id, shard, local_id,"
         " ts, msg_type, sender_id, sender_name, is_self, content, media_hint, exported_at)"
@@ -421,7 +422,7 @@ def test_v9_replaces_a_reembed_trigger_that_fires_on_chat_id(tmp_path):
 
     con = store.connect(db)
     try:
-        assert migrations.stored_version(con, migrations.SCOPE_MAIN) == 9
+        assert migrations.stored_version(con, migrations.SCOPE_MAIN) == store.SCHEMA_VERSION
         key = _insert_message(con)
         con.execute("UPDATE messages SET chat_id='md5:x' WHERE msg_key=?", (key,))
         assert con.execute("SELECT count(*) FROM pending_reembed").fetchone()[0] == 0

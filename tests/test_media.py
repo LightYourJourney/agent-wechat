@@ -492,14 +492,14 @@ def _video_index(tmp_path, account, rows):
     """
     con = store.connect(tmp_path / "index.db")
     store.upsert_batch(con, [
-        {"msg_key": messages.row_key(account, messages.md5_of(c), "message_0.db", lid),
+        {"msg_key": messages.row_key(account, messages.md5_of(c), "message_0.db", lid, ts),
          "account": account, "chat_md5": messages.md5_of(c), "chat_id": c,
          "shard": "message_0.db", "local_id": lid, "server_id": None, "ts": ts,
          "msg_type": messages.TYPE_VIDEO, "sender_id": c, "sender_name": None,
          "is_self": 0, "content": None, "media_hint": "[video]"}
         for c, lid, ts, _ in rows])
     store.upsert_media_refs(con, [
-        (messages.row_key(account, messages.md5_of(c), "message_0.db", lid), "video", fk, None)
+        (messages.row_key(account, messages.md5_of(c), "message_0.db", lid, ts), "video", fk, None)
         for c, lid, ts, fk in rows])
     con.commit()
     return con
@@ -628,7 +628,8 @@ def test_video_export_points_at_history_export_when_messages_are_missing(tmp_pat
     fk = "ee" * 16
     con = store.connect(tmp_path / "refs-only.db")
     store.upsert_media_refs(con, [
-        (messages.row_key(account, messages.md5_of("wxid_a"), "message_0.db", 1),
+        # 孤儿引用：**没有 messages 行**可补第五段 → create_time=None（记 0）
+        (messages.row_key(account, messages.md5_of("wxid_a"), "message_0.db", 1, None),
          "video", fk, None)])
     con.commit()
     rep = media.export_media(account, ["wxid_a"], kinds=["video"], con=con)
@@ -670,7 +671,7 @@ def test_sticker_export_degrades_with_the_same_three_way_note(tmp_path, monkeypa
     fk = "ff" * 16
     con2 = store.connect(tmp_path / "refs-only.db")
     store.upsert_media_refs(con2, [
-        (messages.row_key(account, messages.md5_of("wxid_a"), "message_0.db", 1),
+        (messages.row_key(account, messages.md5_of("wxid_a"), "message_0.db", 1, None),
          "sticker", fk, None)])
     con2.commit()
     rep2 = media.export_media(account, ["wxid_a"], kinds=["sticker"], con=con2)
@@ -682,7 +683,7 @@ def test_sticker_export_degrades_with_the_same_three_way_note(tmp_path, monkeypa
     # 这种连 rebuild-refs 都不该提——那会把人支去跑一个改不了任何事的命令。
     con3 = store.connect(tmp_path / "elsewhere.db")
     store.upsert_media_refs(con3, [
-        (messages.row_key(account, messages.md5_of("wxid_b"), "message_0.db", 1),
+        (messages.row_key(account, messages.md5_of("wxid_b"), "message_0.db", 1, None),
          "sticker", "aa" * 16, None)])
     con3.commit()
     rep3 = media.export_media(account, ["wxid_a"], kinds=["sticker"], con=con3)
@@ -3173,8 +3174,8 @@ def test_sticker_rerun_counts_skipped(tmp_path, monkeypatch):
 
 
 def test_sticker_malformed_msg_key_counts_missing(tmp_path, monkeypatch):
-    """msg_key 不是四段 → 定位不了那一行，计 missing（一次请求都不发）。
-    两道闸各一条：`count("|") != 3` 与 `_loc_of_msg_key` 的非数字段。"""
+    """msg_key 不是四/五段 → 定位不了那一行，计 missing（一次请求都不发）。
+    两道闸各一条：段数闸与 `_loc_of_msg_key` 的非数字段。"""
     _, account = make_tree(tmp_path, monkeypatch)
     ts = int(datetime.datetime(2026, 9, 15, 12, 0).timestamp())
     called = []
@@ -3188,7 +3189,7 @@ def test_sticker_malformed_msg_key_counts_missing(tmp_path, monkeypatch):
         con.close()
     assert rep.sticker.missing == 1 and called == [], rep.sticker
 
-    # 第二道形状闸：四段都在，但 local_id 不是数字 → `_loc_of_msg_key` 返回 None。
+    # 第二道形状闸：段数都在，但 local_id 不是数字 → `_loc_of_msg_key` 返回 None。
     # 它在 `_locs` 里计一次 missing，而 `_locs` 在一次导出里被调两趟（摊平 + 取件前），
     # 加上「got is None」那一笔，合计 3。
     con = _sticker_with_bad_key(ts, "d0f46ed3" + "0" * 24,
@@ -3199,6 +3200,16 @@ def test_sticker_malformed_msg_key_counts_missing(tmp_path, monkeypatch):
     finally:
         con.close()
     assert rep.sticker.missing == 3, rep.sticker   # 一次取件都不会发：all_locs 是空的
+
+    # 五段键（v10）的第五段不可解析：同样过段数闸、在 `_locs` 里被挡下，合计 3。
+    con = _sticker_with_bad_key(ts, "d0f46ed3" + "0" * 24,
+                                "acct|cm|message_0.db|1|notanumber")
+    try:
+        rep = media.export_media(account, ["wxid_y"], kinds=["sticker"],
+                                 out_dir=tmp_path / "media", con=con, with_cdn=True)
+    finally:
+        con.close()
+    assert rep.sticker.missing == 3, rep.sticker
 
 
 def test_sticker_nothing_in_window_degrades_nothing(tmp_path, monkeypatch):

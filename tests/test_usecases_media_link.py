@@ -21,7 +21,7 @@ ACCT = "wxid_testacct01_ab12"
 
 
 def _row(local_id, msg_type, ts=TS):
-    return {"msg_key": messages.row_key(ACCT, CM, "message_0.db", local_id),
+    return {"msg_key": messages.row_key(ACCT, CM, "message_0.db", local_id, ts),
             "account": ACCT, "chat_md5": CM, "chat_id": "wxid_x",
             "shard": "message_0.db", "local_id": local_id, "server_id": None,
             "ts": ts, "msg_type": msg_type, "sender_id": "wxid_x",
@@ -317,7 +317,7 @@ def test_keys_from_another_chat_are_dropped(tmp_path, monkeypatch, idx):
     monkeypatch.setattr(paths, "XWECHAT_FILES", tmp_path / "wx")
     monkeypatch.setattr(usecases, "_voice_keys_for", lambda acct: frozenset())
     foreign_cm = messages.md5_of("wxid_other")
-    foreign = messages.row_key(ACCT, foreign_cm, "message_0.db", 99)
+    foreign = messages.row_key(ACCT, foreign_cm, "message_0.db", 99, TS)
     store.upsert_batch(con, [{**rows[0], "msg_key": foreign, "local_id": 99,
                               "chat_md5": foreign_cm, "chat_id": "wxid_other"}])
     res = usecases.message_media(
@@ -389,7 +389,7 @@ def test_many_keys_are_queried_in_batches(tmp_path, monkeypatch, idx):
     monkeypatch.setattr(usecases, "_voice_keys_for", lambda acct: frozenset())
     n = 32766 + 4                                   # 单条语句装不下的规模
     keys = ([r["msg_key"] for r in rows]
-            + [messages.row_key(ACCT, CM, "message_9.db", i) for i in range(n)])
+            + [messages.row_key(ACCT, CM, "message_9.db", i, TS) for i in range(n)])
     res = usecases.message_media(
         "wxid_x", keys=keys, limit=500, out_dir=str(tmp_path / "media"), account=ACCT,
         _ctx=_FakeCtx(), _con=con)

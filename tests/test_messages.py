@@ -49,14 +49,16 @@ def test_make_row_key_set_equals_row_columns():
         local_id=7, ts=1700000000, msg_type=messages.TYPE_TEXT, sender_id=None,
         sender_name=None, is_self=0, content="正文", media_hint=None)
     assert tuple(row) == messages.ROW_COLUMNS          # 键集合与顺序都钉住
-    assert row["msg_key"] == "acct|deadbeef|message_0.db|7"
+    assert row["msg_key"] == "acct|deadbeef|message_0.db|7|1700000000"
 
 
-def test_row_key_is_the_four_field_tuple():
-    assert messages.row_key("a", "m", "s", 3) == "a|m|s|3"
-    # local_id 在会话内 / 分片内都会重复 → 四个字段缺一不可
-    assert messages.row_key("a", "m1", "s", 3) != messages.row_key("a", "m2", "s", 3)
-    assert messages.row_key("a", "m", "s1", 3) != messages.row_key("a", "m", "s2", 3)
+def test_row_key_is_the_five_field_tuple():
+    assert messages.row_key("a", "m", "s", 3, 1700000000) == "a|m|s|3|1700000000"
+    # local_id 在会话内 / 分片内都会重复 → 前四个字段缺一不可
+    assert messages.row_key("a", "m1", "s", 3, 1) != messages.row_key("a", "m2", "s", 3, 1)
+    assert messages.row_key("a", "m", "s1", 3, 1) != messages.row_key("a", "m", "s2", 3, 1)
+    # create_time 是第五段：会话表被重建后 local_id 从 1 重来，靠它区分两代消息
+    assert messages.row_key("a", "m", "s", 3, 1) != messages.row_key("a", "m", "s", 3, 2)
 
 
 # ---------- 哨兵一：md5:<hex> ----------

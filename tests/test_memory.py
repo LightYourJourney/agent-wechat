@@ -14,7 +14,7 @@ T0 = 1700000000
 
 def _key(lid: int) -> str:
     return messages.row_key(ACCT, hashlib.md5(CHAT.encode()).hexdigest(),
-                            "message_0.db", lid)
+                            "message_0.db", lid, T0 + lid)   # 造行时 ts=T0+lid
 
 
 def _env(tmp_path, monkeypatch):
@@ -119,7 +119,7 @@ def test_purge_removes_cross_chat_evidence_of_a_deleted_claim(tmp_path, monkeypa
             "INSERT INTO fact_evidence(claim_id, msg_key, role, created_at)"
             " VALUES('c-cross', ?, 'support', 1)",
             (messages.row_key(ACCT, hashlib.md5(other.encode()).hexdigest(),
-                              "message_0.db", 1),))
+                              "message_0.db", 1, T0 + 1),))
         con.commit()
         store.delete_chat(con, account=ACCT, chat_id=CHAT)
         con.commit()

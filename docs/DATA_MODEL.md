@@ -195,7 +195,7 @@ DDL 归 `exclusions.py` 的 `exclusions.SCHEMA`，由 `store.connect()` 把它 `
 
 ```sql
 CREATE TABLE IF NOT EXISTS exclusions.excluded (
-    msg_key     TEXT PRIMARY KEY,   -- account|chat_md5|shard|local_id，与 messages.msg_key 逐字相同
+    msg_key     TEXT PRIMARY KEY,   -- 与 messages.msg_key 逐字相同（v10 之前写下的是 4 段旧键）
     account     TEXT NOT NULL,      -- 从 msg_key 派生，存下来只为能建索引
     chat_md5    TEXT NOT NULL,      -- 同上
     excluded_at INTEGER NOT NULL
@@ -226,14 +226,26 @@ CREATE INDEX IF NOT EXISTS exclusions.idx_excluded_chat ON excluded(account, cha
 ### msg_key
 
 ```
-msg_key = "<account>|<chat_md5>|<shard>|<local_id>"
-例：wxid_testacct01_ab12|e5be5159…|message_0.db|103
+msg_key = "<account>|<chat_md5>|<shard>|<local_id>|<create_time>"
+例：wxid_testacct01_ab12|e5be5159…|message_0.db|103|1700000000
 ```
 
-四个字段缺一不可——实测发现（[schema-4.1.13.md](schema-4.1.13.md)）：
+前四个字段缺一不可——实测发现（[schema-4.1.13.md](schema-4.1.13.md)）：
 
 1. 微信 4.1 的消息**按会话分表**（`Msg_<md5(chat)>`），不同会话的 `local_id` 各自从 1 计数
 2. 同一会话跨分片**按时间分区**，`local_id` 在每个分片里重复出现（指向不同消息）
+
+第五段 `create_time`（源表的 `create_time`，即 `messages.ts`；schema v10 加入）防的是**表重建**：
+微信若删掉再建 `Msg_<md5>`，`local_id` 从 1 重来，只有四段时新消息会撞上旧消息的键、覆盖它的
+索引行。同一条消息的 `create_time` 不变，两代表里同 `local_id` 的消息几乎不可能同秒。
+
+- **v10 迁移**把 `index.db` 里的键就地改写（`messages` 与各旁表、`derived_text.derivation_id`、
+  `msg_parts.ref_msg_key`；`messages.id` 不变，向量与 FTS 不动）。没有消息行的旁表孤儿保持 4 段。
+- **`exclusions.db` 不迁移**（被销毁的消息已不在索引里，补不出第五段）：判据把 4 段旧墓碑当前缀，
+  挡住前四段相同的所有消息——宁可多挡，不让被删内容回来。新墓碑写 5 段。
+- **旧键输入**：工具与 CLI 收到 4 段键时，库里恰好一条匹配就换成它的新键（结果里返回新键）；
+  没有匹配按「找不到」；多条（表确实重建过）报参数错误，请重新检索拿新键。
+- 导出的 HTML 锚点由整个键取哈希，升级后重新导出的页面锚点会变。
 
 ### 水位线（watermark）
 
@@ -242,11 +254,16 @@ CREATE TABLE watermark (
     account TEXT, shard TEXT, chat_md5 TEXT,
     max_local_id INTEGER,          -- 该 (账号,分片,会话) 已导到的最大 local_id
     updated_at INTEGER,
+    anchor_ts INTEGER,             -- v10：max_local_id 那一行的 create_time（识别表重建）
     PRIMARY KEY (account, shard, chat_md5)
 );
 ```
 
 - **增量**：导出游标为 `WHERE local_id > max_local_id`（按 id 而非时间——同秒消息不会漏）
+- **表重建识别**（v10）：每轮先看源表 `local_id = max_local_id` 那行——不在，或 `create_time`
+  ≠ `anchor_ts`，就当表被重建过（或最新一条被删了）：该会话水位线归零、从头重扫（键含
+  `create_time`，重扫幂等；这一轮的 `rows` 计数含重扫读到的行，同 `--full`）。`anchor_ts`
+  为 NULL（v10 迁移时回填不到）不判。
 - **断点续传**：水位线与消息写入在**同一事务**；任意时刻被杀，重跑自动从断点继续，
   最多重复处理一批（被幂等 upsert 吸收），不丢数据
 - **幂等修正**：`ON CONFLICT(msg_key) DO UPDATE ... WHERE` `content` / `sender_name` /
@@ -412,7 +429,7 @@ CREATE TABLE IF NOT EXISTS schema_version (
   版本迁移：`main v2` 把 FTS 三条触发器重建为代码里的最新定义（EA-077 的旧体漂移）；
   `main v3`（Phase 02）建立历史回看游标与重嵌队列（`audit_cursor` / `pending_reembed`）
   并重建重嵌触发器；`main v4`（Phase 03）新增重嵌失败账本 `reembed_failures`；
-  `main v5`（Phase 03）给队列加 `reason` 列（表重建）；`main v6`（Phase 04）新增同步终态表 `sync_state`；`main v7`（Phase 06）新增派生文本（`derived_text` / `derived_tombstone` / `derived_fts`）与事实记忆（`fact_claim` / `fact_evidence`）；`main v8` 给 `messages_fts` / `derived_fts` 开 FTS5 `secure-delete`（删除时连倒排索引里的 trigram 一起抹掉；SQLite < 3.42 时为空迁移，只记版本）；`main v9` 换掉重嵌触发器，会话名（`chat_id`）变化不再入队（向量文本与向量行都不含它，此前自愈一次就整会话重嵌）。
+  `main v5`（Phase 03）给队列加 `reason` 列（表重建）；`main v6`（Phase 04）新增同步终态表 `sync_state`；`main v7`（Phase 06）新增派生文本（`derived_text` / `derived_tombstone` / `derived_fts`）与事实记忆（`fact_claim` / `fact_evidence`）；`main v8` 给 `messages_fts` / `derived_fts` 开 FTS5 `secure-delete`（删除时连倒排索引里的 trigram 一起抹掉；SQLite < 3.42 时为空迁移，只记版本）；`main v9` 换掉重嵌触发器，会话名（`chat_id`）变化不再入队（向量文本与向量行都不含它，此前自愈一次就整会话重嵌）。`main v10` 给 `msg_key` 追加第五段 `create_time` 并就地改写各表的键、`watermark` 加 `anchor_ts` 列（识别微信删表重建，见 §4）。
 - **整次升级 = 一笔事务**：`BEGIN IMMEDIATE; <本次全部待执行迁移的 DDL>; <逐条写版本行>;
   COMMIT`。任一句失败整次回滚（版本停在升级前），抛 `SchemaMigrationError`；下次连接重做。
   已是最新的库走只读快路径，**不拿写锁**；重复执行是 no-op（`applied_at` 都不变）。
@@ -524,4 +541,4 @@ fact_evidence(claim_id, msg_key, role, created_at)   -- 至少一条
 没有证据的主张自动转 `retracted`（`note=evidence_purged`）。
 
 
-> Phase 07 没有 schema 变更（当时为 main v7，当前最新为 v9）；工作台只读索引库，唯一写操作是派生文本删除。
+> Phase 07 没有 schema 变更（当时为 main v7，当前最新为 v10）；工作台只读索引库，唯一写操作是派生文本删除。

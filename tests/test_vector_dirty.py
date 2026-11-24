@@ -32,7 +32,7 @@ def _row(acct: str, chat: str, lid: int, content: str, *, msg_type: int = 1,
 
 def _key(lid: int, acct: str = ACCT, chat: str = CHAT) -> str:
     return messages.row_key(acct, hashlib.md5(chat.encode()).hexdigest(),
-                            "message_0.db", lid)
+                            "message_0.db", lid, T0 + lid)   # `_row` 的 ts 就是 T0+lid
 
 
 @pytest.fixture()

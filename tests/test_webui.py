@@ -19,7 +19,7 @@ T0 = 1700000000
 
 def _key(lid: int) -> str:
     return messages.row_key(ACCT, hashlib.md5(CHAT.encode()).hexdigest(),
-                            "message_0.db", lid)
+                            "message_0.db", lid, T0 + lid)   # 与 _env 里那一行的 ts 同源
 
 
 def _env(tmp_path, monkeypatch, *, seed=True):

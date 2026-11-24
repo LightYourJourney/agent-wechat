@@ -122,6 +122,7 @@ reader.recent(chat_id, limit)
 export.run_export
   → 逐分片：快照（db+wal+shm）→ 进程内 SQLCipher 打开（**一次**；明文不落盘）
   → 逐表（Msg_<md5>）两段读：
+      ⓪ 锚点：源表 local_id = 水位线那行不在或 create_time 对不上 → 表被重建过，水位线归零重扫
       ① 前向：local_id > 导出水位线 → 新消息
       ② 回看：local_id > audit_cursor 的一小段旧行（默认 100 行/会话/轮）
   → fetchmany(batch) 分批解码 → 批量幂等 upsert + 水位线推进（同一事务）
@@ -259,7 +260,7 @@ decrypt.open_db(db, passphrase)                     # reader / 语音 / 朋友�
 | 导出与向量化解耦 | 导出时同时嵌入 | 嵌入是 CPU 密集长任务，与 I/O 管道耦合会互相拖累。已落地：`vector.py` 独立嵌入管道，手动/按需触发 |
 
 **消息信封契约**：`get_recent_messages` / `search_history` / `semantic_search` 三处返回的消息
-统一带 `msg_key` 字段（`account|chat_md5|shard|local_id`，由消息的身份/位置字段派生，
+统一带 `msg_key` 字段（`account|chat_md5|shard|local_id|create_time`，由消息的身份/位置字段派生，
 跨导出稳定）。
 `msg_key` 与 `search_history` hits 里既有的 `id`（`messages.id`，DB rowid）不是同一件事
 ——rowid 随重建变化，`msg_key` 是指认消息的稳定句柄，供 `get_message_media` 指认

@@ -435,7 +435,7 @@ def message_parts(contact: str, *, keys: Sequence[str],
                   account: str | None = None) -> MessagePartsResult | NeedConfirm:
     """消息 → appmsg 结构化内容（spec §4.5 的 `get_message_parts`）。
 
-    `keys` 只答**属于该会话**的：`msg_key = account|chat_md5|shard|local_id`，第二段对不上
+    `keys` 只答**属于该会话**的：`msg_key = account|chat_md5|shard|local_id|create_time`，第二段对不上
     的一律静默略过——与 `message_media` 的 keys 路径**同一条约定**（那里的注释：`chat_md5`
     一滤不能少，否则别的会话的内容会被冠上本次解析出的 `chat_id` 报出去）。`msg_parts` 里
     没有的 key 也不出现在结果里。返回顺序按 `keys`（去重后、保序）。
@@ -453,9 +453,11 @@ def message_parts(contact: str, *, keys: Sequence[str],
     prefix = messages.msg_key_prefix(ctx.account, messages.chat_md5(chat_id))
     # 去重保序在**这里**做（与 `message_media` 的 `list(dict.fromkeys(keys))` 同位置）：
     # 入口只管把逗号串拆成 list，归属过滤与去重是入口策略。
-    wanted = list(dict.fromkeys(k for k in keys if k.startswith(prefix)))
     try:
         with store.open() as con:
+            # v10 前的 4 段旧键唯一时换成新键（`store.resolve_msg_key`），再去重保序
+            wanted = list(dict.fromkeys(store.resolve_msg_key(con, ctx.account, k)
+                                        for k in keys if k.startswith(prefix)))
             got = store.msg_parts_by_keys(con, wanted)
             # EA-041：与 parts 同一趟、同一个 wanted 集合读出原始载荷，解析在库外做。
             extras_raw = store.extras_by_keys(con, wanted)

@@ -487,7 +487,7 @@ def test_tombstone_covers_the_same_rows_that_get_deleted(_temp_index):
     real = "wxid_testacct01_ab12"
     cm = messages.md5_of(real)
 
-    # `msg_key` 由 `make_row` 从 (account, chat_md5, shard, local_id) 派生——
+    # `msg_key` 由 `make_row` 从 (account, chat_md5, shard, local_id, ts) 派生——
     # 「md5 与 chat_id 不符」那行靠传不同的 `chat_md5` 表达，不必手写 msg_key。
     store.upsert_batch(con, [
         messages.make_row(account="a", chat_md5=cm, chat_id=real, shard="message_0.db",
@@ -507,7 +507,7 @@ def test_tombstone_covers_the_same_rows_that_get_deleted(_temp_index):
     assert deleted["messages"] == 2, "并集谓词应删掉两行"
     assert tombstoned == 2, f"墓碑必须与删除同覆盖（实际 {tombstoned}，删除 {deleted['messages']}）"
     keys = {r[0] for r in con.execute("SELECT msg_key FROM exclusions.excluded")}
-    for mk in (f"a|{cm}|message_0.db|1", "a|othermd5|message_0.db|2"):
+    for mk in (f"a|{cm}|message_0.db|1|901", "a|othermd5|message_0.db|2|902"):
         assert mk in keys, f"{mk} 被删了却没进墓碑——下次 --full 会复活"
 
 

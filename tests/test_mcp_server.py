@@ -739,9 +739,10 @@ def _parts_fixture(monkeypatch):
     第 1 条是**被引用的原文**（无 appmsg 载荷，只有 server_id），让引用那条能解出回指。
     """
     cm = messages.chat_md5("wxid_friend")
-    key = lambda i: messages.row_key("acct", cm, "message_0.db", i)  # noqa: E731
+    # 这些键只种在 msg_parts 里（没有 messages 行可对）→ create_time 补不出，记 0
+    key = lambda i: messages.row_key("acct", cm, "message_0.db", i, None)  # noqa: E731
     foreign = messages.row_key("acct", messages.chat_md5("wxid_someone_else"),
-                               "message_0.db", 2)
+                               "message_0.db", 2, None)
     _backfill([(1001, key(1), None), (None, key(2), QUOTE_XML), (None, key(3), LINK_XML),
                (None, key(4), FILE_XML), (None, key(5), TRANSFER_XML),
                (None, key(6), MINIPROGRAM_XML), (None, foreign, LINK_XML)], monkeypatch)
@@ -875,7 +876,7 @@ def test_get_message_parts_counts_unparsed_and_rejected_separately(monkeypatch):
     """
     key, _foreign = _parts_fixture(monkeypatch)
     cm = messages.chat_md5("wxid_friend")
-    k = lambda i: messages.row_key("acct", cm, "message_0.db", i)   # noqa: E731
+    k = lambda i: messages.row_key("acct", cm, "message_0.db", i, None)   # noqa: E731
     _seed_raw(monkeypatch, [
         (k(7), zlib.compress(b"<msg><unclosed></msg>", 6)),              # XML 解不开
         (k(8), zlib.compress(b"<!DOCTYPE x [<!ENTITY a 'b'>]><msg/>", 6)),  # 危险载荷
@@ -898,7 +899,7 @@ def test_envelope_reports_dropped_blobs(monkeypatch):
     """
     key, _foreign = _parts_fixture(monkeypatch)
     cm = messages.chat_md5("wxid_friend")
-    k = lambda i: messages.row_key("acct", cm, "message_0.db", i)   # noqa: E731
+    k = lambda i: messages.row_key("acct", cm, "message_0.db", i, None)   # noqa: E731
     # 真机形态：appattach 里一个 1.5 KB 的 emojiinfo（实测中位 1360 字符）
     blob = "CiAxMDVkNjdjZjg1MDJkYmY3MWZkMGY0ZjNmYTQ3MTliNBLEAmh0dHA6Ly92d2VpeGlu" * 20
     _seed_raw(monkeypatch, [

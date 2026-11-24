@@ -359,7 +359,8 @@ def test_export_task_carries_skipped_rows_beside_rows(tmp_path, monkeypatch):
     monkeypatch.setattr(account, "resolve_account", lambda a: "acct")
 
     def _row(md5, chat_id, local_id):
-        return {"msg_key": messages.row_key("acct", md5, "message_0.db", local_id),
+        return {"msg_key": messages.row_key("acct", md5, "message_0.db", local_id,
+                                            100 + local_id),
                 "account": "acct", "chat_md5": md5, "chat_id": chat_id,
                 "shard": "message_0.db", "local_id": local_id, "server_id": local_id,
                 "ts": 100 + local_id, "msg_type": messages.TYPE_TEXT, "sender_id": None,
@@ -463,7 +464,8 @@ def test_media_export_refuses_a_purged_chat(stub, monkeypatch):
                 (str(exclusions.path_for(store.DB_PATH)),))
     con.executescript(exclusions.SCHEMA)
     cm = messages.chat_md5("wxid_target")
-    exclusions.add(con, [(messages.row_key("acct", cm, "message_0.db", 1), "acct", cm)])
+    # 只有墓碑、没有消息行可对 → create_time 补不出，记 0
+    exclusions.add(con, [(messages.row_key("acct", cm, "message_0.db", 1, None), "acct", cm)])
     con.commit()
     con.close()
 
@@ -650,7 +652,7 @@ def test_search_hits_carry_msg_key(tmp_path, monkeypatch):
     monkeypatch.setattr(store, "DB_PATH", tmp_path / "index.db")
     con = store.connect()
     store.upsert_batch(con, [{
-        "msg_key": messages.row_key(acct, cm, "message_0.db", 7),
+        "msg_key": messages.row_key(acct, cm, "message_0.db", 7, 1700000000),
         "account": acct, "chat_md5": cm, "chat_id": "wxid_x",
         "shard": "message_0.db", "local_id": 7, "server_id": None,
         "ts": 1700000000, "msg_type": messages.TYPE_TEXT,
@@ -660,7 +662,8 @@ def test_search_hits_carry_msg_key(tmp_path, monkeypatch):
     con.close()
     res = search.search("你好", account=acct)
     assert res["hits"], "夹具没建出命中，下面的断言将恒真"
-    assert res["hits"][0]["msg_key"] == messages.row_key(acct, cm, "message_0.db", 7)
+    assert res["hits"][0]["msg_key"] == messages.row_key(acct, cm, "message_0.db", 7,
+                                                         1700000000)
 
 
 @pytest.mark.parametrize("name", ["Candidate", "NeedConfirm", "RecentMessages",
@@ -778,7 +781,8 @@ def test_start_vector_build_reports_skipped_and_final_rows(monkeypatch):
 def test_media_rebuild_refs_reports_progress(stub):
     """回填全量重扫时要报进度（n 每满一批的那一段）：删掉 `progress(n)`，分钟级命令
     在 CLI 上全程无输出。"""
-    refs = [(messages.row_key("acct", "md5", "message_0.db", 1), "image", "fk", None)]
+    refs = [(messages.row_key("acct", "md5", "message_0.db", 1, None), "image", "fk",
+             None)]
     stub["iter_all"] = [([], refs)]
     seen = []
     n = usecases.media_rebuild_refs(progress=seen.append)
@@ -791,7 +795,7 @@ def test_msgextra_rebuild_flushes_in_batches_and_reports_progress(stub):
     这两个数同时把 `store.BATCH`（2000）钉住了：改成 1000 或 2001，序列立刻变
     （本用例因此也是那个「等价」改判为杀死的证据，见台账 §5.4）。条数取 BATCH+1 是
     故意的，不是魔数。"""
-    key = messages.row_key("acct", "md5", "message_0.db", 0)
+    key = messages.row_key("acct", "md5", "message_0.db", 0, None)
     stub["iter_extras"] = [(f"{key}{i}", 48, b"<x/>") for i in range(2001)]
     seen = []
     res = usecases.msgextra_rebuild(progress=seen.append)

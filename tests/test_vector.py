@@ -901,9 +901,9 @@ def test_semantic_search_hits_carry_msg_key(env):
     assert res["hits"], "夹具没建出命中，下面的断言将恒真"
     for h in res["hits"]:
         assert "msg_key" in h, "semantic_search 的手写字典漏了 msg_key"
-        # 形态校验：account|chat_md5|shard|local_id
+        # 形态校验：account|chat_md5|shard|local_id|create_time
         parts = h["msg_key"].split("|")
-        assert len(parts) == 4, f"msg_key 形态不对：{h['msg_key']!r}"
+        assert len(parts) == 5, f"msg_key 形态不对：{h['msg_key']!r}"
 
 def test_display_text_takes_content_only():
     """EA-058：`media_hint` 回退分支已删——它在唯一调用点上不可达（`should_embed` 保证

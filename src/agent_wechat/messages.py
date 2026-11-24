@@ -207,9 +207,51 @@ def msg_key_prefix(account: str, chat_md5: str) -> str:
     return acct_chat(account, chat_md5) + "|"
 
 
-def row_key(account: str, chat_md5: str, shard: str, local_id: int) -> str:
-    """去重主键：四字段缺一不可（local_id 在会话内、分片内均会重复）。"""
-    return f"{account}|{chat_md5}|{shard}|{local_id}"
+def row_key(account: str, chat_md5: str, shard: str, local_id: int,
+            create_time: int | None) -> str:
+    """去重主键 `account|chat_md5|shard|local_id|create_time`。
+
+    前四段缺一不可（local_id 在会话内、分片内均会重复）。第五段（schema v10）防的是**表重建**：
+    微信删掉再建 `Msg_<md5>` 时 local_id 从 1 重来，只有四段的话新消息会撞上旧消息的键、
+    覆盖它的索引行。create_time 对同一条消息不变，两代表里同 local_id 的消息几乎不可能同秒。
+    """
+    return f"{account}|{chat_md5}|{shard}|{local_id}|{int(create_time or 0)}"
+
+
+def legacy_key(msg_key: str) -> str:
+    """前四段（v10 之前的键形态）。4 段键原样返回。
+
+    用在两处：exclusions.db 里 v10 之前写下的墓碑只有 4 段、对应的消息已删、补不出第五段，
+    判据按它**前缀挡**（宁可多挡）；调用方手里的旧键按它在库里找唯一的新键。
+    """
+    parts = msg_key.split("|")
+    return "|".join(parts[:4]) if len(parts) == 5 else msg_key
+
+
+# SQL 里由 messages 的列拼出旧键（与 `legacy_key` 同形）：排除判据对 4 段墓碑用它比对
+LEGACY_KEY_SQL = "{p}account||'|'||{p}chat_md5||'|'||{p}shard||'|'||{p}local_id"
+
+
+@dataclasses.dataclass(frozen=True)
+class KeyParts:
+    account: str
+    chat_md5: str
+    shard: str
+    local_id: int
+    create_time: int | None        # 旧 4 段键为 None
+
+
+def split_key(msg_key: str) -> KeyParts | None:
+    """拆键；段数不是 4/5 或数字段不是整数 → None（调用方各自报错）。"""
+    parts = msg_key.split("|")
+    if len(parts) not in (4, 5) or not all(parts[:3]):
+        return None
+    try:
+        lid = int(parts[3])
+        ct = int(parts[4]) if len(parts) == 5 else None
+    except ValueError:
+        return None
+    return KeyParts(parts[0], parts[1], parts[2], lid, ct)
 
 
 class MessageRow(TypedDict):
@@ -237,7 +279,7 @@ def make_row(*, account: str, chat_md5: str, chat_id: str, shard: str, local_id:
              server_id: int | None = None) -> MessageRow:
     """构造一行 messages：键集合恒等于 COLUMNS，msg_key 由 row_key 派生。"""
     return MessageRow(
-        msg_key=row_key(account, chat_md5, shard, local_id),
+        msg_key=row_key(account, chat_md5, shard, local_id, ts),
         account=account, chat_md5=chat_md5, chat_id=chat_id, shard=shard,
         local_id=local_id, server_id=server_id, ts=ts, msg_type=msg_type,
         sender_id=sender_id, sender_name=sender_name, is_self=is_self,

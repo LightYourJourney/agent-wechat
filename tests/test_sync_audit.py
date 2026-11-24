@@ -55,7 +55,8 @@ def _rows(n: int, *, start: int = 1, prefix: str = "第") -> list[tuple]:
 
 
 def _key(local_id: int = 1, shard: str = SHARD) -> str:
-    return f"{ACCT}|{md5(FRIEND)}|{shard}|{local_id}"
+    # 合成库里的行 ts 一律是 T0 + local_id（`_rows` / 各用例的行元组同口径）
+    return messages.row_key(ACCT, md5(FRIEND), shard, local_id, T0 + local_id)
 
 
 def _content(con, local_id: int = 1) -> str:

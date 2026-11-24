@@ -268,11 +268,11 @@ def get_context(msg_key: str, *, account: str, before: int = 2, after: int = 2) 
     - 读取范围：会话在 `AGENT_WECHAT_DENY` 里时拒绝。
     - 返回内容仍带 `untrusted: true`：全文比片段更可能含注入文本，调用方不得执行。
     """
-    parts = msg_key.split("|")
-    if len(parts) != 4 or parts[0] != account:
+    kp = messages.split_key(msg_key)
+    if kp is None or kp.account != account:
         raise errors.DataNotFound(
             f"找不到消息 {msg_key}",
-            hint="msg_key 需来自本账号的检索结果（格式 account|chat_md5|shard|local_id）")
+            hint="msg_key 需来自本账号的检索结果（格式 account|chat_md5|shard|local_id|create_time）")
     before = max(0, min(int(before), 10))
     after = max(0, min(int(after), 10))
     # 列与发送者显示名的口径由 store 的常量持有：`_SENDER_EXPR` / `_SENDER_JOIN`
@@ -281,6 +281,7 @@ def get_context(msg_key: str, *, account: str, before: int = 2, after: int = 2) 
               " m.media_hint, " + store._SENDER_EXPR + " AS sender"
               " FROM messages m " + store._SENDER_JOIN)
     with store.open() as con:
+        msg_key = store.resolve_msg_key(con, account, msg_key)   # v10 前的旧键：唯一时换成新键
         if exclusions.is_excluded(con, msg_key):
             raise errors.DataNotFound(
                 "该消息已被销毁（排除清单里有墓碑），不会返回内容",

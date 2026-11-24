@@ -22,7 +22,7 @@ from . import errors, messages, paths
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS exclusions.excluded (
-    msg_key     TEXT PRIMARY KEY,   -- account|chat_md5|shard|local_id，与 messages.msg_key 逐字相同
+    msg_key     TEXT PRIMARY KEY,   -- 与 messages.msg_key 逐字相同（v10 之前写下的是 4 段旧键）
     account     TEXT NOT NULL,      -- 从 msg_key 派生，存下来只为能建索引
     chat_md5    TEXT NOT NULL,      -- 同上
     excluded_at INTEGER NOT NULL
@@ -143,7 +143,8 @@ def count_unblocked(con: sqlite3.Connection, account: str, chat_id: str) -> int:
     return con.execute(
         "SELECT count(*) FROM messages m "
         f"WHERE m.account=? AND {ident.messages_where} "
-        "AND NOT EXISTS (SELECT 1 FROM exclusions.excluded x WHERE x.msg_key = m.msg_key)",
+        "AND NOT EXISTS (SELECT 1 FROM exclusions.excluded x WHERE x.msg_key IN "
+        f"(m.msg_key, {messages.LEGACY_KEY_SQL.format(p='m.')}))",
         ident.messages_args).fetchone()[0]
 
 
@@ -175,10 +176,11 @@ def is_excluded(con: sqlite3.Connection, msg_key: str) -> bool:
     """该消息是否已被 `purge --chat` 立碑（排除清单里有一条即算）。
 
     读取侧（向量重嵌、上下文回读）统一走这里——墓碑查询只该有一份实现。
+    schema v10 之前写下的墓碑只有 4 段（`messages.legacy_key`），它挡住同前四段的所有消息。
     """
     return con.execute(
-        "SELECT 1 FROM exclusions.excluded WHERE msg_key=? LIMIT 1",
-        (msg_key,)).fetchone() is not None
+        "SELECT 1 FROM exclusions.excluded WHERE msg_key IN (?, ?) LIMIT 1",
+        (msg_key, messages.legacy_key(msg_key))).fetchone() is not None
 
 
 def count_chat(con: sqlite3.Connection, account: str, chat_md5: str) -> int:

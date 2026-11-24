@@ -3,6 +3,24 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 风格，
 版本号语义为 0.x 阶段（API 可能变动）。
 
+### msg_key 追加 create_time：防微信删表重建撞键（schema v10，2026-11-24）
+
+微信若删掉再建某个会话的 `Msg_<md5>` 表，`local_id` 从 1 重来。此前（合成库复现）：
+- 新消息撞上旧消息的 `msg_key`，回看把新正文写到旧行上、`ts` 还是旧的；
+- 导出水位线只增不减，重建后低于旧水位线的新消息永远不被增量导出。
+
+**变更**
+
+- `msg_key` 由 `account|chat_md5|shard|local_id` 改为 `…|local_id|create_time`。schema v10 就地改写
+  `index.db` 的全部键（`messages` 与各旁表、`derivation_id`、`ref_msg_key`；`messages.id` 不变，向量与
+  FTS 不动），无需重建索引。
+- 水位线新增 `anchor_ts`：每轮比对源表水位线那一行，对不上就把该会话水位线归零重扫（重扫幂等）。
+- `exclusions.db` 里 v10 之前的 4 段墓碑按前缀生效（挡住前四段相同的所有消息）；新墓碑写 5 段。
+- 旧 4 段键输入（`get_message_context` / `get_message_parts` / `get_message_media` / 事实证据 /
+  `derived` 的 `derivation_id`）：唯一时自动换成新键，多条时报参数错误。
+- 已知限制：导出 HTML 的锚点随键变化；语音按 `(chat_md5, local_id)` 匹配 `VoiceInfo`、贴纸回源按
+  `(chat_md5, local_id)` 取原文，重建过的表上仍可能取到另一代的那一行（源表侧没有可比的 create_time）。
+
 ### 审查遗留项收尾：导出页原子写、朋友圈 DTD、pid 复用、撤回后的 media_hint（2026-11-24）
 
 都在合成数据上复现过（fsync 那条除外：断电测不了，只钉顺序），每条有回归测试（修复回退即红）。

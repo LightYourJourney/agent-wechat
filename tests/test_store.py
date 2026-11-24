@@ -82,11 +82,16 @@ def test_media_refs_by_chat_filters_kind_and_spans_batches(con, monkeypatch):
 
     md5a = messages.md5_of("wxid_abc123def456")
     md5b = messages.md5_of("wxid_testacct01_ab12")
-    rows = [(f"acct|{md5a}|message_0.db|{i}", "sticker", "ab" * 16, None) for i in range(1, 6)]
-    rows.append((f"acct|{md5a}|message_0.db|9", "image", "aa" * 16, None))
-    rows += [(f"acct|{md5b}|message_0.db|{i}", "sticker", "cd" * 16, None) for i in range(1, 4)]
+    # 键按下面 messages 行的 ts 派生——refs 读取要 join messages，四段旧键 join 不上
+    rows = [(messages.row_key("acct", md5a, "message_0.db", i, 1700000000 + i),
+             "sticker", "ab" * 16, None) for i in range(1, 6)]
+    rows.append((messages.row_key("acct", md5a, "message_0.db", 9, 1700000009),
+                 "image", "aa" * 16, None))
+    rows += [(messages.row_key("acct", md5b, "message_0.db", i, 1700001000 + i),
+              "sticker", "cd" * 16, None) for i in range(1, 4)]
     md5c = messages.md5_of("wxid_x01")            # 第三个会话：3 会话 × 批大小 2 = **真跨批**
-    rows += [(f"acct|{md5c}|message_0.db|1", "sticker", "ef" * 16, None)]
+    rows += [(messages.row_key("acct", md5c, "message_0.db", 1, 1700002000),
+              "sticker", "ef" * 16, None)]
     # refs 的读取 join `messages` 取 ts/local_id 排序——没有消息行就一条都取不到
     store.upsert_batch(con, [messages.make_row(
         account="acct", chat_md5=md5a, chat_id="wxid_abc123def456", shard="message_0.db",
@@ -116,7 +121,7 @@ def test_media_refs_by_chat_filters_kind_and_spans_batches(con, monkeypatch):
     # 3 会话 × 批大小 2 → `range(0,3,2)` 两次迭代——**这才真的跨批**（2 会话配 2 仍是一次，
     # 复审 F4 的 M16 就是在这个缝里全绿的）
     assert len(rows_a) == 5 and len(rows_b) == 3 and len(rows_c) == 1, "跨批累积丢了行"
-    assert all(k.count("|") == 3 for k, _ts, _fk in rows_a + rows_b + rows_c)
+    assert all(k.count("|") == 4 for k, _ts, _fk in rows_a + rows_b + rows_c)
     assert [ts for _k, ts, _fk in rows_a] == sorted(ts for _k, ts, _fk in rows_a), "会话内按 ts 升序"
 
 
@@ -148,7 +153,7 @@ def test_upsert_corrects_a_degraded_chat_id_in_place(con):
     real = "wxid_abc123def456"
     md5v = messages.chat_md5(real)
     deg = messages.degraded_chat_id(md5v)
-    key = f"acct|{md5v}|message_0.db|1"
+    key = messages.row_key("acct", md5v, "message_0.db", 1, 1700000000)
     row = messages.make_row(account="acct", chat_md5=md5v, chat_id=deg, shard="message_0.db",
                             local_id=1, ts=1700000000, msg_type=1, sender_id=None,
                             sender_name=None, is_self=0, content="同一句正文", media_hint=None)
@@ -169,7 +174,7 @@ def test_upsert_touches_a_row_whose_chat_id_changed_even_if_content_did_not(con)
     from agent_wechat import messages
 
     md5v = messages.chat_md5("wxid_abc123def456")
-    key = f"acct|{md5v}|message_0.db|1"
+    key = messages.row_key("acct", md5v, "message_0.db", 1, 1700000000)
     base = dict(account="acct", chat_md5=md5v, shard="message_0.db", local_id=1,
                 ts=1700000000, msg_type=1, sender_id=None, sender_name=None, is_self=0,
                 content="同一句正文", media_hint=None)
@@ -187,7 +192,7 @@ def test_upsert_refreshes_media_hint_when_a_message_is_revoked(con):
     """撤回把图片行改成系统消息（type 与 content 都变）：`media_hint` 由这两列派生，
     不在 DO UPDATE 集里时库里永远留着「[图片]」。"""
     md5v = messages.chat_md5("wxid_abc123def456")
-    key = f"acct|{md5v}|message_0.db|1"
+    key = messages.row_key("acct", md5v, "message_0.db", 1, 1700000000)
     base = dict(account="acct", chat_md5=md5v, chat_id="wxid_abc123def456",
                 shard="message_0.db", local_id=1, ts=1700000000, sender_id=None,
                 sender_name=None, is_self=0)
@@ -215,8 +220,10 @@ def test_upsert_keeps_chat_row_counts_consistent_after_the_fix(con):
                           shard="message_0.db", local_id=2, ts=1700000001, msg_type=49,
                           sender_id=None, sender_name=None, is_self=0, content="<y/>",
                           media_hint=None)])
+    # 上面两行的 ts 是 1700000000 / 1700000001（local_id 1 / 2）
     store.upsert_msg_parts(con, [
-        (messages.row_key("acct", md5v, "message_0.db", i), 5, None, None, b"<x/>")
+        (messages.row_key("acct", md5v, "message_0.db", i, 1700000000 + i - 1), 5, None,
+         None, b"<x/>")
         for i in (1, 2)])
     con.commit()
 
@@ -224,7 +231,7 @@ def test_upsert_keeps_chat_row_counts_consistent_after_the_fix(con):
     # （守卫只认 content），于是同一 chat_md5 上 messages 只有 1 条而 parts/refs 有 2 条。
     store.upsert_batch(con, [
         messages.make_row(account="acct", chat_md5=md5v, chat_id="wxid_abc123def456",
-                          shard="message_0.db", local_id=i, ts=1700000000 + i, msg_type=49,
+                          shard="message_0.db", local_id=i, ts=1700000000 + i - 1, msg_type=49,
                           sender_id=None, sender_name=None, is_self=0, content=c,
                           media_hint=None)
         for i, c in ((1, "<x/>"), (2, "<y/>"))])
@@ -518,7 +525,7 @@ def test_upsert_heals_degraded_siblings_not_in_this_batch(con):
     不按行做。
     """
     store.upsert_batch(con, [_row(_DEG, 1, "早先那条")])
-    key = messages.row_key("acct", _MD5, "message_0.db", 1)
+    key = messages.row_key("acct", _MD5, "message_0.db", 1, 1)     # `_row` 的 ts=local_id
     con.execute("INSERT INTO derived_text(derivation_id, msg_key, account, chat_id, kind,"
                 " text, engine, status, created_at) VALUES(?,?,?,?,?,?,?,?,?)",
                 (f"{key}|ocr", key, "acct", _DEG, "ocr", "图里的字", "t", "auto", 1))

@@ -58,7 +58,7 @@ def _row(chat: str, lid: int, content: str, *, sender: str | None = None,
 
 def _key(chat: str, lid: int) -> str:
     return messages.row_key(ACCT, hashlib.md5(chat.encode()).hexdigest(),
-                            "message_0.db", lid)
+                            "message_0.db", lid, T0 + lid)   # `_row` 的 ts 就是 T0+lid
 
 
 SEED = [
@@ -268,7 +268,8 @@ def test_deny_also_covers_the_degraded_chat_id_form(tmp_path, monkeypatch):
     assert [h["chat_id"] for h in res["hits"]] == [CHAT_A], res
 
     with pytest.raises(errors.ScopeDenied):
-        retrieval.get_context(messages.row_key(ACCT, cm, "message_0.db", 41), account=ACCT)
+        retrieval.get_context(messages.row_key(ACCT, cm, "message_0.db", 41, T0 + 41),
+                              account=ACCT)
 
 
 # ---------------------------------------------------------------- 两阶段披露
