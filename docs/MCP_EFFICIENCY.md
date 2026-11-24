@@ -148,7 +148,7 @@ get_recent_messages` 变成 `get_recent_messages` 一步；「找提到报销的
 ## 6. 回归护栏
 
 `test_descriptions_are_dedented_and_within_budget` 把「描述 + inputSchema」的总字符数限定在 10,500
-以内（现在约 9.5k）。给工具补内容是允许的，但请有意识地调高这个预算，并在本文记一笔，
+以内（现在约 9.6k）。给工具补内容是允许的，但请有意识地调高这个预算，并在本文记一笔，
 不要悄悄把每个会话的固定开销涨回去。
 
 ## 7. 第二轮：短 msg_key、可读时间、翻页与按需加载
@@ -197,7 +197,68 @@ Agent 端到端：见 §7.2。
 一次成功，模型把短键原样交回，没有出错重试。收益集中在读长历史的场景（200 条少约 4.4k token，500 条从被拒收
 变成可用），这组任务没有覆盖。
 
-## 8. 剩余问题
+## 8. 第三轮：账号判定缓存、按会话读名册、预热与消息条目瘦身
+
+按你的选择处理（2026-11-25）。起因是一次本机实况审查：
+
+- `get_recent_messages` 每次都把**全部群**的成员表解析一遍（只为换一个会话的发送者名），还把整张联系人表读一遍
+  只为取一个显示名；
+- 不带 account 的调用每次都跑 `pgrep` + `lsof` 判定当前账号，约 0.1–0.2 s，是检索类调用耗时的大头；
+- 首次混合检索要先花约 4 s 载入语义模型；
+- 返回里还有能推导出来的字段。
+
+| 改动 | 做法 | 兼容性 |
+|---|---|---|
+| 当前账号判定缓存 | `account.status()` 在进程内记住结果：5 s 内不重跑 `pgrep`；pid 没变且不超过 60 s 不重跑 `lsof`。判不出（None）不缓存 | 行为不变；微信重启后 pid 变了会立刻重判，同一进程里切账号最迟 60 s 后重判 |
+| 名册只算目标会话 | `reader.roster_for(chat)`：只解析这一个群的成员，只按名单取这些人的联系人行；规则仍是 `roster.build_rows` | 结果与全量名册里该会话那部分一致（测试逐项对比） |
+| 显示名只查一个人 | `display_name` 没有现成的全量联系人时，只按 username 查一行 | 规则不变：备注 > 昵称 > username |
+| 联系人/名册跨调用复用 | contact.db 的读取结果按库文件与 `-wal` 的 (inode, 大小, mtime_ns) 缓存，微信一写库就作废；记下漂移或降级的那次不缓存（降级说明要每次都带出去）；返回副本 | 行为不变；代价是常驻进程多占几 MB、联系人明文在内存里留得更久 |
+| 语义模型后台预热 | server 启动 3 s 后，若装了 fastembed、已有向量索引、模型已在本地，后台线程载好模型并跑一次查询嵌入；**只读本地缓存，绝不下载**；失败静默放弃 | 不用语义检索的会话也会多占一两百 MB 内存 |
+| 消息条目瘦身（只改 MCP 形态，CLI 不变） | `get_recent_messages` / `get_message_context`：去掉 `time`（保留 `when`，秒级时间在 msg_key 末段）、`is_self`（自己发的 `sender` 是「我」；对方恰好叫「我」时补 `is_self: false`）、文本消息的 `type`、每条的 `untrusted`（顶层保留）。`search_history`：去掉 `id` / `shard` / `local_id` 与空值。`search_messages`：去掉每条的 `untrusted`、空值，单路模式下去掉 `sources` / `ranks` | **接口变更**：按 `time` / `is_self` / `type` / `id` / `shard` / `local_id` 取值的外部代码要改（仓库内没有）。`before_ts` 翻页改传 `next_before_ts` 或 msg_key 末段 |
+
+### 8.1 对比（合成库）
+
+**速度**：20 个会话 × 1,500 条，外加 230 个群（各 50 人）与 12,800 个联系人，接近真机名册规模；旧版（`2a64309`）
+与新版交替各跑两轮，每个工具连调 5 次。测量时机器负载极高（load average 270–370），绝对值偏大、波动也大，
+下表只看量级。
+
+| 工具 | 首次调用（旧 → 新） | 5 次中位数（旧 → 新） |
+|---|---:|---:|
+| get_recent_messages | 387 → **117 ms** | 256 → **46 ms** |
+| get_message_parts | 188 → **21 ms** | 195 → **21 ms** |
+| get_message_media | 85 → 24 ms | 144 → 38 ms |
+| list_contacts | 16 → 12 ms | 13 → 2 ms |
+| search_* / get_message_context | 无明显变化（单独交错复测 15 次，差异在噪声之内） | |
+
+基准把 `pgrep` / `lsof` 换成了桩，所以上表不含账号判定。它单独测（真实进程探测，只计时）：`account.status()`
+每次 180–230 ms → 首次 120–210 ms、之后 **0.3 ms**。
+
+**体积**（同一份 20 × 1,500 合成库，粗估 token：CJK 按 1、其余 3 字符折 1；上一轮标定过，Claude 实际计数约高
+三成五。这次机器负载太高，没有重跑 Claude 实测探针）：
+
+| 调用 | 第二轮后 | 第三轮后 |
+|---|---:|---:|
+| get_recent_messages（50 条） | 3,238（7,879 字符） | **2,447（−24%，5,504 字符）** |
+| get_recent_messages（200 条） | 12,883 | **9,717（−25%）** |
+| get_recent_messages（500 条，触发截断） | 留下 204 条 | 同样预算下留下 **274 条** |
+| search_history（20 条） | 2,266 | **1,734（−23%）** |
+| search_messages（keyword，20 条） | 2,060 | **1,543（−25%）** |
+| get_message_context（前后各 2 条） | 413 | **327（−21%）** |
+
+工具定义与 instructions 合计多了约 130 字符（字段说明改写），每个会话多约 50 token。
+
+### 8.2 本机配置（不在仓库里，记在这里备查）
+
+- **context-mode 插件改写了 agent-wechat 的结果**：它的 PostToolUse 钩子匹配所有 `mcp__.*`，大结果被换成一行
+  指针、正文存进它自己的本地库，模型只好再调 `ctx_search` 取回。已把 Claude Code 侧的 matcher 改成
+  `mcp__(?!agent-wechat__).*`（插件实际生效的目录是全局 npm 安装的那份，升级会覆盖，要重新应用），
+  用一个同名的合成 server 实测：agent-wechat 的结果原样到达，其它 server 照旧被接管。
+- **OpenCode 默认隐藏 agent-wechat 的工具**：全局配置里一条 `deny`，只在用得到的项目里用项目级 `opencode.json`
+  加回 `allow`（权限规则后写的优先），其它项目的每个会话省下约 6.9k token 的工具定义。
+- **Claude Code 的工具延迟加载没生效**：shell 配置里导出了 `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1`，它会
+  关掉 tool search，`ENABLE_TOOL_SEARCH=true` 也压不住，于是每个会话都全量下发 agent-wechat 的 15 个工具定义。
+
+## 9. 剩余问题
 
 - **短键依赖本地索引**：短键要靠索引（或 `msg_parts` / 排除清单）换回完整键。`get_recent_messages` 直接读微信库，
   返回的消息可能还没导出；这时把它的短键交给 `get_message_context` 会答「找不到」——不过完整键在这种情况下
@@ -209,6 +270,10 @@ Agent 端到端：见 §7.2。
 - **体积预算是粗估**：CJK 按 1 个 token、其它按 3 个字符折 1 个，比 Claude 实际计数偏低约三成五（合成库）。
   正文特别密（大段英文、长链接、大量 emoji）的会话里偏差可能更大；13k 的预算在合成库上约合 17–18k，留了余量，
   但不是硬保证。
+- **`get_message_context` 的 sender 来自索引里的名册**，与 `get_recent_messages`（实时读微信库的名册）不是同一来源，
+  名册刷新前可能还是 wxid。这是原有行为，这轮没动。
+- **每次读微信库都要先克隆、再解密打开**（`get_recent_messages` 至少开 contact.db 与若干分片）。缓存只省掉了
+  contact.db 的重复读取，分片这一侧没缓存——它们随消息变化，缓存收益小、失效判断复杂。
 - `get_account_status` 的 `index` 计数仍是三次全表扫描（30 万条约 24ms）。这个工具确实需要这些数，
   而且不在热路径上。
 - server 冷启动的大头仍是 MCP SDK 自身的 import（约八成），本项目这一侧能省的已经省了。

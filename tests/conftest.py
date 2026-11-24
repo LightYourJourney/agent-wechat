@@ -71,6 +71,15 @@ def _forbid_real_external_commands(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _reset_process_caches(monkeypatch):
+    """进程级缓存（当前账号判定、contact.db 的联系人/名册）别让一条用例的结果漏给下一条。"""
+    from agent_wechat import account, reader
+    monkeypatch.setattr(account, "_pid_cache", None)
+    monkeypatch.setattr(account, "_account_cache", None)
+    monkeypatch.setattr(reader, "_contact_cache", {"sig": None, "items": {}})
+
+
+@pytest.fixture(autouse=True)
 def _isolate_index_db(tmp_path, monkeypatch):
     """每条用例一个自己的 HOME_DIR 与 index.db —— 谁也不可能写到用户真实的那个。"""
     monkeypatch.setattr(paths, "HOME_DIR", tmp_path / "home")

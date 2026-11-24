@@ -244,6 +244,18 @@ class FastEmbedEmbedder:
                          f"离线环境请准备 {paths.HOME_DIR / 'models'}") from exc
         return self._model
 
+    def warm_up(self) -> None:
+        """只从本地缓存载入模型并跑一次查询嵌入（MCP server 启动后在后台预热用）。
+
+        **绝不下载**：缓存不全就抛错——预热不该在用户没要求时发起网络请求。
+        """
+        with self._lock:
+            if self._model is None:
+                from fastembed import TextEmbedding
+                self._model = TextEmbedding(model_name=MODEL_NAME, cache_dir=str(MODEL_CACHE_DIR),
+                                            local_files_only=True)
+            next(iter(self._model.query_embed([query_text("预热")])))
+
     def embed(self, texts: list[str]) -> list[Sequence[float]]:
         with self._lock:
             return list(self._ensure().embed(texts, batch_size=EMBED_BATCH))
@@ -268,6 +280,28 @@ def default_embedder() -> FastEmbedEmbedder:
         if _default_embedder is None:
             _default_embedder = FastEmbedEmbedder()
         return _default_embedder
+
+
+def warm_up_if_ready() -> bool:
+    """装了 fastembed、已有向量索引、模型已在本地时，预先载好默认嵌入器的模型：首次语义 /
+    混合检索省掉约 4 s 的载入。条件不满足返回 False；载入失败照常抛（调用方决定吞不吞）。"""
+    if not semantic_installed() or not store.DB_PATH.exists():
+        return False
+    try:
+        if not any(MODEL_CACHE_DIR.iterdir()):
+            return False
+        con = sqlite3.connect(f"file:{store.DB_PATH}?mode=ro", uri=True)
+        try:
+            row = con.execute("SELECT embedded FROM vector_meta WHERE model_id=?",
+                              (MODEL_ID,)).fetchone()
+        finally:
+            con.close()
+    except (OSError, sqlite3.Error):        # 没有模型目录 / 没有 vector_meta 表 / 库读不了
+        return False
+    if not (row and int(row[0]) > 0):
+        return False
+    default_embedder().warm_up()
+    return True
 
 
 # ---------- meta / 向量水位线（vector_watermark） ----------

@@ -4,6 +4,7 @@
 微信库，跑一遍导出建索引，再经 SDK 的 `call_tool` 逐个调用。用法：
 
     uv run --frozen python scripts/mcp_bench.py [--json out.json] [--chats 20 --per-chat 1500]
+        [--groups 230 --contacts 12800]   # 名册与联系人表接近真机规模
 
 token 数是估算：CJK 字符按 1 个、其余字符按 `ASCII_CHARS_PER_TOKEN` 个折 1 个
 （用 Claude Code `/context` 对工具定义的实测值标定过，见 docs/MCP_EFFICIENCY.md）。
@@ -102,7 +103,11 @@ def _text(i: int) -> str:
     return SENTENCES[i % len(SENTENCES)]
 
 
-def build_env(tmp: pathlib.Path, chats: int, per_chat: int) -> tuple[str, list[str]]:
+def build_env(tmp: pathlib.Path, chats: int, per_chat: int, groups: int = 0,
+              contacts: int = 0, members: int = 50) -> tuple[str, list[str]]:
+    """`groups` / `contacts`：再造这么多个群（各 `members` 人）与联系人，让名册与联系人表
+    接近真机规模（读名册、取显示名的耗时与它们成正比）。默认 0 = 与早先的基准一致。"""
+    from helpers import ext_buffer, member  # pyright: ignore[reportMissingImports]
     from test_reader_export_pipeline import (  # pyright: ignore[reportMissingImports]
         ACCT, PW, SELF, T0, build_shard, enc_db)
 
@@ -113,14 +118,24 @@ def build_env(tmp: pathlib.Path, chats: int, per_chat: int) -> tuple[str, list[s
     enc_db(ds / "session" / "session.db", {
         "SessionTable": ("CREATE TABLE SessionTable (username TEXT)",
                          [(f,) for f in friends] + [(SELF,)])})
+    others = [f"bench_contact{i:05d}" for i in range(contacts)]
+    rooms = [f"{9000 + g}@chatroom" for g in range(groups)]
+    pool = others or friends
     enc_db(ds / "contact" / "contact.db", {
-        "name2id": ("CREATE TABLE name2id (username TEXT)", [(f,) for f in friends]),
+        "name2id": ("CREATE TABLE name2id (username TEXT)", [(u,) for u in friends + rooms]),
         "contact": ("CREATE TABLE contact (username TEXT, alias TEXT, remark TEXT, "
                     "nick_name TEXT, delete_flag INTEGER)",
                     [(f, None, ("张三" if i == 0 else f"同事{i}"), f"nick{i}", None)
-                     for i, f in enumerate(friends)]),
+                     for i, f in enumerate(friends)]
+                    + [(u, None, None, f"联系人{i}", None) for i, u in enumerate(others)]
+                    + [(r, None, f"群{g}", None, None) for g, r in enumerate(rooms)]),
+        # chat_room.id 对上 name2id 的 rowid（群排在 friends 之后）
         "chat_room": ("CREATE TABLE chat_room (id INTEGER PRIMARY KEY, username TEXT, "
-                      "owner TEXT, ext_buffer BLOB)", []),
+                      "owner TEXT, ext_buffer BLOB)",
+                      [(len(friends) + g + 1, r, SELF, ext_buffer(*(
+                          member(pool[(g * members + j) % len(pool)], f"群名片{j}" if j % 3 else None)
+                          for j in range(members))))
+                       for g, r in enumerate(rooms)]),
     })
     users = friends + [SELF]
     build_shard(root, ACCT, "message_0.db",
@@ -146,9 +161,10 @@ def _result_sizes(r) -> dict:
             "structured_chars": len(structured)}
 
 
-async def calls(tmp: pathlib.Path, chats: int, per_chat: int, runs: int = 5) -> dict:
+async def calls(tmp: pathlib.Path, chats: int, per_chat: int, runs: int = 5,
+                **scale: int) -> dict:
     from agent_wechat import export, mcp_server
-    acct, friends = build_env(tmp, chats, per_chat)
+    acct, friends = build_env(tmp, chats, per_chat, **scale)
     t0 = time.perf_counter()
     n = export.run_export(acct)
     export_s = time.perf_counter() - t0
@@ -176,7 +192,8 @@ async def calls(tmp: pathlib.Path, chats: int, per_chat: int, runs: int = 5) -> 
             t = time.perf_counter()
             r = await srv.call_tool(name, args)
             lat.append(time.perf_counter() - t)
-        out["tools"][name] = {"median_ms": _median_ms(lat), **_result_sizes(r)}
+        out["tools"][name] = {"first_ms": round(lat[0] * 1000, 1), "median_ms": _median_ms(lat),
+                              **_result_sizes(r)}
     return out
 
 
@@ -187,19 +204,24 @@ async def main() -> None:
     ap.add_argument("--json", type=pathlib.Path)
     ap.add_argument("--chats", type=int, default=20)
     ap.add_argument("--per-chat", type=int, default=1500)
+    ap.add_argument("--groups", type=int, default=0, help="额外造的群数（名册规模）")
+    ap.add_argument("--contacts", type=int, default=0, help="额外造的联系人数")
+    ap.add_argument("--calls-only", action="store_true", help="只测工具调用（跳过定义与冷启动）")
     args = ap.parse_args()
+    scale = {"groups": args.groups, "contacts": args.contacts}
     with tempfile.TemporaryDirectory(prefix="awmcp-bench-") as d:
         tmp = pathlib.Path(d)
         if args.serve:
             from agent_wechat import export, mcp_server
-            acct, _ = build_env(tmp, args.chats, args.per_chat)
+            acct, _ = build_env(tmp, args.chats, args.per_chat, **scale)
             export.run_export(acct)
             await mcp_server.server.run_stdio_async()
             return
-        (tmp / "starthome").mkdir(mode=0o700)
-        res = {"definitions": await definitions(),
-               "startup": await startup(tmp / "starthome"),
-               "calls": await calls(tmp, args.chats, args.per_chat)}
+        res: dict = {}
+        if not args.calls_only:
+            (tmp / "starthome").mkdir(mode=0o700)
+            res = {"definitions": await definitions(), "startup": await startup(tmp / "starthome")}
+        res["calls"] = await calls(tmp, args.chats, args.per_chat, **scale)
     text = json.dumps(res, ensure_ascii=False, indent=1)
     if args.json:
         args.json.write_text(text, encoding="utf-8")

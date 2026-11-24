@@ -1,5 +1,5 @@
 """MCP 返回形态的第二轮：短 msg_key、每条消息的 `when`、get_recent_messages 的体积预算与翻页，
-以及冷启动不载入 CLI / sqlite_vec。全部用合成数据（docs/MCP_EFFICIENCY.md §8）。"""
+以及冷启动不载入 CLI / sqlite_vec。全部用合成数据（docs/MCP_EFFICIENCY.md §7）。"""
 import asyncio
 import json
 import subprocess
@@ -14,6 +14,11 @@ from helpers import mk_row
 from test_msg_key_v10 import ACCT, FRIEND, T0, con, md5, wx  # noqa: F401  （夹具）
 
 KEY = messages.row_key(ACCT, md5(FRIEND), "message_0.db", 59, T0 + 59)
+
+
+def _ts(m):
+    """消息条目不再带 time：秒级时间取 msg_key 末段。"""
+    return int(m["msg_key"].rsplit(":", 1)[1])
 
 
 def _call(name, args):
@@ -84,7 +89,7 @@ def test_mcp_returns_short_keys_and_when_and_takes_them_back(wx):
     first = res["messages"][0]
     assert first["msg_key"] == f"{md5(FRIEND)[:8]}:3:{T0 + 180}"
     assert first["when"] == time.strftime("%Y-%m-%d %H:%M", time.localtime(T0 + 180))
-    assert list(first)[:3] == ["msg_key", "time", "when"]
+    assert list(first) == ["msg_key", "when", "sender", "content"]   # time/is_self/type=text 省略
 
     ctx = _call("get_message_context", {"contact": "张三", "msg_key": first["msg_key"]})
     assert ctx["msg_key"] == first["msg_key"]
@@ -117,13 +122,13 @@ def test_recent_messages_over_budget_keeps_the_newest_and_says_where_to_continue
     wx([(i, T0 + i * 60, "长" * 400) for i in range(1, 11)])
     monkeypatch.setattr(mcp_server, "RECENT_TOKEN_BUDGET", 1500)
     res = _call("get_recent_messages", {"contact": "张三", "limit": 10})
-    got = [m["time"] for m in res["messages"]]
+    got = [_ts(m) for m in res["messages"]]
     assert res["truncated"] is True and 0 < len(got) < 10
     assert got == [T0 + i * 60 for i in range(11 - len(got), 11)]      # 留下的是最新的
     assert res["next_before_ts"] == got[0]
     more = _call("get_recent_messages", {"contact": "张三", "limit": 10,
                                          "before_ts": res["next_before_ts"]})
-    assert more["messages"][-1]["time"] == got[0] - 60                 # 接得上，不重不漏
+    assert _ts(more["messages"][-1]) == got[0] - 60                 # 接得上，不重不漏
 
 
 def test_next_before_ts_steps_past_a_shared_second(wx, monkeypatch):
@@ -131,7 +136,7 @@ def test_next_before_ts_steps_past_a_shared_second(wx, monkeypatch):
     wx([(1, T0, "长" * 400), (2, T0 + 60, "长" * 400), (3, T0 + 60, "长" * 400)])
     monkeypatch.setattr(mcp_server, "RECENT_TOKEN_BUDGET", 500)
     res = _call("get_recent_messages", {"contact": "张三", "limit": 3})
-    assert [m["time"] for m in res["messages"]] == [T0 + 60]
+    assert [_ts(m) for m in res["messages"]] == [T0 + 60]
     assert res["next_before_ts"] == T0 + 61
 
 

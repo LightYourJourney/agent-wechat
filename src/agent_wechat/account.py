@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import dataclasses
 import subprocess
+import time
 from collections.abc import Collection
 
 from . import paths
@@ -80,10 +81,41 @@ def current_account(pid: int, known: Collection[str] | None = None) -> str | Non
     return _parse_account_from_lsof(r.stdout, known)
 
 
-def status() -> AccountStatus:
+# 常驻的 MCP server 每次工具调用都要判一次当前账号（pgrep + lsof 约 0.1–0.2 s，检索类调用
+# 的大头）。进程内短时缓存：PID_TTL 秒内连 pgrep 都不跑；pid 没变且不超过 ACCOUNT_TTL 秒就
+# 不重跑 lsof（微信重启后 pid 会变；同一进程里切账号的情况由 ACCOUNT_TTL 兜住）。
+# 只缓存确定的结果——判不出（None）下次照常重判。
+PID_TTL = 5.0
+ACCOUNT_TTL = 60.0
+_pid_cache: tuple[float, int | None] | None = None
+_account_cache: tuple[float, int, tuple[str, ...], str] | None = None
+
+
+def _cached_pid() -> int | None:
+    global _pid_cache
+    now = time.monotonic()
+    if _pid_cache is not None and now - _pid_cache[0] < PID_TTL:
+        return _pid_cache[1]
     pid = wechat_pid()
+    _pid_cache = (now, pid)
+    return pid
+
+
+def _cached_current(pid: int, accounts: list[str]) -> str | None:
+    global _account_cache
+    now, known = time.monotonic(), tuple(accounts)
+    c = _account_cache
+    if c is not None and c[1] == pid and c[2] == known and now - c[0] < ACCOUNT_TTL:
+        return c[3]
+    cur = current_account(pid, accounts)
+    _account_cache = (now, pid, known, cur) if cur else None
+    return cur
+
+
+def status() -> AccountStatus:
+    pid = _cached_pid()
     accounts = paths.account_dirs()
-    cur = current_account(pid, accounts) if pid else None
+    cur = _cached_current(pid, accounts) if pid else None
     unrecognized = paths.unrecognized_dirs()
     return AccountStatus(running=pid is not None, current=cur, accounts=accounts, pid=pid,
                          data_dir_exists=unrecognized is not None,

@@ -11,8 +11,11 @@
 - `account` 参数（可选）：目标账号目录名（如 `wxid_xxx_ab12`）。省略时操作**当前
   登录账号**；指定的账号目录不存在时报错（错误信息附带本机已知账号）。**唯一例外是
   `build_vector_index`**（省略表示索引全部账号，见 §7）。
-- 时间字段一律 **unix 秒**。返回里每条**消息**在 `time` / `ts` 后另带 `when`：同一时刻的本机
-  时间（`YYYY-MM-DD HH:MM`，时区写在 server instructions 里），免得调用方自己换算。
+- 时间字段一律 **unix 秒**。返回里每条**消息**另带 `when`：同一时刻的本机时间（`YYYY-MM-DD HH:MM`，
+  时区写在 server instructions 里），免得调用方自己换算。`get_recent_messages` / `get_message_context`
+  的消息条目只给 `when`、不再给 `time`——秒级时间是 `msg_key` 的末段。
+- MCP 返回的消息条目**省略为空（null）的字段**，也不重复能推导出来的东西（各工具小节写明了省掉哪些）；
+  CLI 的 `--json` 输出不受影响。
 - **`msg_key`**：MCP 返回的是短形态 `<chat_md5 前 8 位>:<local_id>:<create_time>`（如
   `0123abcd:22415:1789045400`），`ref_msg_key` 同。完整形态 `account|chat_md5|shard|local_id|create_time`
   只用于存储、墓碑、CLI 输出与导出产物（见 DATA_MODEL.md）。凡是接收 msg_key 的工具，短形态、完整
@@ -107,7 +110,7 @@
 |---|---|---|---|---|
 | `contact` | string | **是** | — | username（`wxid_*` / 自定义微信号 / `*@chatroom` / `filehelper`）或展示名 |
 | `limit` | int | 否 | 50 | 返回条数（1-500）；结果过大时见下面的 `truncated` |
-| `before_ts` | int | 否 | null | 只取这个时刻（unix 秒，**不含**）之前的消息，用来往前翻页：传本页第一条的 `time`，或上一页的 `next_before_ts` |
+| `before_ts` | int | 否 | null | 只取这个时刻（unix 秒，**不含**）之前的消息，用来往前翻页：传上一页的 `next_before_ts`，或本页第一条 `msg_key` 的末段 |
 | `account` | string | 否 | null | 同通用约定 |
 
 **成功返回**：
@@ -117,25 +120,23 @@
   "chat_id": "wxid_abc123def456",
   "display": "小李（产品）",
   "messages": [
-    { "msg_key": "01234567:22415:1789045400",
-      "time": 1789045400, "when": "2026-09-10 21:03", "sender": "我", "is_self": true,
-      "type": "text", "content": "今晚一起吃饭吗" },
-    { "msg_key": "01234567:22416:1789045521",
-      "time": 1789045521, "sender": "wxid_abc123def456", "is_self": false,
-      "type": "text", "content": "好啊，七点老地方？" },
-    { "msg_key": "01234567:22417:1789045600",
-      "time": 1789045600, "sender": "wxid_abc123def456", "is_self": false,
-      "type": "image", "content": "[image]" },
-    { "msg_key": "01234567:22418:1789045700",
-      "time": 1789045700, "sender": "我", "is_self": true,
-      "type": "sticker", "content": "[贴纸:滑稽]" }
+    { "msg_key": "01234567:22415:1789045400", "when": "2026-09-10 21:03",
+      "sender": "我", "content": "今晚一起吃饭吗" },
+    { "msg_key": "01234567:22416:1789045521", "when": "2026-09-10 21:05",
+      "sender": "wxid_abc123def456", "content": "好啊，七点老地方？" },
+    { "msg_key": "01234567:22417:1789045600", "when": "2026-09-10 21:06",
+      "sender": "wxid_abc123def456", "type": "image", "content": "[image]" },
+    { "msg_key": "01234567:22418:1789045700", "when": "2026-09-10 21:08",
+      "sender": "我", "type": "sticker", "content": "[贴纸:滑稽]" }
   ],
   "truncated": false,
   "degraded": []
 }
 ```
 
-（示例里只有第一条写出了 `when`，实际每条都有。）
+每条消息的字段：`msg_key`、`when`、`sender`、`content`，非文本消息另有 `type`（`image` / `voice` /
+`sticker` / `appmsg` 等；文本消息省略）。**自己发的 `sender` 是「我」**，所以不再单给 `is_self`；
+对方的展示名恰好也叫「我」时，那几条会带 `"is_self": false` 以免认错。
 
 > `msg_key` 是消息的稳定标识（短形态，见「通用约定」），跨导出保持不变；后续 `get_message_media` /
 > `get_message_parts` / `get_message_context` 靠它指认消息。
@@ -259,11 +260,10 @@
   "total": 2,
   "hits": [
     { "msg_key": "01234567:22415:1789045400",
-      "id": 735662, "chat_id": "wxid_abc123def456",
-      "shard": "message_4.db", "local_id": 22415, "ts": 1789045400,
+      "chat_id": "wxid_abc123def456", "ts": 1789045400, "when": "2026-09-10 21:03",
       "msg_type": 1, "sender_id": "wxid_testacct01",
       "sender_name": "wxid_testacct01", "is_self": 1,
-      "content": "周末爬山的那天记得带水", "media_hint": null,
+      "content": "周末爬山的那天记得带水",
       "snip": "…【周末爬山】那天记得带水…" }
   ]
 }
@@ -274,9 +274,10 @@
 - 1-2 字查询**建议传 `contact`**，否则全表扫描（秒级）
 - 索引为空时返回 `{"hits": [], "hint": "本地索引为空：请先运行 export_full_history", ...}`
 - `msg_key` 是消息的稳定标识（短形态，见「通用约定」），跨导出保持不变；
-  与 `hits` 里既有的 `id`（`messages.id`，DB rowid）不是一回事——rowid 随重建变化，
   `msg_key` 由消息的身份/位置字段派生（不含内容，编辑消息不会改它），
   可用于 `get_message_media` 指认消息。
+- MCP 返回省掉了存储细节 `id`（DB rowid，随重建变化）、`shard`、`local_id`（指认消息用 `msg_key`），
+  以及值为 null 的字段：文本消息没有 `media_hint`，`like` 模式没有 `snip`。CLI `search --json` 仍是全字段。
 - `degraded` 键（§3）非空有三类来源：显示名降级（那时 `sender_name` 会回落成 wxid，
   **不要**当成真实姓名呈现）、索引库问题（结构不完整 / FTS 失同步——按 `effect`
   里的说明处理，失同步时本次结果**不完整**，别把它当「真的没搜到」），以及**首次导出
@@ -855,8 +856,10 @@ rebuild 与否）各起一条。（F-D，T7 复验：与 §4 同款的合并语�
 | `account` | string | 否 | null | 同通用约定 |
 
 **返回**：`mode / total / candidates / truncated / budget{…} / degraded / hits / untrusted`；
-每条 hit 有 `msg_key / chat_id / ts / sender / is_self / snippet / sources / ranks /
-distance / untrusted`。**没有 `content`**——完整正文用 §15。
+每条 hit 有 `msg_key / chat_id / ts / when / sender / is_self / snippet`，`hybrid` 下另有
+`sources / ranks`（命中自哪几路、各路名次；单路模式下它们恒为那一路，MCP 不返回），语义命中另有
+`distance`。**没有 `content`**——完整正文用 §15。顶层 `untrusted: true` 标明整份结果是不可信数据
+（CLI `--json` 每条 hit 上也各有一个，MCP 省掉了这份重复）。
 
 - 片段 ≤200 字符、总量 ≤8000 字符；超出截断并 `truncated=true`。
 - 片段里的 `wxid_*` / `*@chatroom` / 11 位以上数字被替换成 `<已遮盖>`；不以 `wxid_` 开头的自定义微信号认不出形状，只遮**本账号名册里有的**那些（按整词比对，名册里没有的照常显示）。
@@ -877,8 +880,9 @@ distance / untrusted`。**没有 `content`**——完整正文用 §15。
 | `after` | int | 否 | 2 | 向后取几条（0–10） |
 | `account` | string | 否 | null | 同通用约定 |
 
-**返回**：`chat_id / msg_key / messages[{msg_key,time,sender,is_self,content,untrusted}] /
-untrusted / notice`。只返回**同账号同会话**；被 `purge --chat` 销毁的消息**拒绝返回**
+**返回**：`chat_id / msg_key / messages[{msg_key,when,sender,content}] / untrusted / notice`。
+消息条目的形态同 §3：自己发的 `sender` 是「我」；秒级时间在 `msg_key` 末段；顶层 `untrusted: true`
+覆盖全部消息（CLI `--json` 的每条消息仍带 `time / is_self / untrusted`）。只返回**同账号同会话**；被 `purge --chat` 销毁的消息**拒绝返回**
 （`{"error": "该消息已被销毁…"}`）。会话在 `AGENT_WECHAT_DENY` 里时拒绝（**按会话的 `chat_md5` 判**，因此真名与退化
 `md5:<hex>` 两种形态一并拒绝；该变量只约束本工具与 §14，不改变其它工具）。
 

@@ -10,11 +10,13 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import html
+import pathlib
 import sqlite3
 import threading
 import zlib
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, asdict
+from typing import Any
 
 from . import (appmsg, decrypt, errors, keys, media, messages, msgextra,
                 paths, roster, schema, store)
@@ -125,6 +127,34 @@ def _media_hint(t: int, content: str | None) -> str | None:
     return f"[{_type_name(t)}]"
 
 
+# 常驻的 MCP server 里跨工具调用复用 contact.db 的读取结果（联系人查询、单个会话的名册、
+# 显示名）。签名是库文件与 -wal 的 (inode, 大小, mtime_ns)：微信一写库签名就变，整份作废。
+# 只放一个账号；条目数设上限，满了清空（查询串五花八门，不必做 LRU）。
+_CONTACT_CACHE_MAX = 64
+_contact_cache: dict[str, Any] = {"sig": None, "items": {}}
+_contact_lock = threading.Lock()
+
+
+def _file_sig(db: pathlib.Path) -> tuple:
+    out: list[object] = [str(db)]
+    for p in (db, db.with_name(db.name + "-wal")):
+        try:
+            st = p.stat()
+            out.append((st.st_ino, st.st_size, st.st_mtime_ns))
+        except OSError:
+            out.append(None)
+    return tuple(out)
+
+
+# 按 username 精确取行时 TEXT 与 BLOB 两种存储类别都认：SQLite 里 TEXT 参数与 BLOB 值永不
+# 相等，而 `text_factory = bytes` 读出来一律是 bytes，看不出微信存的是哪一种。
+_ONE_NAME = "(?, ?)"
+
+
+def _name_args(name: str) -> tuple[str, bytes]:
+    return name, name.encode("utf-8")
+
+
 def _s(v: object) -> str | None:
     if v is None:
         return None
@@ -152,7 +182,6 @@ class MessageReader:
         self._passphrase: bytes | None = None
         self.self_wxid = paths.bare_wxid(acct)
         self._contacts_all: list[dict] | None = None   # 实例级缓存，见 _contacts_all_cached
-        self._roster_map_cache: dict[tuple[str, str], str] | None = None
         self._probed: set[tuple[str, str, str]] = set()   # (rel, capability, only or table)
         self._drifted: dict[tuple[str, str, str], errors.SchemaDrift] = {}
         self._drift: list[errors.SchemaDrift] = []        # 本次实例见过的漂移（T5 读）
@@ -179,6 +208,25 @@ class MessageReader:
         if self._contacts_all is None:
             self._contacts_all = self.contacts(limit=None)   # **必须显式传 None**：不传就是默认 200
         return self._contacts_all
+
+    def _contact_memo(self, key: tuple, compute: Callable[[], Any]) -> Any:
+        """跨调用复用 contact.db 的读取结果（见模块级 `_contact_cache`）。
+
+        这次计算里记下了漂移或源级降级的**不缓存**：降级说明挂在 reader 实例上，命中缓存的
+        下一次调用拿不到它，名字静默回落 wxid 却没有 degraded——宁可再读一次库。
+        """
+        sig = _file_sig(paths.db_storage(self.acct) / "contact/contact.db")
+        with _contact_lock:
+            if _contact_cache["sig"] == sig and key in _contact_cache["items"]:
+                return _contact_cache["items"][key]
+        notes = len(self._drift) + len(self._source_notes)
+        val = compute()
+        if len(self._drift) + len(self._source_notes) == notes:
+            with _contact_lock:
+                if _contact_cache["sig"] != sig or len(_contact_cache["items"]) >= _CONTACT_CACHE_MAX:
+                    _contact_cache["sig"], _contact_cache["items"] = sig, {}
+                _contact_cache["items"][key] = val
+        return val
 
     @property
     def passphrase(self) -> bytes:
@@ -310,7 +358,15 @@ class MessageReader:
         `limit=None` → **不拼 `LIMIT`**（取全量）。`_contacts_all_cached` 用它：真机 contact 表
         有 12,799 行，而 `resolve_chat` / `display_name` 都扫这份数据——取窗口会让**窗口外的
         联系人按真名解析不出来**（实测窗口外抽 40 条，`resolve_one` 命中 0）。
+
+        结果跨调用复用（`_contact_memo`，contact.db 一变就作废）；返回的是副本，调用方改了也
+        不会污染缓存。
         """
+        rows = self._contact_memo(("contacts", query or None, limit),
+                                  lambda: self._contacts_uncached(query, limit))
+        return [dict(r) for r in rows]
+
+    def _contacts_uncached(self, query: str | None, limit: int | None) -> list[dict]:
         with self._open("contact/contact.db") as con:
             self._check("contacts", "contact/contact.db", con)
             sql = ("SELECT username, alias, remark, nick_name FROM contact "
@@ -355,8 +411,23 @@ class MessageReader:
         return (cands[0]["username"] if len(cands) == 1 else None), cands
 
     def display_name(self, chat_id: str) -> str:
-        return next((c["display"] for c in self._contacts_all_cached()
-                     if c["username"] == chat_id), chat_id)
+        """实例里已有全量联系人就直接查；没有就只读这一个人——真机全表 1.2 万行，为一个名字
+        读一遍要约 0.5 s。规则与 `contacts()` 相同：备注 > 昵称 > username。"""
+        if self._contacts_all is not None:
+            return next((c["display"] for c in self._contacts_all
+                         if c["username"] == chat_id), chat_id)
+        return self._contact_memo(("display", chat_id), lambda: self._display_uncached(chat_id))
+
+    def _display_uncached(self, chat_id: str) -> str:
+        with self._open("contact/contact.db") as con:
+            self._check("contacts", "contact/contact.db", con)
+            for u, remark, nick in con.execute(
+                    "SELECT username, remark, nick_name FROM contact "
+                    f"WHERE COALESCE(delete_flag,0)=0 AND username IN {_ONE_NAME}",
+                    _name_args(chat_id)):
+                if _s(u) == chat_id:
+                    return _s(remark) or _s(nick) or chat_id
+        return chat_id
 
     def roster(self) -> list[roster.RosterRow]:
         """本账号的显示名名册。**逐源降级**（spec §6）：`chat_room` 与 `contact` 在物理上
@@ -366,6 +437,17 @@ class MessageReader:
         两次查询在同一次 contact.db 解密里完成，由 `_open` 管理生命周期。
         名册的**规则**不在这里——`roster.build_rows` 是全项目唯一那份。
         """
+        return self._contact_memo(("roster",), lambda: self._roster_rows(None))
+
+    def roster_for(self, chat_id: str) -> list[roster.RosterRow]:
+        """只算一个会话要用的名册行：这个群的成员（私聊就是对方一人）及其联系人信息。
+
+        `recent` 只换一个会话的发送者名，却要解析全部群的成员表（真机 230 个群约 1.4 s）。
+        结果是 `roster()` 里该会话那部分的超集，规则同为 `roster.build_rows`。
+        """
+        return self._contact_memo(("roster_for", chat_id), lambda: self._roster_rows(chat_id))
+
+    def _roster_rows(self, only_chat: str | None) -> list[roster.RosterRow]:
         groups: dict[str, list[tuple[str, str | None]]] = {}
         contacts: dict[str, tuple[str | None, str | None]] = {}
         with self._open("contact/contact.db") as con:
@@ -374,9 +456,12 @@ class MessageReader:
                 self._check("roster", "contact/contact.db", con, only="chat_room")
                 self._check("roster", "contact/contact.db", con, only="name2id")
                 # chat_room.id → name2id.rowid → 群 username（实测 3/3 相等，spec §2.1）
-                for username, blob in con.execute(
-                        "SELECT n.username, cr.ext_buffer FROM chat_room cr "
-                        "JOIN name2id n ON n.rowid = cr.id"):
+                sql = ("SELECT n.username, cr.ext_buffer FROM chat_room cr "
+                       "JOIN name2id n ON n.rowid = cr.id")
+                args: tuple = ()
+                if only_chat is not None:
+                    sql, args = sql + f" WHERE n.username IN {_ONE_NAME}", _name_args(only_chat)
+                for username, blob in con.execute(sql, args):
                     chat_id = _s(username)
                     if chat_id:
                         groups[chat_id] = roster.parse_members(
@@ -388,9 +473,15 @@ class MessageReader:
                 self._check("roster", "contact/contact.db", con, only="contact")
                 # **不带 limit**：真实 contact 表有 12,782 行——任何窗口都会让名册静默漏人
                 # （spec §2.6；`_contacts_all_cached()` 当年取前 5000 行就是这么漏的）。
-                for u, remark, nick in con.execute(
-                        "SELECT username, remark, nick_name FROM contact "
-                        "WHERE COALESCE(delete_flag,0)=0"):
+                # 只算一个会话时按名单精确取（对方本人 + 群成员），名单之外的人用不上。
+                sql = ("SELECT username, remark, nick_name FROM contact "
+                       "WHERE COALESCE(delete_flag,0)=0")
+                args = ()
+                if only_chat is not None:
+                    names = {only_chat, *(k for ms in groups.values() for k, _ in ms if k)}
+                    args = tuple(a for n in sorted(names) for a in _name_args(n))
+                    sql += f" AND username IN ({','.join('?' * len(args))})"
+                for u, remark, nick in con.execute(sql, args):
                     key = _s(u)
                     if key:
                         contacts[key] = (_s(remark), _s(nick))
@@ -425,14 +516,6 @@ class MessageReader:
             return {}
         return out
 
-    def _roster_map(self) -> dict[tuple[str, str], str]:
-        """`{(chat_id, member_key): display_name}`，**实例级缓存**——与
-        `_contacts_all_cached` 同一模式：一次工具调用里 resolve + recent 会先后用到它。
-        """
-        if self._roster_map_cache is None:
-            self._roster_map_cache = {(c, k): d for c, k, d in self.roster()}
-        return self._roster_map_cache
-
     def _apply_roster(self, chat_id: str, msgs: list[Message]) -> list[Message]:
         """把发送者换成名册里的显示名。
 
@@ -440,7 +523,7 @@ class MessageReader:
         要写进索引库，而索引库侧是由查询时的 join 统一覆盖的——在这里换名会让新导出
         存名字、存量存 wxid，两边分道扬镳（spec §6、§7）。
         """
-        mapping = self._roster_map()
+        mapping = {(c, k): d for c, k, d in self.roster_for(chat_id)}
         out: list[Message] = []
         for m in msgs:
             name = mapping.get((chat_id, m.sender_id or ""))

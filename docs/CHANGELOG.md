@@ -3,6 +3,25 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 风格，
 版本号语义为 0.x 阶段（API 可能变动）。
 
+### MCP 使用效率 · 第三轮（2026-11-25）
+
+逐项对比见 [MCP_EFFICIENCY.md](MCP_EFFICIENCY.md) §8。
+
+**变更**
+
+- 当前账号判定（`pgrep` + `lsof`）在进程内短时缓存：5 s 内不重跑 `pgrep`，pid 不变且不超过 60 s 不重跑 `lsof`。
+- `get_recent_messages` 换发送者名时只解析目标会话的名册，取显示名只查一个联系人；contact.db 的读取结果按库文件
+  签名跨调用复用（微信一写库即作废，降级过的结果不缓存）。
+- MCP server 启动后，若已有向量索引且模型在本地，后台预热嵌入模型（只读本地缓存，不下载）。
+- **MCP 返回形态变更**（CLI 不变）：`get_recent_messages` / `get_message_context` 的消息条目去掉 `time`（保留
+  `when`）、`is_self`（自己发的 `sender` 为「我」）、文本消息的 `type`、每条的 `untrusted`（顶层保留）；
+  `search_history` 去掉 `id` / `shard` / `local_id` 与空值；`search_messages` 去掉每条的 `untrusted` 与空值，
+  单路模式下去掉 `sources` / `ranks`。
+- `scripts/mcp_bench.py` 新增 `--groups` / `--contacts`（名册规模）与 `--calls-only`，工具调用另报首次耗时。
+
+合成库上：最近 50 条消息的返回小约 24%，检索结果小约 23–25%；接近真机名册规模时 `get_recent_messages` 首次
+387 → 117 ms、之后 256 → 46 ms，账号判定之后每次约 0.3 ms。
+
 ### MCP 使用效率 · 第二轮（2026-11-25）
 
 逐项对比见 [MCP_EFFICIENCY.md](MCP_EFFICIENCY.md) §7。

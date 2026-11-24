@@ -49,7 +49,7 @@ def test_strip_titles_only_touches_schema_keywords():
 def test_descriptions_are_dedented_and_within_budget():
     """docstring 的 4 格缩进会原样进描述；总体积设回归护栏——加内容可以，但要有意识地
     调高这里的预算（并在 docs/MCP_EFFICIENCY.md 记一笔），而不是悄悄把每个会话的固定开销
-    涨回去。预算按字符计（描述 + inputSchema），当前约 9.5k。"""
+    涨回去。预算按字符计（描述 + inputSchema），当前约 9.6k。"""
     tools = _tools()
     for t in tools:
         assert "\n    " not in t.description, t.name
