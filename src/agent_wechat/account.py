@@ -2,7 +2,7 @@
 
 识别原理（本机已实测复现）：
 1. 主进程：pgrep -x WeChat（精确进程名，天然排除 WeChatAppEx Helper 等子进程）
-2. 当前登录账号：lsof -p <pid> 打开的 xwechat_files/wxid_* 目录——
+2. 当前登录账号：lsof -p <pid> 打开的 xwechat_files/<微信号>_<hex4> 目录——
    实测只出现当前登录账号（230 个 fd），未登录的历史账号不出现。
 """
 from __future__ import annotations
@@ -20,7 +20,7 @@ _run = subprocess.run
 @dataclasses.dataclass
 class AccountStatus:
     running: bool
-    current: str | None        # 当前登录账号目录名（wxid_xxx_hex4），不确定时为 None
+    current: str | None        # 当前登录账号目录名（<微信号>_<hex4>），不确定时为 None
     accounts: list[str]        # 本机全部账号目录名
     pid: int | None
 
@@ -51,7 +51,7 @@ def wechat_pid() -> int | None:
 
 
 def _parse_account_from_lsof(out: str) -> str | None:
-    """lsof 打开文件列表 → 唯一命中的账号目录名（wxid_xxx_hex4）；无/多命中返回 None。"""
+    """lsof 打开文件列表 → 唯一命中的账号目录名（<微信号>_<hex4>）；无/多命中返回 None。"""
     hits: set[str] = set()
     for line in out.splitlines():
         if "xwechat_files/" not in line:

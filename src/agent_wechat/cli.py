@@ -36,8 +36,19 @@ def _need_confirm(contact: str, nc: usecases.NeedConfirm) -> int:
 def cmd_status(args: argparse.Namespace) -> int:
     st = account.status()
     print(f"微信运行: {st.running}  pid: {st.pid}")
-    print(f"当前登录: {st.current or '未知（未运行或启动中）'}")
+    if st.current:
+        cur = st.current
+    elif st.running:
+        cur = "未识别（微信在运行，但没找到它打开的账号目录：未登录、启动中，或目录名不是 <微信号>_<hex4> 形态）"
+    else:
+        cur = "未知（微信未运行）"
+    print(f"当前登录: {cur}")
     print(f"本机账号: {', '.join(st.accounts) or '（无）'}")
+    if not st.accounts:
+        # issue #1：「（无）」分不清「目录不在」与「在，但一个都没认出来」，排障要先知道是哪种。
+        where = "存在，但其中没有 <微信号>_<hex4> 形态的目录" if paths.XWECHAT_FILES.is_dir() \
+            else "不存在（微信版本或安装位置与实测不同？）"
+        print(f"  微信数据目录 {paths.XWECHAT_FILES}：{where}")
     for acc in st.accounts:
         bare = paths.bare_wxid(acc)
         cached = keys.load_cached_hex(bare)

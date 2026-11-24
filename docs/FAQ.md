@@ -19,7 +19,7 @@
 - 数据目录天然按 `wxid` 隔离，互不干扰
 - 每个账号的密钥独立：**登录到哪个账号，就在该账号登录状态下跑一次 bootstrap**，
   之后该账号的读取/导出即可用（即使它当前不在登录状态，只要密钥缓存有效）
-- 读取/导出默认操作当前登录账号；`--account wxid_xxx_hex4` 显式指定
+- 读取/导出默认操作当前登录账号；`--account <账号目录名>`（形如 `wxid_xxx_hex4`，设过微信号的账号是 `<微信号>_hex4`）显式指定
 - `get_account_status` 列出全部账号名与当前（或指定）账号的 `key_ready`；
   逐账号的密钥校验状态用 CLI `agent-wechat status --verify-keys` 查看
 

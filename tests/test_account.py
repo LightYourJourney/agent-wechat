@@ -77,6 +77,12 @@ def test_parse_lsof_rejects_uppercase_instance_suffix():
     assert account._parse_account_from_lsof(out) is None
 
 
+def test_parse_lsof_custom_wechat_id_account():
+    """issue #1：自定义微信号的账号目录（不以 `wxid_` 开头）也要认成当前登录账号。"""
+    out = _lsof(".../xwechat_files/custom-id_99_c0d1/db_storage/message/message_0.db")
+    assert account._parse_account_from_lsof(out) == "custom-id_99_c0d1"
+
+
 # ---------- _parse_pids ----------
 
 def test_parse_pids_multiple_and_junk():

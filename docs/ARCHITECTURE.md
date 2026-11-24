@@ -84,7 +84,7 @@ src/agent_wechat/
 
 ```
 pgrep -x WeChat → 主进程 PID
-lsof -n -P -p <PID> → 过滤 xwechat_files/wxid_* 目录 → 唯一命中 = 当前登录账号
+lsof -n -P -p <PID> → 过滤 xwechat_files/<微信号>_<hex4> 目录 → 唯一命中 = 当前登录账号
 ```
 
 未唯一命中（多开/启动瞬间）时返回"不确定"而不是猜。

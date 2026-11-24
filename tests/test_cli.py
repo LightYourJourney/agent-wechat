@@ -2352,6 +2352,31 @@ def test_status_success_path_covers_both_entries(tmp_path, monkeypatch, capsys):
     assert idx["last_ts"] is None or isinstance(idx["last_ts"], int)
 
 
+def test_status_explains_why_no_account_was_found(tmp_path, monkeypatch, capsys):
+    """issue #1：微信在跑、「当前登录：未知（未运行或启动中）」「本机账号：（无）」——前一句与
+    「微信运行: True」自相矛盾，后一句分不清「数据目录不在」与「在，但一个都没认出来」。"""
+    from types import SimpleNamespace
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(paths, "HOME_DIR", home)
+    monkeypatch.setattr(account, "status", lambda: SimpleNamespace(
+        running=True, pid=999, current=None, accounts=[]))
+
+    root = tmp_path / "xwechat_files"
+    monkeypatch.setattr(paths, "XWECHAT_FILES", root)
+    with pytest.raises(SystemExit):
+        cli.main(["status"])
+    out = capsys.readouterr().out
+    assert "当前登录: 未识别（微信在运行" in out and "未运行或启动中" not in out
+    assert f"微信数据目录 {root}：不存在" in out
+
+    root.mkdir()
+    with pytest.raises(SystemExit):
+        cli.main(["status"])
+    assert f"微信数据目录 {root}：存在，但其中没有" in capsys.readouterr().out
+
+
 def test_status_does_not_create_the_index_db(tmp_path, monkeypatch):
     """EA-025（只读诊断不许建库）：HOME 空的机器上跑一次 `status`，`store.open()` 会
     `executescript(SCHEMA)` 凭空建出 index.db 与 exclusions.db（实测）——诊断命令不该

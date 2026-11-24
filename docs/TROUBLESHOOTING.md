@@ -9,6 +9,18 @@
 
 微信未启动。`open /Applications/WeChat.app` 并登录后重试。
 
+### 1.1b `无法确定当前登录账号，请先登录微信`（`status` 显示「本机账号：（无）」）
+
+先看 `agent-wechat status` 末尾那行「微信数据目录 …」：
+
+- **不存在**：微信数据不在 `~/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files/`。
+  多半是微信版本与实测版本差得较远（见 §4），请附上 `ls ~/Library/Containers/com.tencent.xinWeChat/Data/Documents/`
+  的输出提 issue。
+- **存在，但其中没有 `<微信号>_<hex4>` 形态的目录**：`ls` 一下该目录，把目录名**打码后**（只留形状，
+  如 `abc***_1a2b`）附在 issue 里。
+- 早期版本只认 `wxid_` 开头的目录，自己设过微信号的账号（目录形如 `zhangsan_1a2b`）会落到这里；
+  已修复（issue #1），升级即可。
+
 ### 1.2 `未捕获到 passphrase`
 
 按顺序检查：

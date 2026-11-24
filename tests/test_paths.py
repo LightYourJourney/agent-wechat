@@ -398,6 +398,17 @@ def test_account_dirs_ignores_entries_that_are_not_accounts(tmp_path, monkeypatc
     assert paths.account_dirs() == ["wxid_testacct01_ab12"]
 
 
+def test_account_dirs_accepts_custom_wechat_id(tmp_path, monkeypatch):
+    """issue #1：设过微信号的账号，目录名不以 `wxid_` 开头（形如 `custom-id_ab12`）。
+    只认 `wxid_` 时这类用户「本机账号：（无）」，后面所有命令都起不来。同级的非账号目录
+    （all_users / Backup / WMPF）没有 `_hex4` 尾巴，仍不得混进来。"""
+    monkeypatch.setattr(paths, "XWECHAT_FILES", tmp_path)
+    for name in ("wxid_testacct01_ab12", "custom-id_99_c0d1", "all_users", "Backup", "WMPF"):
+        (tmp_path / name).mkdir()
+    assert paths.account_dirs() == ["custom-id_99_c0d1", "wxid_testacct01_ab12"]
+    assert paths.bare_wxid("custom-id_99_c0d1") == "custom-id_99"
+
+
 def test_pid_one_is_alive(tmp_path):
     """`pid <= 0` 的边界：1 是 init，必须是「活着」（`<= 1` 会把它判死）。"""
     assert paths.pid_alive(1) is True

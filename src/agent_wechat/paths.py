@@ -33,8 +33,10 @@ APP_DATA = CONTAINER / "app_data"
 # 派生见文件末尾的 `container_bundle()`。
 CONTAINER_DATA = CONTAINER.parent                 # …/com.tencent.xinWeChat/Data
 
-# 账号目录形如 wxid_testacct01_ab12（尾部 _hex4 是实例后缀）
-ACCOUNT_RE = re.compile(r"^wxid_.+_[0-9a-f]{4}$")
+# 账号目录形如 <微信号>_<hex4>（尾部 _hex4 是实例后缀）。微信号**不一定**以 `wxid_` 开头：
+# 自己设过微信号的老账号目录是 `zhangsan_ab12` 这种（issue #1：只认 `wxid_` 时这类用户
+# 「本机账号：（无）」）。同级的非账号目录 all_users / Backup / WMPF 都没有 _hex4 尾巴。
+ACCOUNT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*_[0-9a-f]{4}$")
 # 消息分片形如 message_0.db；不含 message_fts/message_resource 等非分片库
 SHARD_RE = re.compile(r"^message_(\d+)\.db$")
 
@@ -326,7 +328,7 @@ def _listdir_or_project_error(root: pathlib.Path, *, what: str) -> list[pathlib.
 
 
 def account_dirs() -> list[str]:
-    """枚举本机所有账号数据目录名（wxid_xxx_hex4）。"""
+    """枚举本机所有账号数据目录名（<微信号>_<hex4>）。"""
     entries = _listdir_or_project_error(XWECHAT_FILES, what="微信数据目录")
     if entries is None:
         return []
