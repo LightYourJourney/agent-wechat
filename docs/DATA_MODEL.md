@@ -249,6 +249,13 @@ msg_key = "<account>|<chat_md5>|<shard>|<local_id>|<create_time>"
 - **旧键输入**：工具与 CLI 收到 4 段键时，库里恰好一条匹配就换成它的新键（结果里返回新键）；
   没有匹配按「找不到」；多条（表确实重建过）报参数错误，请重新检索拿新键。
 - 导出的 HTML 锚点由整个键取哈希，升级后重新导出的页面锚点会变。
+- **MCP 短键**：MCP 返回给 Agent 的 `msg_key` / `ref_msg_key` 是 `<chat_md5 前 8 位>:<local_id>:<create_time>`
+  （约 22 字符，完整键约 80；`messages.short_key`），只是对外的显示形态，库里、墓碑、CLI 与导出产物都是完整键。
+  去掉的两段都补得回来：account 由调用的 account 参数给出，shard 靠 create_time 区分（同一会话的分片按时间
+  分区，同 `local_id` 又同一秒的两条消息实际上不会出现）。收到短键时 `store.resolve_msg_key` 先按
+  `(account, ts)` 走 `idx_msg_ts` 查 `messages`，查不到再在 `msg_parts` / `msg_extras` / 排除清单里按
+  `account|<前缀>` 区间找（尚未导出但已回填的 appmsg、已被销毁的消息），候选逐段核对；恰好一条就换成它，
+  多条报参数错误（请改用完整键）。
 
 ### 水位线（watermark）
 

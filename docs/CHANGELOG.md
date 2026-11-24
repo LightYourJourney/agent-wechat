@@ -3,6 +3,22 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 风格，
 版本号语义为 0.x 阶段（API 可能变动）。
 
+### MCP 使用效率 · 第二轮（2026-11-25）
+
+逐项对比见 [MCP_EFFICIENCY.md](MCP_EFFICIENCY.md) §7。
+
+**变更**
+
+- MCP 返回的 `msg_key` / `ref_msg_key` 改成短形态 `<chat_md5 前 8 位>:<local_id>:<create_time>`（约 22 字符，
+  原来约 80）。所有接收 msg_key 的工具照收完整 5 段键与 v10 前的 4 段旧键；短键由 `store.resolve_msg_key`
+  换回完整键，对应多条时报错不猜。存储、墓碑、CLI 输出与导出产物不变。
+- 每条消息在 `time` / `ts` 后新增 `when`（本机时间，到分钟）；时区写在 server instructions 里。
+- `get_recent_messages` 新增可选参数 `before_ts`（往前翻页）；返回按体积设预算，超出时留下最新的消息并给出
+  `truncated: true` 与 `next_before_ts`，不再因为结果过大被客户端整个拒收。新增 `truncated` 字段。
+- MCP server 冷启动不再载入 CLI 与 `sqlite_vec`/numpy（载入的模块 731 → 641）。
+
+合成库上实测：50 条最近消息 5,530 → 4,437 token，200 条 21,700 → 17,307 token，检索结果小约一成。
+
 ### MCP 使用效率（2026-11-24）
 
 测量方法、逐项对比与剩余问题见 [MCP_EFFICIENCY.md](MCP_EFFICIENCY.md)。工具名、参数与返回键都没有变。

@@ -38,7 +38,7 @@ def stub(monkeypatch, tmp_path):
             seen.setdefault("contacts", []).append(contact)
             return seen["resolution"]
 
-        def recent(self, chat_id, limit=50):
+        def recent(self, chat_id, limit=50, before_ts=None):
             seen.setdefault("limits", []).append(limit)
             return []
 

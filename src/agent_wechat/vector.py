@@ -13,10 +13,15 @@ import time
 from collections.abc import Collection
 from typing import Any, Callable, Mapping, Sequence
 
-import sqlite_vec
-
 from . import errors, exclusions, messages, migrations, paths, store
 from .errors import SearchInputError, VectorError, VectorIndexEmpty, redact
+
+
+def _sqlite_vec() -> Any:
+    """惰性载入 sqlite_vec：它会顺带载入 numpy，约占 MCP server 冷启动的一成，而只有
+    语义检索与向量索引用得到它。"""
+    import sqlite_vec
+    return sqlite_vec
 
 MODEL_NAME = "BAAI/bge-small-zh-v1.5"
 DIM = store.VECTOR_DIM                      # 单一真值在 store；本模块只做短别名
@@ -47,7 +52,7 @@ def connect() -> sqlite3.Connection:
     con = store.connect()
     try:
         con.enable_load_extension(True)
-        sqlite_vec.load(con)
+        _sqlite_vec().load(con)
     except Exception as e:
         con.close()
         raise VectorError(
@@ -95,7 +100,7 @@ def load(con: sqlite3.Connection) -> bool:
     try:
         con.enable_load_extension(True)
         try:
-            sqlite_vec.load(con)
+            _sqlite_vec().load(con)
         finally:
             con.enable_load_extension(False)
         return True
@@ -417,7 +422,7 @@ def _build_account(con: sqlite3.Connection, acct: str, embedder: FastEmbedEmbedd
                 f"嵌入返回的向量数不足（{len(vecs)} != {len(order)}）：索引不完整。"
                 "重跑一次即可从上次提交处续跑（不带 rebuild）；反复出现再用 rebuild 重建")
         # serialize_float32 注解成 List，实际只做 `pack(*v)`：numpy 数组照收
-        pending.extend((buf_rows[i][0], sqlite_vec.serialize_float32(v),  # pyright: ignore[reportArgumentType]
+        pending.extend((buf_rows[i][0], _sqlite_vec().serialize_float32(v),  # pyright: ignore[reportArgumentType]
                         *buf_rows[i][1:]) for i, v in zip(order, vecs))
         buf_texts.clear()
         buf_rows.clear()
@@ -626,7 +631,7 @@ def _write_vec(con: sqlite3.Connection, row: Mapping, vec: Sequence[float], *,
     """
     _delete_vec(con, row["id"])
     con.execute(_INSERT_VEC, (
-        row["id"], sqlite_vec.serialize_float32(list(vec)),
+        row["id"], _sqlite_vec().serialize_float32(list(vec)),
         messages.acct_chat(row["account"], row["chat_md5"]),
         row["account"], row["ts"], preview[:80]))
 
@@ -911,7 +916,7 @@ def semantic_search(query: str, chat_id: str | None = None, limit: int = 10,
         if meta is None or meta["embedded"] == 0:
             raise VectorIndexEmpty("向量索引为空", hint="请先构建向量语义索引")
         k = min(limit * 3, K_MAX)          # 多取候选，过滤后再截断（limit ≥ 1 时 limit*3 ≥ limit）
-        qvec = sqlite_vec.serialize_float32(
+        qvec = _sqlite_vec().serialize_float32(
             list((embedder or default_embedder()).embed_query(query_text(query))))
         sql = ("SELECT msg_rowid, distance FROM vec_messages "
                "WHERE embedding MATCH ? AND k = ? AND account = ?")

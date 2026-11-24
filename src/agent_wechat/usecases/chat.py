@@ -110,12 +110,15 @@ def chats(account: str | None = None, query: str = "", limit: int = 50) -> list[
 
 
 def recent_messages(contact: str, limit: int = 50,
-                    account: str | None = None) -> RecentMessages | NeedConfirm:
+                    account: str | None = None,
+                    before_ts: int | None = None) -> RecentMessages | NeedConfirm:
+    """before_ts（unix 秒，不含）：只取它之前的消息，用来往前翻页。"""
     ctx = pkg_context(account)
     chat_id = ctx.resolve(contact)
     if isinstance(chat_id, NeedConfirm):
         return chat_id
-    msgs = ctx.reader.recent(chat_id, limit=pkg_clamp_limit(limit, LIMIT_RECENT))
+    msgs = ctx.reader.recent(chat_id, limit=pkg_clamp_limit(limit, LIMIT_RECENT),
+                             before_ts=before_ts)
     return RecentMessages(chat_id=chat_id, display=_display_or_id(ctx, chat_id),
                           messages=msgs,
                           degraded=pkg_call("collect_degradations", ctx.reader))
@@ -457,9 +460,10 @@ def message_parts(contact: str, *, keys: Sequence[str],
     # 入口只管把逗号串拆成 list，归属过滤与去重是入口策略。
     try:
         with store.open() as con:
-            # v10 前的 4 段旧键唯一时换成新键（`store.resolve_msg_key`），再去重保序
-            wanted = store.resolve_msg_keys(con, ctx.account,
-                                            (k for k in keys if k.startswith(prefix)))
+            # MCP 短键与 v10 前的 4 段旧键先换成完整键（`store.resolve_msg_key`），再按会话前缀
+            # 过滤、去重保序——短键不带前缀，先过滤会把它们全滤掉
+            wanted = [k for k in store.resolve_msg_keys(con, ctx.account, keys)
+                      if k.startswith(prefix)]
             got = store.msg_parts_by_keys(con, wanted)
             # EA-041：与 parts 同一趟、同一个 wanted 集合读出原始载荷，解析在库外做。
             extras_raw = store.extras_by_keys(con, wanted)

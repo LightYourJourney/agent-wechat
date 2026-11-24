@@ -517,14 +517,19 @@ class MessageReader:
     def _read_rows(self, con: decrypt.ReadConnection, table: str, shard: str, md5hex: str,
                    chat_map: Mapping[str, str], n2i: Mapping[int, str],
                    order_desc: bool = False, limit: int | None = None,
-                   sticker_names: Mapping[str, str] | None = None) -> list[Message]:
+                   sticker_names: Mapping[str, str] | None = None,
+                   before_ts: int | None = None) -> list[Message]:
         sql = (f"SELECT local_id, local_type, real_sender_id, create_time, "
                f"message_content, WCDB_CT_message_content FROM '{table}'")
+        params: tuple = ()
+        if before_ts is not None:
+            sql += " WHERE create_time < ?"
+            params = (int(before_ts),)
         sql += " ORDER BY local_id" + (" DESC" if order_desc else "")
         if limit:
             sql += f" LIMIT {int(limit)}"
         out = []
-        for lid, ltype, sender, ts, mc, ct in con.execute(sql):
+        for lid, ltype, sender, ts, mc, ct in con.execute(sql, params):
             m = self._decode_row(lid, ltype, sender, ts, mc, ct, md5hex, chat_map, n2i,
                                  sticker_names=sticker_names)
             m.shard = shard
@@ -532,8 +537,12 @@ class MessageReader:
             out.append(m)
         return out
 
-    def recent(self, chat_id: str, limit: int = 50) -> list[Message]:
-        """某会话最近 N 条（时间正序）。分片按时间分区 → 从最新分片起查，够数即停。"""
+    def recent(self, chat_id: str, limit: int = 50,
+               before_ts: int | None = None) -> list[Message]:
+        """某会话最近 N 条（时间正序）。分片按时间分区 → 从最新分片起查，够数即停。
+
+        before_ts（unix 秒，不含）：只取它之前的消息——往前翻页用。
+        """
         md5hex = messages.md5_of(chat_id)
         chat_map = {md5hex: chat_id}
         names = self.sticker_captions()        # **循环外取一次**，见该方法 docstring
@@ -550,7 +559,7 @@ class MessageReader:
                 for table in tables:
                     pieces += self._read_rows(con, table, shard.name, md5hex, chat_map,
                                               n2i, order_desc=True, limit=limit,
-                                              sticker_names=names)
+                                              sticker_names=names, before_ts=before_ts)
             if len(pieces) >= limit:
                 break
         # EA-016：排序键此前只有 `m.ts`——扫描是 `ORDER BY local_id DESC`（`order_desc=True`），

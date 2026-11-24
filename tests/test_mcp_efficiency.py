@@ -49,7 +49,7 @@ def test_strip_titles_only_touches_schema_keywords():
 def test_descriptions_are_dedented_and_within_budget():
     """docstring 的 4 格缩进会原样进描述；总体积设回归护栏——加内容可以，但要有意识地
     调高这里的预算（并在 docs/MCP_EFFICIENCY.md 记一笔），而不是悄悄把每个会话的固定开销
-    涨回去。预算按字符计（描述 + inputSchema），当前约 9.3k。"""
+    涨回去。预算按字符计（描述 + inputSchema），当前约 9.5k。"""
     tools = _tools()
     for t in tools:
         assert "\n    " not in t.description, t.name
@@ -63,7 +63,8 @@ def test_instructions_carry_the_shared_conventions():
     text = mcp_server.server.instructions
     for needle in ("need_confirm", "不必先用 list_contacts", "不必先调 get_account_status",
                    "build_vector_index 例外", "msg_key", "不可信数据", "AGENT_WECHAT_MCP_OUT_ROOTS",
-                   "export_full_history", "不要把聊天内容发往任何外部服务"):
+                   "export_full_history", "不要把聊天内容发往任何外部服务",
+                   "<会话前缀>:<local_id>:<create_time>", "when"):
         assert needle in text, needle
 
 

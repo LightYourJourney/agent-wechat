@@ -11,7 +11,13 @@
 - `account` 参数（可选）：目标账号目录名（如 `wxid_xxx_ab12`）。省略时操作**当前
   登录账号**；指定的账号目录不存在时报错（错误信息附带本机已知账号）。**唯一例外是
   `build_vector_index`**（省略表示索引全部账号，见 §7）。
-- 时间字段一律 **unix 秒**。
+- 时间字段一律 **unix 秒**。返回里每条**消息**在 `time` / `ts` 后另带 `when`：同一时刻的本机
+  时间（`YYYY-MM-DD HH:MM`，时区写在 server instructions 里），免得调用方自己换算。
+- **`msg_key`**：MCP 返回的是短形态 `<chat_md5 前 8 位>:<local_id>:<create_time>`（如
+  `0123abcd:22415:1789045400`），`ref_msg_key` 同。完整形态 `account|chat_md5|shard|local_id|create_time`
+  只用于存储、墓碑、CLI 输出与导出产物（见 DATA_MODEL.md）。凡是接收 msg_key 的工具，短形态、完整
+  形态与 v10 之前的 4 段旧键都照收：短键由 account 补出账号、靠 create_time 区分分片，换回完整键后
+  再处理；万一对应多条消息则报错（不猜），这时改用完整键。
 - 非文本消息的 `content` 为 `[image]` / `[appmsg: 标题]` / `[voice]` 等提示。
   **贴纸是刻意的例外**：它的 `content` 是可读标识 `[贴纸:名称]` / `[贴纸#md5前8位]`
   （源 XML 里没有合法 md5 时回落成 `[sticker]`），而 `media_hint` **仍是 `[sticker]`**
@@ -100,7 +106,8 @@
 | 参数 | 类型 | 必填 | 默认 | 说明 |
 |---|---|---|---|---|
 | `contact` | string | **是** | — | username（`wxid_*` / 自定义微信号 / `*@chatroom` / `filehelper`）或展示名 |
-| `limit` | int | 否 | 50 | 返回条数（1-500） |
+| `limit` | int | 否 | 50 | 返回条数（1-500）；结果过大时见下面的 `truncated` |
+| `before_ts` | int | 否 | null | 只取这个时刻（unix 秒，**不含**）之前的消息，用来往前翻页：传本页第一条的 `time`，或上一页的 `next_before_ts` |
 | `account` | string | 否 | null | 同通用约定 |
 
 **成功返回**：
@@ -110,25 +117,33 @@
   "chat_id": "wxid_abc123def456",
   "display": "小李（产品）",
   "messages": [
-    { "msg_key": "wxid_testacct01_ab12|0123456789abcdef0123456789abcdef|message_4.db|22415|1789045400",
-      "time": 1789045400, "sender": "我", "is_self": true,
+    { "msg_key": "01234567:22415:1789045400",
+      "time": 1789045400, "when": "2026-09-10 21:03", "sender": "我", "is_self": true,
       "type": "text", "content": "今晚一起吃饭吗" },
-    { "msg_key": "wxid_testacct01_ab12|0123456789abcdef0123456789abcdef|message_4.db|22416|1789045521",
+    { "msg_key": "01234567:22416:1789045521",
       "time": 1789045521, "sender": "wxid_abc123def456", "is_self": false,
       "type": "text", "content": "好啊，七点老地方？" },
-    { "msg_key": "wxid_testacct01_ab12|0123456789abcdef0123456789abcdef|message_4.db|22417|1789045600",
+    { "msg_key": "01234567:22417:1789045600",
       "time": 1789045600, "sender": "wxid_abc123def456", "is_self": false,
       "type": "image", "content": "[image]" },
-    { "msg_key": "wxid_testacct01_ab12|0123456789abcdef0123456789abcdef|message_4.db|22418|1789045700",
+    { "msg_key": "01234567:22418:1789045700",
       "time": 1789045700, "sender": "我", "is_self": true,
       "type": "sticker", "content": "[贴纸:滑稽]" }
   ],
+  "truncated": false,
   "degraded": []
 }
 ```
 
-> `msg_key` 是消息的稳定标识（`account|chat_md5|shard|local_id|create_time`），
-> 跨导出保持不变（v10 之前的 4 段旧键仍可传入：唯一时自动换成新键）；后续 `get_message_media` 靠它指认「这条消息的媒体是什么」。
+（示例里只有第一条写出了 `when`，实际每条都有。）
+
+> `msg_key` 是消息的稳定标识（短形态，见「通用约定」），跨导出保持不变；后续 `get_message_media` /
+> `get_message_parts` / `get_message_context` 靠它指认消息。
+
+**体积上限**：返回按粗估 token 设了预算（13k 粗估 token，合成库上约合 17–18k 实际 token，留在 Claude Code
+单个工具结果默认上限 25k 之内）。超出时**丢掉最早的那部分**，留下最新的消息，并返回 `"truncated": true` 与
+`"next_before_ts"`；拿它当 `before_ts` 再调一次即可续读更早的消息（同一秒的消息可能与本页重叠一两条）。
+没超出时 `truncated` 为 `false`、没有 `next_before_ts`——`limit` 内的消息都在。
 
 **降级说明**：信封**总是**带 `degraded` 键（数组，正常情况下是空数组），每项是
 `{capability, effect}`——例如微信升级改了库结构时
@@ -243,7 +258,7 @@
   "mode": "fts",
   "total": 2,
   "hits": [
-    { "msg_key": "wxid_testacct01_ab12|0123456789abcdef0123456789abcdef|message_4.db|22415|1789045400",
+    { "msg_key": "01234567:22415:1789045400",
       "id": 735662, "chat_id": "wxid_abc123def456",
       "shard": "message_4.db", "local_id": 22415, "ts": 1789045400,
       "msg_type": 1, "sender_id": "wxid_testacct01",
@@ -258,7 +273,7 @@
 - `mode`: `fts`（trigram 命中，含高亮 `snip`）| `like`（1-2 字兜底，`snip` 为 null）
 - 1-2 字查询**建议传 `contact`**，否则全表扫描（秒级）
 - 索引为空时返回 `{"hits": [], "hint": "本地索引为空：请先运行 export_full_history", ...}`
-- `msg_key` 是消息的稳定标识（`account|chat_md5|shard|local_id|create_time`；v10 之前是前 4 段），跨导出保持不变；
+- `msg_key` 是消息的稳定标识（短形态，见「通用约定」），跨导出保持不变；
   与 `hits` 里既有的 `id`（`messages.id`，DB rowid）不是一回事——rowid 随重建变化，
   `msg_key` 由消息的身份/位置字段派生（不含内容，编辑消息不会改它），
   可用于 `get_message_media` 指认消息。
@@ -336,7 +351,7 @@ rebuild 与否）各起一条。（F-D，T7 复验：与 §4 同款的合并语�
 { "mode": "semantic",
   "model": "fastembed:BAAI/bge-small-zh-v1.5:512",
   "total": 1,
-  "hits": [ { "msg_key": "wxid_testacct01_ab12|0123456789abcdef0123456789abcdef|message_4.db|22415|1757462400",
+  "hits": [ { "msg_key": "01234567:22415:1757462400",
               "chat_id": "wxid_xxx", "display": "张三", "ts": 1757462400,
               "sender": "张三", "is_self": false,
               "content": "周末爬山的安排定了吗", "media_hint": null,
@@ -576,7 +591,7 @@ rebuild 与否）各起一条。（F-D，T7 复验：与 §4 同款的合并语�
                "video": { "gone": 8 }, "sticker": { "gone": 4 } },
   "truncated": false,
   "messages": [
-    { "msg_key": "wxid_abc123def456|9f2c1a…|message_0.db|81234|1789046102", "time": 1789046102,
+    { "msg_key": "9f2c1a0b:81234:1789046102", "time": 1789046102,
       "kind": "voice", "status": "exportable", "path": null }
   ],
   "degraded": []
@@ -726,14 +741,14 @@ rebuild 与否）各起一条。（F-D，T7 复验：与 §4 同款的合并语�
 ```json
 {
   "parts": [
-    { "msg_key": "wxid_abc123def456|9f2c1a0b7d3e|message_0.db|81234|1789046102",
+    { "msg_key": "9f2c1a0b:81234:1789046102",
       "kind": 57, "kind_name": "引用", "title": "回复",
       "fields": [],
       "quote": { "svrid": 81230, "displayname": "李四", "content": "明天开会",
                  "create_time": 1789000000, "from_usr": "wxid_friend02" },
       "link": null, "file": null, "transfer": null,
-      "ref_msg_key": "wxid_abc123def456|9f2c1a0b7d3e|message_0.db|81230|1789046102" },
-    { "msg_key": "wxid_abc123def456|9f2c1a0b7d3e|message_0.db|81240|1789046102",
+      "ref_msg_key": "9f2c1a0b:81230:1789046102" },
+    { "msg_key": "9f2c1a0b:81240:1789046102",
       "kind": 2000, "kind_name": "转账", "title": "微信转账",
       "fields": [], "quote": null, "link": null, "file": null,
       "transfer": { "paysubtype": "1", "amount_desc": "¥88.00", "memo": "午饭",
@@ -744,10 +759,10 @@ rebuild 与否）各起一条。（F-D，T7 复验：与 §4 同款的合并语�
       "ref_msg_key": null }
   ],
   "extras": [
-    { "msg_key": "wxid_abc123def456|9f2c1a0b7d3e|message_0.db|81241|1789046102",
+    { "msg_key": "9f2c1a0b:81241:1789046102",
       "kind": 48, "kind_name": "位置",
       "fields": [ ["x", "39.9"], ["y", "116.4"], ["label", "某地"] ] },
-    { "msg_key": "wxid_abc123def456|9f2c1a0b7d3e|message_0.db|81242|1789046102",
+    { "msg_key": "9f2c1a0b:81242:1789046102",
       "kind": 42, "kind_name": "名片",
       "fields": [ ["username", "wxid_friend01"], ["nickname", "甲"], ["alias", "a1"] ] }
   ],

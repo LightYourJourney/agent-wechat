@@ -130,6 +130,8 @@ get_recent_messages` 变成 `get_recent_messages` 一步；「找提到报销的
 
 ## 5. 兼容性
 
+以下是第一轮的情况；第二轮改了 msg_key 的显示形态、加了字段和参数，见 §7。
+
 - 工具名、工具数（15）、参数名、类型、默认值、必填项都没有变（`tests/test_tools_doc.py`
   逐项对照 TOOLS.md），返回 dict 的键与值也没有变。
 - 返回文本仍是合法 JSON，`json.loads` 的结果与之前完全相同；变化的只有空白字符。
@@ -146,20 +148,67 @@ get_recent_messages` 变成 `get_recent_messages` 一步；「找提到报销的
 ## 6. 回归护栏
 
 `test_descriptions_are_dedented_and_within_budget` 把「描述 + inputSchema」的总字符数限定在 10,500
-以内（现在约 9.3k）。给工具补内容是允许的，但请有意识地调高这个预算，并在本文记一笔，
+以内（现在约 9.5k）。给工具补内容是允许的，但请有意识地调高这个预算，并在本文记一笔，
 不要悄悄把每个会话的固定开销涨回去。
 
-## 7. 剩余问题
+## 7. 第二轮：短 msg_key、可读时间、翻页与按需加载
 
-- **msg_key 很长**（约 80 字符，含 32 位 hex），每条消息都带一个。在 50 条的
-  `get_recent_messages` 里大约占三分之一的 token。它是对外的稳定标识，改格式会破坏兼容性，
-  所以这次没动。
-- **limit 的上限偏大**：`get_recent_messages` 允许的 limit（上限 500）远超 Claude Code 单个工具结果的默认上限
-  （`MAX_MCP_OUTPUT_TOKENS` = 25k）。200 条在缩进形态下约 26k token，会被客户端拒收，模型只好
-  调小 limit 重试；紧凑后约 22k，余量仍然不多。收紧上限属于接口变更，这次没做。
-- **`time` 只给 unix 秒**：模型要换算日期时会去找 Bash，评测里出现过一次。加一个可读时间字段属于
-  加法式变更，但每条消息会多约 10 token，这次没做。
+第一轮留下的前四个问题，第二轮按你的选择处理了（2026-11-25）：
+
+| 问题 | 处理 | 兼容性 |
+|---|---|---|
+| msg_key 太长（约 80 字符） | MCP 返回的 `msg_key` / `ref_msg_key` 改成短形态 `<chat_md5 前 8 位>:<local_id>:<create_time>`，约 22 字符（`messages.short_key`）。account 由 account 参数补出，shard 靠 create_time 区分。收到短键时 `store.resolve_msg_key` 先按 `(account, ts)` 查 messages，查不到再查 `msg_parts` / `msg_extras` / 排除清单，候选逐段核对，多条报错不猜 | 字段名不变；完整 5 段键、v10 前的 4 段旧键照收；存储、墓碑、CLI 输出、导出产物都还是完整键。按 `\|` 拆 msg_key 的外部代码会受影响（仓库内没有） |
+| 只有 unix 秒 | 每条消息在 `time` / `ts` 后补 `when`（本机时间，`YYYY-MM-DD HH:MM`），时区写进 instructions | 只加字段 |
+| 200 条接近客户端 25k 上限，500 条一定被拒收 | `get_recent_messages` 按粗估 token 设预算（13k 粗估，约合 17–18k 实际）。超出时丢掉最早的部分，返回 `truncated: true` 与 `next_before_ts`；新增可选参数 `before_ts` 往前翻页 | 默认 50、上限 500 不变；只加参数和字段；没超预算时与原来一样，多一个 `truncated: false` |
+| 冷启动 | `agent_wechat/__init__` 不再在 import 时载入 CLI；`vector` 的 `sqlite_vec`（带 numpy）改成用到时才载入 | 行为不变 |
+
+### 7.1 对比（同一份合成库，Claude 实测 token：探针第 2 次请求与第 1 次请求的输入之差）
+
+| 调用 | 第一轮后 | 第二轮后 |
+|---|---:|---:|
+| get_recent_messages（50 条） | 5,530（9,011 字符） | **4,437（−20%，7,879 字符）** |
+| get_recent_messages（200 条） | 21,700（35,856 字符，离 25k 上限只剩 3k） | **17,307（−20%）**，200 条全在、未截断 |
+| get_recent_messages（500 条） | 约 54k，客户端拒收 | 截到最新的约 200 条（约 17k），`truncated: true` + `next_before_ts` |
+| search_history（20 条） | 3,651 | **3,286（−10%）** |
+| search_messages（keyword，20 条） | 3,350 | **2,985（−11%）** |
+
+两次都加上了 `when`，所以表里的节省是短键省下的部分减去 `when` 增加的部分之后的净值。
+
+固定开销（`/context`）：工具定义从 6.1k 增加到 6.2k（`get_recent_messages` 多了 `before_ts` 参数和翻页说明），
+instructions 从 588 增加到 676（短键与 `when` 的说明）。合计每个会话多约 0.2k，读一次 50 条消息就省回来了。
+
+冷启动：MCP server 进程载入的模块从 731 个降到 641 个（不再载入 CLI、`sqlite_vec`、numpy）。
+测量时机器负载很高（load average 约 50），墙钟时间的波动比差值还大，没有给出可信的毫秒数；同一时段交错测
+20 次，import 的 CPU 时间中位数少约 5%。按负载较低时的 `-X importtime` 拆分，这几个模块约占本项目 import
+时间的六到七成、server 冷启动的一成左右。
+
+Agent 端到端：见 §7.2。
+
+### 7.2 Agent 端到端（Sonnet，6 个任务 × 2 次）
+
+| 指标 | 第一轮后 | 第二轮后 |
+|---|---:|---:|
+| 平均工具调用次数 | 1.42 | 1.33 |
+| 输入 token 合计（含缓存读写） | 386,208 | 386,306 |
+| 期望工具命中率 / 答案关键词校验 | 100% / 4/4 | 100% / 4/4 |
+
+这组任务里大结果很少（最大的是 50 条最近消息），每次请求多出的约 0.2k 固定开销和结果里省下的部分基本抵消，
+合计持平。短键的正确性在这里得到了验证：「找机票并给上下文」两次都是 `search_history → get_message_context`
+一次成功，模型把短键原样交回，没有出错重试。收益集中在读长历史的场景（200 条少约 4.4k token，500 条从被拒收
+变成可用），这组任务没有覆盖。
+
+## 8. 剩余问题
+
+- **短键依赖本地索引**：短键要靠索引（或 `msg_parts` / 排除清单）换回完整键。`get_recent_messages` 直接读微信库，
+  返回的消息可能还没导出；这时把它的短键交给 `get_message_context` 会答「找不到」——不过完整键在这种情况下
+  本来也找不到（这个工具读的是索引），`get_message_media` 也一样。只有 `get_message_parts` 例外：
+  它原来能凭完整键查到「已回填、未导出」的消息，现在凭短键也能查到（走 `msg_parts` 那一支），没有退步。
+- **`next_before_ts` 在同一秒边界上可能与本页重叠一两条**：`before_ts` 不含上界，而被丢掉的消息里可能有和本页
+  第一条同一秒的，这时往后挪一秒，宁可重叠也不漏。要做到严格不重叠需要再加一个 local_id 游标，跨分片处理较复杂，
+  这次没做。
+- **体积预算是粗估**：CJK 按 1 个 token、其它按 3 个字符折 1 个，比 Claude 实际计数偏低约三成五（合成库）。
+  正文特别密（大段英文、长链接、大量 emoji）的会话里偏差可能更大；13k 的预算在合成库上约合 17–18k，留了余量，
+  但不是硬保证。
 - `get_account_status` 的 `index` 计数仍是三次全表扫描（30 万条约 24ms）。这个工具确实需要这些数，
   而且不在热路径上。
-- server 冷启动约 330ms，大头是 MCP SDK 自身的 import，本项目能省的不到 15%。启动只发生在会话开始时，
-  而且与客户端的其它初始化并行。
+- server 冷启动的大头仍是 MCP SDK 自身的 import（约八成），本项目这一侧能省的已经省了。

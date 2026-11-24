@@ -257,6 +257,32 @@ def split_key(msg_key: str) -> KeyParts | None:
     return KeyParts(parts[0], parts[1], parts[2], int(parts[3]), ct)
 
 
+# MCP 输出用的短键 `<chat_md5 前 8 位>:<local_id>:<create_time>`（约 22 字符；完整键约 80）。
+# account 由调用方的 account 参数补出；shard 靠 create_time 区分（同一会话的不同分片按时间分区，
+# 同 local_id 又同一秒的两条消息实际上不会出现）。只用于**对外显示与回传**：存储、墓碑、
+# CLI 与导出产物都用完整键；收到短键时由 `store.resolve_msg_key` 换回完整键。
+SHORT_KEY_PREFIX_LEN = 8
+
+
+def short_key(msg_key: str) -> str:
+    """完整 5 段键 → 短键；不是 5 段键（旧 4 段、已是短键、畸形）原样返回。"""
+    kp = split_key(msg_key)
+    if (kp is None or kp.create_time is None or kp.create_time < 0
+            or split_short_key(f"{kp.chat_md5[:SHORT_KEY_PREFIX_LEN]}:0:0") is None):
+        return msg_key
+    return f"{kp.chat_md5[:SHORT_KEY_PREFIX_LEN]}:{kp.local_id}:{kp.create_time}"
+
+
+def split_short_key(key: str) -> tuple[str, int, int] | None:
+    """短键 → `(chat_md5 前缀, local_id, create_time)`；不是短键形态返回 None。"""
+    parts = key.split(":")
+    if (len(parts) != 3 or len(parts[0]) != SHORT_KEY_PREFIX_LEN
+            or any(c not in "0123456789abcdef" for c in parts[0])
+            or not parts[1].isdecimal() or not parts[2].isdecimal()):
+        return None
+    return parts[0], int(parts[1]), int(parts[2])
+
+
 class MessageRow(TypedDict):
     """messages 表一行（写入侧形状；运行时就是普通 dict）。"""
 

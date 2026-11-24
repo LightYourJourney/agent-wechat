@@ -1494,9 +1494,12 @@ def reset_export_watermark(con: sqlite3.Connection, account: str, shard: str,
 
 
 def resolve_msg_key(con: sqlite3.Connection, account: str, msg_key: str) -> str:
-    """调用方给的键 → 库里的键。5 段原样返回；v10 之前的 4 段旧键按前缀找：恰好一条就换成
+    """调用方给的键 → 库里的键。5 段原样返回；MCP 输出的短键（`messages.short_key`）换回完整键；
+    v10 之前的 4 段旧键按前缀找：恰好一条就换成
     它的新键，一条都没有原样返回（由调用方走「找不到」），多条（会话表被重建过、两代消息
     同 local_id）报 `SearchInputError`——不猜。"""
+    if (short := messages.split_short_key(msg_key)) is not None:
+        return _resolve_short_key(con, account, msg_key, *short)
     kp = messages.split_key(msg_key)
     if kp is None or kp.create_time is not None or kp.account != account:
         return msg_key
@@ -1508,6 +1511,44 @@ def resolve_msg_key(con: sqlite3.Connection, account: str, msg_key: str) -> str:
             f"旧格式 msg_key 对应多条消息：{msg_key}",
             hint="该会话的微信消息表被重建过；请重新检索，使用结果里的新 msg_key")
     return rows[0][0] if rows else msg_key
+
+
+# 短键在 messages 里找不到时（消息还没导出、或已被 purge 删掉）再去这几张表找：
+# appmsg 回填扫的是微信库，`msg_parts` 里可以有索引里还没有的消息；墓碑要认得出才能答「已销毁」。
+_SHORT_KEY_FALLBACK_TABLES = ("msg_parts", "msg_extras", "exclusions.excluded")
+
+
+def _resolve_short_key(con: sqlite3.Connection, account: str, key: str,
+                       md5_prefix: str, local_id: int, create_time: int) -> str:
+    """短键 → 完整键。先按 `(account, ts)` 走 idx_msg_ts 查 messages，查不到再按
+    `account|<前缀>` 的 msg_key 区间扫旁表；候选都用 `split_key` 逐段核对。
+
+    恰好一条返回它；没有原样返回（调用方走「找不到」）；多条报 `SearchInputError`——不猜。
+    """
+    def match(k: str) -> bool:
+        kp = messages.split_key(k)
+        return (kp is not None and kp.account == account and kp.local_id == local_id
+                and kp.create_time == create_time and kp.chat_md5.startswith(md5_prefix))
+
+    # create_time 为 0 = 源表里是 NULL（`row_key` 记 0），messages.ts 那时也是 NULL
+    ts_sql = "ts=?" if create_time else "(ts IS NULL OR ts=?)"
+    rows = con.execute(f"SELECT msg_key FROM messages WHERE account=? AND {ts_sql} AND local_id=?",
+                       (account, create_time, local_id)).fetchall()
+    found = {r[0] for r in rows if match(r[0])}
+    if not found:
+        lo = f"{account}|{md5_prefix}"
+        for table in _SHORT_KEY_FALLBACK_TABLES:
+            try:
+                rows = con.execute(f"SELECT msg_key FROM {table} WHERE msg_key >= ? AND msg_key < ?",
+                                   (lo, lo + "~")).fetchall()
+            except sqlite3.OperationalError:       # 旁表不在（如 exclusions.db 没挂上）
+                continue
+            found |= {r[0] for r in rows if match(r[0])}
+    if len(found) > 1:
+        raise errors.SearchInputError(
+            f"短 msg_key 对应多条消息：{key}",
+            hint="请改用完整 msg_key（CLI 输出里是完整形态）")
+    return found.pop() if found else key
 
 
 def resolve_msg_keys(con: sqlite3.Connection, account: str, keys: Iterable[str]) -> list[str]:

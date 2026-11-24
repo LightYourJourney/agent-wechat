@@ -40,7 +40,7 @@ def captured(monkeypatch):
         def resolve_one(self, contact):
             return ("wxid_target", [])
 
-        def recent(self, chat_id, limit=50):
+        def recent(self, chat_id, limit=50, before_ts=None):
             seen["recent_limit"] = limit
             return []
 
