@@ -682,6 +682,9 @@ agent-wechat purge --excluded              # 列出排除清单的规模（按�
 - `--undo` **只删墓碑、不恢复数据**：被删的内容不会因为 `--undo` 回来，只有**将来**的新消息
   能重新入库；要找回那批得重跑 `export --full`（那时它们不再被排除）。它在索引已被
   `purge --index` 删掉时**照样能用**——走排除清单那一支，不会把刚删掉的索引重建回来。
+- **OCR/ASR 的删除记录不跨 purge 保留**：`purge --chat` 会连同该会话的派生文本删除墓碑
+  （`derived_tombstone`）一起销毁，`purge --index` 也一样。之后 `--undo` + `export --full`
+  再跑识别，你删过的 OCR/ASR 文本会**重新生成**——撤销销毁并重新导出，等于恢复这个会话的全部派生数据。
 
 **dry-run 不改索引内容，但别读成「磁盘零变化」**：要读索引的命令（`search` / `export` 等，
 以及**索引库存在时**的 `purge --chat` 与 `--undo`）都会经 `store.connect()` 把

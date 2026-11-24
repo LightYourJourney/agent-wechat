@@ -505,7 +505,8 @@ OCR/ASR 结果只写 `derived_text`，**不覆盖 `messages.content`**：
 - `derivation_id = f"{msg_key}|{kind}"`（确定性）；`kind ∈ {ocr, asr}`。
 - 记录 `engine` / `engine_version` / `source`（本机媒体路径）/ `quality` / `created_at`。
 - `status`：`auto`（引擎产出）/ `edited`（用户改过）/ `deleted`（正文已清空）。
-- `derived_tombstone(msg_key, kind)`：删除后重扫**不得复活**。
+- `derived_tombstone(msg_key, kind)`：删除后重扫**不得复活**。它住在 `index.db` 里，随
+  `purge --chat` / `purge --index` 一起销毁——撤销销毁并重新导出后，删过的派生文本会被重新识别出来。
 - `derived_fts`（trigram）由三条触发器跟随 `derived_text`；只在 `hybrid` 检索里作为
   第三路参与 RRF。
 
