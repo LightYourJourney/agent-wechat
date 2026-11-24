@@ -346,6 +346,12 @@ class MessageReader:
         if is_chat_id(name_or_id):
             return name_or_id, []
         cands = self.resolve_chat(name_or_id)
+        # 自定义微信号形态上认不出（见 is_chat_id），子串匹配又常带出 `zhangsan2` 这类同前缀的
+        # 人。**整串等于某人的 username** 就是指名——除非另有人的展示名也整串等于它（那才真歧义）。
+        if (any(c["username"] == name_or_id for c in cands)
+                and not any(c["display"] == name_or_id and c["username"] != name_or_id
+                            for c in cands)):
+            return name_or_id, []
         return (cands[0]["username"] if len(cands) == 1 else None), cands
 
     def display_name(self, chat_id: str) -> str:

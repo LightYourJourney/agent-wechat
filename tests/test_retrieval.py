@@ -155,6 +155,19 @@ def test_snippets_are_bounded_and_masked(tmp_path, monkeypatch):
     assert res["budget"]["used_chars"] <= retrieval.TOTAL_CHARS
 
 
+def test_snippets_mask_custom_wechat_ids_from_roster(tmp_path, monkeypatch):
+    """自定义微信号（不以 `wxid_` 开头）按形状认不出，此前原样出现在片段里。现按名册
+    （`display_names.member_key`）整词遮盖；普通英文词、名册外的词、词中间的子串不遮。"""
+    _env(tmp_path, monkeypatch, with_vector=False)
+    with store.open() as con:
+        con.execute("INSERT INTO display_names VALUES (?,?,?,?)",
+                    (ACCT, CHAT_A, "custom-id_99", "某人"))
+        store.upsert_batch(con, [_row(
+            CHAT_A, 50, "遮盖检查 custom-id_99 与 xcustom-id_99 和 meeting")])
+    hit = retrieval.search_messages("遮盖检查", account=ACCT, mode="keyword")["hits"][0]
+    assert hit["snippet"] == f"遮盖检查 {retrieval.MASK} 与 xcustom-id_99 和 meeting"
+
+
 def test_long_history_is_truncated_within_budget(tmp_path, monkeypatch):
     _env(tmp_path, monkeypatch, with_vector=False)
     monkeypatch.setattr(retrieval, "TOTAL_CHARS", 600)     # 让 5×200 字符触到总预算

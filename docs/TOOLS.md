@@ -89,7 +89,7 @@
 
 | 参数 | 类型 | 必填 | 默认 | 说明 |
 |---|---|---|---|---|
-| `contact` | string | **是** | — | username（`wxid_*` / `*@chatroom` / `filehelper`）或展示名 |
+| `contact` | string | **是** | — | username（`wxid_*` / 自定义微信号 / `*@chatroom` / `filehelper`）或展示名 |
 | `limit` | int | 否 | 50 | 返回条数（1-500） |
 | `account` | string | 否 | null | 同通用约定 |
 
@@ -367,7 +367,7 @@ rebuild 与否）各起一条。（F-D，T7 复验：与 §4 同款的合并语�
 
 | 参数 | 类型 | 必填 | 默认 | 说明 |
 |---|---|---|---|---|
-| `contact` | string | **是** | — | username（`wxid_*` / `*@chatroom` / `filehelper`）或展示名（歧义返回 `need_confirm`，形状见 §3；未命中返回 `{"error": "找不到联系人「XXX」，请用 list_contacts 查询"}`） |
+| `contact` | string | **是** | — | username（`wxid_*` / 自定义微信号 / `*@chatroom` / `filehelper`）或展示名（歧义返回 `need_confirm`，形状见 §3；未命中返回 `{"error": "找不到联系人「XXX」，请用 list_contacts 查询"}`） |
 | `kinds` | string | 否 | `"image,voice,video"` | 逗号分隔的媒体类型（`image` / `voice` / `video` / `sticker`）；含未知值报错。**默认不含 sticker**——要导贴纸得显式写进 `kinds`，且还要 `with_cdn=true` |
 | `months` | string | 否 | null | 逗号分隔的月份（`YYYY-MM`），按消息时间过滤；省略不限 |
 | `limit` | int | 否 | 500 | 本次最多**新增**的文件数（下界 1，无上界；产物已存在的不计） |
@@ -548,7 +548,7 @@ rebuild 与否）各起一条。（F-D，T7 复验：与 §4 同款的合并语�
 
 | 参数 | 类型 | 必填 | 默认 | 说明 |
 |---|---|---|---|---|
-| `contact` | string | **是** | — | username（`wxid_*` / `*@chatroom` / `filehelper`）或展示名（歧义返回 `need_confirm`，形状见 §3；未命中返回 `{"error": "找不到联系人「XXX」，请用 list_contacts 查询"}`） |
+| `contact` | string | **是** | — | username（`wxid_*` / 自定义微信号 / `*@chatroom` / `filehelper`）或展示名（歧义返回 `need_confirm`，形状见 §3；未命中返回 `{"error": "找不到联系人「XXX」，请用 list_contacts 查询"}`） |
 | `keys` | string | 否 | null | 逗号分隔的 `msg_key`（取自 §3 / §6 / §8 返回的 `msg_key` 字段）；省略 = 该会话**全部媒体类型的消息**。只答属于该会话的 key：别的会话的 key、以及**索引里根本没有的 key**（消息未导出、或已从索引消失）都**静默略过**——答案里没有某个 key，不等于它不是媒体消息 |
 | `months` | string | 否 | null | 逗号分隔的月份（`YYYY-MM`），按消息时间过滤；格式不符返回 `{"error": "月份格式应为 YYYY-MM：…"}`（不静默 0 命中） |
 | `limit` | int | 否 | 200 | 消息条数上限（1-500，超出按边界处理）。`months` 在 SQL 里筛，故 `limit` 卡的是**命中月份**的条数 |
@@ -631,7 +631,7 @@ rebuild 与否）各起一条。（F-D，T7 复验：与 §4 同款的合并语�
 
 | 参数 | 类型 | 必填 | 默认 | 说明 |
 |---|---|---|---|---|
-| `contact` | string | **是** | — | username（`wxid_*` / `*@chatroom` / `filehelper`）或展示名（歧义返回 `need_confirm`，形状见 §3；未命中返回 `{"error": "找不到联系人「XXX」，请用 list_contacts 查询"}`） |
+| `contact` | string | **是** | — | username（`wxid_*` / 自定义微信号 / `*@chatroom` / `filehelper`）或展示名（歧义返回 `need_confirm`，形状见 §3；未命中返回 `{"error": "找不到联系人「XXX」，请用 list_contacts 查询"}`） |
 | `months` | string | 否 | null | 逗号分隔的月份（`YYYY-MM`），限定**一段连续窗口**。**必须按时间升序、相邻月首尾相接**：非连续（`2026-08,2026-10`）只能取包络、会把 9 月静默带进来，反序会得到倒置（或退化成空区间）的窗口——两者都返回 `{"error": "…"}`，**不静默产出空产物**；格式不符同理 |
 | `limit` | int | 否 | 500 | 封顶窗口内**最近的** N 条（非正值按 1 处理：`LIMIT -1` 在 SQLite 里是「不限量」） |
 | `format` | string | 否 | `"html,md"` | 逗号分隔，`html` / `md`；空串或未知格式返回 `{"error": "…"}`（「少写一个文件」与「格式名写错」长得一样，故不静默跳过） |
@@ -707,7 +707,7 @@ rebuild 与否）各起一条。（F-D，T7 复验：与 §4 同款的合并语�
 
 | 参数 | 类型 | 必填 | 默认 | 说明 |
 |---|---|---|---|---|
-| `contact` | string | **是** | — | username（`wxid_*` / `*@chatroom` / `filehelper`）或展示名（歧义返回 `need_confirm`，形状见 §3；未命中返回 `{"error": "找不到联系人「XXX」，请用 list_contacts 查询"}`）。**`keys` 只答属于该会话的**：别的会话的 key 静默略过 |
+| `contact` | string | **是** | — | username（`wxid_*` / 自定义微信号 / `*@chatroom` / `filehelper`）或展示名（歧义返回 `need_confirm`，形状见 §3；未命中返回 `{"error": "找不到联系人「XXX」，请用 list_contacts 查询"}`）。**`keys` 只答属于该会话的**：别的会话的 key 静默略过 |
 | `keys` | string | **是** | — | 逗号分隔的 `msg_key`（取自 §3 / §6 / §8 返回的 `msg_key` 字段）。msg_parts 里没有的 key（回填跑在它之前、不是 appmsg）**静默略过**——答案里没有某个 key，不等于它不是 appmsg。**载荷解不开 / 被主动拒绝的不在此列**：它们进下面的 `unparsed` / `rejected` 计数。空串 → `parts: []` |
 | `account` | string | 否 | null | 同通用约定 |
 
@@ -834,7 +834,7 @@ rebuild 与否）各起一条。（F-D，T7 复验：与 §4 同款的合并语�
 distance / untrusted`。**没有 `content`**——完整正文用 §15。
 
 - 片段 ≤200 字符、总量 ≤8000 字符；超出截断并 `truncated=true`。
-- 片段里的 `wxid_*` / `*@chatroom` / 11 位以上数字被替换成 `<已遮盖>`。
+- 片段里的 `wxid_*` / `*@chatroom` / 11 位以上数字被替换成 `<已遮盖>`；不以 `wxid_` 开头的自定义微信号认不出形状，只遮**本账号名册里有的**那些（按整词比对，名册里没有的照常显示）。
 - `hybrid` 还会融合 Phase 06 的本地 OCR/ASR 派生文本（`sources` 里出现 `derived`）。
 - **没有向量索引时**：`hybrid` 退化成关键词并在 `degraded` 说明；`semantic` 返回空结果 +
   `degraded`，不报错。

@@ -341,6 +341,25 @@ def test_resolve_one(env):
     assert chat_id is None and cands == []
 
 
+def test_resolve_one_exact_custom_wechat_id(env, monkeypatch):
+    """自定义微信号不以 `wxid_` 开头，过不了 `is_chat_id` 的形状直通；此前按子串匹配，
+    `zhangsan` 会把 `zhangsan2` 一起带出来报歧义——明明给的就是一个确切的 username。"""
+    r = reader.MessageReader(ACCT)
+
+    def contacts(*rows):
+        monkeypatch.setattr(r, "_contacts_all_cached", lambda: [
+            {"username": u, "display": d, "kind": "direct"} for u, d in rows])
+
+    contacts(("zhangsan", "张三"), ("zhangsan2", "张三二"))
+    assert r.resolve_one("zhangsan") == ("zhangsan", [])
+    chat_id, cands = r.resolve_one("zhang")                     # 子串仍按歧义走
+    assert chat_id is None and len(cands) == 2
+
+    contacts(("zhangsan", "张三"), ("wxid_other", "zhangsan"))  # 别人的展示名也叫这个：真歧义
+    chat_id, cands = r.resolve_one("zhangsan")
+    assert chat_id is None and len(cands) == 2
+
+
 def test_recent_orders_same_second_messages_by_local_id(wechat, env):
     """EA-016：`recent` 的排序键此前只有 `m.ts`——**同一秒**的消息顺序于是取决于扫描顺序，
     而扫描是 `ORDER BY local_id DESC`（:439 的 `order_desc=True`）+ 稳定排序 ⇒ 同秒的两条
