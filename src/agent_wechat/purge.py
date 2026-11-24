@@ -905,9 +905,11 @@ def _write_tombstone(con: sqlite3.Connection, account: str, chat_id: str) -> int
     不可逆性未建立」那条测试要把它换成不写库的桩。
 
     EA-075：SQL 已归位到 `exclusions.add_from_messages`（生产写入端属于拥有排除清单的模块），
-    本函数只是它在 purge 事务里的调用点。
+    本函数只是它在 purge 事务里的调用点。`add_from_side_tables` 挡的是 `delete_chat` 按前缀
+    一并删掉的孤儿行（消息没进索引、回填命令写下的 `msg_parts` / `media_refs` / `msg_extras`）。
     """
-    return exclusions.add_from_messages(con, account, chat_id)
+    return (exclusions.add_from_messages(con, account, chat_id)
+            + exclusions.add_from_side_tables(con, account, chat_id))
 
 
 def _escaping_links(plan: ChatPlan, home: pathlib.Path) -> list[pathlib.Path]:

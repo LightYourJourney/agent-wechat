@@ -381,6 +381,7 @@ def _build_account(con: sqlite3.Connection, acct: str, embedder: FastEmbedEmbedd
     buf_texts: list[str] = []
     buf_rows: list[tuple] = []
     pending: list[tuple] = []          # (msg_rowid, blob, acct_chat, ts, preview, msg_key)
+    scanned: list[tuple[int, str]] = []   # 上次 write 之后扫过的**全部**行（含跳过的）：(id, msg_key)
     embedded = skipped = 0
 
     def flush() -> None:
@@ -427,6 +428,19 @@ def _build_account(con: sqlite3.Connection, acct: str, embedder: FastEmbedEmbedd
         alive = _alive_ids(con, [(r[0], r[5]) for r in pending])
         con.executemany(_INSERT_VEC, [(r[0], r[1], r[2], acct, r[3], r[4])
                                       for r in pending if r[0] in alive])
+        # 扫过之后被删、id 又被新消息**复用**的行：水位线马上要推过这些 id，前向扫描再也看不见
+        # 那条新消息（典型：嵌入期间 `purge --chat` 删掉了最高的 id，随后的导出复用了它们——
+        # 封顶只看 max(id)，而复用之后 max(id) 又回来了）。投进重嵌队列，由 `apply_dirty` 按
+        # 当前内容嵌（先删后插，不撞主键）。
+        seen_alive = _alive_ids(con, scanned)
+        dead = [i for i, _ in scanned if i not in seen_alive]
+        for i in range(0, len(dead), 500):
+            chunk = dead[i:i + 500]
+            for (key,) in con.execute(
+                    f"SELECT msg_key FROM messages WHERE id IN ({','.join('?' * len(chunk))})",
+                    chunk).fetchall():
+                store.enqueue_reembed(con, key, reason="reused")
+        scanned.clear()
         _set_vector_watermark(con, acct, upto)
         try:
             con.commit()
@@ -443,6 +457,7 @@ def _build_account(con: sqlite3.Connection, acct: str, embedder: FastEmbedEmbedd
             break
         for row in page:
             last_id = row["id"]
+            scanned.append((row["id"], row["msg_key"]))
             chat_key = messages.acct_chat(row["account"], row["chat_md5"])
             prev = prev_by_chat.get(chat_key)
             if should_embed(row):
@@ -529,6 +544,9 @@ def build_index(accounts: Sequence[str] | None = None, rebuild: bool = False,
                    [r[0] for r in con.execute("SELECT DISTINCT account FROM messages")])
         # 前向扫描之前的水位线：drain 用它判断「这一轮刚被前向嵌过」，避免重复嵌入。
         wm_before = {acct: _vector_watermark(con, acct) for acct in targets}
+        # 同一时刻的队列快照：前向扫描**之后**才进队列（或又被改了一次）的行，扫描读到的可能是
+        # 改动之前的正文——它们不算「本轮已按当前正文嵌过」（见 apply_dirty 的 `queued_before`）。
+        queued_before = dict(con.execute("SELECT msg_key, changed_at FROM pending_reembed"))
         embedded = skipped = 0
         for acct in targets:
             # 进度带偏移：_build_account 的计数是每账号局部的（各自从 0 起），直接
@@ -545,7 +563,7 @@ def build_index(accounts: Sequence[str] | None = None, rebuild: bool = False,
         if targets:
             for _ in range(4):
                 dirty = apply_dirty(con, accounts=targets, embedder=embedder,
-                                    covered_above=wm_before)
+                                    covered_above=wm_before, queued_before=queued_before)
                 embedded += dirty["embedded"]
                 if dirty["embedded"] == 0 and dirty["dropped"] == 0 \
                         and dirty["deferred"] == 0:
@@ -638,6 +656,20 @@ def _next_embed_key(con: sqlite3.Connection, row: Mapping) -> str | None:
     return None
 
 
+def _queued(con: sqlite3.Connection, key: str) -> tuple[int | None, str | None]:
+    """队列行的 `(changed_at, reason)`；不在队列里时两者都是 None。"""
+    row = con.execute("SELECT changed_at, reason FROM pending_reembed WHERE msg_key=?",
+                      (key,)).fetchone()
+    return (row[0], row[1]) if row else (None, None)
+
+
+# 只因**上一条**变了而进队列（`prefix`）的行，自己的正文没变——后继的上文前缀（`doc_text` 只取
+# 上一条的正文）不受影响，不再级联。此前一律级联：改一条就把整段会话之后的每一条都重嵌一遍
+# （每轮 4 批地推进，队列长期挂着一条）。其余原因照旧级联（保守：触发器的 ON CONFLICT 会用后来
+# 的原因覆盖先前的，`sender` 可能盖住了 `content`）。
+_NO_CASCADE_REASON = "prefix"
+
+
 def _queued_keys(con: sqlite3.Connection, accounts: Sequence[str] | None,
                  limit: int) -> list[str]:
     if accounts is None:
@@ -651,7 +683,8 @@ def _queued_keys(con: sqlite3.Connection, accounts: Sequence[str] | None,
 def apply_dirty(con: sqlite3.Connection, *, accounts: Sequence[str] | None = None,
                 limit: int | None = None,
                 embedder: FastEmbedEmbedder | None = None,
-                covered_above: Mapping[str, int] | None = None) -> dict:
+                covered_above: Mapping[str, int] | None = None,
+                queued_before: Mapping[str, int] | None = None) -> dict:
     """消费最多 `limit` 条重嵌队列，返回 `{embedded, dropped, deferred, failed}`。
 
     判定顺序（每一支都决定「这条队列行还要不要」）：
@@ -668,7 +701,9 @@ def apply_dirty(con: sqlite3.Connection, *, accounts: Sequence[str] | None = Non
 
     `covered_above`：调用方（`build_index`）在**前向扫描之前**记下的水位线。给了它时，
     `id` 高于该值的行算「本轮前向扫描已经按当前正文嵌过」——只作废队列行、不再嵌一次。
-    不给则按当前水位线判（独立调用/测试的语义）。
+    不给则按当前水位线判（独立调用/测试的语义）。`queued_before`：同一时刻的队列快照
+    `{msg_key: changed_at}`；给了它时，扫描开始之后才进队列（或 `changed_at` 变了）的行
+    不算嵌过，照常重嵌。
 
     嵌入失败时：整批记失败账本、保留队列行、提交失败记录，然后抛 `VectorError`——
     下一次运行会重试同一批，直到收敛。**不静默吞掉**。
@@ -677,6 +712,7 @@ def apply_dirty(con: sqlite3.Connection, *, accounts: Sequence[str] | None = Non
     embedder = embedder or default_embedder()
     stats = {"embedded": 0, "dropped": 0, "deferred": 0, "failed": 0}
     todo: list[tuple[str, Mapping, str, str]] = []     # (key, row, text, preview)
+    reasons: dict[str, str | None] = {}
 
     try:
         keys = _queued_keys(con, accounts, limit)
@@ -695,11 +731,17 @@ def apply_dirty(con: sqlite3.Connection, *, accounts: Sequence[str] | None = Non
                 store.dequeue_reembed(con, key)
                 stats["dropped"] += 1
                 continue
-            # 「这一行是否已经被本轮前向扫描嵌过」的判据：用**前向之前**的水位线。
-            ceiling = (covered_above[row["account"]] if covered_above
-                       and row["account"] in covered_above
-                       else _vector_watermark(con, row["account"]))
-            if row["id"] > ceiling:
+            # 「这一行的向量是否已经按当前正文写过」：
+            # ① 高于**当前**水位线 = 还没嵌过，下一次前向扫描按当前正文嵌；
+            # ② 高于**前向之前**的水位线 = 本轮前向扫描刚嵌过——但只有改动早于扫描开始时才是
+            #    当前正文：扫描途中进队列（或又被改了一次）的行，扫描读到的可能是旧正文，此前在这里
+            #    被一并作废，那个向量就永远停在旧正文上（并发导出 + 向量构建即可触发）。
+            cur_wm = _vector_watermark(con, row["account"])
+            queued_at, reasons[key] = _queued(con, key)
+            fresh = (covered_above is not None and row["account"] in covered_above
+                     and row["id"] > covered_above[row["account"]]
+                     and (queued_before is None or queued_before.get(key) == queued_at))
+            if row["id"] > cur_wm or fresh:
                 store.dequeue_reembed(con, key)
                 stats["deferred"] += 1
                 continue
@@ -716,6 +758,10 @@ def apply_dirty(con: sqlite3.Connection, *, accounts: Sequence[str] | None = Non
         raise store.index_unavailable(exc) from exc
 
     if todo:
+        # 嵌入（CPU 推理）在任何事务之外：上面的作废/延后是写，会隐式开着一个写事务——带着它去
+        # 推理，并发的导出 / purge 就要等满 busy timeout（同 `_build_account` 的「嵌入在任何事务之外」）。
+        if con.in_transaction:
+            _commit(con)
         try:
             vecs = embedder.embed([t for _, _, t, _ in todo])
         except Exception as exc:                       # noqa: BLE001 — 出口统一翻译
@@ -741,10 +787,27 @@ def apply_dirty(con: sqlite3.Connection, *, accounts: Sequence[str] | None = Non
                 "换模型后必须重建索引",
                 hint="用 rebuild=True 重建（DDL 会按新维度建表）")
         try:
-            for (key, row, _text, preview), v in zip(todo, vecs):
+            # **写之前在写锁下复查**（与 `_build_account.write()` 同一判据）：上面那些读不在任何
+            # 锁里，嵌入又要几秒——`purge --chat` 在这段窗口里删完的话，不复查就把被删会话的
+            # 向量（`preview` 列是正文）写回去，此后没有任何东西会清它。按 (id, msg_key) 对判：
+            # 消息没了的 id 可能已被新消息复用，所以只作废队列行、不碰那个 id 的向量。
+            con.execute("BEGIN IMMEDIATE")
+            alive = _alive_ids(con, [(row["id"], key) for key, row, _, _ in todo])
+            live: list[tuple[tuple[str, Mapping, str, str], Sequence[float]]] = []
+            for item, v in zip(todo, vecs):
+                key, row = item[0], item[1]
+                if row["id"] not in alive or _is_excluded(con, key):
+                    if row["id"] in alive:
+                        _delete_vec(con, row["id"])
+                    store.dequeue_reembed(con, key)
+                    stats["dropped"] += 1
+                else:
+                    live.append((item, v))
+            for (key, row, _text, preview), v in live:
                 _write_vec(con, row, v, preview=preview)
                 store.dequeue_reembed(con, key)
-                nxt = _next_embed_key(con, row)
+                nxt = (_next_embed_key(con, row)
+                       if reasons.get(key) != _NO_CASCADE_REASON else None)
                 if nxt:
                     # 原因与触发器写的那几种并列：`prefix` = 自己的正文没变、
                     # 是前一条变了导致上文前缀过时。
@@ -759,7 +822,7 @@ def apply_dirty(con: sqlite3.Connection, *, accounts: Sequence[str] | None = Non
             if con.in_transaction:
                 con.rollback()
             raise
-        stats["embedded"] = len(todo)
+        stats["embedded"] = len(live)
     else:
         # 只有作废/延后时也要提交（dequeue 是写）
         _commit(con)

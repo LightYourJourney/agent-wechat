@@ -143,14 +143,42 @@ def _clone_or_copy(src: pathlib.Path, dst: pathlib.Path) -> None:
     shutil.copy2(src, dst)
 
 
+# 主库在复制期间被改写时重拍的次数上限（见 `snapshot`）。克隆是毫秒级的，撞上 checkpoint
+# 本身就罕见，连撞 5 次只会是微信正在持续大量写入（如首次同步聊天记录）。
+SNAPSHOT_TRIES = 5
+
+
+def _stamp(p: pathlib.Path) -> tuple[int, int, int] | None:
+    try:
+        st = p.stat()
+    except FileNotFoundError:
+        return None
+    return (st.st_ino, st.st_size, st.st_mtime_ns)
+
+
 def snapshot(db: pathlib.Path, td: pathlib.Path) -> pathlib.Path:
-    """db+wal+shm 三元组快照到私有目录。微信目录零写入（只读：克隆或复制）。"""
+    """db+wal+shm 三元组快照到私有目录。微信目录零写入（只读：克隆或复制）。
+
+    三个文件是**逐个**克隆/复制的，不是一次原子快照：主库拷完、-wal 还没拷的那一刻微信若做了
+    checkpoint（把 WAL 里的页写回主库，随后重启 WAL），拿到的就是「旧主库 + 新 WAL」。那份快照
+    可能读出 malformed，也可能 `integrity_check` 通过、却**中间缺几行而其后的行都在**——增量
+    导出随即把水位线推过那段空洞，前向扫描再也看不见它们（合成库复现：
+    tests/test_decrypt_open_db.py 的 torn 用例）。checkpoint 必然写主库，所以判据是**主库在整个
+    三元组复制的前后没变**（inode / 大小 / mtime）：变了就整组重拍；只有 WAL 被追加（没有
+    checkpoint）时拍到的是一致的前缀，不必重拍。
+    """
     dst = td / db.name
     try:
-        for suf in ("", "-wal", "-shm"):
-            src = pathlib.Path(str(db) + suf)
-            if src.exists():
-                _clone_or_copy(src, pathlib.Path(str(dst) + suf))
+        for _ in range(SNAPSHOT_TRIES):
+            before = _stamp(db)
+            for suf in ("", "-wal", "-shm"):
+                src = pathlib.Path(str(db) + suf)
+                out = pathlib.Path(str(dst) + suf)
+                out.unlink(missing_ok=True)     # 重拍：clonefile 不覆盖既有文件，上一轮的 -wal 也不能留
+                if src.exists():
+                    _clone_or_copy(src, out)
+            if _stamp(db) == before:
+                return dst
     except OSError as exc:
         # A 矩阵：快照那一步此前裸穿 PermissionError/ENOSPC（R2-A-007）。快照是解密的
         # 第一步，失败就整条走不通——按 core 契约只能是项目异常。
@@ -158,7 +186,9 @@ def snapshot(db: pathlib.Path, td: pathlib.Path) -> pathlib.Path:
             f"无法快照微信数据库（只读复制失败）：{db.name}",
             hint=f"{exc}；请确认数据目录与 AGENT_WECHAT_HOME 都有空间、且可写"
         ) from exc
-    return dst
+    raise errors.SourceUnreadable(
+        f"无法快照微信数据库：{db.name} 在复制期间被反复改写（{SNAPSHOT_TRIES} 次）",
+        hint="微信正在大量写入（如同步聊天记录）：等它空闲后重试")
 
 
 @functools.lru_cache(maxsize=64)

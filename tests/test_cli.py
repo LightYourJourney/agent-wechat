@@ -1538,6 +1538,38 @@ def test_purge_chat_with_no_messages_still_plans_and_removes_the_export(
             "别的会话一个字节都不许动"
 
 
+def test_purge_chat_also_finds_accounts_that_only_have_side_table_copies(
+        tmp_path, monkeypatch, capsys):
+    """回填命令（`appmsg rebuild` / `media rebuild-refs` / 名册刷新）扫的是**整个微信库**：
+    账号 b 一条消息都没导过，`msg_parts` / `media_refs` / `display_names` 里却有这个会话。
+    此前只按 `messages` 找账号——b 的这些行一行不删，核查只看 a，照样 ✅、退 0；而删掉的
+    孤儿行也没进清单，下一次回填原样写回来。"""
+    _isolate(tmp_path, monkeypatch)
+    import zlib
+    from agent_wechat import messages
+    md5 = messages.chat_md5("victim@chatroom")
+    orphan_part = (f"b|{md5}|message_0.db|8", 5, None, None,
+                   zlib.compress(b"<msg><appmsg><title>B SECRET</title></appmsg></msg>"))
+    with store.open() as con:
+        store.upsert_batch(con, [_chat_row(1, account="a", chat_id="victim@chatroom"),
+                                 _chat_row(2, account="b", chat_id="别的会话")])
+        store.upsert_media_refs(con, [(f"b|{md5}|message_0.db|9", "image", "f" * 32, None)])
+        store.upsert_msg_parts(con, [orphan_part])
+        store.replace_roster(con, "b", [("victim@chatroom", "member01", "真名")])
+    _stub_resolution(monkeypatch, "victim@chatroom")
+
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["purge", "--chat", "小李", "--yes"])
+    assert ei.value.code == 0
+    with store.open() as con:
+        for acct in ("a", "b"):
+            left = {k: v for k, v in store.chat_row_counts(con, acct, "victim@chatroom").items() if v}
+            assert left == {}, f"账号 {acct} 仍有残留：{left}"
+        assert store.upsert_msg_parts(con, [orphan_part]) == 1, "删掉的孤儿行必须进清单，回填不许写回"
+        assert con.execute("SELECT count(*) FROM messages WHERE account='b'").fetchone()[0] == 1, \
+            "b 的别的会话一个字节都不许动"
+
+
 def test_purge_chat_without_a_value_exits_2(tmp_path, monkeypatch, capsys):
     """`--chat` 缺值退 2（spec §6 第二行）。
 
@@ -2125,6 +2157,50 @@ def test_decrypt_out_absolute_path_is_written_there_and_chmods_0600(tmp_path, mo
     assert target.read_bytes() == b"SECRET", "绝对路径按原样写入"
     assert (target.stat().st_mode & 0o777) == 0o600, "整库明文必须 0600"
     assert str(target) in capsys.readouterr().out
+
+
+def test_decrypt_out_plaintext_never_exists_with_group_or_other_bits(tmp_path, monkeypatch):
+    """先写后 chmod 的窗口：明文以 umask 权限（0644）落盘、随后才收紧——`--out` 指向共享目录
+    时别的本地用户在窗口里读得到整库明文。判据：**任何时刻**盘上带明文的文件都没有 g/o 位
+    （在每次 chmod 之前扫一遍目标目录；修前 chmod 前那一刻正是 0644）。"""
+    import os as _os
+    import pathlib as _pl
+    db = tmp_path / "message" / "message_0.db"
+    db.parent.mkdir(parents=True)
+    db.write_bytes(b"x")
+    plain = tmp_path / "plain.db"
+    plain.write_bytes(b"SECRET")
+    monkeypatch.setattr(account, "resolve_account", lambda a: "wxid_testacct01_ab12")
+    monkeypatch.setattr(paths, "db_storage", lambda acc: db.parent)
+    monkeypatch.setattr(keys, "get_passphrase", lambda acc: b"p" * 32)
+
+    class _Ctx:
+        def __enter__(self):
+            return plain
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(decrypt, "decrypted", lambda d, pp: _Ctx())
+    outdir = tmp_path / "shared"
+    lax: list[str] = []
+    orig_chmod = _pl.Path.chmod
+
+    def watching_chmod(self, mode, **kw):
+        for p in outdir.rglob("*"):
+            if p.is_file() and b"SECRET" in p.read_bytes() and p.stat().st_mode & 0o077:
+                lax.append(f"{p.name}:{oct(p.stat().st_mode & 0o777)}")
+        return orig_chmod(self, mode, **kw)
+    monkeypatch.setattr(_pl.Path, "chmod", watching_chmod)
+    old = _os.umask(0o022)
+    try:
+        with pytest.raises(SystemExit) as ei:
+            cli.main(["decrypt", "message_0.db", "--out", str(outdir / "m0.db")])
+    finally:
+        _os.umask(old)
+    assert ei.value.code == 0
+    assert (outdir / "m0.db").read_bytes() == b"SECRET"
+    assert lax == [], f"明文曾以宽权限落盘：{lax}"
 
 def test_core_index_hints_name_no_entry_specific_commands():
     """F4（复审补强）：`usecases` 里四条 IndexUnavailable hint 只给**中立动作**，

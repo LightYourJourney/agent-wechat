@@ -108,8 +108,10 @@ def cmd_decrypt(args: argparse.Namespace) -> int:
         out = paths.HOME_DIR / args.out
         try:
             out.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-            out.write_bytes(plain.read_bytes())
-            out.chmod(0o600)  # EA-050：整库明文，权限与目录侧承诺对齐
+            # EA-050：整库明文必须 0600。先写再 chmod 留一个 umask 权限（0644）的窗口，绝对路径
+            # 落在共享目录时别的用户读得到；atomic_copy 的临时文件**建出时**就是 0600，且流式
+            # 复制（几百 MB 的库不整读进内存），`out` 是符号链接时替换链接本身、不写穿到目标。
+            paths.atomic_copy(plain, out, mode=0o600)
         except OSError as exc:
             # A 矩阵：这三步此前裸穿（`PermissionError`/`OSError` 直接 traceback）。
             # 整库明文是高敏产物——写不成必须说清，且不许留权限未收紧的半成品。

@@ -3607,3 +3607,40 @@ def test_media_ref_regexes_are_linear_on_unclosed_tags(tag):
     media._STICKER_MD5.search(blob)
     media._emoji_attr_re("cdnurl").search(blob)
     assert time.monotonic() - t0 < 1.0
+
+
+def test_a_purge_during_the_export_does_not_leave_media_behind(tmp_path, monkeypatch):
+    """`media export` 只在入口判一次墓碑，随后要跑几分钟（CLI 不登记任务，purge 的在飞闸门
+    看不见它）：purge 中途删完 `media/<md5>/`、核查报 ✅，这边照样把剩下的明文视频写回去。"""
+    from agent_wechat import messages, purge, store
+    _root, account = make_tree(tmp_path, monkeypatch)
+    monkeypatch.setattr(store, "DB_PATH", paths.HOME_DIR / "index.db")
+    chat = "victim@chatroom"
+    cm = messages.chat_md5(chat)
+    ts = int(datetime.datetime(2026, 5, 10, 12, 0).timestamp())
+    vdir = paths.XWECHAT_FILES / account / "msg/video" / media.month_of(ts)
+    vdir.mkdir(parents=True)
+    keys_ = ("a" * 32, "b" * 32)
+    for k in keys_:
+        (vdir / f"{k}.mp4").write_bytes(b"\x00\x00\x00\x18ftypmp42 secret " + k.encode())
+    rows = [messages.make_row(account=account, chat_md5=cm, chat_id=chat, shard="message_0.db",
+                              local_id=i, ts=ts + i, msg_type=43, sender_id=None,
+                              sender_name=None, is_self=0, content="[video]", media_hint="video")
+            for i in (1, 2)]
+    with store.open() as con:
+        store.upsert_media_refs(con, [(r["msg_key"], "video", k, None) for r, k in zip(rows, keys_)])
+        store.upsert_batch(con, rows)
+    monkeypatch.setattr(purge, "_run", lambda *a, **kw: type(
+        "R", (), {"stdout": "", "stderr": "", "returncode": 0})())
+
+    def purge_after_the_first_file(n):
+        if n == 1:
+            plan = purge.plan_chat([{"account": account, "chat_id": chat}])
+            purge.execute_chat(plan)
+            assert purge.verify_chat(plan).export_dirs == ()
+    with store.open() as con, pytest.raises(errors.ScopeDenied, match="导出期间"):
+        media.export_media(account, [chat], kinds=["video"], con=con,
+                           progress=purge_after_the_first_file)
+    left = media.export_root() / cm
+    assert not left.exists() or not any(p.is_file() for p in left.rglob("*")), \
+        [str(p) for p in left.rglob("*")]

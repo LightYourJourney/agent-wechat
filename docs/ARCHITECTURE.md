@@ -223,7 +223,8 @@ moments.iter_posts(account, report=…)       # 复用 passphrase 解密 sns/sns
 
 ```
 decrypt.open_db(db, passphrase)                     # reader / 语音 / 朋友圈的唯一入口
-  → 快照 db+wal+shm 到 tmp/awdec-<pid>-*（0700；APFS clonefile 写时复制，跨卷/非 APFS 回退复制）
+  → 快照 db+wal+shm 到 tmp/awdec-<pid>-*（0700；APFS clonefile 写时复制，跨卷/非 APFS 回退复制；
+     三个文件逐个拷，主库在拷贝前后变了——微信在中间 checkpoint 过——就整组重拍，最多 5 次）
   → 读 page1 的 salt → PBKDF2（进程内按 salt 缓存）
   → 默认：sqlcipher3 只读打开**加密快照**，查询只解密触及的页，明文不落盘
      回退：AGENT_WECHAT_DECRYPT=cli 或 sqlcipher3 不可用 → sqlcipher CLI 整库导出明文副本再只读打开

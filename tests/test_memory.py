@@ -127,3 +127,28 @@ def test_purge_removes_cross_chat_evidence_of_a_deleted_claim(tmp_path, monkeypa
         assert con.execute("SELECT count(*) FROM fact_evidence").fetchone()[0] == 0
     with pytest.raises(errors.DataNotFound):
         derived.get_claim("c-cross")
+
+
+def test_evidence_check_and_insert_share_one_write_lock(tmp_path, monkeypatch):
+    """证据判据与写入之间不能有窗口：此前判据是自动提交的 SELECT，`purge --chat` 在判完、写之前
+    删完证据所在会话的话，主张与证据就落在已销毁的会话上（核查早已报 ✅）。判据：判完到写之间，
+    别的连接拿不到写锁。"""
+    import sqlite3
+    import uuid as _uuid
+    _env(tmp_path, monkeypatch)
+    real, seen = _uuid.uuid4, []
+
+    def between_check_and_insert():
+        other = sqlite3.connect(store.DB_PATH, timeout=0)
+        try:
+            other.execute("BEGIN IMMEDIATE")
+            seen.append("别的写者在窗口里拿到了写锁")
+            other.rollback()
+        except sqlite3.OperationalError:
+            seen.append("locked")
+        finally:
+            other.close()
+        return real()
+    monkeypatch.setattr(derived.uuid, "uuid4", between_check_and_insert)
+    derived.add_claim(ACCT, "周末去爬山", evidence=[_key(1)])
+    assert seen == ["locked"]

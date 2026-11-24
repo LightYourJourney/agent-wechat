@@ -202,6 +202,30 @@ def test_a_degraded_name_never_overwrites_a_real_one(tmp_path):
         con.close()
 
 
+def test_a_degraded_reread_of_a_group_row_does_not_rewrite_it(tmp_path):
+    """名字源读不出来的那一轮，回看重读的群消息**整行**都是降级解码：认不出 `@chatroom`，
+    `<wxid>:\\n` 前缀没剥、发送者为空。此前守卫只拦「仅 chat_id 不同」，正文一不同就整行
+    覆盖——好行被写成「md5:… / 无发送者 / 带前缀的正文」，还投递了一次重嵌。"""
+    from agent_wechat import reader
+    group = "888@chatroom"
+    r = reader.MessageReader(ACCT)
+    src = (1, 1, 1, T0, f"{FRIEND}:\n开会啦", 0, None)
+    pieces = [r._export_piece(src, shard=SHARD, md5hex=md5(group), chat_map=cm,
+                              n2i={1: FRIEND}, sticker_names={})[0]
+              for cm in ({md5(group): group}, {})]
+    good, outage = pieces
+    assert outage["chat_id"].startswith(messages.MD5_PREFIX) and outage["content"] != "开会啦"
+    con = store.connect(tmp_path / "i.db")
+    try:
+        store.upsert_batch(con, [good])
+        store.upsert_batch(con, [outage])
+        assert tuple(con.execute("SELECT chat_id, sender_name, content FROM messages")
+                     .fetchone()) == (group, FRIEND, "开会啦")
+        assert con.execute("SELECT count(*) FROM pending_reembed").fetchone()[0] == 0
+    finally:
+        con.close()
+
+
 # ---------------------------------------------------------------- 失败语义
 
 def test_missing_shard_is_eviction_not_deletion(tmp_path, monkeypatch):

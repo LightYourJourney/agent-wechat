@@ -23,6 +23,7 @@ import os
 import pathlib
 import re
 import select
+import shutil
 import sqlite3
 import stat
 import subprocess
@@ -929,7 +930,37 @@ def export_media(account: str, chat_ids: list[str], *, kinds: list[str],
         _export_voices(st, chat_ids)
     if "sticker" in kinds:
         _export_stickers(st, chat_ids, con=con, with_cdn=with_cdn)
+    _discard_if_purged_meanwhile(account, chat_ids, out_root)
     return report
+
+
+def _discard_if_purged_meanwhile(account: str, chat_ids: list[str], out_root: pathlib.Path) -> None:
+    """导出**期间**被 `purge --chat` 销毁的会话：删掉它在默认导出根下的目录，然后拒绝。
+
+    入口那道 `_refuse_purged` 只判一次，而导出要跑几分钟（CLI `media export` 不登记任务，
+    purge 的在飞闸门看不见它）：purge 在中途删完 `media/<md5>/`、核查报 ✅ 之后，这边照样把
+    剩下的明文媒体写回去。这里在**最后一次写之后**逐会话再判一次——判到墓碑：purge 的 rmtree
+    在它之前或之后都一样，那棵树里此刻的东西只可能是本次写的，删掉；判不到：本次的写全部早于
+    墓碑，也就早于 purge 随后的 rmtree，由 purge 删。两种顺序都不留东西。
+    自定义 `--out` 根不在 purge 的删除面里（SECURITY.md），那里只拒绝、不删。
+    """
+    gone = []
+    for chat_id in chat_ids:
+        try:
+            _refuse_purged(account, [chat_id])
+        except errors.ScopeDenied:
+            gone.append(chat_id)
+    if not gone:
+        return
+    if out_root.resolve() == export_root().resolve():
+        for chat_id in gone:
+            d = out_root / messages.chat_md5(chat_id)
+            if not d.is_symlink():
+                shutil.rmtree(d, ignore_errors=True)
+    raise errors.ScopeDenied(
+        f"导出期间会话 {gone[0]} 被 purge --chat 销毁，本次写出的媒体已作废"
+        + (f"（另有 {len(gone) - 1} 个会话）" if len(gone) > 1 else ""),
+        hint="确需导出：先 `agent-wechat purge --chat <会话> --undo --yes` 解除墓碑")
 
 
 class _ExportState:

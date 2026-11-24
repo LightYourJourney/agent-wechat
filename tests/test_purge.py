@@ -1609,11 +1609,14 @@ def test_write_tombstone_goes_through_the_owning_module(monkeypatch):
         return 3
 
     monkeypatch.setattr(exclusions, "add_from_messages", spy)
+    # 孤儿行那一半（`delete_chat` 按前缀一并删掉的 msg_parts / media_refs / msg_extras）同样在
+    # 拥有清单的模块里写
+    monkeypatch.setattr(exclusions, "add_from_side_tables", spy)
     monkeypatch.setattr(exclusions, "add",
                         lambda *a, **k: (_ for _ in ()).throw(
                             AssertionError("测试播种接口不该被生产路径调用")))
-    assert purge._write_tombstone(object(), "acct", "wxid_x") == 3
-    assert calls == [("acct", "wxid_x")]
+    assert purge._write_tombstone(object(), "acct", "wxid_x") == 6
+    assert calls == [("acct", "wxid_x")] * 2
 
 
 # ---------- 批 B7 · 销毁路径（T13） ----------

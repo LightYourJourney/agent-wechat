@@ -109,6 +109,29 @@ def add_from_messages(con: sqlite3.Connection, account: str, chat_id: str) -> in
     return cur.rowcount
 
 
+# 存「消息没进索引也会有」的副本、且按 `msg_key` 存的表：回填命令（`appmsg rebuild` /
+# `media rebuild-refs` / `extras rebuild`）扫的是整个微信库，会给没导出的消息写这些行。
+ORPHAN_KEY_TABLES = ("msg_parts", "media_refs", "msg_extras")
+
+
+def add_from_side_tables(con: sqlite3.Connection, account: str, chat_id: str) -> int:
+    """把该会话在 `ORPHAN_KEY_TABLES` 里的 `msg_key` 也写进清单（`messages` 里有的那些已由
+    `add_from_messages` 写过，`OR IGNORE` 跳过——这里真正新增的是孤儿行）。
+
+    `add_from_messages` 只挡 `messages` 里的行；而 `purge` 按前缀删的还有这几张表里的孤儿行
+    ——不挡的话，下一次回填命令原样把刚删掉的载荷（`msg_parts.raw_xml` 是完整 appmsg）写回来。
+    与 `add_from_messages` 一样从谓词派生（`INSERT … SELECT`），`OR IGNORE` 幂等，返回新写入条数。
+    """
+    p = messages.msg_key_prefix(account, messages.chat_md5(chat_id))
+    now, n = int(time.time()), 0
+    for t in ORPHAN_KEY_TABLES:
+        n += con.execute(
+            "INSERT OR IGNORE INTO exclusions.excluded (msg_key, account, chat_md5, excluded_at) "
+            f"SELECT msg_key, ?, ?, ? FROM {t} WHERE substr(msg_key, 1, ?) = ?",
+            (account, messages.chat_md5(chat_id), now, len(p), p)).rowcount
+    return n
+
+
 def count_unblocked(con: sqlite3.Connection, account: str, chat_id: str) -> int:
     """该会话**谓词命中、却不在清单里**的消息条数——与 `add_from_messages` 同一个谓词。
 

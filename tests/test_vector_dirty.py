@@ -397,3 +397,96 @@ def test_semantic_search_does_not_return_purged_rows(con):
     res = vector.semantic_search("任意查询", account=ACCT, embedder=FakeEmbedder())
     assert res["hits"], "另一个会话还在，索引不是空的"
     assert {h["chat_id"] for h in res["hits"]} == {"wxid_friend02"}
+
+
+# ---------------------------------------------------------------- 与并发写者的竞态
+
+class _HookEmbedder(FakeEmbedder):
+    """第 `at` 次 `embed` 调用时先跑一次 `hook`——模拟嵌入（几秒 CPU）期间别的进程在写库。"""
+
+    def __init__(self, hook, at=1):
+        super().__init__()
+        self.hook, self.at = hook, at
+
+    def embed(self, texts):
+        if len(self.calls) + 1 == self.at:
+            self.hook()
+        return super().embed(texts)
+
+
+def test_a_row_edited_while_the_forward_scan_embeds_it_is_reembedded(con):
+    """前向扫描读到旧正文、正在嵌入时，并发导出改写了它（触发器入队）。此前 drain 把
+    「id 高于扫描前水位线」一律当成本轮已按当前正文嵌过、直接作废——那个向量永远停在旧正文上。"""
+    c = con
+    _seed(c, [f"第{i}句原始正文" for i in range(1, 6)])
+
+    def edit():
+        with store.open() as other:
+            store.upsert_batch(other, [_row(ACCT, CHAT, 3, "第3句被改写后的正文")])
+    fake = _HookEmbedder(edit)
+    vector.build_index(accounts=[ACCT], embedder=fake)
+    assert any("第3句被改写后的正文" in t for t in _texts(fake)), _texts(fake)
+    assert store.reembed_queue_stats(c, ACCT)["pending"] == 0
+
+
+def test_a_dirty_drain_racing_a_purge_does_not_write_the_vector_back(con):
+    """drain 的读不在锁里、嵌入又要几秒：`purge --chat` 在这段窗口里删完，此前照样把被删会话的
+    向量（`preview` 列是正文）写回去，核查早已报过 ✅。"""
+    c = con
+    _seed(c, ["要删的第一句", "要删的第二句"])
+    vector.build_index(accounts=[ACCT], embedder=FakeEmbedder())
+    store.upsert_batch(c, [_row(ACCT, CHAT, 2, "要删的第二句改")])
+
+    def purge_now():
+        plan = purge.plan_chat([{"account": ACCT, "chat_id": CHAT}])
+        purge.execute_chat(plan)
+        assert purge.verify_chat(plan).leftover == ()
+    vector.apply_dirty(c, accounts=[ACCT], embedder=_HookEmbedder(purge_now))
+    assert _vec_count(c) == 0
+    assert store.chat_row_counts(c, ACCT, CHAT)["vectors"] == 0
+
+
+def test_ids_freed_by_a_purge_and_reused_during_the_embed_are_still_embedded(con):
+    """嵌入期间 `purge --chat` 删掉最高的那批 id、随后的导出**复用**了它们：此前水位线照样推过
+    这些 id（封顶看的 max(id) 又回来了），新会话一条都不进向量索引、以后也不会进。"""
+    c = con
+    _seed(c, [f"甲会话第{i}句" for i in range(1, 4)])
+    vector.build_index(accounts=[ACCT], embedder=FakeEmbedder())
+    _seed(c, [f"乙会话第{i}句" for i in range(1, 4)], chat="wxid_bbb")
+
+    def purge_then_export():
+        purge.execute_chat(purge.plan_chat([{"account": ACCT, "chat_id": "wxid_bbb"}]))
+        with store.open() as other:
+            _seed(other, [f"丙会话第{i}句" for i in range(1, 4)], chat="wxid_ccc")
+    vector.build_index(accounts=[ACCT], embedder=_HookEmbedder(purge_then_export))
+    ids = [r[0] for r in c.execute("SELECT id FROM messages WHERE chat_id='wxid_ccc'")]
+    assert ids == [4, 5, 6], "前提：丙会话复用了被删的 id"
+    vector.build_index(accounts=[ACCT], embedder=FakeEmbedder())
+    assert _vec_count(c, chat="wxid_ccc") == 3
+    assert _vec_count(c, chat="wxid_bbb") == 0
+
+
+def test_one_edit_does_not_cascade_through_the_rest_of_the_chat(con):
+    """后继只因**上一条**变了才进队列（`prefix`），它自己的正文没变——再往后的前缀不受影响。
+    此前一律级联：改一条就把之后的每一条都重嵌一遍，每轮推进 4 条，队列长期挂着一条积压。"""
+    c = con
+    _seed(c, [f"第{i}句正文内容" for i in range(1, 41)])
+    vector.build_index(accounts=[ACCT], embedder=FakeEmbedder())
+    store.upsert_batch(c, [_row(ACCT, CHAT, 20, "第20句改过了")])
+    fake = FakeEmbedder()
+    vector.build_index(accounts=[ACCT], embedder=fake)
+    assert len(_texts(fake)) == 2, _texts(fake)
+    assert store.reembed_queue_stats(c, ACCT)["pending"] == 0
+
+
+def test_a_cascade_does_not_downgrade_a_queued_content_change(con):
+    """后继本来就因正文改写在队列里：上一条的级联只该刷新时间，不许把原因降成 `prefix`——
+    降了之后它被消费时不再级联，再往后那条的前缀永远过时。"""
+    c = con
+    _seed(c, ["第一句正文", "第二句正文", "第三句正文"])
+    vector.build_index(accounts=[ACCT], embedder=FakeEmbedder())
+    store.upsert_batch(c, [_row(ACCT, CHAT, 2, "第二句改")])
+    store.enqueue_reembed(c, _key(2), reason="prefix")
+    c.commit()
+    assert c.execute("SELECT reason FROM pending_reembed WHERE msg_key=?",
+                     (_key(2),)).fetchone()[0] == "content"

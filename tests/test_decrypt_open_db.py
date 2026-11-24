@@ -253,6 +253,96 @@ def test_snapshot_falls_back_to_copy_when_cloning_fails(tmp_path, monkeypatch):
         {p.name: p.read_bytes() for p in db.parent.iterdir()}
 
 
+def _wal_source(d):
+    """明文 WAL 库（快照与加密无关）：5 行已 checkpoint 进主库，3 行（6–8）只在 -wal 里。
+    写连接不关，模拟微信。行宽 900 字节：这个布局下「旧主库 + 新 WAL」恰好读出一个空洞。"""
+    d.mkdir()
+    w = sqlite3.connect(d / "src.db", isolation_level=None)
+    w.execute("PRAGMA journal_mode=WAL")
+    w.execute("PRAGMA wal_autocheckpoint=0")
+    w.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)")
+    for i in range(1, 6):
+        w.execute("INSERT INTO t VALUES (?, ?)", (i, "x" * 900))
+    w.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    for i in range(6, 9):
+        w.execute("INSERT INTO t VALUES (?, ?)", (i, "y" * 900))
+    return d / "src.db", w
+
+
+def _ids(snap):
+    con = sqlite3.connect(f"file:{snap}?mode=ro", uri=True)
+    try:
+        assert con.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        return [r[0] for r in con.execute("SELECT id FROM t ORDER BY id")]
+    finally:
+        con.close()
+
+
+@pytest.mark.parametrize("clone", [True, False], ids=["clone", "copy"])
+def test_a_checkpoint_between_copying_the_db_and_the_wal_is_retaken(tmp_path, monkeypatch, clone):
+    """主库拷完、-wal 还没拷时微信 checkpoint 并重启 WAL：旧主库 + 新 WAL 读出 1–5、9，
+    **6–8 静默缺席**（integrity_check 照样 ok），增量导出会把水位线推到 9、再也看不见 6–8。"""
+    if not clone:
+        monkeypatch.setattr(decrypt, "_clonefile", None)
+    db, w = _wal_source(tmp_path / "src")
+    orig, fired = decrypt._clone_or_copy, []
+
+    def racy(src, dst):
+        orig(src, dst)
+        if src == db and not fired:          # 只撞第一次
+            fired.append(1)
+            w.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            w.execute("INSERT INTO t VALUES (9, ?)", ("z" * 900,))
+    monkeypatch.setattr(decrypt, "_clone_or_copy", racy)
+    td = tmp_path / "td"
+    td.mkdir()
+    try:
+        assert _ids(decrypt.snapshot(db, td)) == list(range(1, 10))
+    finally:
+        w.close()
+    assert fired
+
+
+def test_appends_to_the_wal_alone_do_not_force_a_retake(tmp_path, monkeypatch):
+    """没有 checkpoint、只是 -wal 变长：拍到的是一致的前缀，不重拍（重拍在拷贝回退时代价不小）。"""
+    db, w = _wal_source(tmp_path / "src")
+    orig, calls = decrypt._clone_or_copy, []
+
+    def appending(src, dst):
+        calls.append(src.name)
+        orig(src, dst)
+        if src == db:
+            w.execute("INSERT INTO t VALUES (9, ?)", ("z" * 900,))
+    monkeypatch.setattr(decrypt, "_clone_or_copy", appending)
+    td = tmp_path / "td"
+    td.mkdir()
+    try:
+        assert _ids(decrypt.snapshot(db, td)) == list(range(1, 10))
+    finally:
+        w.close()
+    assert calls.count("src.db") == 1
+
+
+def test_a_db_rewritten_on_every_attempt_is_a_source_error_not_a_torn_snapshot(tmp_path, monkeypatch):
+    db, w = _wal_source(tmp_path / "src")
+    orig = decrypt._clone_or_copy
+    n = iter(range(100, 200))
+
+    def busy(src, dst):
+        orig(src, dst)
+        if src == db:
+            w.execute("INSERT INTO t VALUES (?, ?)", (next(n), "z" * 900))
+            w.execute("PRAGMA wal_checkpoint(PASSIVE)")
+    monkeypatch.setattr(decrypt, "_clone_or_copy", busy)
+    td = tmp_path / "td"
+    td.mkdir()
+    try:
+        with pytest.raises(errors.SourceUnreadable, match="反复改写"):
+            decrypt.snapshot(db, td)
+    finally:
+        w.close()
+
+
 @pytest.mark.parametrize("clone", [True, False], ids=["clone", "copy"])
 def test_open_db_reads_the_same_rows_whichever_way_the_snapshot_was_taken(tmp_path, monkeypatch, clone):
     if not clone:

@@ -578,18 +578,21 @@ _INSERT_SQL = (
     # EA-012：守卫扩成「content **或 chat_id** 不同」。`chat_id` 是 `chat_md5` 的派生展示
     # 属性（退化形态 `md5:<hex>` 是真名的降级），名字解析回来后必须能自愈；只认 content
     # 时同一条消息会永远停在首次写入的 chat_id 上，同一 chat_md5 的行分裂成两种 id。
-    "WHERE messages.content IS NOT excluded.content "
+    # 退化名（`md5:<hex>`）**只许修好、不许写坏**：回看会重读旧行，而名字源
+    # （session/contact）可能临时读不出来——那时 chat_map 缺项、解码结果退回退化 id。
+    # 这一轮解出来的**整行**都不可信，不只是 chat_id：群消息的 `<wxid>:\n` 前缀要认得出
+    # `@chatroom` 才剥（`reader._decode_row`），退化时 content 带着前缀、sender_name 为空。
+    # 此前这道守卫只挡「仅 chat_id 不同」那一支，content 一不同就整行覆盖——好行被写成
+    # 「md5:… / 无发送者 / 带前缀的正文」，chat_id 随后自愈，正文却要等下一轮回看。
+    # 所以库里已是真名时，退化的来行一列都不写；反向（退化 → 真名）照常更新（会话标识恢复）。
+    f"WHERE NOT (excluded.chat_id LIKE '{messages.MD5_PREFIX}%' "
+    f"           AND messages.chat_id NOT LIKE '{messages.MD5_PREFIX}%') "
+    "  AND (messages.content IS NOT excluded.content "
     # Phase 03：`doc_text` 的发送者前缀与「是否可嵌入」的判定都来自这两列——它们变了
     # 也要落库（触发器才能看到并投递重嵌）。`ts` / `sender_id` 对同一条消息稳定，不比。
     "   OR messages.sender_name IS NOT excluded.sender_name "
     "   OR messages.msg_type IS NOT excluded.msg_type "
-    "   OR (messages.chat_id IS NOT excluded.chat_id "
-    # 退化名（`md5:<hex>`）**只许修好、不许写坏**：回看会重读旧行，而名字源
-    # （session/contact）可能临时读不出来——那时 chat_map 缺项、解码结果退回退化 id。
-    # 没有这半句，一次临时降级会把索引里所有好名字覆盖成 `md5:…`（只增改的库还会
-    # 就此固化）。反向（退化 → 真名）仍然更新，这正是「会话标识恢复」。
-    f"      AND (excluded.chat_id NOT LIKE '{messages.MD5_PREFIX}%' "
-    f"           OR messages.chat_id LIKE '{messages.MD5_PREFIX}%'))")
+    "   OR messages.chat_id IS NOT excluded.chat_id)")
 
 
 def schema_drift_notes(con: sqlite3.Connection) -> list[str]:
@@ -960,6 +963,37 @@ def chat_row_counts(con: sqlite3.Connection, account: str, chat_id: str) -> dict
             "SELECT count(*) FROM derived_fts_content c"
             " LEFT JOIN derived_text d ON d.rowid = c.id WHERE d.rowid IS NULL", ()),
     }
+
+
+# 按 `msg_key` 存会话副本的表（`account|chat_md5|…` 前缀）。`messages` 不在其列：它有 account /
+# chat_md5 两列，走 `ChatIdentity.messages_where`。
+_MSG_KEY_TABLES = ("msg_parts", "media_refs", "msg_extras", "derived_text", "derived_tombstone",
+                   "fact_evidence", "pending_reembed", "reembed_failures")
+
+
+def accounts_holding_chat(con: sqlite3.Connection, chat_id: str) -> list[str]:
+    """索引里**任何一张表**存着这个会话副本的账号（升序）。`purge --chat` 据此决定删哪些账号。
+
+    只看 `messages` 不够：`appmsg rebuild` / `media rebuild-refs` / `extras rebuild` / 名册刷新
+    扫的是**整个微信库**，不管会话导没导过——于是一个账号可以一条消息都没进索引，却在
+    `msg_parts`（完整 appmsg 载荷）、`media_refs`、`display_names` 里有这个会话。只按消息找账号，
+    这些行一行都不删，核查（它也只看给定账号）还报 ✅。
+
+    账号取 `msg_key` 的第一段（账号不含 `|`，见 `count_media_refs`）；第二段逐字比 `chat_md5`，
+    不用 LIKE（账号里的 `_` / `%` 是通配符）。全表扫——`purge --chat` 是罕见的人工操作。
+    """
+    ident = messages.ChatIdentity.of("", chat_id)
+    key_md5 = ident.md5 + "|"
+    parts = [f"SELECT account FROM messages WHERE {ident.messages_where}"]
+    args: list[object] = [ident.md5, ident.chat_id, ident.degraded_id]
+    for t in _MSG_KEY_TABLES:
+        parts.append(f"SELECT substr(msg_key, 1, instr(msg_key, '|') - 1) FROM {t}"
+                     " WHERE substr(msg_key, instr(msg_key, '|') + 1, ?) = ?")
+        args += [len(key_md5), key_md5]
+    for t in ("display_names", "fact_claim"):
+        parts.append(f"SELECT account FROM {t} WHERE {ident.chat_id_where}")
+        args += [ident.chat_id, ident.degraded_id]
+    return [r[0] for r in con.execute(" UNION ".join(parts) + " ORDER BY 1", args)]
 
 
 def delete_chat(con: sqlite3.Connection, *, account: str, chat_id: str) -> dict[str, int]:
@@ -1433,10 +1467,13 @@ def enqueue_reembed(con: sqlite3.Connection, msg_key: str,
     队列是**集合**不是日志：同一条消息改十次也只是一行，`changed_at` 取最后一次。
     消费时读的是 `messages` 的**当前**内容，所以中间版本不需要保留。
     """
+    # 已在队列里的行**不被 `prefix` 降级**：它原来的原因（正文变了）决定消费时要不要级联到
+    # 后继（`vector._NO_CASCADE_REASON`）；降成 `prefix` 就再也不级联，后继的前缀永远过时。
     con.execute(
         "INSERT INTO pending_reembed(msg_key, changed_at, reason) VALUES (?, ?, ?) "
         "ON CONFLICT(msg_key) DO UPDATE SET changed_at=excluded.changed_at, "
-        "reason=excluded.reason",
+        "reason=CASE WHEN excluded.reason='prefix' THEN pending_reembed.reason "
+        "ELSE excluded.reason END",
         (msg_key, int(time.time()), reason))
 
 

@@ -592,6 +592,9 @@ def add_claim(account: str, claim: str, *, evidence: list[str],
     evidence = list(dict.fromkeys(evidence))      # 重复 key 去重（PK 冲突会逃出项目异常）
     stamp = int(now if now is not None else time.time())
     with store.open() as con:
+        # 证据判据与写入同一把写锁（同 `store.upsert_batch` 的立场）：判完、写之前 `purge --chat`
+        # 若删完了证据所在的会话，主张与证据会落在已销毁的会话上，核查早已报过 ✅。
+        store._begin_immediate(con)
         rows = con.execute(
             "SELECT msg_key, chat_id FROM messages WHERE msg_key IN ("
             + ",".join("?" * len(evidence)) + ") AND account=?",
