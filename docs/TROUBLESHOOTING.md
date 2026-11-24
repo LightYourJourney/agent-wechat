@@ -153,7 +153,7 @@ agent-wechat recent filehelper -n 3           # 端到端读取
 
 ## 7. 本地索引库 schema 迁移（`SchemaMigrationError`）
 
-本地库带版本表（`schema_version`），首次连接旧库时会自动升级（当前最新为 `main v10`；
+本地库带版本表（`schema_version`），首次连接旧库时会自动升级（当前最新为 `main v11`；
 各版内容见 `store.MIGRATIONS`）。迁移在**同一个库内的一笔事务**里完成，失败即整条回滚、版本停在上一版。
 
 | 现象 | 原因 | 处置 |

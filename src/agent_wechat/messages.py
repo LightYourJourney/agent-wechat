@@ -242,16 +242,19 @@ class KeyParts:
 
 
 def split_key(msg_key: str) -> KeyParts | None:
-    """拆键；段数不是 4/5 或数字段不是整数 → None（调用方各自报错）。"""
+    """拆键；段数不是 4/5 或数字段不可解析 → None（调用方各自报错）。
+
+    local_id 用 `isdecimal` 判而不是直接 `int()`：后者也收 `-1` / ` 1` / `1_0`，
+    那不是本工具写得出来的键。
+    """
     parts = msg_key.split("|")
-    if len(parts) not in (4, 5) or not all(parts[:3]):
+    if len(parts) not in (4, 5) or not all(parts[:3]) or not parts[3].isdecimal():
         return None
     try:
-        lid = int(parts[3])
         ct = int(parts[4]) if len(parts) == 5 else None
     except ValueError:
         return None
-    return KeyParts(parts[0], parts[1], parts[2], lid, ct)
+    return KeyParts(parts[0], parts[1], parts[2], int(parts[3]), ct)
 
 
 class MessageRow(TypedDict):

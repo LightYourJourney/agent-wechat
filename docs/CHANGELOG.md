@@ -3,6 +3,23 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 风格，
 版本号语义为 0.x 阶段（API 可能变动）。
 
+### code-review / simplify 收尾（schema v11，2026-11-24）
+
+**修复**
+
+- `decrypt.open_db` 的并发名额：同一线程里两个连接不按后开先关的顺序关闭时，嵌套计数卡在 1，这个线程此后不再占名额。改为递减计数。
+- `chat export` 写完后复查墓碑时，索引读不了抛的是 `IndexUnavailable`，此前漏接：产物留在盘上、错误原样上抛。现在按销毁处理，删掉产物。
+- 被 purge 的消息用 4 段旧键查上下文：此前答「找不到」，现在答「已被销毁」（旧键也认 5 段新墓碑）。
+- 表重建时回看游标也归零（此前只归零了水位线）。
+- **schema v11**：v10 改不了没有消息行的 `msg_parts` / `media_refs` / `msg_extras` 行（补不出第五段），它们再也对不上日后导出的 5 段键，只会把计数垫高。v11 删掉这些行；对应消息导出后重跑一次回填命令即可补回。
+
+**整理**
+
+- 墓碑判据收成一份 `exclusions.excluded_keys`。旧键解析加批量版 `store.resolve_msg_keys`。
+  `split_key` 的 local_id 改用 `isdecimal` 严格判，贴纸定位复用它。
+- 向量构建的存活复查每段只查一次；续跑时回查上文改为逐行取。
+- TOOLS.md 的示例键改成 5 段。
+
 ### msg_key 追加 create_time：防微信删表重建撞键（schema v10，2026-11-24）
 
 微信若删掉再建某个会话的 `Msg_<md5>` 表，`local_id` 从 1 重来。此前（合成库复现）：

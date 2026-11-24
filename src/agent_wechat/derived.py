@@ -600,7 +600,7 @@ def add_claim(account: str, claim: str, *, evidence: list[str],
     stamp = int(now if now is not None else time.time())
     with store.open() as con:
         # v10 前的 4 段旧键唯一时换成新键；重复 key 去重（PK 冲突会逃出项目异常）
-        evidence = list(dict.fromkeys(store.resolve_msg_key(con, account, k) for k in evidence))
+        evidence = store.resolve_msg_keys(con, account, evidence)
         # 证据判据与写入同一把写锁（同 `store.upsert_batch` 的立场）：判完、写之前 `purge --chat`
         # 若删完了证据所在的会话，主张与证据会落在已销毁的会话上，核查早已报过 ✅。
         store._begin_immediate(con)

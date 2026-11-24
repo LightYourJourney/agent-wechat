@@ -156,6 +156,11 @@ def test_v10_migration_rekeys_every_table_and_keeps_ids(tmp_path, monkeypatch):
                 (f"{k1}|ocr", k1, ACCT, FRIEND))
     orphan = f"{ACCT}|{md5(FRIEND)}|message_0.db|99"            # 没有消息行的旁表孤儿
     store.upsert_media_refs(con, [(orphan, "image", "bb" * 16, None)])
+    tomb_orphan = f"{ACCT}|{md5(FRIEND)}|message_0.db|98"       # 派生墓碑的孤儿：要留着
+    con.execute("INSERT INTO derived_tombstone(msg_key, kind, deleted_at) VALUES (?, 'ocr', 0)",
+                (tomb_orphan,))
+    con.execute("INSERT INTO derived_tombstone(msg_key, kind, deleted_at) VALUES (?, 'asr', 0)",
+                (rows[2]["msg_key"],))
     con.commit()
     ids = dict(con.execute("SELECT local_id, id FROM messages").fetchall())
     con.close()
@@ -164,11 +169,14 @@ def test_v10_migration_rekeys_every_table_and_keeps_ids(tmp_path, monkeypatch):
     con = store.connect(db)                                   # 触发 v10
     try:
         assert con.execute("SELECT version FROM schema_version WHERE scope='main'"
-                           ).fetchone()[0] == store.SCHEMA_VERSION == 10
+                           ).fetchone()[0] == store.SCHEMA_VERSION == 11
         got = dict(con.execute("SELECT local_id, msg_key FROM messages").fetchall())
         assert got == {r["local_id"]: r["msg_key"] for r in rows}, "改写结果须与 row_key 同形"
         assert dict(con.execute("SELECT local_id, id FROM messages").fetchall()) == ids
-        assert {r[0] for r in con.execute("SELECT msg_key FROM media_refs")} == {k1, orphan}
+        # 回填缓存里的 4 段孤儿对不上任何日后导出的 5 段键：v11 删掉（重跑回填即恢复）
+        assert {r[0] for r in con.execute("SELECT msg_key FROM media_refs")} == {k1}
+        assert {r[0] for r in con.execute("SELECT msg_key FROM derived_tombstone")} \
+            == {rows[2]["msg_key"], tomb_orphan}
         assert tuple(con.execute("SELECT msg_key, ref_msg_key FROM msg_parts").fetchone()) \
             == (rows[1]["msg_key"], k1)
         assert tuple(con.execute("SELECT derivation_id, msg_key FROM derived_text"
@@ -256,3 +264,47 @@ def test_derived_and_claims_accept_legacy_keys(con):
     claim = derived.add_claim(ACCT, "某个事实", evidence=[legacy])
     assert [r[0] for r in con.execute("SELECT msg_key FROM fact_evidence WHERE claim_id=?",
                                       (claim["claim_id"],))] == [a["msg_key"]]
+
+
+def test_a_legacy_key_of_a_purged_message_is_reported_as_destroyed(con):
+    """消息已被 purge（行不在、墓碑是 5 段）：调用方手里的 4 段旧键换不成新键，判据也要认出
+    它对应的 5 段墓碑——否则答的是「找不到」而不是「已被销毁」。"""
+    row = mk_row(ACCT, FRIEND, 1, "x", ts=T0 + 1)
+    exclusions.add(con, [(row["msg_key"], ACCT, md5(FRIEND))])
+    con.commit()
+    legacy = messages.legacy_key(row["msg_key"])
+    assert exclusions.is_excluded(con, legacy)
+    with pytest.raises(errors.DataNotFound, match="销毁"):
+        retrieval.get_context(legacy, account=ACCT)
+
+
+def test_resolve_msg_keys_dedupes_after_resolving(con):
+    a = mk_row(ACCT, FRIEND, 1, "x", ts=T0 + 1)
+    store.upsert_batch(con, [a])
+    assert store.resolve_msg_keys(con, ACCT, [messages.legacy_key(a["msg_key"]), a["msg_key"]]) \
+        == [a["msg_key"]]
+
+
+def test_a_null_anchor_skips_the_rebuild_check(wx, monkeypatch):
+    """v10 迁移回填不到锚点（水位线那行不在索引里）时为 NULL：不判，照常增量。"""
+    wx([(1, T0 + 1, "一"), (2, T0 + 2, "二")])
+    export.run_export(ACCT)
+    with store.open() as c:
+        c.execute("UPDATE watermark SET anchor_ts = NULL")
+    wx([(1, T0 + 101, "别的一代"), (2, T0 + 102, "别的二"), (3, T0 + 103, "三")])
+    resets = []
+    monkeypatch.setattr(store, "reset_export_watermark", lambda *a: resets.append(a))
+    assert export.run_export(ACCT, audit_rows=0) == 1
+    assert resets == []
+
+
+def test_a_rebuild_restarts_the_look_back_cursor_too(wx):
+    """回看游标是上一代表的编号：重建后不归零，就从旧位置往后看、漏掉新表开头。"""
+    wx([(i, T0 + i, f"一代{i}") for i in range(1, 4)])
+    export.run_export(ACCT)
+    export.run_export(ACCT, audit_rows=1)
+    export.run_export(ACCT, audit_rows=1)              # 游标走到 2
+    wx([(i, T0 + 100 + i, f"二代{i}") for i in range(1, 4)])
+    export.run_export(ACCT, audit_rows=1)
+    with store.open() as c:
+        assert list(store.load_audit_cursors(c, ACCT).values()) == [1]

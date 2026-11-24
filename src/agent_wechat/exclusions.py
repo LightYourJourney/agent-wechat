@@ -16,7 +16,7 @@ import contextlib
 import pathlib
 import sqlite3
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 
 from . import errors, messages, paths
 
@@ -172,15 +172,41 @@ def add(con: sqlite3.Connection, rows: list[tuple[str, str, str]]) -> int:
     return con.total_changes - before
 
 
-def is_excluded(con: sqlite3.Connection, msg_key: str) -> bool:
-    """该消息是否已被 `purge --chat` 立碑（排除清单里有一条即算）。
+def excluded_keys(con: sqlite3.Connection, keys: Sequence[str], *, batch: int = 500) -> set[str]:
+    """`keys` 里被立过碑的那些。**墓碑判据的唯一实现**（写入侧拦截、读取侧回读都走它，
+    嵌在 `INSERT … SELECT` 里、必须与写同一条语句的两处除外）。
 
-    读取侧（向量重嵌、上下文回读）统一走这里——墓碑查询只该有一份实现。
-    schema v10 之前写下的墓碑只有 4 段（`messages.legacy_key`），它挡住同前四段的所有消息。
+    每个键连同它的旧 4 段形态（`messages.legacy_key`）一起查：schema v10 之前写下的墓碑
+    只有 4 段，它挡住前四段相同的所有消息。走主键、按 `batch` 分批（SQLite 的参数上限）。
     """
-    return con.execute(
-        "SELECT 1 FROM exclusions.excluded WHERE msg_key IN (?, ?) LIMIT 1",
-        (msg_key, messages.legacy_key(msg_key))).fetchone() is not None
+    by_form: dict[str, list[str]] = {}
+    for k in dict.fromkeys(keys):
+        by_form.setdefault(k, []).append(k)
+        lk = messages.legacy_key(k)
+        if lk != k:
+            by_form.setdefault(lk, []).append(k)
+    forms = list(by_form)
+    out: set[str] = set()
+    for i in range(0, len(forms), batch):
+        chunk = forms[i:i + batch]
+        for (hit,) in con.execute("SELECT msg_key FROM exclusions.excluded "
+                                  f"WHERE msg_key IN ({','.join('?' * len(chunk))})", chunk):
+            out.update(by_form[hit])
+    return out
+
+
+def is_excluded(con: sqlite3.Connection, msg_key: str) -> bool:
+    """该消息是否已被 `purge --chat` 立碑（单键版 `excluded_keys`）。
+
+    调用方给的若是 4 段旧键（库里已找不到对应消息，没能换成新键），还要认 5 段的新墓碑：
+    按 `旧键|` 前缀做主键范围扫描（`|` 之后是 `}`）。
+    """
+    if excluded_keys(con, [msg_key]):
+        return True
+    kp = messages.split_key(msg_key)
+    return kp is not None and kp.create_time is None and con.execute(
+        "SELECT 1 FROM exclusions.excluded WHERE msg_key > ? AND msg_key < ? LIMIT 1",
+        (msg_key + "|", msg_key + "}")).fetchone() is not None
 
 
 def count_chat(con: sqlite3.Connection, account: str, chat_md5: str) -> int:

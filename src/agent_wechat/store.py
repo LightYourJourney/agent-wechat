@@ -2,7 +2,7 @@
 
 设计约束（全量导出面向超大规模数据）：
 - 写入恒定内存：调用方按批喂 upsert_batch，绝不 fetchall
-- 幂等：主键 (account, chat_md5, shard, local_id) + ON CONFLICT DO UPDATE——
+- 幂等：主键 msg_key = (account, chat_md5, shard, local_id, create_time) + ON CONFLICT DO UPDATE——
   重复导出不产生重复行，且能吸收撤回/编辑引起的内容变化
 - 增量：导出水位线 watermark 表按 (account, shard, chat_md5) 记录已导到的 max(local_id)
   读写入口是本模块的 load_export_watermarks / clear_export_watermarks（导出侧不写裸 SQL）
@@ -16,7 +16,7 @@ import re
 import sqlite3
 import threading
 import time
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 
 from . import errors, exclusions, messages, migrations, paths
 
@@ -314,7 +314,7 @@ SCHEMA = _SCHEMA_SANS_FTS_TRIGGERS + "\n" + "\n".join(FTS_TRIGGERS)
 
 # 本程序已知的 main scope 最新版本。迁移只列**IF NOT EXISTS 表达不了**的变更；
 # 基线（v1）由 `migrations.apply` 隐式 stamp——那代表「整套 DDL 已由 ensure 建好」。
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 # FTS5 的 `secure-delete`（SQLite ≥ 3.42）：删除时把被删行的 token 从索引段里**当场**抹掉。
 # 不开的话 `purge --chat` 之后，被删正文的 trigram 仍留在 `*_fts_data` 的活跃页里（实测 8 个里
@@ -330,7 +330,8 @@ FTS_SECURE_DELETE: tuple[str, ...] = (
 # v10：旧 4 段 msg_key → `…|local_id|create_time`（`messages.row_key`）。
 # - **先改旁表、后改 messages**：旁表靠旧键去 messages 取 ts，messages 先改就对不上了。
 #   没有消息行的孤儿（回填命令写的、或 purge 前缀删之外的残留）保持 4 段——没有 ts 可补，
-#   而 purge 的前缀删与排除判据（认 4 段旧键）照样盖得住它们。
+#   而 purge 的前缀删与排除判据（认 4 段旧键）照样盖得住它们。其中回填缓存三张表的孤儿
+#   由 v11 删掉（见那一版）。
 # - 只改**恰好 4 段**的键：新库上迁移也会跑（表是空的），已是 5 段的不会被再追加一次。
 # - `messages.id` 不变：向量行（`msg_rowid`）与 FTS（rowid）不受影响；FTS / 重嵌触发器
 #   不监听 msg_key，这次 UPDATE 不会触发它们。
@@ -434,6 +435,16 @@ MIGRATIONS: tuple[migrations.Migration, ...] = (
         version=10,
         name="msg_key 追加 create_time；水位线记锚点（识别表重建）",
         statements=_V10_STATEMENTS,
+    ),
+    migrations.Migration(
+        version=11,
+        name="清掉 v10 留下的 4 段旁表孤儿",
+        # v10 改不了没有消息行的旁表行（补不出 create_time）。这三张表的行是回填命令
+        # （`appmsg rebuild` / `media rebuild-refs` / `extras rebuild`）按微信库写的缓存：消息
+        # 日后导出时拿的是 5 段键，4 段的那行再也对不上，只会把计数垫高。删掉，重跑回填即恢复。
+        # 单独成一版而不是并进 v10：已经升到 v10 的库也要清一次。
+        statements=tuple(f"DELETE FROM {t} WHERE {_IS_LEGACY_KEY.format(c='msg_key')}"
+                         for t in ("msg_parts", "media_refs", "msg_extras")),
     ),
 )
 
@@ -831,27 +842,8 @@ def _ensure_fts_triggers(con: sqlite3.Connection) -> None:
 def _filter_excluded(con: sqlite3.Connection, keys: Sequence[str]) -> set[str]:
     """本批里被排除的 msg_key。**必须在调用方的事务内查**，与随后的写同事务：
     读在提交前、写在提交后的话，那份陈旧结果会把被删的行原样写回去（spec §5.4）。
-
-    走 `exclusions.excluded` 的主键，按 KEYS_BATCH 分批——与 `media_refs_by_keys` 同一写法。
-    每个键连同它的旧 4 段形态（`messages.legacy_key`）一起查：v10 之前的墓碑只有 4 段。
-    """
-    if not keys:
-        return set()
-    by_form: dict[str, list[str]] = {}
-    for k in dict.fromkeys(keys):
-        by_form.setdefault(k, []).append(k)
-        lk = messages.legacy_key(k)
-        if lk != k:
-            by_form.setdefault(lk, []).append(k)
-    forms = list(by_form)
-    out: set[str] = set()
-    for i in range(0, len(forms), KEYS_BATCH):
-        chunk = forms[i:i + KEYS_BATCH]
-        sql = ("SELECT msg_key FROM exclusions.excluded "
-               f"WHERE msg_key IN ({','.join('?' * len(chunk))})")
-        for (hit,) in con.execute(sql, chunk):
-            out.update(by_form[hit])
-    return out
+    判据本体在 `exclusions.excluded_keys`（含 v10 前的 4 段墓碑），这里只钉批大小。"""
+    return exclusions.excluded_keys(con, keys, batch=KEYS_BATCH)
 
 
 def _heal_degraded_chat_ids(con: sqlite3.Connection, rows: list[messages.MessageRow]) -> None:
@@ -1516,6 +1508,11 @@ def resolve_msg_key(con: sqlite3.Connection, account: str, msg_key: str) -> str:
             f"旧格式 msg_key 对应多条消息：{msg_key}",
             hint="该会话的微信消息表被重建过；请重新检索，使用结果里的新 msg_key")
     return rows[0][0] if rows else msg_key
+
+
+def resolve_msg_keys(con: sqlite3.Connection, account: str, keys: Iterable[str]) -> list[str]:
+    """批量版 `resolve_msg_key`：逐个换成库里的键，再去重保序（调用方给的键可能重复）。"""
+    return list(dict.fromkeys(resolve_msg_key(con, account, k) for k in keys))
 
 
 def clear_export_watermarks(con: sqlite3.Connection, account: str) -> None:

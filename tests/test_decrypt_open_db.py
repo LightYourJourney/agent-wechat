@@ -412,3 +412,18 @@ def test_nested_opens_in_one_thread_do_not_take_a_second_slot(monkeypatch):
     for t in ts:
         t.join(5)
     assert len(done) == n
+
+
+def test_out_of_order_close_in_one_thread_still_releases_the_slot(monkeypatch):
+    """同一线程里两个 `open_db` 不按 LIFO 关闭（先关外层、后关内层）：此前 finally 「恢复进入时的
+    深度」，计数卡在 1，这个线程此后再也不占名额——并发上限对它失效。"""
+    _counting_backend(monkeypatch, lambda: None)
+    a = decrypt.open_db(pathlib.Path("a.db"), b"k")
+    b = decrypt.open_db(pathlib.Path("b.db"), b"k")
+    a.__enter__()
+    b.__enter__()
+    a.__exit__(None, None, None)
+    b.__exit__(None, None, None)
+    assert decrypt._open_db_depth.n == 0
+    with decrypt.open_db(pathlib.Path("c.db"), b"k"):
+        assert decrypt._open_db_depth.n == 1

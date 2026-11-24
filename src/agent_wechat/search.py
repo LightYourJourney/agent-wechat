@@ -58,13 +58,12 @@ def _runtime_failure(msg: str) -> errors.IndexUnavailable:
 _INT64_MIN, _INT64_MAX = -(1 << 63), (1 << 63) - 1
 
 
-def check_ts(name: str, value: int | None) -> int | None:
+def check_ts(name: str, value: int | None) -> None:
     """时间窗入参的值域闸：超出 SQLite INTEGER（int64）的值此前在绑定时抛裸 `OverflowError`，
     穿出 core 层（MCP 报「内部错误」、web 界面直接断连接）。"""
     if value is not None and not _INT64_MIN <= int(value) <= _INT64_MAX:
         raise SearchInputError(f"{name} 超出范围（须在 64 位整数内）",
                                hint="时间窗参数是 unix 秒")
-    return value
 
 
 def search(query: str, chat_id: str | None = None, limit: int = 20,

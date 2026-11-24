@@ -350,7 +350,7 @@ def chat_export(contact: str, *, months: list[str] | None = None, limit: int = 5
         degraded=view.degraded)
 
 
-def _discard_if_purged_meanwhile(keys: list[str], files: list) -> None:
+def _discard_if_purged_meanwhile(keys: list[str], files: list[pathlib.Path]) -> None:
     """读完索引、写完产物之间 `purge --chat` 删掉了这个会话：删掉本次写的产物，然后拒绝。
 
     产物里是读出来的正文，purge 的 rmtree 若早于这次写，核查报 ✅ 之后已删的正文又落回
@@ -362,13 +362,13 @@ def _discard_if_purged_meanwhile(keys: list[str], files: list) -> None:
         return
     try:
         with store.open() as con:
-            purged = any(exclusions.is_excluded(con, k) for k in keys)
-    except (sqlite3.Error, OSError):
+            purged = bool(exclusions.excluded_keys(con, keys, batch=store.KEYS_BATCH))
+    except (sqlite3.Error, OSError, errors.AgentWeChatError):   # store.open 抛的是 IndexUnavailable
         purged = True
     if not purged:
         return
     for f in files:
-        pathlib.Path(f).unlink(missing_ok=True)
+        f.unlink(missing_ok=True)
     raise errors.ScopeDenied(
         "导出期间会话被 purge --chat 销毁（或排除清单读不出来），本次写出的产物已删除",
         hint="确需导出：先 `agent-wechat purge --chat <会话> --undo --yes` 解除墓碑后重导")
@@ -456,8 +456,8 @@ def message_parts(contact: str, *, keys: Sequence[str],
     try:
         with store.open() as con:
             # v10 前的 4 段旧键唯一时换成新键（`store.resolve_msg_key`），再去重保序
-            wanted = list(dict.fromkeys(store.resolve_msg_key(con, ctx.account, k)
-                                        for k in keys if k.startswith(prefix)))
+            wanted = store.resolve_msg_keys(con, ctx.account,
+                                            (k for k in keys if k.startswith(prefix)))
             got = store.msg_parts_by_keys(con, wanted)
             # EA-041：与 parts 同一趟、同一个 wanted 集合读出原始载荷，解析在库外做。
             extras_raw = store.extras_by_keys(con, wanted)

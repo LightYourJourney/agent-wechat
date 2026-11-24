@@ -256,7 +256,7 @@ decrypt.open_db(db, passphrase)                     # reader / 语音 / 朋友�
 | SQLite + FTS5（单文件） | PostgreSQL / 独立向量库 | 个人数据量级（百万条内）下零运维、单文件易备份/销毁；trigram 无需分词词典，对中文子串匹配和人名/专名表现稳 |
 | 每会话一张表的全量枚举（不解析表名来源） | 只导出 session 列表中的会话 | Msg_ 表含历史会话；未解析 md5 的会话以 `md5:xxx` 为 id 仍完整导出，不丢数据 |
 | 幂等 upsert（ON CONFLICT DO UPDATE） | INSERT OR IGNORE | 撤回/编辑后重扫能修正内容而非跳过 |
-| 水位线与数据同事务 | 先写数据后改水位线 | 任意时刻被杀都一致：最多重复扫一批（幂等吸收），绝不丢数据 |
+| 水位线与数据同事务 | 先写数据后改水位线 | 任意时刻被杀都一致：最多重复扫一批（幂等吸收），绝不丢数据。唯一例外是识别到表重建时的水位线归零（`store.reset_export_watermark`）：它先单独提交，崩在中间最坏是下一轮再从头扫一遍（键含 create_time，重扫幂等） |
 | 导出与向量化解耦 | 导出时同时嵌入 | 嵌入是 CPU 密集长任务，与 I/O 管道耦合会互相拖累。已落地：`vector.py` 独立嵌入管道，手动/按需触发 |
 
 **消息信封契约**：`get_recent_messages` / `search_history` / `semantic_search` 三处返回的消息

@@ -430,10 +430,8 @@ def _loc_of_msg_key(msg_key: str) -> tuple[str, str, int] | None:
     判据必须是 `isdecimal`（可 `int` 解析）而不是 `isdigit`——后者含 `²`/`⑦` 这类
     Numeric_Type=Digit 的字符，`int()` 照样抛（F5，T6 复审）。
     """
-    parts = msg_key.split("|")
-    if len(parts) not in (4, 5) or not all(x.isdecimal() for x in parts[3:]):
-        return None
-    return parts[1], parts[2], int(parts[3])
+    kp = messages.split_key(msg_key)
+    return None if kp is None else (kp.chat_md5, kp.shard, kp.local_id)
 
 
 def _sticker_name(raw_b64: str | None) -> str | None:

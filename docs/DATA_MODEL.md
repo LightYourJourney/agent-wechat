@@ -240,7 +240,10 @@ msg_key = "<account>|<chat_md5>|<shard>|<local_id>|<create_time>"
 索引行。同一条消息的 `create_time` 不变，两代表里同 `local_id` 的消息几乎不可能同秒。
 
 - **v10 迁移**把 `index.db` 里的键就地改写（`messages` 与各旁表、`derived_text.derivation_id`、
-  `msg_parts.ref_msg_key`；`messages.id` 不变，向量与 FTS 不动）。没有消息行的旁表孤儿保持 4 段。
+  `msg_parts.ref_msg_key`；`messages.id` 不变，向量与 FTS 不动）。没有消息行的旁表孤儿补不出第五段：
+  其中 `msg_parts` / `media_refs` / `msg_extras`（回填命令按微信库写的缓存，消息日后导出时拿的是 5 段键，
+  4 段那行再也对不上）由 **v11 删掉**——这部分消息导出后，重跑一次 `appmsg rebuild` /
+  `media rebuild-refs` / `extras rebuild` 即补回；派生文本墓碑等其余孤儿保持 4 段，判据照认。
 - **`exclusions.db` 不迁移**（被销毁的消息已不在索引里，补不出第五段）：判据把 4 段旧墓碑当前缀，
   挡住前四段相同的所有消息——宁可多挡，不让被删内容回来。新墓碑写 5 段。
 - **旧键输入**：工具与 CLI 收到 4 段键时，库里恰好一条匹配就换成它的新键（结果里返回新键）；
@@ -429,7 +432,7 @@ CREATE TABLE IF NOT EXISTS schema_version (
   版本迁移：`main v2` 把 FTS 三条触发器重建为代码里的最新定义（EA-077 的旧体漂移）；
   `main v3`（Phase 02）建立历史回看游标与重嵌队列（`audit_cursor` / `pending_reembed`）
   并重建重嵌触发器；`main v4`（Phase 03）新增重嵌失败账本 `reembed_failures`；
-  `main v5`（Phase 03）给队列加 `reason` 列（表重建）；`main v6`（Phase 04）新增同步终态表 `sync_state`；`main v7`（Phase 06）新增派生文本（`derived_text` / `derived_tombstone` / `derived_fts`）与事实记忆（`fact_claim` / `fact_evidence`）；`main v8` 给 `messages_fts` / `derived_fts` 开 FTS5 `secure-delete`（删除时连倒排索引里的 trigram 一起抹掉；SQLite < 3.42 时为空迁移，只记版本）；`main v9` 换掉重嵌触发器，会话名（`chat_id`）变化不再入队（向量文本与向量行都不含它，此前自愈一次就整会话重嵌）。`main v10` 给 `msg_key` 追加第五段 `create_time` 并就地改写各表的键、`watermark` 加 `anchor_ts` 列（识别微信删表重建，见 §4）。
+  `main v5`（Phase 03）给队列加 `reason` 列（表重建）；`main v6`（Phase 04）新增同步终态表 `sync_state`；`main v7`（Phase 06）新增派生文本（`derived_text` / `derived_tombstone` / `derived_fts`）与事实记忆（`fact_claim` / `fact_evidence`）；`main v8` 给 `messages_fts` / `derived_fts` 开 FTS5 `secure-delete`（删除时连倒排索引里的 trigram 一起抹掉；SQLite < 3.42 时为空迁移，只记版本）；`main v9` 换掉重嵌触发器，会话名（`chat_id`）变化不再入队（向量文本与向量行都不含它，此前自愈一次就整会话重嵌）。`main v10` 给 `msg_key` 追加第五段 `create_time` 并就地改写各表的键、`watermark` 加 `anchor_ts` 列（识别微信删表重建，见 §4）；`main v11` 删掉 v10 改不了的回填缓存孤儿（见 §4）。
 - **整次升级 = 一笔事务**：`BEGIN IMMEDIATE; <本次全部待执行迁移的 DDL>; <逐条写版本行>;
   COMMIT`。任一句失败整次回滚（版本停在升级前），抛 `SchemaMigrationError`；下次连接重做。
   已是最新的库走只读快路径，**不拿写锁**；重复执行是 no-op（`applied_at` 都不变）。
@@ -541,4 +544,4 @@ fact_evidence(claim_id, msg_key, role, created_at)   -- 至少一条
 没有证据的主张自动转 `retracted`（`note=evidence_purged`）。
 
 
-> Phase 07 没有 schema 变更（当时为 main v7，当前最新为 v10）；工作台只读索引库，唯一写操作是派生文本删除。
+> Phase 07 没有 schema 变更（当时为 main v7，当前最新为 v11）；工作台只读索引库，唯一写操作是派生文本删除。

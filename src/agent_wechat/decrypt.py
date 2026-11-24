@@ -449,15 +449,16 @@ _open_db_depth = threading.local()
 
 @contextlib.contextmanager
 def _open_db_slot() -> Iterator[None]:
-    depth = getattr(_open_db_depth, "n", 0)
-    if depth == 0:
+    if getattr(_open_db_depth, "n", 0) == 0:
         _open_db_slots.acquire()
-    _open_db_depth.n = depth + 1
+    _open_db_depth.n = getattr(_open_db_depth, "n", 0) + 1
     try:
         yield
     finally:
-        _open_db_depth.n = depth
-        if depth == 0:
+        # 递减而不是恢复进入时的值：同一线程里两个 open_db 生成器不按 LIFO 关闭时，
+        # 「恢复」会让计数卡在 ≥1，这个线程从此不再占名额，并发上限对它失效。
+        _open_db_depth.n -= 1
+        if _open_db_depth.n == 0:
             _open_db_slots.release()
 
 

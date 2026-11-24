@@ -930,3 +930,25 @@ def test_messages_that_arrived_after_an_old_purge_still_export(con, chat_env):
     _seed(con)
     res = usecases.chat_export("wxid_testacct02", out_dir=str(chat_env), account="acct")
     assert "第1条" in _html(res)
+
+
+def test_an_unreadable_exclusion_list_after_writing_discards_the_artifact(con, chat_env,
+                                                                         monkeypatch):
+    """写完之后复查墓碑时索引读不了：`store.open()` 抛的是 `IndexUnavailable`（不是裸 sqlite3
+    错误），此前漏接——产物留在盘上、错误原样上抛。判不了就按销毁处理。"""
+    from agent_wechat import chatview, errors, exclusions
+    _seed(con, n=2)
+    real = chatview.write
+
+    def write_then_break(view, **kw):
+        out = real(view, **kw)
+
+        def boom(*a, **k):
+            raise errors.IndexUnavailable("模拟索引被锁")
+        monkeypatch.setattr(exclusions, "excluded_keys", boom)
+        return out
+    monkeypatch.setattr(chatview, "write", write_then_break)
+    with pytest.raises(errors.ScopeDenied, match="导出期间"):
+        usecases.chat_export("wxid_testacct02", out_dir=str(chat_env), account="acct")
+    chat_dir = chat_env / "aaaa" / "chat"
+    assert not chat_dir.exists() or not any(chat_dir.iterdir())

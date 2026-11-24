@@ -428,14 +428,15 @@ def _build_account(con: sqlite3.Connection, acct: str, embedder: FastEmbedEmbedd
         # **写入时复查消息还在**（同一个写事务）：本函数不登记任务，`purge --chat` 的闸门
         # 看不见它——嵌入期间被销毁的会话，其向量（preview 列是真正文）否则会被写回来。
         # 按 (id, msg_key) 对：messages.id 不是 AUTOINCREMENT，被删的 id 会被新消息复用。
-        alive = _alive_ids(con, [(r[0], r[5]) for r in pending])
+        # 一次查完本段扫过的全部行（pending ⊆ scanned，同一对 (id, msg_key)）
+        seen_alive = _alive_ids(con, scanned)
+        alive = {r[0] for r in pending if r[0] in seen_alive}
         con.executemany(_INSERT_VEC, [(r[0], r[1], r[2], acct, r[3], r[4])
                                       for r in pending if r[0] in alive])
         # 扫过之后被删、id 又被新消息**复用**的行：水位线马上要推过这些 id，前向扫描再也看不见
         # 那条新消息（典型：嵌入期间 `purge --chat` 删掉了最高的 id，随后的导出复用了它们——
         # 封顶只看 max(id)，而复用之后 max(id) 又回来了）。投进重嵌队列，由 `apply_dirty` 按
         # 当前内容嵌（先删后插，不撞主键）。
-        seen_alive = _alive_ids(con, scanned)
         dead = [i for i, _ in scanned if i not in seen_alive]
         for i in range(0, len(dead), 500):
             chunk = dead[i:i + 500]
@@ -643,8 +644,8 @@ def _prev_text(con: sqlite3.Connection, row: Mapping) -> str | None:
         "WHERE account=? AND chat_id=? AND (ts < ? OR (ts = ? AND local_id < ?)) "
         "ORDER BY ts DESC, local_id DESC LIMIT ?",
         (row["account"], row["chat_id"], row["ts"], row["ts"], row["local_id"],
-         DIRTY_PREV_SCAN)).fetchall()
-    for r in cand:
+         DIRTY_PREV_SCAN))
+    for r in cand:                       # 逐行取：通常第一行就是答案，不必整段 fetchall
         if should_embed(r):
             return display_text(r)
     return None

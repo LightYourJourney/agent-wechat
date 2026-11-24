@@ -57,7 +57,7 @@ def run_export(acct: str, chat_id: str | None = None, full: bool = False,
                 # locked/corrupt）。出口共享构造器，**调用点留在原地**——冻结表按调用点记账。
                 raise store.index_unavailable(exc) from exc
         resume = {} if full else None
-        anchors: dict = {}
+        anchors: dict[tuple[str, str], int | None] = {}
         if resume is None:
             resume = store.load_export_watermarks(con, acct)
             anchors = store.load_export_anchors(con, acct)

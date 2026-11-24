@@ -662,8 +662,9 @@ class MessageReader:
                     # 唯一那张表，这里再判一次是恒真分支（同一判据两处维护）。
                     start = resume.get((shard.name, md5hex), 0)
                     anchor = (anchors or {}).get((shard.name, md5hex))
-                    if start and anchor is not None and self._table_rebuilt(
-                            con, table, start, anchor):
+                    rebuilt = bool(start and anchor is not None
+                                   and self._table_rebuilt(con, table, start, anchor))
+                    if rebuilt:
                         start = 0
                         if on_rebuilt is not None:
                             on_rebuilt(shard.name, md5hex)
@@ -682,7 +683,9 @@ class MessageReader:
                         # 回看的行走 `audit_sink` 而**不**混进 yield：调用方要把「本轮
                         # 新写入的行」与「回看过的行」分开计数（`rows` 是已发布契约），
                         # 混在一起会让每次增量都报出几万行。
-                        a_start = (audit_cursors or {}).get((shard.name, md5hex), 0)
+                        # 表重建过：旧游标是上一代的编号，回看也从头走
+                        a_start = 0 if rebuilt else (audit_cursors or {}).get(
+                            (shard.name, md5hex), 0)
                         got = con.execute(
                             f"SELECT {_EXPORT_COLUMNS} FROM '{table}' "
                             f"WHERE local_id > ? ORDER BY local_id LIMIT ?",

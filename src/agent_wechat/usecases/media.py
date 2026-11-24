@@ -301,8 +301,7 @@ def message_media(contact: str, *, keys: Sequence[str] | None = None,
                 # `chat_md5` 一滤不能少：keys 可能来自别的会话——不加就会把别人的媒体
                 # 冠上本次解析出的 chat_id 报出去。
                 # v10 前的 4 段旧键唯一时换成新键（`store.resolve_msg_key`）
-                uniq = list(dict.fromkeys(store.resolve_msg_key(con, ctx.account, k)
-                                          for k in keys))
+                uniq = store.resolve_msg_keys(con, ctx.account, keys)
                 rows = []
                 for i in range(0, len(uniq), store.KEYS_BATCH):
                     chunk = uniq[i:i + store.KEYS_BATCH]
