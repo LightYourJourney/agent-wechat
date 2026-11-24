@@ -2324,7 +2324,7 @@ def test_status_success_path_covers_both_entries(tmp_path, monkeypatch, capsys):
     home.mkdir()
     monkeypatch.setattr(paths, "HOME_DIR", home)
     monkeypatch.setattr(keys_mod, "CACHE_FILE", home / "passphrase.json")
-    monkeypatch.setattr(account, "status", lambda: SimpleNamespace(
+    monkeypatch.setattr(account, "status", lambda: account.AccountStatus(
         running=True, pid=999, current="wxid_testacct01_ab12",
         accounts=["wxid_testacct01_ab12"]))
     keys_mod.save_cached_hex("wxid_testacct01", "aa" * 32)
@@ -2355,13 +2355,11 @@ def test_status_success_path_covers_both_entries(tmp_path, monkeypatch, capsys):
 def test_status_explains_why_no_account_was_found(tmp_path, monkeypatch, capsys):
     """issue #1：微信在跑、「当前登录：未知（未运行或启动中）」「本机账号：（无）」——前一句与
     「微信运行: True」自相矛盾，后一句分不清「数据目录不在」与「在，但一个都没认出来」。"""
-    from types import SimpleNamespace
-
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setattr(paths, "HOME_DIR", home)
-    monkeypatch.setattr(account, "status", lambda: SimpleNamespace(
-        running=True, pid=999, current=None, accounts=[]))
+    monkeypatch.setattr(account, "wechat_pid", lambda: 999)
+    monkeypatch.setattr(account, "current_account", lambda pid, known=None: None)
 
     root = tmp_path / "xwechat_files"
     monkeypatch.setattr(paths, "XWECHAT_FILES", root)
@@ -2374,7 +2372,16 @@ def test_status_explains_why_no_account_was_found(tmp_path, monkeypatch, capsys)
     root.mkdir()
     with pytest.raises(SystemExit):
         cli.main(["status"])
-    assert f"微信数据目录 {root}：存在，但其中没有" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert f"微信数据目录 {root}：存在，但没认出账号" in out and "未识别的子目录" not in out
+
+    # 目录名不合规则时列出**形状**（贴进 issue 不泄露微信号），已知的非账号目录原名列出
+    (root / "Zhang3_ab12").mkdir()
+    (root / "all_users").mkdir()
+    with pytest.raises(SystemExit):
+        cli.main(["status"])
+    out = capsys.readouterr().out
+    assert "（未识别的子目录：aaaaa0_aa00, all_users）" in out and "Zhang3" not in out
 
 
 def test_status_does_not_create_the_index_db(tmp_path, monkeypatch):
@@ -2387,7 +2394,7 @@ def test_status_does_not_create_the_index_db(tmp_path, monkeypatch):
     from types import SimpleNamespace
 
     from agent_wechat import usecases
-    monkeypatch.setattr(account, "status", lambda: SimpleNamespace(
+    monkeypatch.setattr(account, "status", lambda: account.AccountStatus(
         running=True, pid=999, current=None, accounts=[]))
 
     res = usecases.account_status()
@@ -2407,7 +2414,7 @@ def test_status_does_not_create_exclusions_db_either(tmp_path, monkeypatch):
     from types import SimpleNamespace
 
     from agent_wechat import exclusions, usecases
-    monkeypatch.setattr(account, "status", lambda: SimpleNamespace(
+    monkeypatch.setattr(account, "status", lambda: account.AccountStatus(
         running=True, pid=999, current=None, accounts=[]))
     store.DB_PATH.write_bytes(b"")                     # 「索引在、排除清单缺」的手工态
     ex_path = exclusions.path_for(store.DB_PATH)
@@ -2428,7 +2435,7 @@ def test_status_says_when_the_index_cannot_be_read(tmp_path, monkeypatch):
     from types import SimpleNamespace
 
     from agent_wechat import exclusions, usecases
-    monkeypatch.setattr(account, "status", lambda: SimpleNamespace(
+    monkeypatch.setattr(account, "status", lambda: account.AccountStatus(
         running=True, pid=999, current=None, accounts=[]))
     ex_path = exclusions.path_for(store.DB_PATH)
     store.DB_PATH.write_bytes("这不是数据库".encode())
@@ -2459,7 +2466,7 @@ def test_status_reports_the_real_backup_exclusion_state(tmp_path, monkeypatch, c
 
     from agent_wechat import keys as keys_mod
     monkeypatch.setattr(keys_mod, "CACHE_FILE", tmp_path / "passphrase.json")   # F12：不读真实缓存
-    monkeypatch.setattr(account, "status", lambda: SimpleNamespace(
+    monkeypatch.setattr(account, "status", lambda: account.AccountStatus(
         running=True, pid=999, current="wxid_testacct01_ab12",
         accounts=["wxid_testacct01_ab12"]))
 
@@ -2486,7 +2493,7 @@ def test_status_verify_keys_renders_the_hmac_line(tmp_path, monkeypatch, capsys)
     home.mkdir()
     monkeypatch.setattr(paths, "HOME_DIR", home)
     monkeypatch.setattr(keys_mod, "CACHE_FILE", home / "passphrase.json")
-    monkeypatch.setattr(account, "status", lambda: SimpleNamespace(
+    monkeypatch.setattr(account, "status", lambda: account.AccountStatus(
         running=True, pid=999, current="wxid_testacct01_ab12",
         accounts=["wxid_testacct01_ab12"]))
     keys_mod.save_cached_hex("wxid_testacct01", "aa" * 32)
@@ -2513,7 +2520,7 @@ def test_status_verify_keys_survives_a_corrupt_cache(tmp_path, monkeypatch, caps
     home.mkdir()
     monkeypatch.setattr(paths, "HOME_DIR", home)
     monkeypatch.setattr(keys_mod, "CACHE_FILE", home / "passphrase.json")
-    monkeypatch.setattr(account, "status", lambda: SimpleNamespace(
+    monkeypatch.setattr(account, "status", lambda: account.AccountStatus(
         running=True, pid=999, current="wxid_testacct01_ab12",
         accounts=["wxid_testacct01_ab12"]))
     (home / "passphrase.json").write_text(_json.dumps(
@@ -2540,7 +2547,7 @@ def test_status_verify_keys_names_the_unreadable_dbs(tmp_path, monkeypatch, caps
     home.mkdir()
     monkeypatch.setattr(paths, "HOME_DIR", home)
     monkeypatch.setattr(keys_mod, "CACHE_FILE", home / "passphrase.json")
-    monkeypatch.setattr(account, "status", lambda: SimpleNamespace(
+    monkeypatch.setattr(account, "status", lambda: account.AccountStatus(
         running=True, pid=999, current="wxid_testacct01_ab12",
         accounts=["wxid_testacct01_ab12"]))
     keys_mod.save_cached_hex("wxid_testacct01", "aa" * 32)
@@ -2661,7 +2668,7 @@ def test_cli_status_prints_the_same_index_notes_as_mcp(tmp_path, monkeypatch, ca
     from types import SimpleNamespace
 
     from agent_wechat import exclusions
-    monkeypatch.setattr(account, "status", lambda: SimpleNamespace(
+    monkeypatch.setattr(account, "status", lambda: account.AccountStatus(
         running=True, pid=999, current=None, accounts=[]))
     monkeypatch.setattr(paths, "time_machine_excluded", lambda: None)
     store.DB_PATH.write_bytes("这不是数据库".encode())

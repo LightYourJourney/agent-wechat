@@ -83,6 +83,17 @@ def test_parse_lsof_custom_wechat_id_account():
     assert account._parse_account_from_lsof(out) == "custom-id_99_c0d1"
 
 
+def test_parse_lsof_only_counts_known_account_dirs():
+    """形似账号、但不是账号目录的名字（如 `Backup_2024`）不得造成多命中——给了本机账号
+    清单就只认清单里的。"""
+    out = "\n".join([
+        _lsof(f".../xwechat_files/{ACC}/db_storage/a.db"),
+        _lsof(".../xwechat_files/Backup_2024/x.tmp"),
+    ])
+    assert account._parse_account_from_lsof(out) is None
+    assert account._parse_account_from_lsof(out, [ACC]) == ACC
+
+
 # ---------- _parse_pids ----------
 
 def test_parse_pids_multiple_and_junk():

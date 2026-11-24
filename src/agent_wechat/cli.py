@@ -46,8 +46,13 @@ def cmd_status(args: argparse.Namespace) -> int:
     print(f"本机账号: {', '.join(st.accounts) or '（无）'}")
     if not st.accounts:
         # issue #1：「（无）」分不清「目录不在」与「在，但一个都没认出来」，排障要先知道是哪种。
-        where = "存在，但其中没有 <微信号>_<hex4> 形态的目录" if paths.XWECHAT_FILES.is_dir() \
-            else "不存在（微信版本或安装位置与实测不同？）"
+        # 未识别的子目录只给形状（字母→a、数字→0），贴进 issue 不泄露微信号。
+        if not st.data_dir_exists:
+            where = "不存在（微信版本或安装位置与实测不同？）"
+        else:
+            where = "存在，但没认出账号（账号目录应形如 <微信号>_<hex4>，且其下有 db_storage/）"
+            if st.unrecognized:
+                where += f"\n  （未识别的子目录：{', '.join(st.unrecognized)}）"
         print(f"  微信数据目录 {paths.XWECHAT_FILES}：{where}")
     for acc in st.accounts:
         bare = paths.bare_wxid(acc)

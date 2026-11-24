@@ -24,7 +24,7 @@ def _key(lid: int) -> str:
 
 def _env(tmp_path, monkeypatch, *, seed=True):
     wx = tmp_path / "wx"
-    (wx / ACCT).mkdir(parents=True)
+    (wx / ACCT / "db_storage").mkdir(parents=True)
     monkeypatch.setattr(paths, "XWECHAT_FILES", wx)
     monkeypatch.setattr(paths, "HOME_DIR", tmp_path / "home")
     monkeypatch.setattr(store, "DB_PATH", tmp_path / "home" / "index.db")

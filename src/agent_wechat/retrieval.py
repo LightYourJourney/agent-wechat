@@ -45,8 +45,18 @@ _WXID_RE = re.compile(r"wxid_[A-Za-z0-9_-]{4,}")
 _CHATROOM_RE = re.compile(r"[A-Za-z0-9._%+-]+@chatroom")
 _LONG_DIGITS_RE = re.compile(r"\d{11,}")
 # 自定义微信号（字母开头、6–20 位字母数字 `_` `-`）长得和普通英文词一样，不能按形状遮；
-# 只遮**名册里真有的**那些（`display_names.member_key`），按整词比对。
-_ID_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9_-])[A-Za-z][A-Za-z0-9_-]{5,19}(?![A-Za-z0-9_-])")
+# 只遮**名册里真有的**那些（`display_names.member_key`），按整词比对。本正则只用来筛形状。
+_ID_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9_-]{5,19}")
+# 微信内置的系统 username：形状与自定义微信号无异，但不是个人标识，且 `weixin` 这类词在正文
+# 里很常见——遮掉只会误伤。
+_SYSTEM_USERNAMES = frozenset({
+    "filehelper", "weixin", "medianote", "fmessage", "floatbottle", "qqmail", "tmessage",
+    "qmessage", "qqsync", "newsapp", "blogapp", "masssendapp", "feedsapp", "voipapp",
+    "voicevoipapp", "voiceinputapp", "shakeapp", "lbsapp", "linkedinplugin", "cardpackage",
+    "officialaccounts", "notifymessage", "notification_messages", "brandsessionholder",
+    "brandservicesessionholder", "mphelper", "weibo", "qqfriend", "topstory",
+    "exmail_tool", "userexperience_alarm",
+})
 
 
 def denied_chat_ids() -> frozenset[str]:
@@ -79,11 +89,14 @@ def _ensure_allowed(chat_id: str | None) -> None:
             hint="从 AGENT_WECHAT_DENY 里去掉它，或改用其它会话")
 
 
-def known_custom_ids(account: str) -> frozenset[str]:
-    """本账号名册里**不以 `wxid_` 开头**的个人微信号（自定义微信号），外加本账号自己的。
+def custom_id_pattern(account: str) -> re.Pattern[str] | None:
+    """本账号名册里**不以 `wxid_` 开头**的个人微信号（自定义微信号）外加本账号自己的，
+    编成一条整词匹配的正则；一个都没有返回 None。
 
-    `wxid_*` 已按形状遮；`gh_*`（公众号）与 `*@chatroom` 不在此列（前者不是个人标识，
-    后者另有正则）。读不了索引就只剩本账号自己的——遮盖是尽力而为，不该把检索打挂。
+    `wxid_*` 已按形状遮；`gh_*`（公众号）、`*@chatroom`（另有正则）与系统 username 不在此列。
+    不分大小写；左右两侧只要不是字母数字就算词边界——`zhangsan_备注`、`zhangsan-1` 里的
+    `zhangsan` 也遮（多遮半个词好过漏遮）。长的排前面，免得 `abc_def` 只遮掉 `abc`。
+    读不了索引就只剩本账号自己的——遮盖是尽力而为，不该把检索打挂。
     """
     ids = {paths.bare_wxid(account)}
     try:
@@ -92,15 +105,20 @@ def known_custom_ids(account: str) -> frozenset[str]:
                 "SELECT DISTINCT member_key FROM display_names WHERE account=?", (account,)))
     except (sqlite3.Error, errors.IndexUnavailable):
         pass
-    return frozenset(i for i in ids
-                     if _ID_TOKEN_RE.fullmatch(i) and not i.startswith(("wxid_", "gh_")))
+    keep = sorted((i for i in ids
+                   if _ID_TOKEN_RE.fullmatch(i) and not i.startswith(("wxid_", "gh_"))
+                   and i.lower() not in _SYSTEM_USERNAMES), key=len, reverse=True)
+    if not keep:
+        return None
+    alts = "|".join(map(re.escape, keep))
+    return re.compile(rf"(?<![A-Za-z0-9])(?:{alts})(?![A-Za-z0-9])", re.IGNORECASE)
 
 
-def mask_snippet(text: str | None, known_ids: frozenset[str] = frozenset()) -> str:
+def mask_snippet(text: str | None, custom_ids: re.Pattern[str] | None) -> str:
     """片段遮盖：账号标识与 11 位以上数字（手机号）替换成占位符。
 
-    账号标识 = `wxid_*` / `*@chatroom`（按形状）＋ `known_ids` 里的自定义微信号（按整词，
-    见 `known_custom_ids`）。
+    账号标识 = `wxid_*` / `*@chatroom`（按形状）＋ 名册里的自定义微信号（`custom_ids`，
+    见 `custom_id_pattern`）。
 
     **只作用于片段**：完整的原文属于第二阶段（`get_context`），那里如实验出，不做篡改。
     遮盖是「降低首次披露的敏感度」，不是脱敏保证——调用方仍应把片段当敏感数据。
@@ -108,8 +126,8 @@ def mask_snippet(text: str | None, known_ids: frozenset[str] = frozenset()) -> s
     if not text:
         return ""
     out = _WXID_RE.sub(MASK, text)
-    if known_ids:
-        out = _ID_TOKEN_RE.sub(lambda m: MASK if m.group(0) in known_ids else m.group(0), out)
+    if custom_ids is not None:
+        out = custom_ids.sub(MASK, out)
     out = _CHATROOM_RE.sub(MASK, out)
     out = _LONG_DIGITS_RE.sub(MASK, out)
     return out
@@ -256,13 +274,13 @@ def search_messages(query: str, *, account: str, chat_id: str | None = None,
     hits: list[dict] = []
     used = 0
     clipped = False
-    known_ids = known_custom_ids(account) if ordered else frozenset()
+    custom_ids = custom_id_pattern(account) if ordered else None
     for entry in ordered:
         remaining = TOTAL_CHARS - used
         if remaining <= 0:
             break
         hit = entry["hit"]
-        flat = mask_snippet(hit.get("content") or hit.get("media_hint"), known_ids)
+        flat = mask_snippet(hit.get("content") or hit.get("media_hint"), custom_ids)
         flat = flat.replace("\n", " ").strip()
         snip, was_clipped = _clip(flat, min(SNIPPET_CHARS, remaining))
         clipped = clipped or was_clipped

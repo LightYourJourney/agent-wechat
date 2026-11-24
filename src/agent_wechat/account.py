@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import dataclasses
 import subprocess
+from collections.abc import Collection
 
 from . import paths
 from .errors import AccountNotFound
@@ -23,6 +24,9 @@ class AccountStatus:
     current: str | None        # 当前登录账号目录名（<微信号>_<hex4>），不确定时为 None
     accounts: list[str]        # 本机全部账号目录名
     pid: int | None
+    # 排障诊断（issue #1）：数据目录在不在、里面哪些子目录没认成账号（只给形状，见 paths）
+    data_dir_exists: bool = True
+    unrecognized: list[str] = dataclasses.field(default_factory=list)
 
     @property
     def logged_in(self) -> bool:
@@ -50,34 +54,40 @@ def wechat_pid() -> int | None:
     return pids[0] if pids else None
 
 
-def _parse_account_from_lsof(out: str) -> str | None:
-    """lsof 打开文件列表 → 唯一命中的账号目录名（<微信号>_<hex4>）；无/多命中返回 None。"""
+def _parse_account_from_lsof(out: str, known: Collection[str] | None = None) -> str | None:
+    """lsof 打开文件列表 → 唯一命中的账号目录名（<微信号>_<hex4>）；无/多命中返回 None。
+
+    给了 `known`（本机账号目录）就只认其中的名字：形似账号的非账号目录不该造成多命中。
+    """
     hits: set[str] = set()
     for line in out.splitlines():
         if "xwechat_files/" not in line:
             continue
         tail = line.split("xwechat_files/", 1)[1]
         name = tail.split("/", 1)[0]
-        if paths.ACCOUNT_RE.match(name):
+        if paths.ACCOUNT_RE.match(name) and (known is None or name in known):
             hits.add(name)
     return next(iter(hits)) if len(hits) == 1 else None
 
 
-def current_account(pid: int) -> str | None:
+def current_account(pid: int, known: Collection[str] | None = None) -> str | None:
     """lsof 判定当前登录账号。非唯一命中（如启动瞬间）视为不确定，不猜。"""
     try:
         r = _run(["lsof", "-n", "-P", "-p", str(pid)],
                  capture_output=True, text=True, timeout=15)
     except (subprocess.TimeoutExpired, OSError):
         return None                    # 同上：探测失败=不确定，不是错误
-    return _parse_account_from_lsof(r.stdout)
+    return _parse_account_from_lsof(r.stdout, known)
 
 
 def status() -> AccountStatus:
     pid = wechat_pid()
-    cur = current_account(pid) if pid else None
-    return AccountStatus(running=pid is not None, current=cur,
-                         accounts=paths.account_dirs(), pid=pid)
+    accounts = paths.account_dirs()
+    cur = current_account(pid, accounts) if pid else None
+    unrecognized = paths.unrecognized_dirs()
+    return AccountStatus(running=pid is not None, current=cur, accounts=accounts, pid=pid,
+                         data_dir_exists=unrecognized is not None,
+                         unrecognized=unrecognized or [])
 
 
 def resolve_account(account: str | None) -> str:

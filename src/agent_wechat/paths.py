@@ -35,8 +35,11 @@ CONTAINER_DATA = CONTAINER.parent                 # …/com.tencent.xinWeChat/Da
 
 # 账号目录形如 <微信号>_<hex4>（尾部 _hex4 是实例后缀）。微信号**不一定**以 `wxid_` 开头：
 # 自己设过微信号的老账号目录是 `zhangsan_ab12` 这种（issue #1：只认 `wxid_` 时这类用户
-# 「本机账号：（无）」）。同级的非账号目录 all_users / Backup / WMPF 都没有 _hex4 尾巴。
-ACCOUNT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*_[0-9a-f]{4}$")
+# 「本机账号: （无）」）。微信号以字母开头；光看名字挡不住 `Backup_2024` 这种同级目录，
+# 所以 `account_dirs` 另要求目录下有 db_storage/。
+ACCOUNT_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*_[0-9a-f]{4}$")
+# 数据目录里已知的非账号子目录：诊断时原名列出（其余只给形状，见 `unrecognized_dirs`）
+KNOWN_NON_ACCOUNT_DIRS = frozenset({"all_users", "Backup", "WMPF"})
 # 消息分片形如 message_0.db；不含 message_fts/message_resource 等非分片库
 SHARD_RE = re.compile(r"^message_(\d+)\.db$")
 
@@ -327,12 +330,35 @@ def _listdir_or_project_error(root: pathlib.Path, *, what: str) -> list[pathlib.
             hint=f"{exc}；微信容器需要「完全磁盘访问权限」（见 INSTALL.md §3.3）") from exc
 
 
+def _is_account_dir(p: pathlib.Path) -> bool:
+    return bool(ACCOUNT_RE.match(p.name)) and (p / "db_storage").is_dir()
+
+
 def account_dirs() -> list[str]:
-    """枚举本机所有账号数据目录名（<微信号>_<hex4>）。"""
+    """枚举本机所有账号数据目录名（<微信号>_<hex4>，且其下有 db_storage/）。"""
     entries = _listdir_or_project_error(XWECHAT_FILES, what="微信数据目录")
     if entries is None:
         return []
-    return sorted(p.name for p in entries if p.is_dir() and ACCOUNT_RE.match(p.name))
+    return sorted(p.name for p in entries if p.is_dir() and _is_account_dir(p))
+
+
+def _name_shape(name: str) -> str:
+    """目录名 → 形状：字母→a、数字→0、其余字符原样。排障要的是命名规则，不是名字本身。"""
+    return "".join("a" if c.isascii() and c.isalpha() else "0" if c.isdigit() else c
+                   for c in name)
+
+
+def unrecognized_dirs() -> list[str] | None:
+    """数据目录下**没认成账号**的子目录（issue #1 排障用）；数据目录不存在返回 None。
+
+    已知的非账号目录（`KNOWN_NON_ACCOUNT_DIRS`）原名列出，其余只给形状——目录名里有微信号。
+    """
+    entries = _listdir_or_project_error(XWECHAT_FILES, what="微信数据目录")
+    if entries is None:
+        return None
+    return sorted(p.name if p.name in KNOWN_NON_ACCOUNT_DIRS else _name_shape(p.name)
+                  for p in entries
+                  if p.is_dir() and not p.name.startswith(".") and not _is_account_dir(p))
 
 
 def bare_wxid(account: str) -> str:

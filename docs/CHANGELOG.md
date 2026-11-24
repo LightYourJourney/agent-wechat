@@ -3,6 +3,20 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 风格，
 版本号语义为 0.x 阶段（API 可能变动）。
 
+### issue #1 修复复审（2026-11-24）
+
+**修复**
+
+- 账号目录识别收紧：微信号须字母开头，且目录下要有 `db_storage/`。此前 `Backup_2024` 这类同级目录
+  （4 位数字也是 hex）会被当成账号；它若出现在微信打开的文件里，lsof 判定会多命中，「当前登录」又认不出。
+  lsof 判定现在只认本机账号目录里的名字。
+- `get_account_status` 新增 `data_dir`（`path` / `exists` / `unrecognized`）：此前「为什么没认出账号」的
+  诊断只有 CLI 有。`unrecognized` 列出没认成账号的子目录，已知名原样、其余只给形状（字母→a、数字→0）；
+  `status` 印同一份，排障时不必再让用户手动 `ls`。
+- 片段遮盖自定义微信号：不再遮 `weixin` / `filehelper` 等系统 username（正文里的普通词 `weixin` 此前被遮）；
+  比对不分大小写；后面紧跟 `_` / `-` 也遮（此前 `zhangsan_备注` 原样露出）。
+- 文档：TOOLS.md `current_account: null` 的成因说明与 CLI 对齐；TROUBLESHOOTING §1.1b 标题与实际输出一致。
+
 ### 账号目录不再只认 `wxid_` 开头（issue #1，2026-11-24）
 
 **修复**

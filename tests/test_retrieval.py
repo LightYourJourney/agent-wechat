@@ -168,6 +168,21 @@ def test_snippets_mask_custom_wechat_ids_from_roster(tmp_path, monkeypatch):
     assert hit["snippet"] == f"遮盖检查 {retrieval.MASK} 与 xcustom-id_99 和 meeting"
 
 
+def test_custom_id_masking_ignores_case_and_underscore_dash_neighbours(tmp_path, monkeypatch):
+    """此前比对区分大小写、且把 `_` `-` 当词内字符：`Custom-ID_99`、`custom-id_99_备注`
+    原样露出。系统 username（`weixin` / `filehelper`）形状与微信号无异，但不是个人标识，
+    此前把正文里的普通词 `weixin` 也遮了。"""
+    _env(tmp_path, monkeypatch, with_vector=False)
+    with store.open() as con:
+        for uname in ("custom-id_99", "weixin", "filehelper"):
+            con.execute("INSERT INTO display_names VALUES (?,?,?,?)", (ACCT, CHAT_A, uname, "某"))
+        store.upsert_batch(con, [_row(
+            CHAT_A, 51, "遮盖检查 Custom-ID_99 custom-id_99_备注 weixin filehelper")])
+    hit = retrieval.search_messages("遮盖检查", account=ACCT, mode="keyword")["hits"][0]
+    m = retrieval.MASK
+    assert hit["snippet"] == f"遮盖检查 {m} {m}_备注 weixin filehelper"
+
+
 def test_long_history_is_truncated_within_budget(tmp_path, monkeypatch):
     _env(tmp_path, monkeypatch, with_vector=False)
     monkeypatch.setattr(retrieval, "TOTAL_CHARS", 600)     # 让 5×200 字符触到总预算

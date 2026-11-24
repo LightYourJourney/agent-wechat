@@ -32,7 +32,7 @@ def test_account_dirs_distinguishes_unreadable_from_absent(tmp_path, monkeypatch
     把 `_listdir_or_project_error` 换回 `is_dir()` 早退，第二条断言必红。
     """
     root = tmp_path / "xwechat_files"
-    (root / ACC).mkdir(parents=True)
+    (root / ACC / "db_storage").mkdir(parents=True)
     monkeypatch.setattr(paths, "XWECHAT_FILES", root)
     assert paths.account_dirs() == [ACC]
 
@@ -392,7 +392,7 @@ def test_the_time_machine_exclusion_is_attempted_once_per_process(tmp_path, monk
 
 def test_account_dirs_ignores_entries_that_are_not_accounts(tmp_path, monkeypatch):
     monkeypatch.setattr(paths, "XWECHAT_FILES", tmp_path)
-    (tmp_path / "wxid_testacct01_ab12").mkdir()
+    (tmp_path / "wxid_testacct01_ab12" / "db_storage").mkdir(parents=True)
     (tmp_path / "not-an-account").mkdir()
     (tmp_path / "wxid_x").write_bytes(b"")          # 名字像但不是目录
     assert paths.account_dirs() == ["wxid_testacct01_ab12"]
@@ -403,10 +403,27 @@ def test_account_dirs_accepts_custom_wechat_id(tmp_path, monkeypatch):
     只认 `wxid_` 时这类用户「本机账号：（无）」，后面所有命令都起不来。同级的非账号目录
     （all_users / Backup / WMPF）没有 `_hex4` 尾巴，仍不得混进来。"""
     monkeypatch.setattr(paths, "XWECHAT_FILES", tmp_path)
-    for name in ("wxid_testacct01_ab12", "custom-id_99_c0d1", "all_users", "Backup", "WMPF"):
+    for name in ("wxid_testacct01_ab12", "custom-id_99_c0d1"):
+        (tmp_path / name / "db_storage").mkdir(parents=True)
+    for name in ("all_users", "Backup", "WMPF"):
         (tmp_path / name).mkdir()
     assert paths.account_dirs() == ["custom-id_99_c0d1", "wxid_testacct01_ab12"]
     assert paths.bare_wxid("custom-id_99_c0d1") == "custom-id_99"
+
+
+def test_account_dirs_rejects_lookalikes_and_reports_their_shape(tmp_path, monkeypatch):
+    """`_hex4` 尾巴挡不住 `Backup_2024` 这类同级目录（4 位数字也是 hex）；微信号也不会数字
+    开头。账号目录另要求有 db_storage/。没认成账号的子目录供排障：已知名原样，其余只给形状。"""
+    monkeypatch.setattr(paths, "XWECHAT_FILES", tmp_path)
+    (tmp_path / "custom-id_99_c0d1" / "db_storage").mkdir(parents=True)
+    (tmp_path / "2024abc_ab12" / "db_storage").mkdir(parents=True)   # 数字开头
+    for name in ("Backup_2024", "Backup", ".hidden"):
+        (tmp_path / name).mkdir()
+    assert paths.account_dirs() == ["custom-id_99_c0d1"]
+    assert paths.unrecognized_dirs() == ["0000aaa_aa00", "Backup", "aaaaaa_0000"]
+
+    monkeypatch.setattr(paths, "XWECHAT_FILES", tmp_path / "nope")
+    assert paths.unrecognized_dirs() is None                         # 数据目录不存在
 
 
 def test_pid_one_is_alive(tmp_path):

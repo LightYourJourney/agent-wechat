@@ -43,12 +43,19 @@
   "accounts": ["wxid_xxx_ab12", "wxid_yyy_cd34"],
   "key_ready": true,
   "index": { "messages": 841584, "chats": 772, "last_ts": 1789046525 },
-  "schema_notes": []
+  "schema_notes": [],
+  "data_dir": { "path": ".../xwechat_files", "exists": true, "unrecognized": ["Backup", "all_users"] }
 }
 ```
 
 **异常**：微信未运行时 `wechat_running=false`、`current_account=null`（不报错）；
 索引库不存在时 `index` 计数为 0。
+
+`data_dir`：排障用。`exists` 是微信数据目录在不在；`unrecognized` 是其下**没认成账号**的子目录
+（账号目录须形如 `<微信号>_<hex4>` 且其下有 `db_storage/`）。已知的非账号目录（`all_users` /
+`Backup` / `WMPF`）原名列出，其余只给形状（字母→`a`、数字→`0`），不泄露微信号。
+`accounts` 为空时先看它：`exists=false` 是装法或版本不同，`unrecognized` 里有形似账号的形状是
+目录命名与实测不同。
 
 `schema_notes`：「老库 + 新代码」的触发器体不一致说明（**只报不改库**）。这类差异通常
 不影响既有行为（例如触发器只是多了个触发列），重建索引时自然消除——不需要为它专门重建。
@@ -869,7 +876,7 @@ untrusted / notice`。只返回**同账号同会话**；被 `purge --chat` 销�
 | `{"error": "账号 … 尚无 passphrase 缓存。请运行一次性引导：…"}` | 该账号未 bootstrap | 按 INSTALL.md §5 引导（文案与 `keys.get_passphrase` 的 `KeyNotFound` 逐字一致） |
 | `{"error": "账号目录不存在: …"}` / `{"error": "微信未运行或无法确定当前登录账号…"}` | `account` 传错或微信未登录 | 用 `get_account_status` 看已知账号，或先登录微信 |
 | `{"error": "内部错误: …"}` | 未预期的第三方异常（fastembed/sqlite3 等） | 多为环境问题；查看服务端日志 |
-| `current_account: null` | 微信未运行或启动中 | 打开微信并登录后重试 |
+| `current_account: null` | `wechat_running=false`：微信未运行；为 `true`：未登录、启动中，或没认出账号目录（`accounts` 为空时看 `data_dir`） | 打开微信并登录后重试；仍为 null 见 TROUBLESHOOTING §1.1b |
 | `{"error": "找不到联系人…"}` | 名字未命中 | 用 `list_contacts` 查准确名 |
 | `{"need_confirm": [...]}` | 名字命中多个联系人 | 让用户选择后用 username 重调 |
 | `search_history` 无 hint 但 0 命中 | 该词从未出现 | 换词 / 放宽 contact 过滤 |

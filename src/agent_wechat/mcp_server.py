@@ -79,7 +79,8 @@ def get_account_status(account: str | None = None) -> dict:
     """检测微信登录状态、当前账号、密钥就绪情况与本地索引规模。
 
     读取任何消息前应先调用本工具。返回 wechat_running / current_account /
-    accounts / key_ready / index(消息数与会话数)。
+    accounts / key_ready / index(消息数与会话数)。accounts 为空时看 data_dir
+    （数据目录在不在、哪些子目录没认成账号——只给形状，不含微信号）。
     """
     return usecases.account_status(account)
 

@@ -486,6 +486,20 @@ def test_account_status_rejects_an_unknown_explicit_account(monkeypatch):
         usecases.account_status("wxid_abc123def456")
 
 
+def test_account_status_reports_the_data_dir_diagnosis(tmp_path, monkeypatch):
+    """issue #1：MCP 也要拿得到「数据目录在不在、哪些子目录没认成账号」（只给形状）。"""
+    monkeypatch.setattr(paths, "XWECHAT_FILES", tmp_path)
+    monkeypatch.setattr(account, "wechat_pid", lambda: None)
+    from agent_wechat.usecases import chat as uc_chat
+    monkeypatch.setattr(uc_chat, "index_snapshot", lambda: ({}, []))
+    (tmp_path / "Zhang3_ab12").mkdir()
+    (tmp_path / "WMPF").mkdir()
+    res = usecases.account_status()
+    assert res["accounts"] == [] and res["current_account"] is None
+    assert res["data_dir"] == {"path": str(tmp_path), "exists": True,
+                               "unrecognized": ["WMPF", "aaaaa0_aa00"]}
+
+
 def test_media_export_opens_index_for_video(stub, monkeypatch):
     """视频归属要索引：用例层自己开 `store` 并把**可用的连接**交给 export_media。
 

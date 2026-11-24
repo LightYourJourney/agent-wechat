@@ -76,7 +76,9 @@ def account_status(account: str | None = None) -> dict:
     index, schema_notes = index_snapshot()
     return {"wechat_running": st.running, "current_account": st.current,
             "accounts": st.accounts, "key_ready": ready, "index": index,
-            "schema_notes": schema_notes}
+            "schema_notes": schema_notes,
+            "data_dir": {"path": str(paths.XWECHAT_FILES), "exists": st.data_dir_exists,
+                         "unrecognized": st.unrecognized}}
 
 
 def contacts(query: str = "", limit: int = 200,
