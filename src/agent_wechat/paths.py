@@ -16,6 +16,7 @@ import re
 import shutil
 import subprocess
 import threading
+import time
 from collections.abc import Callable
 from shutil import copyfile as _copyfile   # 单独绑定：conftest 会把 `paths.shutil` 整个换成桩
 
@@ -438,11 +439,31 @@ def pid_alive(pid: object) -> bool:
     return True
 
 
+def pid_started_after(pid: int, ts: int) -> bool:
+    """`pid` 现在这个进程是否**确定**晚于 `ts`（unix 秒）启动——是则它只是复用了这个 pid。
+
+    取 `ps -o etime=`（已运行时长，`[[dd-]hh:]mm:ss`）倒推启动时刻：不经本地时区解析，
+    不受夏令时影响。秒级截断留 2 s 余量。**判不出来一律答 False**（同 `pid_alive` 的保守立场）。
+    """
+    try:
+        out = subprocess.run(["ps", "-o", "etime=", "-p", str(pid)], capture_output=True,
+                             text=True, timeout=5).stdout.strip()
+        days, _, hms = out.rpartition("-")
+        secs = 0
+        for part in hms.split(":"):
+            secs = secs * 60 + int(part)
+        secs += int(days or 0) * 86400
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return False
+    return time.time() - secs > ts + 2
+
+
 def atomic_write(dest: pathlib.Path, data: str | bytes, *, mode: int = 0o600) -> None:
     """临时文件 + `os.replace`：失败时 `dest` 上既有的文件**原样不动**，也不会出现半截文件。
 
-    三处共用（密钥缓存、任务注册表、媒体产物），此前各写一份、写法已经分叉（媒体那份直接
-    截断终路径再写，断电后半截文件被「已导出」判据永久跳过）。
+    共用于密钥缓存、任务注册表、媒体产物与 HTML/Markdown 导出页，此前各写一份、写法已经分叉
+    （媒体那份直接截断终路径再写，断电后半截文件被「已导出」判据永久跳过）。
+    - 换名前 `fsync` 临时文件：rename 不保证数据先落盘。
     - 临时文件在**同目录**（`os.replace` 只在同一文件系统上原子）、名带 pid（并发进程不共用
       同一个 tmp），以 `mode` **建出**——落到正式文件名之前权限已经收紧；chmod 再收一次
       （同名残留可能是别的权限）。
@@ -472,6 +493,13 @@ def _atomic(dest: pathlib.Path, fill: Callable[[pathlib.Path], object], mode: in
         os.close(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode))
         fill(tmp)
         tmp.chmod(mode)
+        # 先落盘再换名：否则断电后可能是「新名字、空内容」——rename 先于数据持久化，
+        # 而空文件会被「已存在」判据当成已导出永久跳过（密钥缓存则是读出空串）。
+        fd = os.open(tmp, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
         os.replace(tmp, dest)
     except BaseException:
         try:

@@ -635,14 +635,14 @@ def test_chat_export_reports_only_the_files_it_actually_wrote(con, chat_env, mon
     把 `except OSError: continue` 改成 `except OSError: pass`（把没写成的路径也 append）→ 这条红。
     """
     _seed(con)
-    real = pathlib.Path.write_text
+    real = pathlib.Path.write_bytes
 
     def fake(self, data, *a, **kw):
-        if str(self).endswith("index.md"):
+        if self.name.startswith("index.md."):         # 原子写的临时文件 `index.md.<pid>.<tid>.tmp`
             raise OSError(28, "No space left on device", str(self))   # ENOSPC
         return real(self, data, *a, **kw)
 
-    monkeypatch.setattr(pathlib.Path, "write_text", fake)
+    monkeypatch.setattr(pathlib.Path, "write_bytes", fake)
     res = usecases.chat_export("wxid_testacct02", out_dir=str(chat_env), account="acct")
     assert sorted(pathlib.Path(f).name for f in res.files) == ["index.html"]
     assert not (chat_env / "aaaa" / "chat" / "index.md").exists()
@@ -785,7 +785,7 @@ def test_chat_index_reports_a_write_failure_as_a_project_error(con, chat_env, mo
     def boom(self, *a, **kw):                     # 补丁在 chat_export 之后才打
         raise OSError(28, "No space left on device", str(self))
 
-    monkeypatch.setattr(pathlib.Path, "write_text", boom)
+    monkeypatch.setattr(pathlib.Path, "write_bytes", boom)   # 原子写走的是 write_bytes
     with pytest.raises(errors.MediaOutputError):
         usecases.chat_index(out_dir=str(chat_env), account="acct")
 

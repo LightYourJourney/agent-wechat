@@ -117,6 +117,25 @@ def test_a_killed_fill_is_rebuilt_on_the_next_open(env, monkeypatch):
         _assert_consistent(con)
 
 
+def test_a_marker_whose_pid_was_reused_by_a_later_process_is_rebuilt(env, monkeypatch):
+    """写标记的进程被杀后，它的 pid 被一个**更晚启动**的无关进程复用：只问「pid 活不活」
+    会把标记永远当成进行中（FTS 一直缺行、检索一直走慢路）。这里把标记的启动时刻往前拨，
+    再让一个刚起的活进程顶上那个 pid。去掉启动时刻判据本测试必红。"""
+    _fill_without_finish(monkeypatch)
+    squatter = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        con = sqlite3.connect(store.DB_PATH)
+        con.execute("UPDATE fts_bulk_pending SET pid=?, started_at=started_at-600",
+                    (squatter.pid,))
+        con.commit()
+        con.close()
+        with store.open() as con:
+            _assert_consistent(con)
+    finally:
+        squatter.kill()
+        squatter.wait()
+
+
 def test_a_failed_finish_in_a_long_lived_process_heals_on_the_next_open(env, monkeypatch):
     """MCP 常驻进程里收口失败：标记的 pid 是本进程、一直活着——不能因此永远修不好。"""
     def broken(con):

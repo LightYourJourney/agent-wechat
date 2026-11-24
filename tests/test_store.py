@@ -183,6 +183,23 @@ def test_upsert_touches_a_row_whose_chat_id_changed_even_if_content_did_not(con)
     assert after[0] > before, "守卫没放行这次更新（exported_at 未推进）"
 
 
+def test_upsert_refreshes_media_hint_when_a_message_is_revoked(con):
+    """撤回把图片行改成系统消息（type 与 content 都变）：`media_hint` 由这两列派生，
+    不在 DO UPDATE 集里时库里永远留着「[图片]」。"""
+    md5v = messages.chat_md5("wxid_abc123def456")
+    key = f"acct|{md5v}|message_0.db|1"
+    base = dict(account="acct", chat_md5=md5v, chat_id="wxid_abc123def456",
+                shard="message_0.db", local_id=1, ts=1700000000, sender_id=None,
+                sender_name=None, is_self=0)
+    store.upsert_batch(con, [messages.make_row(msg_type=3, content=None,
+                                               media_hint="[image]", **base)])
+    store.upsert_batch(con, [messages.make_row(msg_type=messages.TYPE_REVOKE,
+                                               content="对方撤回了一条消息",
+                                               media_hint=None, **base)])
+    assert tuple(con.execute("SELECT msg_type, media_hint FROM messages WHERE msg_key=?",
+                             (key,)).fetchone()) == (messages.TYPE_REVOKE, None)
+
+
 def test_upsert_keeps_chat_row_counts_consistent_after_the_fix(con):
     """EA-012 ③：分裂场景消失后，同一 chat_md5 的 messages 与 parts/refs 计数同数
     （前缀按 md5 数——修复前 `chat_row_counts` 报 messages:1 而 parts/refs:2 的「各说各话」）。"""

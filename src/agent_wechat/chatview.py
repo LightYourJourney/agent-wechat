@@ -31,7 +31,7 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from . import chat_html, chat_md, errors, messages, msgextra
+from . import chat_html, chat_md, errors, messages, msgextra, paths
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -193,7 +193,8 @@ def write(view: ChatView, *, formats: Sequence[str] = FORMATS) -> list[pathlib.P
     for fmt in formats:
         p = root / f"index.{fmt}"
         try:
-            p.write_text(_RENDERERS[fmt](view), encoding="utf-8")
+            # 原子写：两次并发导出（或写到一半被中断）不会在 `index.*` 上留下互相拼接的半截页。
+            paths.atomic_write(p, _RENDERERS[fmt](view).encode("utf-8"))
         except OSError:
             # R2-A-009：短写/中途失败会在盘上留半截 `index.html`（实测 739 B），而本函数
             # 又把它从返回列表里剔掉——调用方以为「没有这个产物」，浏览器却能打开一个残缺页。

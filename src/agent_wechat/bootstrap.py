@@ -19,6 +19,7 @@ import os
 import platform
 import re
 import select
+import shlex
 import shutil
 import signal
 import subprocess
@@ -167,7 +168,8 @@ def capture_passphrase_lldb(timeout: int = DEFAULT_TIMEOUT) -> str:
     # bash→lldb 进程树，而不是按名字杀（见 _terminate_capture）。
     try:
         proc = subprocess.Popen(
-            ["bash", "-c", f"( cat {sp}; sleep {timeout} ) | TERM=dumb lldb"],
+            # 路径要 shell 转义：`TMPDIR` 含空格或 `;` 时，不转义的 cat 读不到脚本。
+            ["bash", "-c", f"( cat {shlex.quote(sp)}; sleep {timeout} ) | TERM=dumb lldb"],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
             start_new_session=True)
     except (OSError, subprocess.TimeoutExpired) as exc:

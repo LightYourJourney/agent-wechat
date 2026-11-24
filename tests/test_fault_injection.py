@@ -225,7 +225,7 @@ def test_decrypt_snapshot_copy_failure(fake_wechat_db, tmp_path, monkeypatch):
 
 def test_moments_index_write_failure(env, tmp_path, monkeypatch):
     from agent_wechat import usecases
-    inj = install([Fault("write_text", "ENOSPC", nth=1)])
+    inj = install([Fault("write_bytes", "ENOSPC", nth=1)])     # index.html 走原子写（bytes）
     try:
         with pytest.raises(errors.AgentWeChatError):
             usecases.moments_export(account=M_ACCT, out_dir=str(tmp_path / "out"))
@@ -241,7 +241,7 @@ def test_chatview_write_failure(tmp_path, monkeypatch):
     view = chatview.ChatView(chat_id="wxid_x", title="X", generated_at=0,
                              out_dir=str(tmp_path / "v"), msgs=(), counts={}, unparsed=0,
                              rejected=0, degraded=(), truncated=False)
-    inj = install([Fault("write_text", "SHORT_WRITE", nth=1)])
+    inj = install([Fault("write_bytes", "SHORT_WRITE", nth=1)])   # 原子写（bytes）
     try:
         out = chatview.write(view)
         inj.assert_fired()

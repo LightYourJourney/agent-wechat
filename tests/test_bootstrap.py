@@ -254,6 +254,33 @@ def test_capture_starts_its_own_session_so_cleanup_cannot_hit_the_caller(monkeyp
     assert "lldb" in seen["argv"][2] and "TERM=dumb" in seen["argv"][2]
 
 
+def test_capture_script_path_survives_shell_metacharacters_in_tmpdir(monkeypatch, tmp_path):
+    """`TMPDIR` 含空格 / `;` 时，未转义的 `cat {sp}` 被拆成几个词、读不到脚本（已复现：
+    `cat: /tmp/…/a: No such file or directory`）。在 Popen 那一刻用真 bash 跑同一条命令
+    （lldb 换成 cat、sleep 换成 true），读回的必须是脚本本身。"""
+    import subprocess as _sub
+    import tempfile as _tf
+    odd = tmp_path / "a b;c"
+    odd.mkdir()
+    monkeypatch.setattr(_tf, "tempdir", str(odd))
+    _lldb_which(monkeypatch)
+    monkeypatch.setattr(bootstrap.account, "wechat_pid", lambda: 4242)
+    seen = {}
+
+    def fake_popen(argv, **kw):
+        cmd = argv[2].replace("TERM=dumb lldb", "cat").replace("sleep 1", "true")
+        seen["out"] = _sub.run(["bash", "-c", cmd], capture_output=True, text=True)
+        return SimpleNamespace()
+    monkeypatch.setattr(bootstrap, "subprocess", SimpleNamespace(
+        Popen=fake_popen, PIPE=_sub.PIPE, STDOUT=_sub.STDOUT))
+    monkeypatch.setattr(bootstrap, "_read_capture", lambda proc, deadline: _hexdump(HEX))
+    monkeypatch.setattr(bootstrap, "_terminate_capture", lambda proc: None)
+
+    assert bootstrap.capture_passphrase_lldb(timeout=1) == HEX
+    assert seen["out"].returncode == 0, seen["out"].stderr
+    assert "process attach -p 4242" in seen["out"].stdout
+
+
 # ---------- EA-052：读循环的 deadline ----------
 
 def _pipe_reader():

@@ -86,7 +86,7 @@ def moments_export(contact: str | None = None, *, months: list[str] | None = Non
     doc = moments_html.render(kept, report)
     index = out_root / "index.html"
     try:
-        index.write_text(doc, encoding="utf-8")
+        paths.atomic_write(index, doc.encode("utf-8"))   # 并发/中断不留半截页
     except OSError as exc:
         raise errors.MediaOutputError(f"写产物失败：{index}") from exc
     try:

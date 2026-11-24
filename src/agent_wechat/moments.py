@@ -15,7 +15,7 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from typing import Iterator
 
-from . import decrypt, errors, keys, media, paths
+from . import appmsg, decrypt, errors, keys, media, paths
 
 TYPE_VIDEO_POST = 15
 KIND_IMAGE, KIND_VIDEO, KIND_OTHER = "image", "video", "other"
@@ -308,6 +308,10 @@ def parse_post(tid: str, xml_text: str) -> SnsPost | None:
     与 `appmsg.parse` 同形——那边也是把会抛的步骤（`normalize`）放进同一个 try。
     """
     if not xml_text or not xml_text.strip():
+        return None
+    # 与 appmsg / msgextra 同一道 DTD/实体守卫：`ET.fromstring` 会展开内部实体，
+    # 实测 729 字节的动态展开出 50 万字符的正文。
+    if appmsg.is_dangerous(xml_text):
         return None
     try:
         root = ET.fromstring(xml_text.strip())

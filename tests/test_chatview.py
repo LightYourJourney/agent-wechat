@@ -1,5 +1,7 @@
 # tests/test_chatview.py
 """ChatView 组装。纯函数，不需要真实数据。"""
+import pytest
+
 from agent_wechat import appmsg, chatview
 
 
@@ -142,10 +144,37 @@ def test_a_failed_chmod_does_not_hide_a_written_artifact(tmp_path, monkeypatch):
 
     view = _minimal_view(tmp_path)
 
+    real_chmod = _pl.Path.chmod
+
     def _boom(self, mode):
+        if self.name != "index.md":           # 原子写的临时文件照常；只让写成之后那次 chmod 失败
+            return real_chmod(self, mode)
         raise OSError(1, "Operation not permitted")
     monkeypatch.setattr(_pl.Path, "chmod", _boom)
 
     out = chatview.write(view, formats=["md"])
     assert [p.name for p in out] == ["index.md"], "写成了就该进返回列表（权限没收敛是降级）"
     assert (tmp_path / "chat" / "index.md").exists()
+
+
+def test_an_interrupted_write_leaves_the_previous_artifact_whole(tmp_path, monkeypatch):
+    """`index.*` 此前直接 `write_text` 到终路径：写到一半被中断（或两次导出并发写同一文件）
+    会在盘上留下半截/互相拼接的页。改成原子写后，中断时终路径上仍是上一次的完整产物、
+    不留临时文件。改回直接写终路径本测试必红。"""
+    import pathlib as _pl
+
+    view = _minimal_view(tmp_path)
+    (out,) = chatview.write(view, formats=["md"])
+    whole = out.read_bytes()
+
+    def half_then_interrupt(self, data, *a, **k):
+        with open(self, "wb") as f:
+            f.write((data.encode() if isinstance(data, str) else data)[:5])
+        raise KeyboardInterrupt
+    monkeypatch.setattr(_pl.Path, "write_text", half_then_interrupt)
+    monkeypatch.setattr(_pl.Path, "write_bytes", half_then_interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        chatview.write(view, formats=["md"])
+    monkeypatch.undo()
+    assert out.read_bytes() == whole
+    assert [p.name for p in out.parent.iterdir()] == ["index.md"]

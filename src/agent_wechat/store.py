@@ -582,6 +582,9 @@ _INSERT_SQL = (
     "ON CONFLICT(msg_key) DO UPDATE SET "
     "content=excluded.content, msg_type=excluded.msg_type, "
     "sender_name=excluded.sender_name, chat_id=excluded.chat_id, "
+    # `media_hint` 由 (msg_type, content) 派生，两者变了它必须跟着变：撤回把图片改成系统消息后，
+    # 不写它的话库里永远留着「[图片]」。
+    "media_hint=excluded.media_hint, "
     "exported_at=excluded.exported_at "
     # EA-012：守卫扩成「content **或 chat_id** 不同」。`chat_id` 是 `chat_md5` 的派生展示
     # 属性（退化形态 `md5:<hex>` 是真名的降级），名字解析回来后必须能自愈；只认 content
@@ -744,10 +747,14 @@ def fts_bulk_interrupted(con: sqlite3.Connection) -> int:
     判不出死活（`pid_alive` 对 EPERM 答「活」）一律当进行中——宁可晚修，不在别人灌库中途
     抢写锁重建。`_ensure_fts_triggers`（修）与 `sync.diagnose`（只报）共用这一个判据。
     """
-    pids = [r[0] for r in con.execute("SELECT pid FROM fts_bulk_pending")]
+    rows = con.execute("SELECT pid, started_at FROM fts_bulk_pending").fetchall()
     me = os.getpid()
-    live = any(_bulk_active > 0 if p == me else paths.pid_alive(p) for p in pids)
-    return 0 if live else len(pids)
+    # pid 活着还不够：写标记的进程被杀后 pid 可能被别的进程复用（EPERM 也答「活」），
+    # 那样标记会一直被当成进行中。进程**晚于标记**启动的，必然不是写标记的那个。
+    live = any(_bulk_active > 0 if p == me
+               else paths.pid_alive(p) and not paths.pid_started_after(p, t)
+               for p, t in rows)
+    return 0 if live else len(rows)
 
 
 def _fts_triggers_present(con: sqlite3.Connection) -> bool:

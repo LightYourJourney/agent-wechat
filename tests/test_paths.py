@@ -525,6 +525,43 @@ def test_atomic_write_leaves_the_existing_file_untouched_on_failure(tmp_path, mo
     assert [p.name for p in tmp_path.iterdir()] == ["f.bin"], "tmp 残骸没抹掉"
 
 
+def test_atomic_write_flushes_the_data_before_the_rename(tmp_path, monkeypatch):
+    """rename 不保证数据先落盘：断电后可能是「新名字、空内容」。换名之前必须对**临时文件**
+    fsync 过。（断电本身测不了，这里钉的是顺序契约；去掉 fsync 本测试必红。）"""
+    import os
+    calls = []
+    real_fsync, real_replace = os.fsync, os.replace
+
+    def fsync(fd):
+        calls.append(("fsync", fd))
+        return real_fsync(fd)
+
+    def replace(src, dst):
+        calls.append(("replace", pathlib.Path(src).read_bytes()))
+        return real_replace(src, dst)
+    monkeypatch.setattr(os, "fsync", fsync)
+    monkeypatch.setattr(os, "replace", replace)
+    paths.atomic_write(tmp_path / "f.bin", b"data")
+    assert [c[0] for c in calls] == ["fsync", "replace"]
+    assert calls[1][1] == b"data"
+
+
+def test_pid_started_after_tells_a_reused_pid_from_the_original(tmp_path):
+    """早于 ts 启动的进程（pytest 的父进程）→ False；刚起的进程对 10 分钟前的 ts → True；
+    判不出来（pid 已不在）→ False（保守，同 `pid_alive`）。"""
+    import os
+    import time
+    now = int(time.time())
+    assert paths.pid_started_after(os.getppid(), now) is False
+    p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        assert paths.pid_started_after(p.pid, now - 600) is True
+    finally:
+        p.kill()
+        p.wait()
+    assert paths.pid_started_after(p.pid, now - 600) is False
+
+
 def test_sweep_stale_tmp_only_reclaims_dead_pids(tmp_path, monkeypatch):
     dest = tmp_path / "passphrase.json"
     dead, live = tmp_path / "passphrase.json.111.tmp", tmp_path / "passphrase.json.222.tmp"

@@ -148,6 +148,16 @@ def test_malformed_xml_returns_none():
     assert moments.parse_post("T1", "<Other/>") is None
 
 
+def test_a_post_with_a_dtd_is_rejected_before_entity_expansion():
+    """与 appmsg / msgextra 同一道守卫：`ET.fromstring` 展开内部实体——没有守卫时这条
+    729 字节的动态解析出 50 万字符的正文（已复现）。去掉守卫本测试必红。"""
+    dtd = ('<!DOCTYPE r [<!ENTITY a "' + "x" * 100 + '"><!ENTITY b "' + "&a;" * 100
+           + '"><!ENTITY c "' + "&b;" * 50 + '">]>')
+    xml = dtd + ("<SnsDataItem><TimelineObject><id>P</id><username>u</username>"
+                 "<contentDesc>&c;</contentDesc></TimelineObject></SnsDataItem>")
+    assert moments.parse_post("T", xml) is None
+
+
 def test_text_only_post_has_no_media():
     xml = ("""<SnsDataItem><TimelineObject><id>P2</id><username>u</username>"""
            """<createTime>1735689600</createTime><contentDesc>只有文字</contentDesc>"""

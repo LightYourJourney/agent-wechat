@@ -574,7 +574,7 @@ def chat_index(out_dir: str | None = None, account: str | None = None) -> ChatIn
             has_html="index.html" in names))
     target = media.ensure_tree(out_root) / "index.html"
     try:
-        target.write_text(index_html.render(entries), encoding="utf-8")
+        paths.atomic_write(target, index_html.render(entries).encode("utf-8"))  # 不留半截页
     except OSError as exc:
         # 单个产物写失败**不吞**（与 `chatview.write` 的多产物取舍不同）：这里只有一个文件，
         # 吞掉就是「退出码 0、什么都没有」，而索引页正是用户唯一的入口（同 moments_export）。

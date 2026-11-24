@@ -127,8 +127,8 @@ export.run_export
   → fetchmany(batch) 分批解码 → 批量幂等 upsert + 水位线推进（同一事务）
      首次导出（消息表为空）：先拆 3 条 FTS 触发器并落中断标记（同一事务），灌完一次 rebuild、
      恢复触发器、清标记（store.fts_bulk）。store.connect() 跑的 DDL 不含 FTS 触发器，最后由
-     _ensure_fts_triggers 在写锁下判标记：灌库进行中不建；灌库已不在进行（进程被杀，或本进程
-     收口失败）当场补建；没有标记就照常补建缺的触发器。进行中的关键词检索改走 LIKE
+     _ensure_fts_triggers 在写锁下判标记：灌库进行中不建；灌库已不在进行（进程被杀——含 pid
+     已被一个晚于标记启动的进程复用——或本进程收口失败）当场补建；没有标记就照常补建缺的触发器。进行中的关键词检索改走 LIKE
   → 数据提交之后才推进 audit_cursor（回看游标；绕圈覆盖整段历史）
   → 快照删除；进度写 tasks.json（进程重启后从该文件载入，遗留的 running 记为 failed）；
   中断后重跑自动续传
