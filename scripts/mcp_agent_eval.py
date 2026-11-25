@@ -5,6 +5,10 @@ server 用 `scripts/mcp_bench.py --serve`（临时目录里的加密合成库，
 
     uv run --frozen python scripts/mcp_agent_eval.py --model sonnet --reps 2 --json out.json
         [--server-src /path/to/other/checkout/src]   # 拿别的版本当 server（新旧对比）
+        [--slow --tasks 全量 --tasks 分别]             # 只跑部分任务；--slow 见下
+
+`--slow`：server 每个工具调用前多睡 0.3 s、导出时每批多睡 1 s（全量导出约 20 s，接近真机），并记下每个调用
+的起止时刻，算出同时在执行的调用数 `max_concurrency`——客户端是否真的并行执行，只看模型回合分不出来。
 
 每条任务记录：调用的工具序列、发起工具调用的模型回合数（同一回合里的多个调用 = 并行）、轮数、
 输入 token（含缓存读写）、输出 token、耗时、是否用到期望的工具、答案里是否含期望的关键词。
@@ -47,6 +51,19 @@ TASKS = [
 ]
 
 
+def _max_concurrency(log: pathlib.Path) -> int:
+    """调用日志里同一时刻最多有几个调用在执行。"""
+    if not log.exists():
+        return 0
+    spans = [json.loads(line) for line in log.read_text().splitlines() if line.strip()]
+    edges = sorted([(s["start"], 1) for s in spans] + [(s["end"], -1) for s in spans])
+    cur = best = 0
+    for _, d in edges:
+        cur += d
+        best = max(best, cur)
+    return best
+
+
 def run_one(prompt: str, cfg: pathlib.Path, model: str) -> dict:
     cmd = ["claude", "-p", prompt, "--model", model, "--strict-mcp-config",
            "--mcp-config", str(cfg), "--tools", "", "--allowedTools", "mcp__agent-wechat",
@@ -87,6 +104,9 @@ def main() -> None:
     ap.add_argument("--json", type=pathlib.Path)
     ap.add_argument("--server-src", type=pathlib.Path,
                     help="server 用这份源码（PYTHONPATH），默认是本仓库的 src")
+    ap.add_argument("--tasks", action="append", default=[],
+                    help="只跑提示里含这个子串的任务（可重复）")
+    ap.add_argument("--slow", action="store_true", help="减速并记录调用起止（见模块说明）")
     args = ap.parse_args()
     with tempfile.TemporaryDirectory(prefix="awmcp-eval-") as d:
         _run(pathlib.Path(d) / "mcp.json", args)
@@ -95,17 +115,27 @@ def main() -> None:
 def _run(cfg: pathlib.Path, args: argparse.Namespace) -> None:
     server: dict = {"command": sys.executable,
                     "args": [str(ROOT / "scripts" / "mcp_bench.py"), "--serve"]}
+    env: dict[str, str] = {}
     if args.server_src:
-        server["env"] = {"PYTHONPATH": str(args.server_src.resolve())}
+        env["PYTHONPATH"] = str(args.server_src.resolve())
+    log = cfg.parent / "calls.jsonl"
+    if args.slow:
+        env.update(AWMCP_CALL_LOG=str(log), AWMCP_CALL_DELAY="0.3", AWMCP_EXPORT_DELAY="1")
+    if env:
+        server["env"] = env
     cfg.write_text(json.dumps({"mcpServers": {"agent-wechat": server}}))
+    tasks = [t for t in TASKS if not args.tasks or any(x in t[0] for x in args.tasks)]
     rows = []
-    for prompt, want, keyword in TASKS:
+    for prompt, want, keyword in tasks:
         for _ in range(args.reps):
+            log.unlink(missing_ok=True)
             r = run_one(prompt, cfg, args.model)
+            r["max_concurrency"] = _max_concurrency(log) if args.slow else None
             r.update(task=prompt, hit=bool(want & set(r["tools"])),
                      keyword_ok=(keyword in r["answer"]) if keyword else None)
             rows.append(r)
-            print(json.dumps({k: r[k] for k in ("task", "tools", "tool_rounds", "turns", "input_tokens",
+            print(json.dumps({k: r[k] for k in ("task", "tools", "tool_rounds", "max_concurrency",
+                                                 "turns", "input_tokens",
                                                  "duration_ms", "hit", "keyword_ok")},
                              ensure_ascii=False), flush=True)
     summary = {
@@ -118,9 +148,10 @@ def _run(cfg: pathlib.Path, args: argparse.Namespace) -> None:
         "duration_ms_median": statistics.median(r["duration_ms"] or 0 for r in rows),
         "cost_usd_total": round(sum(r["cost_usd"] or 0 for r in rows), 4),
         "by_task": {t[:12]: {"tools": [r["tools"] for r in g], "tool_rounds": [r["tool_rounds"] for r in g],
+                             "max_concurrency": [r["max_concurrency"] for r in g],
                              "input_tokens": [r["input_tokens"] for r in g],
                              "hit": [r["hit"] for r in g], "keyword_ok": [r["keyword_ok"] for r in g]}
-                    for t, _, _ in TASKS if (g := [r for r in rows if r["task"] == t])},
+                    for t, _, _ in tasks if (g := [r for r in rows if r["task"] == t])},
     }
     print(json.dumps(summary, ensure_ascii=False))
     if args.json:

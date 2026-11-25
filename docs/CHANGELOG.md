@@ -22,6 +22,11 @@
 - `scripts/mcp_bench.py` 新增大结果场景、长任务的「查到结束要调几次」、`--shards` 与首调计时；
   `scripts/mcp_agent_eval.py` 新增长任务与并行两个任务、模型回合数统计和 `--server-src`（新旧对比）。
   Sonnet / Opus 评测新旧版命中率都是 16/16，两个模型都会主动用 `wait=60`（MCP_EFFICIENCY.md §9.6）。
+- `get_recent_messages` 往前翻页时跳过已知没有更早消息的分片（按分片库文件签名记，库一变即作废）：真机在一年前那段
+  往前翻，每页 0.32–0.37 s → 3–5 ms。
+- `mcp_agent_eval.py --slow`（server 减速并记录调用起止，`--tasks` 只跑部分任务）：导出 20 秒时旧版模型要轮询 4–6 次，
+  新版 1 次，长任务输入 token 少 43–63%；带 `readOnlyHint` 后 Claude Code 真的同时执行两个只读调用
+  （MCP_EFFICIENCY.md §9.7）。
 
 ### MCP 使用效率 · 第三轮（2026-11-25）
 

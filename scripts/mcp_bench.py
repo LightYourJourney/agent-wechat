@@ -253,6 +253,52 @@ async def _long_task(srv) -> dict:
             "duration_s": round(time.perf_counter() - t0, 2), "status_calls": calls}
 
 
+def _instrument_for_eval() -> None:
+    """给端到端评测用的观测与减速（`scripts/mcp_agent_eval.py --slow` 设这些环境变量；默认全不生效）：
+
+    - `AWMCP_CALL_LOG`：每个用例调用的起止时刻（time.time()）逐行追加成 JSON——看客户端是否真的
+      **同时执行**了多个调用（只看模型发出的回合分不出来）。
+    - `AWMCP_CALL_DELAY`：每个用例调用前多睡这么多秒，让「并行」与「串行」在时间线上一眼可分。
+    - `AWMCP_EXPORT_DELAY`：导出时每写一批多睡这么多秒，模拟真机全量导出要几十秒到几分钟。
+    """
+    import functools
+    import inspect
+    import threading
+
+    from agent_wechat import store, usecases
+    log, delay = os.environ.get("AWMCP_CALL_LOG"), float(os.environ.get("AWMCP_CALL_DELAY", 0))
+    lock, depth = threading.Lock(), threading.local()
+
+    def wrap(name, fn):
+        @functools.wraps(fn)
+        def inner(*a, **k):
+            # 用例之间会互相调用（经包级名字）：只记最外层，否则一次调用会被算成两个并发
+            if getattr(depth, "n", 0):
+                return fn(*a, **k)
+            depth.n, t0 = 1, time.time()
+            time.sleep(delay)
+            try:
+                return fn(*a, **k)
+            finally:
+                depth.n = 0
+                with lock, open(log, "a", encoding="utf-8") as f:   # type: ignore[arg-type]
+                    f.write(json.dumps({"fn": name, "start": t0, "end": time.time()}) + "\n")
+        return inner
+
+    if log:
+        for name, fn in vars(usecases).items():
+            # task_status 是 get_task_status(wait) 的轮询原语：不记、不减速
+            if inspect.isfunction(fn) and not name.startswith("_") and name != "task_status":
+                setattr(usecases, name, wrap(name, fn))
+    if export_delay := float(os.environ.get("AWMCP_EXPORT_DELAY", 0)):
+        upsert = store.upsert_batch
+
+        def slow_upsert(con, rows):
+            time.sleep(export_delay)
+            return upsert(con, rows)
+        store.upsert_batch = slow_upsert
+
+
 async def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--serve", action="store_true",
@@ -272,6 +318,7 @@ async def main() -> None:
             from agent_wechat import export, mcp_server
             acct, _ = build_env(tmp, args.chats, args.per_chat, **scale)
             export.run_export(acct)
+            _instrument_for_eval()
             await mcp_server.server.run_stdio_async()
             return
         res: dict = {}

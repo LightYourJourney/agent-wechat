@@ -146,6 +146,15 @@ def _file_sig(db: pathlib.Path) -> tuple:
     return tuple(out)
 
 
+# 常驻进程里记下「这个分片（按 _file_sig）里，这个会话没有早于 X 的消息」（没有这张表记 inf）。
+# `recent` 往前翻页时 before_ts 只会越来越小，而微信的 Msg_ 表在 create_time 上没有索引：
+# 不记的话，比 before_ts 新的分片每翻一页都要把这个会话的表整表扫一遍（真机一年前的一页约 0.6 s）。
+# 库或 -wal 一变签名就变，旧记录自然不再命中。条目数设上限，满了清空。
+_EMPTY_BEFORE_MAX = 4096
+_empty_before: dict[tuple, float] = {}
+_empty_lock = threading.Lock()
+
+
 # 按 username 精确取行时 TEXT 与 BLOB 两种存储类别都认：SQLite 里 TEXT 参数与 BLOB 值永不
 # 相等，而 `text_factory = bytes` 读出来一律是 bytes，看不出微信存的是哪一种。
 _ONE_NAME = "(?, ?)"
@@ -637,7 +646,13 @@ class MessageReader:
         chat_map = {md5hex: chat_id}
         names = self.sticker_captions()        # **循环外取一次**，见该方法 docstring
         pieces: list[Message] = []
+        bound = float("inf") if before_ts is None else before_ts
         for shard in reversed(paths.message_shards(self.acct)):
+            sig = (_file_sig(shard), md5hex)
+            with _empty_lock:
+                if _empty_before.get(sig, float("-inf")) >= bound:
+                    continue        # 已知这一片里没有早于 bound 的消息：不必再开库
+            got: list[Message] = []
             with self._open(f"message/{shard.name}") as con:
                 tables = self._shard_tables(con, md5hex)
                 if tables:          # 空 = 该会话在这分片里没有消息，**不是**漂移（spec §4）
@@ -647,9 +662,16 @@ class MessageReader:
                     # 缺那张表的分片就抛裸 sqlite 错误（守卫白设）。
                     n2i = self._name2id(con)
                 for table in tables:
-                    pieces += self._read_rows(con, table, shard.name, md5hex, chat_map,
-                                              n2i, order_desc=True, limit=limit,
-                                              sticker_names=names, before_ts=before_ts)
+                    got += self._read_rows(con, table, shard.name, md5hex, chat_map,
+                                           n2i, order_desc=True, limit=limit,
+                                           sticker_names=names, before_ts=before_ts)
+            if not got:
+                empty_below = bound if tables else float("inf")
+                with _empty_lock:
+                    if len(_empty_before) >= _EMPTY_BEFORE_MAX:
+                        _empty_before.clear()
+                    _empty_before[sig] = max(_empty_before.get(sig, float("-inf")), empty_below)
+            pieces += got
             if len(pieces) >= limit:
                 break
         # EA-016：排序键此前只有 `m.ts`——扫描是 `ORDER BY local_id DESC`（`order_desc=True`），

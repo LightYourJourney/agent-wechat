@@ -72,11 +72,13 @@ def _forbid_real_external_commands(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _reset_process_caches(monkeypatch):
-    """进程级缓存（当前账号判定、contact.db 的联系人/名册）别让一条用例的结果漏给下一条。"""
+    """进程级缓存（当前账号判定、contact.db 的联系人/名册、分片里「没有更早消息」的记录）
+    别让一条用例的结果漏给下一条。"""
     from agent_wechat import account, reader
     monkeypatch.setattr(account, "_pid_cache", None)
     monkeypatch.setattr(account, "_account_cache", None)
     monkeypatch.setattr(reader, "_contact_cache", {"sig": None, "items": {}})
+    monkeypatch.setattr(reader, "_empty_before", {})
 
 
 @pytest.fixture(autouse=True)

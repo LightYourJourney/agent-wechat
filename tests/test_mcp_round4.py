@@ -199,3 +199,61 @@ def test_key_warm_up_leaves_nothing_to_derive_on_the_first_call(wx, monkeypatch)
     monkeypatch.setattr(keys, "derive_key", lambda *a: derived.append(1) or real(*a))
     assert _call("get_recent_messages", {"contact": "张三", "account": ACCT})["messages"]
     assert derived == []
+
+
+# ---------- recent：记住「这一片里没有更早的消息」 ----------
+
+def _two_shards(wx, newer):
+    """message_0：张三 1..5 号（T0+60..300）；message_1：张三 newer 里的那些（更新的）。"""
+    from agent_wechat import paths
+    from test_reader_export_pipeline import FRIEND, SELF, build_shard
+    wx([(i, T0 + i * 60, f"旧{i}") for i in range(1, 6)])
+    build_shard(paths.XWECHAT_FILES, ACCT, "message_1.db",
+                {FRIEND: [(lid, 1, 1, ts, f"新{lid}", 0) for lid, ts in newer]}, [FRIEND, SELF])
+
+
+def _opens(monkeypatch):
+    from agent_wechat import reader
+    seen, real = [], reader.MessageReader._open
+    monkeypatch.setattr(reader.MessageReader, "_open",
+                        lambda self, rel: seen.append(rel) or real(self, rel))
+    return seen
+
+
+def test_paging_back_skips_newer_shards_it_already_found_empty(wx, monkeypatch):
+    _two_shards(wx, [(i, T0 + 10_000 + i) for i in range(1, 4)])
+    seen = _opens(monkeypatch)
+    page = lambda ts: [m["content"] for m in _call(   # noqa: E731
+        "get_recent_messages", {"contact": "张三", "account": ACCT, "before_ts": ts})["messages"]]
+    assert page(T0 + 250) == ["旧1", "旧2", "旧3", "旧4"]
+    assert "message/message_1.db" in seen                       # 第一次得看过才知道
+    seen.clear()
+    assert page(T0 + 190) == ["旧1", "旧2", "旧3"]              # 往前再翻一页：结果照旧
+    assert "message/message_1.db" not in seen                   # 但不再开那一片
+    assert page(None) == ["旧1", "旧2", "旧3", "旧4", "旧5", "新1", "新2", "新3"]
+
+
+def test_a_changed_shard_is_looked_at_again(wx, monkeypatch):
+    """库文件一变（这里：较新的分片里补进了一条更早的消息）记录就作废，不会漏掉它。"""
+    _two_shards(wx, [(1, T0 + 10_000)])
+    before = {"contact": "张三", "account": ACCT, "before_ts": T0 + 250}
+    assert len(_call("get_recent_messages", before)["messages"]) == 4
+    _two_shards(wx, [(1, T0 + 10_000), (2, T0 + 230)])
+    got = [m["content"] for m in _call("get_recent_messages", before)["messages"]]
+    assert "新2" in got and len(got) == 5
+
+
+def test_a_shard_without_the_chat_is_skipped_after_the_first_look(wx, monkeypatch):
+    from agent_wechat import paths
+    from test_reader_export_pipeline import SELF, build_shard
+    wx([(1, T0 + 60, "只在旧片")])
+    build_shard(paths.XWECHAT_FILES, ACCT, "message_1.db", {"wxid_otherchat": [(1, 1, 1, T0 + 9999, "x", 0)]},
+                ["wxid_otherchat", SELF])
+    seen = _opens(monkeypatch)
+    args = {"contact": "张三", "account": ACCT}
+    assert [m["content"] for m in _call("get_recent_messages", args)["messages"]] == ["只在旧片"]
+    seen.clear()
+    assert [m["content"] for m in _call("get_recent_messages", args)["messages"]] == ["只在旧片"]
+    assert "message/message_1.db" not in seen
+    other = _call("get_recent_messages", {"contact": "wxid_otherchat", "account": ACCT})
+    assert [m["content"] for m in other["messages"]] == ["x"]  # 记录按会话分开：别的会话照常读
