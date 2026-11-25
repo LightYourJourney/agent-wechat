@@ -254,9 +254,12 @@ Agent 端到端：见 §7.2。
   `mcp__(?!agent-wechat__).*`（插件实际生效的目录是全局 npm 安装的那份，升级会覆盖，要重新应用），
   用一个同名的合成 server 实测：agent-wechat 的结果原样到达，其它 server 照旧被接管。
 - **OpenCode 默认隐藏 agent-wechat 的工具**：全局配置里一条 `deny`，只在用得到的项目里用项目级 `opencode.json`
-  加回 `allow`（权限规则后写的优先），其它项目的每个会话省下约 6.9k token 的工具定义。
+  加回 `allow`（权限规则后写的优先）。OpenCode v2 默认走 Code Mode：MCP 工具不直接列给模型，而是放在 `execute`
+  工具的目录里，经它调用——所以省下的是目录里的那部分，比全量工具定义（约 6.9k token）少。也因为 Code Mode，
+  context-mode 的 OpenCode 插件看到的是 `execute` 的输出，不是 agent-wechat 工具本身的结果，按工具名排除无从下手。
 - **Claude Code 的工具延迟加载没生效**：shell 配置里导出了 `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1`，它会
-  关掉 tool search，`ENABLE_TOOL_SEARCH=true` 也压不住，于是每个会话都全量下发 agent-wechat 的 15 个工具定义。
+  关掉 tool search，`ENABLE_TOOL_SEARCH=true` 也压不住（调试日志 `ENABLE_TOOL_SEARCH=true, result=false`），于是每个
+  会话都全量下发全部 MCP 工具定义。去掉这一行后 `/context`：MCP 工具预载 527 token，其余 19.1k 改为按需加载。
 
 ## 9. 剩余问题
 
