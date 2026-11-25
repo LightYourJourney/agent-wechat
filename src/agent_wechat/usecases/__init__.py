@@ -34,7 +34,7 @@ from ._core import (DEGRADE_EFFECT, LIMIT_RECENT, LIMIT_SEMANTIC, LIMIT_UNBOUNDE
 from .chat import (ChatExportResult, ChatIndexResult, ExtraPart, MessagePart,
                    MessagePartsResult, account_status, chat_export, chat_index, chats,
                    contacts, export_history, export_plan, index_snapshot, message_parts,
-                   recent_messages, timeline)
+                   recent_messages, timeline, warm_up)
 from .media import (LIMIT_MEDIA, MediaExportResult, MediaRefState, MessageMediaResult,
                     media_export, message_media)
 from .memory import (appmsg_rebuild_parts, media_rebuild_refs, msgextra_rebuild,

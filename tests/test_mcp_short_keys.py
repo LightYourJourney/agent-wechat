@@ -120,7 +120,7 @@ def test_recent_messages_pages_with_before_ts(wx):
 
 def test_recent_messages_over_budget_keeps_the_newest_and_says_where_to_continue(wx, monkeypatch):
     wx([(i, T0 + i * 60, "长" * 400) for i in range(1, 11)])
-    monkeypatch.setattr(mcp_server, "RECENT_TOKEN_BUDGET", 1500)
+    monkeypatch.setattr(mcp_server, "OUTPUT_TOKEN_BUDGET", 1500)
     res = _call("get_recent_messages", {"contact": "张三", "limit": 10})
     got = [_ts(m) for m in res["messages"]]
     assert res["truncated"] is True and 0 < len(got) < 10
@@ -134,7 +134,7 @@ def test_recent_messages_over_budget_keeps_the_newest_and_says_where_to_continue
 def test_next_before_ts_steps_past_a_shared_second(wx, monkeypatch):
     """被丢的消息里有与本页第一条同秒的：before_ts 不含上界，要往后挪一秒，宁可重叠不漏。"""
     wx([(1, T0, "长" * 400), (2, T0 + 60, "长" * 400), (3, T0 + 60, "长" * 400)])
-    monkeypatch.setattr(mcp_server, "RECENT_TOKEN_BUDGET", 500)
+    monkeypatch.setattr(mcp_server, "OUTPUT_TOKEN_BUDGET", 500)
     res = _call("get_recent_messages", {"contact": "张三", "limit": 3})
     assert [_ts(m) for m in res["messages"]] == [T0 + 60]
     assert res["next_before_ts"] == T0 + 61
@@ -142,7 +142,7 @@ def test_next_before_ts_steps_past_a_shared_second(wx, monkeypatch):
 
 def test_a_single_message_larger_than_the_budget_is_still_returned(wx, monkeypatch):
     wx([(1, T0, "长" * 400)])
-    monkeypatch.setattr(mcp_server, "RECENT_TOKEN_BUDGET", 10)
+    monkeypatch.setattr(mcp_server, "OUTPUT_TOKEN_BUDGET", 10)
     res = _call("get_recent_messages", {"contact": "张三"})
     assert len(res["messages"]) == 1 and res["truncated"] is False
 

@@ -3,6 +3,23 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 风格，
 版本号语义为 0.x 阶段（API 可能变动）。
 
+### MCP 使用效率 · 第四轮（2026-11-25）
+
+逐项对比见 [MCP_EFFICIENCY.md](MCP_EFFICIENCY.md) §9。全部向后兼容（只加参数与字段）。
+
+- 工具加 MCP 注解：只读工具 `readOnlyHint`（Claude Code 会并行执行它们），导出类 `idempotentHint`。
+- `get_task_status` 新增 `wait`（秒，≤60）：任务还在跑时等到结束再返回，代替反复轮询。
+- `search_history` 新增 `before_ts`；它与 `semantic_search` 改用和 `get_recent_messages` 同一个体积预算，超出时
+  明确返回 `truncated`（以及 `next_before_ts` / `omitted`）。此前 `search_history(limit=300)` 在合成库上返回 6.4 万字符，
+  超过 Claude Code 单个结果 5 万字符的上限、会被转存为文件。
+- `get_recent_messages` / `search_history` / `semantic_search` 顶层补 `"untrusted": true`。
+- 体积预算的 token 估算按字符类别加权、对 Claude 实际计数标定过（旧估算低约三成、emoji 低到 1/8）；预算改为
+  18k token 且 ≤4 万字符。
+- `semantic_search` 新增 `offset` 翻页，截断时返回 `next_offset`。
+- `get_message_parts`（恒有）与 `get_message_media`（给了 keys 时）返回 `unanswered`：没答的 key 不再静默略过。
+- MCP 后台预热增加密钥预派生、Time Machine 检查与联系人表缓存：真机常驻进程第一次读微信库 0.54–0.66 s → 0.16–0.20 s。
+- `scripts/mcp_bench.py` 新增大结果场景、长任务的「查到结束要调几次」、`--shards` 与首调计时。
+
 ### MCP 使用效率 · 第三轮（2026-11-25）
 
 逐项对比见 [MCP_EFFICIENCY.md](MCP_EFFICIENCY.md) §8。

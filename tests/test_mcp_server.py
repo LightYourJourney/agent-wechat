@@ -773,7 +773,8 @@ def test_get_message_parts_envelope_shape(monkeypatch):
                 keys=",".join(key(i) for i in (2, 3, 4, 5, 6)))
     # 已回填：不带 hint（hint 只在未回填时给）；解不开/被拒/剔块三个计数恒存在（这里都是 0）
     assert set(res) == {"parts", "extras", "unparsed", "rejected", "dropped_blobs",
-                        "degraded"}
+                        "unanswered", "degraded"}
+    assert res["unanswered"] == []
     # EA-041：位置/名片**另起一个键**（形状不同，并进 parts 会让每个消费者都要判
     # 「这条到底是不是 appmsg」）。这份夹具全是 appmsg，故它是空的。
     assert res["extras"] == []
@@ -996,6 +997,7 @@ def test_get_message_parts_carries_location_and_card_payloads(monkeypatch):
     assert first["x"] == "39.9" and first["label"] == "某地"
     assert "antispamticket" not in first
     assert set(dict(res["extras"][1]["fields"])) == {"username", "nickname"}
+    assert res["unanswered"] == []               # 只在 extras 里有答案的 key 也算答了
     assert msgextra.kind_name(48) == "位置"      # 与产物侧同一处措辞
 
 
@@ -1078,3 +1080,13 @@ def test_mcp_out_roots_reject_relative_entries(tmp_path, monkeypatch):
     monkeypatch.setenv(paths.MCP_OUT_ROOTS_ENV, "exports")
     with pytest.raises(errors.OutDirRefused):
         paths.refuse_mcp_out(str(tmp_path / "home" / "x"))
+
+
+def test_get_message_parts_lists_the_keys_it_did_not_answer(monkeypatch):
+    """别的会话的 key、msg_parts 里没有的 key 都原样列进 unanswered（去重保序），不静默略过。"""
+    key, foreign = _parts_fixture(monkeypatch)
+    missing = key(2).rsplit("|", 1)[0] + "|999"
+    res = _call(mcp_server.get_message_parts, contact="张三",
+                keys=",".join([key(2), foreign, missing, foreign]))
+    assert [p["msg_key"] for p in res["parts"]] == [key(2)]
+    assert res["unanswered"] == [foreign, missing]

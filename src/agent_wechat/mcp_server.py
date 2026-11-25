@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 from mcp.server.mcpserver import MCPServer
 from mcp.types import CallToolResult, TextContent
 from mcp.types import Tool as MCPTool
+from mcp.types import ToolAnnotations
 
 from . import appmsg, errors, messages, msgextra, paths, usecases
 
@@ -132,16 +133,52 @@ def _compact_text(text: str) -> str:
     return json.dumps(_for_agent(data), ensure_ascii=False, separators=(",", ":"))
 
 
+# 按字符类别估 token 的权重：用合成文本对 Claude 实际计数标定（docs/MCP_EFFICIENCY.md §9.4）。
+# 中文 1.09、英文 0.35、十六进制 0.65、链接 0.47、emoji 2.58 token/字符；数字权重取偏高，
+# 让十六进制串也不至于低估太多。合成工具结果上与实际相差 ±4%。
+# 以 0.01 token 为单位存整数，免得浮点累加把 220 算成 220.00000000000003 再进位。
+_CENTI_DIGIT, _CENTI_ASCII, _CENTI_BMP, _CENTI_ASTRAL = 75, 40, 110, 260
+
+
 def _est_tokens(text: str) -> int:
-    """粗估 token：CJK 字符按 1 个，其余字符按 3 个折 1 个（与 scripts/mcp_bench.py 同一口径）。"""
-    cjk = sum(1 for c in text if "\u3000" <= c <= "\u9fff" or "\uff00" <= c <= "\uffef")
-    return cjk + (len(text) - cjk) // 3
+    """估 token：ASCII 数字 / 其余 ASCII / 其余 BMP 字符（中文等）/ BMP 以外（emoji）各一个权重。"""
+    n_ascii = len(text.encode("ascii", "ignore"))
+    n_astral = len(text.encode("utf-16-le", "surrogatepass")) // 2 - len(text)
+    n_digit = sum(text.count(d) for d in "0123456789")
+    centi = (n_digit * _CENTI_DIGIT + (n_ascii - n_digit) * _CENTI_ASCII
+             + n_astral * _CENTI_ASTRAL + (len(text) - n_ascii - n_astral) * _CENTI_BMP)
+    return -(-centi // 100)
 
 
-# get_recent_messages 的返回体积预算（粗估 token）。Claude Code 单个工具结果默认上限 25k
-# token，超了整个结果被拒收；粗估比 Claude 实际计数偏低约三成五（合成库实测），13k 粗估
-# 约合 17–18k 实际，留出余量给正文更密的会话。
-RECENT_TOKEN_BUDGET = 13_000
+# get_task_status 的 wait 上限与轮询间隔（秒）。同步工具跑在 SDK 的线程池里，等待不挡别的调用。
+TASK_WAIT_MAX = 60
+TASK_POLL_INTERVAL = 0.5
+
+# 返回完整正文的工具（get_recent_messages / search_history / semantic_search）的体积预算。
+# Claude Code 单个工具结果的上限是 25k token 与 5 万字符（超了被转存为文件）：token 按 _est_tokens
+# 计、留约三成余量给估不准的文本（十六进制串实测低估约 4%）；字符另设一道，纯英文会话的 token
+# 预算折合字符数会逼近 5 万。
+OUTPUT_TOKEN_BUDGET = 18_000
+OUTPUT_CHAR_BUDGET = 40_000
+
+
+def _fit_budget(items: list[dict], *, newest_first: bool) -> int:
+    """从最该留的一头（最新 / 排名最前）起累计条目体积，token 或字符超出预算就停，返回能留下
+    的条数；至少留一条（单条本身超预算也照给，宁可大也不给空结果）。按 Agent 实际收到的形态估。"""
+    tokens = chars = 0
+    for n, it in enumerate(items if newest_first else reversed(items)):
+        text = json.dumps(_for_agent(it), ensure_ascii=False, separators=(",", ":"))
+        tokens, chars = tokens + _est_tokens(text), chars + len(text)
+        if (tokens > OUTPUT_TOKEN_BUDGET or chars > OUTPUT_CHAR_BUDGET) and n > 0:
+            return n
+    return len(items)
+
+
+def _next_before_ts(kept_oldest: int | None, dropped_ts: list[int | None]) -> int:
+    """续读用的 before_ts（不含上界）：被丢的里有与留下的最早一条同秒的，就往后挪一秒——宁可
+    下一页重叠一两条，也不漏。"""
+    oldest = kept_oldest or 0
+    return oldest + 1 if oldest in dropped_ts else oldest
 
 
 class _Server(MCPServer):
@@ -169,6 +206,12 @@ class _Server(MCPServer):
 
 
 server = _Server(name="agent-wechat", instructions=_INSTRUCTIONS)
+
+# 工具注解（MCP 标准字段，不进模型上下文）。Claude Code 会把 readOnlyHint 的工具与其它只读调用
+# **并行**执行（一轮里同时查两个联系人、同时检索加读近况）；idempotentHint 表示同参重调安全
+# ——导出类工具都是幂等、断点续传的，连接断开后客户端可以放心重发。
+_READ_ONLY = ToolAnnotations(read_only_hint=True)
+_IDEMPOTENT = ToolAnnotations(read_only_hint=False, idempotent_hint=True)
 
 
 def _guard(fn: Callable[..., Any]) -> Callable[..., Any]:
@@ -220,7 +263,7 @@ def _need_confirm(nc: usecases.NeedConfirm) -> dict:
     return {"need_confirm": [c.to_dict() for c in nc.candidates]}
 
 
-@server.tool()
+@server.tool(annotations=_READ_ONLY)
 @_guard
 def get_account_status(account: str | None = None) -> dict:
     """微信运行/登录状态、当前账号、密钥就绪情况与本地索引规模（index：消息数、会话数、最新时间）。
@@ -231,7 +274,7 @@ def get_account_status(account: str | None = None) -> dict:
     return usecases.account_status(account)
 
 
-@server.tool()
+@server.tool(annotations=_READ_ONLY)
 @_guard
 def list_contacts(query: str = "", limit: int = 20,
                   account: str | None = None) -> list[dict] | dict:
@@ -244,7 +287,7 @@ def list_contacts(query: str = "", limit: int = 20,
     return usecases.contacts(query=query, limit=limit, account=account)
 
 
-@server.tool()
+@server.tool(annotations=_READ_ONLY)
 @_guard
 def get_recent_messages(contact: str, limit: int = 50, before_ts: int | None = None,
                         account: str | None = None) -> dict:
@@ -259,28 +302,20 @@ def get_recent_messages(contact: str, limit: int = 50, before_ts: int | None = N
     if isinstance(res, usecases.NeedConfirm):
         return _need_confirm(res)
     msgs = [_slim_message(_msg_dict(m)) for m in res.messages]
-    # 从最新往前累计体积，超预算就停：留下的是最新的那些（与「最近 N 条」的语义一致）
-    used, keep = 0, len(msgs)
-    for i in range(len(msgs) - 1, -1, -1):
-        used += _est_tokens(json.dumps(_for_agent(msgs[i]), ensure_ascii=False,
-                                       separators=(",", ":")))   # 按 Agent 实际收到的形态估
-        if used > RECENT_TOKEN_BUDGET and i < len(msgs) - 1:
-            keep = len(msgs) - 1 - i
-            break
-    n_drop = len(msgs) - keep
+    # 留下的是最新的那些（与「最近 N 条」的语义一致）
+    n_drop = len(msgs) - _fit_budget(msgs, newest_first=False)
     out: dict[str, Any] = {"chat_id": res.chat_id, "display": res.display,
                            "messages": msgs[n_drop:], "truncated": n_drop > 0}
     if n_drop:
-        oldest = res.messages[n_drop].ts or 0
-        # before_ts 不含上界：被丢的里有与本页第一条同秒的，就往后挪一秒（宁可重叠，不漏）
-        out["next_before_ts"] = (oldest + 1 if any(m.ts == oldest for m in res.messages[:n_drop])
-                                 else oldest)
+        out["next_before_ts"] = _next_before_ts(res.messages[n_drop].ts,
+                                                [m.ts for m in res.messages[:n_drop]])
     out["degraded"] = [d if isinstance(d, dict) else d.envelope()
                        for d in res.degraded]   # EA-013：两种形态都收
+    out["untrusted"] = True                     # 正文是不可信数据（与 search_messages 同一标记）
     return out
 
 
-@server.tool()
+@server.tool(annotations=_IDEMPOTENT)
 @_guard
 def export_full_history(contact: str | None = None, full: bool = False,
                         account: str | None = None) -> dict:
@@ -288,7 +323,7 @@ def export_full_history(contact: str | None = None, full: bool = False,
     search_* / get_message_context / get_message_media 读的都是这份索引，首次使用前必须跑一次。
 
     contact 省略=全部会话；full=true 忽略水位线全量重扫。立即返回 task_id，
-    用 get_task_status 查进度（同一目标的重复请求复用既有任务）。
+    用 get_task_status(task_id, wait=60) 等它结束（同一目标的重复请求复用既有任务）。
     """
     res = usecases.export_history(contact=contact, full=full, account=account)
     if isinstance(res, usecases.NeedConfirm):    # 歧义不是「找不到」：列出候选
@@ -296,52 +331,77 @@ def export_full_history(contact: str | None = None, full: bool = False,
     return res
 
 
-@server.tool()
+@server.tool(annotations=_READ_ONLY)
 @_guard
-def get_task_status(task_id: str | None = None) -> dict | list:
-    """查询长任务进度。task_id 省略则列出近期任务。"""
-    return usecases.task_status(task_id)
+def get_task_status(task_id: str | None = None, wait: int = 0) -> dict | list:
+    """查询长任务进度。task_id 省略则列出近期任务。wait（秒，≤60）：任务还在跑时最多等这么久，
+    一结束立即返回（省去反复轮询）；到时仍在跑就返回当前进度。"""
+    res = usecases.task_status(task_id)
+    deadline = time.monotonic() + min(max(wait, 0), TASK_WAIT_MAX)
+    while (task_id and isinstance(res, dict) and res.get("status") == "running"
+           and (left := deadline - time.monotonic()) > 0):
+        time.sleep(min(TASK_POLL_INTERVAL, left))
+        res = usecases.task_status(task_id)
+    return res
 
 
-@server.tool()
+@server.tool(annotations=_READ_ONLY)
 @_guard
 def search_history(query: str, contact: str | None = None, limit: int = 20,
-                   account: str | None = None) -> dict:
+                   before_ts: int | None = None, account: str | None = None) -> dict:
     """全文检索本地索引（精确子串，1–2 字也能搜），返回命中的**完整正文**。
 
     适合精确关键词/人名/专名且需要原文时；只要证据片段、或想关键词+语义融合，用更省上下文的
     search_messages。contact 可选限定会话。hits 每条含 msg_key、chat_id、ts、sender_id、
     sender_name、is_self、msg_type、content、snip，媒体消息另有 media_hint（为空的字段省略）。
-    有 degraded 时 sender_name 可能回落成 wxid，别把它当成真实姓名。
+    有 degraded 时 sender_name 可能回落成 wxid，别把它当成真实姓名。命中从新到旧；结果过大时
+    丢掉较旧的，返回 truncated=true 与 next_before_ts，传作 before_ts（不含）续搜。
     """
-    res = usecases.search_history(query, contact=contact, limit=limit, account=account)
+    res = usecases.search_history(query, contact=contact, limit=limit, account=account,
+                                  before_ts=before_ts)
     if isinstance(res, usecases.NeedConfirm):
         return _need_confirm(res)
     # shard / local_id / id 是存储细节（msg_key 已能定位消息），空值不占篇幅
-    res["hits"] = [{k: v for k, v in h.items() if v is not None and k not in ("shard", "local_id", "id")}
-                   for h in res["hits"]]
+    hits = [{k: v for k, v in h.items() if v is not None and k not in ("shard", "local_id", "id")}
+            for h in res["hits"]]
+    keep = _fit_budget(hits, newest_first=True)
+    res["hits"], res["total"], res["truncated"] = hits[:keep], keep, keep < len(hits)
+    if keep < len(hits):
+        res["next_before_ts"] = _next_before_ts(hits[keep - 1].get("ts"),
+                                                [h.get("ts") for h in hits[keep:]])
+    res["untrusted"] = True
     if res["total"] == 0 and not usecases.index_ready():
         # MCP 专属提示（文案里是工具名 export_full_history）；CLI 侧不打印，故不放用例层
         res["hint"] = "本地索引为空：请先运行 export_full_history"
     return res
 
 
-@server.tool()
+@server.tool(annotations=_READ_ONLY)
 @_guard
 def semantic_search(query: str, contact: str | None = None, limit: int = 10,
-                    account: str | None = None) -> dict:
+                    offset: int = 0, account: str | None = None) -> dict:
     """按意思检索（关键词记不清时，如「上次说的那个爬山的安排」），返回命中的完整正文。
 
     需先 build_vector_index，且要可选安装项 [semantic]（fastembed；没装时报错并提示
     uv sync --extra semantic）。hits 含 display、ts、sender、content、distance（cosine 距离，
     越小越近；没有相关性阈值，恒返回最近的 limit 条）。精确词用 search_history；
-    只要片段用 search_messages(mode="semantic")。
+    只要片段用 search_messages(mode="semantic")。offset 跳过前面这么多条（翻页）；结果过大时只留
+    最相近的，返回 truncated 与 next_offset。
     """
-    res = usecases.semantic_search(query, contact=contact, limit=limit, account=account)
-    return _need_confirm(res) if isinstance(res, usecases.NeedConfirm) else res
+    res = usecases.semantic_search(query, contact=contact, limit=limit, account=account,
+                                   offset=offset)
+    if isinstance(res, usecases.NeedConfirm):
+        return _need_confirm(res)
+    hits = res.get("hits", [])
+    keep = _fit_budget(hits, newest_first=True)        # 按相似度排序：留下最相近的
+    res["truncated"], res["untrusted"] = keep < len(hits), True
+    if keep < len(hits):
+        res["hits"], res["total"], res["omitted"] = hits[:keep], keep, len(hits) - keep
+        res["next_offset"] = offset + keep
+    return res
 
 
-@server.tool()
+@server.tool(annotations=_IDEMPOTENT)
 @_guard
 def build_vector_index(rebuild: bool = False, account: str | None = None) -> dict:
     """[长任务] 构建本地向量索引，供 semantic_search / search_messages 的语义路使用。
@@ -350,12 +410,12 @@ def build_vector_index(rebuild: bool = False, account: str | None = None) -> dic
     模型到 ~/.agent-wechat/models，之后离线。全量可能要数小时：中断后重跑同一命令自动续传；
     rebuild=true 先清空索引并重置进度（被中断后要从头）。**account 省略=索引全部账号**（与其它
     工具相反）。需可选安装项 [semantic]（没装时报错并提示 uv sync --extra semantic）。
-    立即返回 task_id，用 get_task_status 查进度。
+    立即返回 task_id，用 get_task_status(task_id, wait=60) 等它结束。
     """
     return usecases.build_vector_index(account, rebuild)
 
 
-@server.tool()
+@server.tool(annotations=_READ_ONLY)
 @_guard
 def search_messages(query: str, contact: str | None = None,
                     after_ts: int | None = None, before_ts: int | None = None,
@@ -382,7 +442,7 @@ def search_messages(query: str, contact: str | None = None,
     return res
 
 
-@server.tool()
+@server.tool(annotations=_READ_ONLY)
 @_guard
 def get_message_context(contact: str, msg_key: str, before: int = 2, after: int = 2,
                         account: str | None = None) -> dict:
@@ -400,7 +460,7 @@ def get_message_context(contact: str, msg_key: str, before: int = 2, after: int 
     return res
 
 
-@server.tool()
+@server.tool(annotations=_IDEMPOTENT)
 @_guard
 def export_chat_media(contact: str, kinds: str = "image,voice,video",
                       months: str | None = None, limit: int = 500,
@@ -434,15 +494,15 @@ def export_chat_media(contact: str, kinds: str = "image,voice,video",
             "degraded": res.report.degraded, "truncated": res.report.truncated}
 
 
-@server.tool()
+@server.tool(annotations=_READ_ONLY)
 @_guard
 def get_message_media(contact: str, keys: str | None = None, months: str | None = None,
                       limit: int = 200, out_dir: str | None = None,
                       account: str | None = None) -> dict:
     """查消息媒体的状态：有没有、什么类型、在不在本机、在哪。
 
-    keys 逗号分隔 msg_key（省略=该会话的全部图片/视频/语音/贴纸消息）；out_dir 要与导出时用的
-    一致，否则已导出的会被判成 exportable。每条 status：
+    keys 逗号分隔 msg_key（省略=该会话的全部图片/视频/语音/贴纸消息；索引里查不到的列在 unanswered）；
+    out_dir 要与导出时用的一致，否则已导出的会被判成 exportable。每条 status：
     exported（已导出，path 是产物）/ exportable（本体还在、尚未导出——本机实际几乎只有语音）/
     gone（本机找不到；**图片、视频以 gone 为主是常态**，导出更多历史比「修复」有用）/
     none（不属于本功能覆盖的类型，如文件、位置、appmsg——不是「没有媒体」；只在显式给 keys 时出现）。
@@ -467,6 +527,8 @@ def get_message_media(contact: str, keys: str | None = None, months: str | None 
                "messages": [{"msg_key": s.msg_key, "time": s.ts, "kind": s.kind,
                              "status": s.status, "path": s.path} for s in res.states],
                "degraded": [d.envelope() for d in res.degraded]}
+    if keys:
+        payload["unanswered"] = list(res.unanswered)
     if not res.states and not usecases.index_ready():
         # 与 search_history 同一个道理（文案是 MCP 专属渲染，故留在这里）：索引里一条消息
         # 都没有时，上面那份信封（counts 全 0、messages 为空、degraded 为空）与「这个会话
@@ -476,7 +538,7 @@ def get_message_media(contact: str, keys: str | None = None, months: str | None 
     return payload
 
 
-@server.tool()
+@server.tool(annotations=_IDEMPOTENT)
 @_guard
 def export_moments(contact: str | None = None, months: str | None = None,
                    with_media: bool = False, limit: int = 500,
@@ -515,7 +577,7 @@ def export_moments(contact: str | None = None, months: str | None = None,
             "degraded": r.degraded, "truncated": r.truncated}
 
 
-@server.tool()
+@server.tool(annotations=_IDEMPOTENT)
 @_guard
 def export_chat(contact: str, months: str | None = None, limit: int = 500,
                 format: str = "html,md", out_dir: str | None = None,
@@ -545,16 +607,16 @@ def export_chat(contact: str, months: str | None = None, limit: int = 500,
             "degraded": [d.envelope() for d in res.degraded]}
 
 
-@server.tool()
+@server.tool(annotations=_READ_ONLY)
 @_guard
 def get_message_parts(contact: str, keys: str, account: str | None = None) -> dict:
     """取 appmsg 的结构化内容：引用 / 链接 / 文件 / 转账 / 其余类型；另有位置、名片。
 
     需先在 CLI 跑 `agent-wechat appmsg rebuild`（未回填时信封带 hint 与 degraded）；位置/名片在
     平行的 extras 键里，需另跑 `agent-wechat extras rebuild`（没跑时 extras 为空，**没有**降级提示）。
-    keys 逗号分隔 msg_key，只答属于 contact 那个会话的；其余 key 静默略过——答案里没有某个 key
-    不等于它不是 appmsg：也可能是回填之后才到的消息（重跑 appmsg rebuild，幂等），要分辨请看
-    get_recent_messages 的 type / content（appmsg 的 content 是 [appmsg: 标题]）。
+    keys 逗号分隔 msg_key，只答属于 contact 那个会话的；没有答案的 key 列在 unanswered（不属于该会话、
+    不是 appmsg，或回填之后才到——重跑 appmsg rebuild，幂等；要分辨看 get_recent_messages 的
+    type / content，appmsg 的 content 是 [appmsg: 标题]）。
     parts 每条：kind（数字 type）与 kind_name（含义未确认时为 appmsg:<type>）、title、
     fields（[[点分路径, 值], …]，凭据已剔除）、quote / link / file / transfer（按 kind 择一非空，其余 null）、
     ref_msg_key（引用目标，回填时的快照，可能为 null）。
@@ -585,7 +647,7 @@ def get_message_parts(contact: str, keys: str, account: str | None = None) -> di
                     "fields": [[name, value] for name, value in e.extra.fields]}
                    for e in res.extras],
         "unparsed": res.unparsed, "rejected": res.rejected,
-        "dropped_blobs": res.dropped_blobs, "degraded": []}
+        "dropped_blobs": res.dropped_blobs, "unanswered": list(res.unanswered), "degraded": []}
     if not res.backfilled:
         # 两个通道**分工不重复**（控制器 F69.2）：degraded 只说「少了什么」（结构化记录），
         # 可操作的那一句在 hint 里。同一句话印两遍对读的人只是噪声。
@@ -605,18 +667,23 @@ def get_message_parts(contact: str, keys: str, account: str | None = None) -> di
 WARM_UP_DELAY = 3.0
 
 
-def _warm_up_semantic() -> None:
-    """后台预热嵌入模型（`vector.warm_up_if_ready`）。任何失败都静默放弃：真正的检索照常
-    懒加载，并报它自己的错。"""
+def _warm_up() -> None:
+    """后台预热：先做读微信库的一次性工作（`usecases.warm_up`：密钥预派生等，首调省约 0.4 s），
+    再载入嵌入模型（`vector.warm_up_if_ready`）。任何失败都静默放弃：真正的调用照常懒加载，
+    并报它自己的错。"""
+    try:
+        usecases.warm_up()
+    except Exception:              # noqa: BLE001 — 预热只是加速，不该影响 server
+        pass
     try:
         from . import vector
         vector.warm_up_if_ready()
-    except Exception:              # noqa: BLE001 — 预热只是加速，不该影响 server
+    except Exception:              # noqa: BLE001
         pass
 
 
 def main() -> None:
-    timer = threading.Timer(WARM_UP_DELAY, _warm_up_semantic)
+    timer = threading.Timer(WARM_UP_DELAY, _warm_up)
     timer.daemon = True
     timer.start()
     asyncio.run(server.run_stdio_async())

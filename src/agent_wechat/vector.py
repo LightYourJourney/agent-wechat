@@ -915,8 +915,10 @@ def semantic_search(query: str, chat_id: str | None = None, limit: int = 10,
                     account: str = "", embedder: FastEmbedEmbedder | None = None, *,
                     after_ts: int | None = None,
                     before_ts: int | None = None,
-                    exclude_chats: Collection[str] = ()) -> dict:
+                    exclude_chats: Collection[str] = (), offset: int = 0) -> dict:
     """KNN 语义检索。account 必传（多账号隔离，与 search.search 规则一致）。
+
+    `offset`：跳过按距离排在前面的这么多条，用来续读下一页（同一份索引上结果确定）。
 
     `exclude_chats`（`AGENT_WECHAT_DENY`）下推进 KNN：每个会话一条 `acct_chat != ?`。
     **不能写成 `NOT IN`**——实测 sqlite-vec 对分区键的 `NOT IN` 静默返回空集，`!=` 才对。
@@ -941,6 +943,8 @@ def semantic_search(query: str, chat_id: str | None = None, limit: int = 10,
     try:
         if limit < 1:
             raise SearchInputError("limit 必须为正整数", hint="limit 应为 ≥1 的整数")
+        if offset < 0:
+            raise SearchInputError("offset 不能为负", hint="offset 应为 ≥0 的整数")
         # 顺序要紧：先判模型是否匹配，再判是否为空——不匹配的索引一律不得查询。
         # 判据必须模型无关（`_meta()` 按 MODEL_ID 过滤，异模型的行对它不可见，
         # 用它会让本分支永不可达），且必须看「是否存在任何异模型行」而非「最新一行」；
@@ -949,7 +953,7 @@ def semantic_search(query: str, chat_id: str | None = None, limit: int = 10,
         meta = _meta(con)
         if meta is None or meta["embedded"] == 0:
             raise VectorIndexEmpty("向量索引为空", hint="请先构建向量语义索引")
-        k = min(limit * 3, K_MAX)          # 多取候选，过滤后再截断（limit ≥ 1 时 limit*3 ≥ limit）
+        k = min((offset + limit) * 3, K_MAX)   # 多取候选，过滤后再截断
         qvec = _sqlite_vec().serialize_float32(
             list((embedder or default_embedder()).embed_query(query_text(query))))
         sql = ("SELECT msg_rowid, distance FROM vec_messages "
@@ -983,7 +987,7 @@ def semantic_search(query: str, chat_id: str | None = None, limit: int = 10,
             hits = [h for h in hits if h["ts"] >= after_ts]
         if before_ts is not None:
             hits = [h for h in hits if h["ts"] < before_ts]
-        return {"mode": "semantic", "model": MODEL_ID,
-                "total": len(hits[:limit]), "hits": hits[:limit]}
+        page = hits[offset:offset + limit]
+        return {"mode": "semantic", "model": MODEL_ID, "total": len(page), "hits": page}
     finally:
         con.close()

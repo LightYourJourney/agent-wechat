@@ -203,6 +203,19 @@ def _derive_cached(passphrase: bytes, salt: bytes) -> bytes:
     return keys.derive_key(passphrase, salt)
 
 
+def prewarm_keys(dbs: list[pathlib.Path], passphrase: bytes) -> int:
+    """预先派生这些库的密钥，填进 `_derive_cached`：MCP 常驻进程的首个工具调用省掉逐库 PBKDF2
+    （真机约 66 ms/库，一次 `get_recent_messages` 要开 6–8 个库）。只读各库第 1 页里的 salt
+    （`keys.read_page1`：纯文件读），不快照、不解密。读不到的库跳过。返回派生了几个。"""
+    n = 0
+    for db in dbs:
+        page1 = keys.read_page1(db)
+        if page1 is not None and len(page1) >= keys.SALT_SZ:
+            _derive_cached(passphrase, page1[:keys.SALT_SZ])
+            n += 1
+    return n
+
+
 @contextlib.contextmanager
 def _keyed_snapshot(db: pathlib.Path, passphrase: bytes
                     ) -> Iterator[tuple[pathlib.Path, pathlib.Path, bytes]]:

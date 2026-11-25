@@ -10,7 +10,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent_wechat import account, decrypt, export, mcp_server, paths, reader, roster, store, vector
+from agent_wechat import (account, decrypt, export, mcp_server, paths, reader, roster, store,
+                          usecases, vector)
 from test_msg_key_v10 import wx  # noqa: F401  （夹具）
 from test_reader_export_pipeline import (ACCT, FRIEND, GROUP, SELF, T0, build_shard,  # noqa: F401
                                          drift_tree, env, wechat)
@@ -190,10 +191,19 @@ def test_warm_up_loads_the_model_offline_only(monkeypatch):
 
 
 def test_a_failing_warm_up_is_swallowed(monkeypatch):
-    def boom():
+    def boom(*_a):
         raise RuntimeError("模型坏了")
     monkeypatch.setattr(vector, "warm_up_if_ready", boom)
-    mcp_server._warm_up_semantic()                              # 不抛
+    monkeypatch.setattr(usecases, "warm_up", boom)
+    mcp_server._warm_up()                                       # 不抛
+
+
+def test_key_warm_up_failing_does_not_skip_the_model(monkeypatch):
+    seen = []
+    monkeypatch.setattr(usecases, "warm_up", lambda: 1 / 0)
+    monkeypatch.setattr(vector, "warm_up_if_ready", lambda: seen.append(1))
+    mcp_server._warm_up()
+    assert seen == [1]
 
 
 # ---------- 消息条目省掉可推导字段 ----------

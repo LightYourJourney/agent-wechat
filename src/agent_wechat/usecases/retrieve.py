@@ -6,7 +6,7 @@ from ._core import (DEGRADE_EFFECT, LIMIT_SEMANTIC, NeedConfirm, _display_or_id,
                     _refresh_roster, pkg_clamp_limit, pkg_context, to_accounts)
 
 def search_history(query: str, contact: str | None = None, limit: int = 20,
-                   account: str | None = None) -> dict | NeedConfirm:
+                   account: str | None = None, before_ts: int | None = None) -> dict | NeedConfirm:
     """hits 的 `sender_name` 来自名册（`search.py:13`），而 `_refresh_roster` 吞掉漂移——
     所以降级说明必须随结果带出去（Ruling 13），否则显示名**静默**回落成 wxid。"""
     ctx = pkg_context(account)
@@ -15,12 +15,13 @@ def search_history(query: str, contact: str | None = None, limit: int = 20,
         return chat_id
     _refresh_roster(ctx)
     res = search.search(query, chat_id=chat_id, limit=pkg_clamp_limit(limit),
-                        account=ctx.account)
+                        account=ctx.account, before_ts=before_ts)
     res["degraded"] = [*res.get("degraded", []), *ctx.degradations()]   # EA-013：合并 FTS 降级说明
     return res
 
 
 LIMIT_RETRIEVAL = (1, retrieval.MAX_LIMIT)
+SEMANTIC_OFFSET_MAX = 1000   # (1000 + 50) × 3 < vector.K_MAX
 
 
 def search_messages(query: str, *, contact: str | None = None,
@@ -59,8 +60,12 @@ def message_context(msg_key: str, *, contact: str | None = None,
 
 
 def semantic_search(query: str, contact: str | None = None, limit: int = 10,
-                    account: str | None = None) -> dict | NeedConfirm:
+                    account: str | None = None, offset: int = 0) -> dict | NeedConfirm:
     """同 search_history：hits 的 `display` 也由名册富化（Ruling 13）。"""
+    if offset > SEMANTIC_OFFSET_MAX:
+        # KNN 一次最多取 vector.K_MAX 个候选（且要多取三倍留给过滤）：再往后的页取不到，明说
+        raise errors.SearchInputError(f"offset 最大 {SEMANTIC_OFFSET_MAX}",
+                                      hint="语义检索只适合看最相近的那些；要穷举请用 search_history")
     ctx = pkg_context(account)
     chat_id = ctx.resolve_optional(contact)
     if isinstance(chat_id, NeedConfirm):
@@ -68,7 +73,7 @@ def semantic_search(query: str, contact: str | None = None, limit: int = 10,
     _refresh_roster(ctx)
     res = vector.semantic_search(query, chat_id=chat_id,
                                  limit=pkg_clamp_limit(limit, LIMIT_SEMANTIC),
-                                 account=ctx.account)
+                                 account=ctx.account, offset=offset)
     fell_back = False
     for h in res.get("hits", []):
         try:

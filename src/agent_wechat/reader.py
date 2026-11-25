@@ -250,6 +250,13 @@ class MessageReader:
             con.text_factory = bytes   # 库内 TEXT 含非 UTF-8 字节，统一按 bytes 取
             yield con
 
+    def prewarm_keys(self) -> int:
+        """预先派生会话、联系人、表情与各消息分片的密钥（见 `decrypt.prewarm_keys`）。"""
+        ds = paths.db_storage(self.acct)
+        return decrypt.prewarm_keys([ds / "session" / "session.db", ds / "contact" / "contact.db",
+                                     ds / "emoticon" / "emoticon.db",
+                                     *paths.message_shards(self.acct)], self.passphrase)
+
     def _check(self, capability: str, rel: str, con: decrypt.ReadConnection, *,
                table: str | None = None, only: str | None = None) -> None:
         """校验该能力在**这个库**上的声明，缺了抛 `SchemaDrift`。

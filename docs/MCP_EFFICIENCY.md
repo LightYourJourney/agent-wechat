@@ -261,7 +261,88 @@ Agent 端到端：见 §7.2。
   关掉 tool search，`ENABLE_TOOL_SEARCH=true` 也压不住（调试日志 `ENABLE_TOOL_SEARCH=true, result=false`），于是每个
   会话都全量下发全部 MCP 工具定义。去掉这一行后 `/context`：MCP 工具预载 527 token，其余 19.1k 改为按需加载。
 
-## 9. 剩余问题
+## 9. 第四轮：注解、长轮询、统一体积预算（2026-11-25）
+
+### 9.1 审计结论（合成库基线，`scripts/mcp_bench.py`，机器空闲时测）
+
+- **服务端延迟已经不是瓶颈**：20 会话 × 1.5 万条上，各工具中位数 0.2–6 ms；冷启动 `initialize` 约 0.3–0.6 s。
+  真机慢在读微信库（克隆 + 解密），第三轮已处理 contact.db 那部分。
+- **固定开销**：Claude Code 开着工具搜索时，会话开头只载入 server instructions（`/context` 实测 691 token），
+  15 个工具定义（6.3k）全部按需加载。instructions 里的通用约定是第一轮从 5 个工具描述里收拢来的，拆回去
+  会在加载时重复计费，这轮不动。
+- **动态开销里真正的风险是大结果**：`search_history` 不设体积上限，`limit=300` 时返回 64,160 字符——超过 Claude Code
+  对单个工具结果的 5 万字符上限，整份结果会被存到文件、模型只拿到一个文件路径。`semantic_search` 同理（上限 50 条完整正文）。
+- **往返次数**：长任务只能靠反复调 `get_task_status` 轮询，每次轮询都是一轮完整的模型往返（重读整段上下文）。
+- **没用上的协议能力**：工具没有注解。Claude Code 文档写明会把 `readOnlyHint` 的工具与其它只读调用并行执行。
+
+### 9.2 改了什么
+
+| 改动 | 位置 | 兼容性 |
+|---|---|---|
+| 工具注解：10 个只读工具 `readOnlyHint`，5 个导出类 `idempotentHint` | `mcp_server._READ_ONLY` / `_IDEMPOTENT` | 只加 `annotations` 字段（给客户端的元数据；`/context` 的增量与新参数说明的增量相符） |
+| `get_task_status(task_id, wait=0)`：任务还在跑时最多等 `wait` 秒（上限 60），一结束立即返回 | `mcp_server.get_task_status` | 新参数默认 0 = 旧行为；同步工具跑在 SDK 线程池里，等待不挡别的调用（有测试） |
+| 完整正文类工具共用一个体积预算：18k token（按字符类别估算，见 §9.4）且 ≤4 万字符，同时低于 25k token 与 5 万字符两道上限 | `mcp_server._fit_budget` / `_est_tokens` / `_next_before_ts` | 中文会话的截断位置与旧的「13k 粗估」基本相同；英文、链接、emoji 多的会话会更早截断（以前会被低估） |
+| `search_history` 超预算时丢掉较旧的命中，返回 `truncated: true` 与 `next_before_ts`；新增 `before_ts` 参数续搜（核心的 `search.search` 本来就支持） | `mcp_server.search_history`、`usecases.search_history` | 新增 `truncated`（总是有）、`before_ts`；`total` 仍等于本次返回条数 |
+| `semantic_search` 超预算时只留最相近的，返回 `truncated` / `omitted` / `next_offset`；新增 `offset` 参数翻页（0–1000，再大明确报错） | `mcp_server.semantic_search`、`usecases.semantic_search`、`vector.semantic_search` | 新增参数与字段 |
+| `get_message_parts` 恒返回 `unanswered`、`get_message_media` 给了 keys 时返回 `unanswered`：没答的 key 原样列出，不再静默略过 | `usecases.message_parts` / `message_media` | 新增字段 |
+| MCP 后台预热增加读微信库的一次性工作：常用库的密钥预派生（只读各库第 1 页的 salt）、home 目录与 Time Machine 检查、联系人表进缓存 | `usecases.warm_up`、`reader.MessageReader.prewarm_keys`、`decrypt.prewarm_keys`、`mcp_server._warm_up` | 只在 `main()` 起的后台线程里跑，失败静默 |
+| `get_recent_messages` / `search_history` / `semantic_search` 顶层补 `"untrusted": true` | 同上 | 新增字段；与 `search_messages` / `get_message_context` 一致 |
+
+**评估后放弃的**：
+
+- 给常用工具打 `anthropic/alwaysLoad`：省一次 ToolSearch，但 agent-wechat 是用户级配置，每个会话（大多与微信无关）
+  都要多付约 700 token。
+- 把 out_dir、build_vector_index 等工具专属约定从 instructions 挪回工具描述：省下的常驻 token 会在加载工具时按 4–5 份重复付回来。
+- MCP progress notifications 与 tasks 扩展：导出类工具本来就立即返回 task_id，进度通知无处可发；tasks 扩展在
+  Claude Code 里要求请求方显式携带，覆盖面不如一个 `wait` 参数。
+- `search_messages` 内联上下文：两阶段披露（先片段、再按需取原文）是有意的设计，内联会让每条命中都付上下文的 token。
+
+### 9.3 对比（合成库 20 × 1,500；新旧版交替各跑两轮）
+
+| 场景 | 改前 | 改后 |
+|---|---:|---:|
+| `search_history`（limit=300） | 64,160 字符，**超过客户端 5 万字符上限、被转存为文件** | 约 3.3 万字符，留下最新的一批 + `next_before_ts` |
+| `search_history`（默认 20 条） | 4,323 字符 | 4,358（多了 `truncated` / `untrusted` 两个字段） |
+| `get_recent_messages`（50 条） | 5,504 | 5,521（多了 `untrusted`） |
+| 全量重导出（3 万条，约 0.5–3 s）查到结束要调 `get_task_status` 的次数 | 2（按 Agent 每轮约 3 s 轮询） | **1**（`wait=60`） |
+| 常驻进程第一次读微信库（6 分片、230 群、1.28 万联系人，`--shards 6`） | 172–317 ms | 预热后 **19 ms** |
+| 工具定义（Claude Code `/context`，全部加载时） | 6.3k token | 6.5k（新参数与说明） |
+| 会话开头常驻（工具搜索开启时，只有 instructions） | 691 | 691 |
+| 冷启动 `initialize`（交错 3 次，负载 90–140） | 0.58–1.60 s | 0.65–1.10 s（噪声内） |
+
+轮询次数省下多少取决于任务时长：真机全量导出要数分钟到数小时，旧做法每 3–5 秒一轮往返，`wait=60` 每分钟一轮。
+
+### 9.4 token 估算的标定
+
+旧估算（中文按 1、其余 3 字符折 1）在合成工具结果上比 Claude 实际计数低约三成，遇到 emoji 会低到 1/8。
+用 7 段合成文本各调一次 Sonnet、读回 `usage.input_tokens`（减去空提示的基数）：
+
+| 文本 | 实际 token / 字符 | 新估算 / 实际 |
+|---|---:|---:|
+| 中文句子 | 1.09 | 1.01 |
+| 英文单词 | 0.35 | 1.14 |
+| 十六进制串 | 0.65 | 0.96 |
+| 带参数的链接 | 0.47 | 1.11 |
+| emoji | 2.58 | 1.01 |
+| `get_recent_messages(limit=500)` 的完整结果 | 17,746 token | 1.02 |
+| `search_history(limit=300)` 的完整结果 | 18,115 token | 0.97 |
+
+新估算按字符类别给权重：ASCII 数字 0.75、其余 ASCII 0.4、其余 BMP 字符（中文等）1.1、BMP 以外（emoji）2.6。
+数字权重有意偏高，给十六进制串留余量。估算在服务端每次约 1 ms（4 万字符）。
+
+### 9.5 真机剖析（只计时，不输出内容）
+
+真机 6 个分片（5–238 MB），读的是当前账号，脚本只打印耗时、条数与分片体积：
+
+- `get_recent_messages`（50 条）预热后 15–24 ms；500 条 30–200 ms。
+- 常驻进程**第一次**读微信库要 0.54–0.66 s：逐库 PBKDF2（约 66 ms/库，一次调用开 6–8 个库）、首次
+  Time Machine 检查（`tmutil` 子进程约 80 ms）、整张联系人表（约 70 ms）。后台预热把它们提前做掉后，
+  首调 **0.16–0.20 s**（交错 3 次）。预热本身在后台约 1.4–1.8 s，在 server 起来 3 秒后开始。
+- 剩下的大头是目标会话的群名册（约 70 ms，与会话有关，无法预热）和逐库打开时解析 `sqlite_master`。
+- `before_ts` 一次往前跳很远（如一年前）时 0.6 s：比它新的分片里，这个会话的表都要整表扫一遍
+  （`create_time` 上没有索引）。逐页往前翻时只扫上一页之后的部分，不受影响。见 §10。
+
+## 10. 剩余问题
 
 - **短键依赖本地索引**：短键要靠索引（或 `msg_parts` / 排除清单）换回完整键。`get_recent_messages` 直接读微信库，
   返回的消息可能还没导出；这时把它的短键交给 `get_message_context` 会答「找不到」——不过完整键在这种情况下
@@ -270,13 +351,18 @@ Agent 端到端：见 §7.2。
 - **`next_before_ts` 在同一秒边界上可能与本页重叠一两条**：`before_ts` 不含上界，而被丢掉的消息里可能有和本页
   第一条同一秒的，这时往后挪一秒，宁可重叠也不漏。要做到严格不重叠需要再加一个 local_id 游标，跨分片处理较复杂，
   这次没做。
-- **体积预算是粗估**：CJK 按 1 个 token、其它按 3 个字符折 1 个，比 Claude 实际计数偏低约三成五（合成库）。
-  正文特别密（大段英文、长链接、大量 emoji）的会话里偏差可能更大；13k 的预算在合成库上约合 17–18k，留了余量，
-  但不是硬保证。
+- **体积预算仍是估算**（§9.4，标定于 Sonnet 的计数）：合成结果上误差 ±4%，英文偏高约一成四；没有本地分词器，
+  不是硬保证。18k 的预算离 25k 上限留了约三成。
 - **`get_message_context` 的 sender 来自索引里的名册**，与 `get_recent_messages`（实时读微信库的名册）不是同一来源，
   名册刷新前可能还是 wxid。这是原有行为，这轮没动。
-- **每次读微信库都要先克隆、再解密打开**（`get_recent_messages` 至少开 contact.db 与若干分片）。缓存只省掉了
-  contact.db 的重复读取，分片这一侧没缓存——它们随消息变化，缓存收益小、失效判断复杂。
+- **每次读微信库都要先克隆、再解密打开**（`get_recent_messages` 至少开 contact.db 与若干分片）。密钥派生已缓存、
+  首调前预热（§9.5）；连接本身没缓存——分片随消息变化，失效判断复杂，而预热后单次调用已在 20 ms 上下。
+- **`get_recent_messages` 的 `before_ts` 一次跳很远时慢**（真机一年前约 0.6 s）：微信的 `Msg_` 表在 `create_time` 上
+  没有索引，比它新的分片里这个会话的表要整表扫。`sort_seq` 有索引、约等于 `create_time × 1000`，但「约等于」
+  不足以当过滤条件（会静默漏消息），这轮没用。逐页往前翻不受影响。
 - `get_account_status` 的 `index` 计数仍是三次全表扫描（30 万条约 24ms）。这个工具确实需要这些数，
   而且不在热路径上。
 - server 冷启动的大头仍是 MCP SDK 自身的 import（约八成），本项目这一侧能省的已经省了。
+- **`semantic_search` 的 `offset` 最多 1000**：KNN 一次最多取 4096 个候选，还要多取三倍留给过滤；再往后明确报错，
+  建议改用 `search_history` 穷举。
+

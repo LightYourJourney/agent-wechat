@@ -145,6 +145,9 @@ class MessageMediaResult:
     by_kind: dict[str, dict[str, int]] = dataclasses.field(default_factory=dict)
     truncated: bool = False    # limit 截断了答案：与 media.MediaReport.truncated 同义
     degraded: tuple[Degradation, ...] = ()
+    # 给了 keys 时，**索引里查不到**的那些（原样、去重保序）：别的会话的、未导出的、不在所选月份
+    # 的。被 limit 截掉的不在此列（那是 truncated）。
+    unanswered: tuple[str, ...] = ()
 
 
 _KIND_OF_TYPE = {messages.TYPE_IMAGE: "image",
@@ -269,7 +272,7 @@ def message_media(contact: str, *, keys: Sequence[str] | None = None,
 
     keys=None → 该会话**所有媒体类型的消息**（msg_type ∈ {3,43,34,47}），受 limit 约束
     ——按 msg_type 而非按 ref 筛选：索引内实测有 259 条媒体消息拿不到 ref，
-    按 ref 筛会把它们谎报成「没有媒体」。给了 keys → 只答这些，查不到的静默略过。
+    按 ref 筛会把它们谎报成「没有媒体」。给了 keys → 只答这些，查不到的列在 `unanswered`。
     months 在 SQL 里筛（不是取回后再滤）：limit 卡的必须是**命中月份**的条数。
     truncated=True 表示 limit 截断了答案，别把它当成「那个月没有媒体」。
     """
@@ -289,6 +292,7 @@ def message_media(contact: str, *, keys: Sequence[str] | None = None,
     lim = pkg_clamp_limit(limit, LIMIT_MEDIA)
     month_sql, month_args = _month_clause(months)
     degraded: list[Degradation] = []
+    unanswered: tuple[str, ...] = ()
 
     with contextlib.ExitStack() as stack:
         try:
@@ -301,7 +305,9 @@ def message_media(contact: str, *, keys: Sequence[str] | None = None,
                 # `chat_md5` 一滤不能少：keys 可能来自别的会话——不加就会把别人的媒体
                 # 冠上本次解析出的 chat_id 报出去。
                 # v10 前的 4 段旧键唯一时换成新键（`store.resolve_msg_key`）
-                uniq = store.resolve_msg_keys(con, ctx.account, keys)
+                given = list(dict.fromkeys(keys))
+                full_of = {k: store.resolve_msg_key(con, ctx.account, k) for k in given}
+                uniq = list(dict.fromkeys(full_of.values()))
                 rows = []
                 for i in range(0, len(uniq), store.KEYS_BATCH):
                     chunk = uniq[i:i + store.KEYS_BATCH]
@@ -315,6 +321,8 @@ def message_media(contact: str, *, keys: Sequence[str] | None = None,
                 # `ORDER BY m.ts DESC` 等价（limit 截断取的必须是**最新**的那些）。
                 rows.sort(key=lambda r: r["ts"], reverse=True)
                 rows = [r for r in rows if r["account"] == ctx.account]
+                found = {r["msg_key"] for r in rows}
+                unanswered = tuple(k for k in given if full_of[k] not in found)
                 # **`>` 而不是 `>=`**：这条路（keys 分支）没有 SQL `LIMIT`，`rows` 就是候选
                 # 全量，`rows[:lim]` 只在**超过** lim 时才真的丢东西。用 `>=` 时「key 数恰好
                 # 等于 limit」（真机常见：200 个 key + 默认 limit 200）会一条不丢地报
@@ -382,7 +390,7 @@ def message_media(contact: str, *, keys: Sequence[str] | None = None,
     # `Degradation` 元组，同 recent_messages 的口径（转换归入口层）。
     return MessageMediaResult(chat_id=chat_id, out_dir=str(out_root),
                               states=states, counts=counts, by_kind=by_kind,
-                              truncated=truncated,
+                              truncated=truncated, unanswered=unanswered,
                               degraded=tuple(degraded) + ctx.drift())
 
 

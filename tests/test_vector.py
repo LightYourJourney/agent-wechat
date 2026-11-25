@@ -987,3 +987,16 @@ def test_rebuild_without_the_semantic_extra_refuses_before_dropping_anything(mon
     monkeypatch.setattr(vector, "connect", lambda: pytest.fail("不该打开索引（更不该清表）"))
     with pytest.raises(errors.VectorError, match="未安装语义检索组件"):
         vector.build_index(rebuild=True, embedder=vector.FastEmbedEmbedder())
+
+
+def test_semantic_search_offset_pages_through_the_ranking(env):
+    """offset 跳过排在前面的命中：两页拼起来等于一次取全，不重不漏。"""
+    fake = _seed_search_fixture(env)
+    full = vector.semantic_search("爬山", account="acct", limit=5, embedder=fake)["hits"]
+    p1 = vector.semantic_search("爬山", account="acct", limit=1, embedder=fake)["hits"]
+    p2 = vector.semantic_search("爬山", account="acct", limit=1, offset=1, embedder=fake)
+    assert [h["msg_key"] for h in p1 + p2["hits"]] == [h["msg_key"] for h in full]
+    assert p2["total"] == 1
+    assert vector.semantic_search("爬山", account="acct", limit=1, offset=9, embedder=fake)["hits"] == []
+    with pytest.raises(errors.SearchInputError, match="offset"):
+        vector.semantic_search("爬山", account="acct", offset=-1, embedder=fake)

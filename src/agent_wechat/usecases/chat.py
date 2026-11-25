@@ -109,6 +109,16 @@ def chats(account: str | None = None, query: str = "", limit: int = 50) -> list[
                                     limit=pkg_clamp_limit(limit, (1, 100)))
 
 
+def warm_up(account: str | None = None) -> None:
+    """MCP 后台预热：把首个读微信库的调用要做的一次性工作提前做掉（真机首调约 0.6 s → 0.2 s）。
+    常用库的密钥预派生（`MessageReader.prewarm_keys`）、home 目录与 Time Machine 排除检查、
+    联系人表进跨调用缓存（按名字解析会话要扫它）。"""
+    r = pkg_context(account).reader
+    r.prewarm_keys()
+    paths.ensure_home_dirs()
+    r.contacts(limit=None)
+
+
 def recent_messages(contact: str, limit: int = 50,
                     account: str | None = None,
                     before_ts: int | None = None) -> RecentMessages | NeedConfirm:
@@ -434,6 +444,10 @@ class MessagePartsResult:
     #: `extras` 这一族**没有 `backfilled` 那样的账号级状态**：表空与「这些消息本来就没有
     #: 位置/名片」在库里分不开，故不设对应的降级位（与 `chat_export` 那边同一决定）。
     extras: tuple["ExtraPart", ...] = ()
+    #: 调用方给的 key 里**没有任何答案**的那些（原样、去重保序）：不属于该会话、不是 appmsg /
+    #: 位置 / 名片、或回填之后才到。三种情形在库里不可分，但「哪些没答」要说出来，不能让调用方
+    #: 自己拿输入去比对才发现少了。计入 unparsed / rejected 的不算没答。
+    unanswered: tuple[str, ...] = ()
 
 
 def message_parts(contact: str, *, keys: Sequence[str],
@@ -462,8 +476,9 @@ def message_parts(contact: str, *, keys: Sequence[str],
         with store.open() as con:
             # MCP 短键与 v10 前的 4 段旧键先换成完整键（`store.resolve_msg_key`），再按会话前缀
             # 过滤、去重保序——短键不带前缀，先过滤会把它们全滤掉
-            wanted = [k for k in store.resolve_msg_keys(con, ctx.account, keys)
-                      if k.startswith(prefix)]
+            given = list(dict.fromkeys(keys))
+            full_of = {k: store.resolve_msg_key(con, ctx.account, k) for k in given}
+            wanted = [k for k in dict.fromkeys(full_of.values()) if k.startswith(prefix)]
             got = store.msg_parts_by_keys(con, wanted)
             # EA-041：与 parts 同一趟、同一个 wanted 集合读出原始载荷，解析在库外做。
             extras_raw = store.extras_by_keys(con, wanted)
@@ -479,10 +494,12 @@ def message_parts(contact: str, *, keys: Sequence[str],
         ) from exc
     out: list[MessagePart] = []
     unparsed = rejected = dropped_blobs = 0
+    answered: set[str] = set()
     for key in wanted:
         row = got.get(key)
         if row is None:               # 不是 appmsg / 没导出：两种情形在这里不可分
             continue
+        answered.add(key)
         parsed, outcome, blobs = _decode_part(row[3])
         # **无条件累加**：`rejected` / `unparsed` 两条路径的第三项恒为 0（`_decode_part` 的
         # 早退），所以不必按 outcome 分支——分了反而是把「计数口径」和「成功与否」绑在一起。
@@ -498,9 +515,11 @@ def message_parts(contact: str, *, keys: Sequence[str],
     extras = tuple(ExtraPart(key, x) for key in wanted
                    if (row2 := extras_raw.get(key)) is not None
                    and (x := _decode_extra(row2[0], row2[1])) is not None)
+    answered |= {e.msg_key for e in extras}
     return MessagePartsResult(parts=tuple(out), unparsed=unparsed, rejected=rejected,
                               dropped_blobs=dropped_blobs, backfilled=backfilled,
-                              extras=extras)
+                              extras=extras,
+                              unanswered=tuple(k for k in given if full_of[k] not in answered))
 
 
 @dataclass(frozen=True)

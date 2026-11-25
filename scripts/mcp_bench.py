@@ -24,7 +24,7 @@ import time
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tests"))          # 复用测试夹具（加密合成库）
 
-ASCII_CHARS_PER_TOKEN = 3.0
+ASCII_CHARS_PER_TOKEN = 3.0   # 历轮对比用的老口径（est_tokens），偏低约三成；标定过的见 text_tokens
 
 
 def est_tokens(text: str) -> int:
@@ -104,9 +104,10 @@ def _text(i: int) -> str:
 
 
 def build_env(tmp: pathlib.Path, chats: int, per_chat: int, groups: int = 0,
-              contacts: int = 0, members: int = 50) -> tuple[str, list[str]]:
+              contacts: int = 0, members: int = 50, shards: int = 1) -> tuple[str, list[str]]:
     """`groups` / `contacts`：再造这么多个群（各 `members` 人）与联系人，让名册与联系人表
-    接近真机规模（读名册、取显示名的耗时与它们成正比）。默认 0 = 与早先的基准一致。"""
+    接近真机规模（读名册、取显示名的耗时与它们成正比）。默认 0 = 与早先的基准一致。
+    `shards`：消息按时间均分进这么多个分片（真机 6 个；每开一个库都要派生一次密钥）。"""
     from helpers import ext_buffer, member  # pyright: ignore[reportMissingImports]
     from test_reader_export_pipeline import (  # pyright: ignore[reportMissingImports]
         ACCT, PW, SELF, T0, build_shard, enc_db)
@@ -138,11 +139,13 @@ def build_env(tmp: pathlib.Path, chats: int, per_chat: int, groups: int = 0,
                        for g, r in enumerate(rooms)]),
     })
     users = friends + [SELF]
-    build_shard(root, ACCT, "message_0.db",
-                {f: [(lid, 1, (len(users) if lid % 2 else ci + 1), T0 + lid * 60 + ci,
-                      _text(lid * 7 + ci * 3), 0)
-                     for lid in range(1, per_chat + 1)]
-                 for ci, f in enumerate(friends)}, users)
+    for s in range(shards):
+        lids = range(s * per_chat // shards + 1, (s + 1) * per_chat // shards + 1)
+        build_shard(root, ACCT, f"message_{s}.db",
+                    {f: [(lid, 1, (len(users) if lid % 2 else ci + 1), T0 + lid * 60 + ci,
+                          _text(lid * 7 + ci * 3), 0)
+                         for lid in lids]
+                     for ci, f in enumerate(friends)}, users)
     paths.XWECHAT_FILES = root
     paths.HOME_DIR = home
     keys.CACHE_FILE = home / "passphrase.json"
@@ -155,10 +158,18 @@ def build_env(tmp: pathlib.Path, chats: int, per_chat: int, groups: int = 0,
 
 def _result_sizes(r) -> dict:
     text = "".join(getattr(c, "text", "") for c in r.content)
+    try:
+        data = json.loads(text) if len(r.content) == 1 else None
+    except ValueError:
+        data = None
+    extra = ({k: data[k] for k in ("truncated", "next_before_ts", "total") if k in data}
+             if isinstance(data, dict) else {})
     structured = (json.dumps(r.structured_content, ensure_ascii=False)
                   if r.structured_content is not None else "")
+    from agent_wechat.mcp_server import _est_tokens   # 按字符类别标定过的估算（服务端预算用的那个）
     return {"blocks": len(r.content), "text_chars": len(text), "text_est_tokens": est_tokens(text),
-            "structured_chars": len(structured)}
+            "text_tokens": _est_tokens(text),
+            "structured_chars": len(structured), **extra}
 
 
 async def calls(tmp: pathlib.Path, chats: int, per_chat: int, runs: int = 5,
@@ -183,18 +194,63 @@ async def calls(tmp: pathlib.Path, chats: int, per_chat: int, runs: int = 5,
         ("get_message_media", {"contact": "张三"}),
         ("get_message_parts", {"contact": "张三", "keys": key}),
         ("get_task_status", {}),
+        # 大结果：limit 远超预算时应截断并给出续读位置（客户端单个结果上限：25k token / 5 万字符）
+        ("get_recent_messages#500", {"contact": "张三", "limit": 500}),
+        ("search_history#300", {"query": "会议", "limit": 300}),
     ]
     out = {"messages_indexed": n, "export_s": round(export_s, 2), "tools": {}}
-    for name, args in cases:
+    for label, args in cases:
+        name = label.split("#")[0]
         lat = []
         r = None
         for _ in range(runs):
             t = time.perf_counter()
             r = await srv.call_tool(name, args)
             lat.append(time.perf_counter() - t)
-        out["tools"][name] = {"first_ms": round(lat[0] * 1000, 1), "median_ms": _median_ms(lat),
+        out["tools"][label] = {"first_ms": round(lat[0] * 1000, 1), "median_ms": _median_ms(lat),
                               **_result_sizes(r)}
+    out["long_task"] = await _long_task(srv)
+    out["first_call"] = await _first_call(srv)
     return out
+
+
+async def _first_call(srv) -> dict:
+    """常驻进程里第一次读微信库的调用：清掉进程内的密钥与联系人缓存后计时；warmed 先跑一遍
+    后台预热（`usecases.warm_up`，没有它的旧版两项相同）。"""
+    from agent_wechat import decrypt, reader, usecases
+    out = {}
+    for mode in ("cold", "warmed"):
+        decrypt._derive_cached.cache_clear()
+        reader._contact_cache.update(sig=None, items={})
+        if mode == "warmed" and hasattr(usecases, "warm_up"):
+            usecases.warm_up()
+        t = time.perf_counter()
+        await srv.call_tool("get_recent_messages", {"contact": "张三"})
+        out[f"{mode}_ms"] = round((time.perf_counter() - t) * 1000, 1)
+    return out
+
+
+# 不支持 wait 的旧版按「Agent 每轮约 3 秒查一次」模拟轮询（每次轮询 = 一轮模型往返）
+AGENT_TURN_S = 3.0
+
+
+async def _long_task(srv) -> dict:
+    """全量重导出一遍（后台任务），数「查到结束」要调几次 get_task_status。"""
+    tools = {t.name: t for t in await srv.list_tools()}
+    has_wait = "wait" in tools["get_task_status"].input_schema.get("properties", {})
+    t0 = time.perf_counter()
+    tid = json.loads((await srv.call_tool("export_full_history", {"full": True})).content[0].text)["task_id"]
+    calls = 0
+    while True:
+        calls += 1
+        args = {"task_id": tid, **({"wait": 60} if has_wait else {})}
+        st = json.loads((await srv.call_tool("get_task_status", args)).content[0].text)
+        if st.get("status") != "running":
+            break
+        if not has_wait:
+            await asyncio.sleep(AGENT_TURN_S)
+    return {"mode": "wait=60" if has_wait else f"poll@{AGENT_TURN_S:g}s", "status": st.get("status"),
+            "duration_s": round(time.perf_counter() - t0, 2), "status_calls": calls}
 
 
 async def main() -> None:
@@ -206,9 +262,10 @@ async def main() -> None:
     ap.add_argument("--per-chat", type=int, default=1500)
     ap.add_argument("--groups", type=int, default=0, help="额外造的群数（名册规模）")
     ap.add_argument("--contacts", type=int, default=0, help="额外造的联系人数")
+    ap.add_argument("--shards", type=int, default=1, help="消息分片数（真机 6 个）")
     ap.add_argument("--calls-only", action="store_true", help="只测工具调用（跳过定义与冷启动）")
     args = ap.parse_args()
-    scale = {"groups": args.groups, "contacts": args.contacts}
+    scale = {"groups": args.groups, "contacts": args.contacts, "shards": args.shards}
     with tempfile.TemporaryDirectory(prefix="awmcp-bench-") as d:
         tmp = pathlib.Path(d)
         if args.serve:
