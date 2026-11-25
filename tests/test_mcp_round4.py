@@ -102,9 +102,9 @@ def test_search_history_over_budget_keeps_the_newest_hits_and_pages_with_before_
         seen += [h["ts"] for h in res["hits"]]
         assert res["total"] == len(res["hits"])
         if not res["truncated"]:
-            assert "next_before_ts" not in res
+            assert "next_before_ts" not in res and "hint" not in res
             break
-        assert 0 < len(res["hits"]) < 10
+        assert 0 < len(res["hits"]) < 10 and "before_ts=next_before_ts" in res["hint"]
         before = res["next_before_ts"]
     assert pages > 1                                            # 确实截断过、续搜过
     assert seen == [T0 + i * 60 for i in range(10, 0, -1)]      # 从新到旧，不重不漏
@@ -127,7 +127,7 @@ def test_semantic_search_over_budget_says_how_many_were_left_out(monkeypatch):
     kept = len(res["hits"])
     assert res["truncated"] is True and 0 < kept < 8 and res["omitted"] == 8 - kept
     assert [h["distance"] for h in res["hits"]] == [i / 10 for i in range(kept)]   # 最相近的留下
-    assert res["next_offset"] == kept and res["total"] == kept
+    assert res["next_offset"] == kept and res["total"] == kept and "offset=next_offset" in res["hint"]
     assert _call("semantic_search", {"query": "x", "offset": 30})["next_offset"] == 30 + kept
 
 

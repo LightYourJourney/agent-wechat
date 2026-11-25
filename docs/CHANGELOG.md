@@ -18,7 +18,10 @@
 - `semantic_search` 新增 `offset` 翻页，截断时返回 `next_offset`。
 - `get_message_parts`（恒有）与 `get_message_media`（给了 keys 时）返回 `unanswered`：没答的 key 不再静默略过。
 - MCP 后台预热增加密钥预派生、Time Machine 检查与联系人表缓存：真机常驻进程第一次读微信库 0.54–0.66 s → 0.16–0.20 s。
-- `scripts/mcp_bench.py` 新增大结果场景、长任务的「查到结束要调几次」、`--shards` 与首调计时。
+- `search_history` / `semantic_search` 截断时在结果里给一句 `hint` 说明怎么续读（不写进工具描述，只在真截断时付这几十个 token）。
+- `scripts/mcp_bench.py` 新增大结果场景、长任务的「查到结束要调几次」、`--shards` 与首调计时；
+  `scripts/mcp_agent_eval.py` 新增长任务与并行两个任务、模型回合数统计和 `--server-src`（新旧对比）。
+  Sonnet / Opus 评测新旧版命中率都是 16/16，两个模型都会主动用 `wait=60`（MCP_EFFICIENCY.md §9.6）。
 
 ### MCP 使用效率 · 第三轮（2026-11-25）
 

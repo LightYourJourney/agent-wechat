@@ -334,8 +334,7 @@ def export_full_history(contact: str | None = None, full: bool = False,
 @server.tool(annotations=_READ_ONLY)
 @_guard
 def get_task_status(task_id: str | None = None, wait: int = 0) -> dict | list:
-    """查询长任务进度。task_id 省略则列出近期任务。wait（秒，≤60）：任务还在跑时最多等这么久，
-    一结束立即返回（省去反复轮询）；到时仍在跑就返回当前进度。"""
+    """查询长任务进度。task_id 省略则列出近期任务。wait：最多等这么多秒（≤60），任务一结束即返回。"""
     res = usecases.task_status(task_id)
     deadline = time.monotonic() + min(max(wait, 0), TASK_WAIT_MAX)
     while (task_id and isinstance(res, dict) and res.get("status") == "running"
@@ -354,8 +353,7 @@ def search_history(query: str, contact: str | None = None, limit: int = 20,
     适合精确关键词/人名/专名且需要原文时；只要证据片段、或想关键词+语义融合，用更省上下文的
     search_messages。contact 可选限定会话。hits 每条含 msg_key、chat_id、ts、sender_id、
     sender_name、is_self、msg_type、content、snip，媒体消息另有 media_hint（为空的字段省略）。
-    有 degraded 时 sender_name 可能回落成 wxid，别把它当成真实姓名。命中从新到旧；结果过大时
-    丢掉较旧的，返回 truncated=true 与 next_before_ts，传作 before_ts（不含）续搜。
+    有 degraded 时 sender_name 可能回落成 wxid，别把它当成真实姓名。命中从新到旧。
     """
     res = usecases.search_history(query, contact=contact, limit=limit, account=account,
                                   before_ts=before_ts)
@@ -369,6 +367,8 @@ def search_history(query: str, contact: str | None = None, limit: int = 20,
     if keep < len(hits):
         res["next_before_ts"] = _next_before_ts(hits[keep - 1].get("ts"),
                                                 [h.get("ts") for h in hits[keep:]])
+        # 说明放在截断时的结果里而不是工具描述里：只在真截断时才付这几十个 token
+        res["hint"] = "结果过大，只给了较新的命中：传 before_ts=next_before_ts 续搜更早的"
     res["untrusted"] = True
     if res["total"] == 0 and not usecases.index_ready():
         # MCP 专属提示（文案里是工具名 export_full_history）；CLI 侧不打印，故不放用例层
@@ -385,8 +385,7 @@ def semantic_search(query: str, contact: str | None = None, limit: int = 10,
     需先 build_vector_index，且要可选安装项 [semantic]（fastembed；没装时报错并提示
     uv sync --extra semantic）。hits 含 display、ts、sender、content、distance（cosine 距离，
     越小越近；没有相关性阈值，恒返回最近的 limit 条）。精确词用 search_history；
-    只要片段用 search_messages(mode="semantic")。offset 跳过前面这么多条（翻页）；结果过大时只留
-    最相近的，返回 truncated 与 next_offset。
+    只要片段用 search_messages(mode="semantic")。
     """
     res = usecases.semantic_search(query, contact=contact, limit=limit, account=account,
                                    offset=offset)
@@ -398,6 +397,7 @@ def semantic_search(query: str, contact: str | None = None, limit: int = 10,
     if keep < len(hits):
         res["hits"], res["total"], res["omitted"] = hits[:keep], keep, len(hits) - keep
         res["next_offset"] = offset + keep
+        res["hint"] = "结果过大，只给了最相近的部分：传 offset=next_offset 续读，或调小 limit"
     return res
 
 

@@ -4,9 +4,11 @@ server 用 `scripts/mcp_bench.py --serve`（临时目录里的加密合成库，
 只开放 agent-wechat 的 MCP 工具（`--tools ""` 关掉全部内置工具）。用法：
 
     uv run --frozen python scripts/mcp_agent_eval.py --model sonnet --reps 2 --json out.json
+        [--server-src /path/to/other/checkout/src]   # 拿别的版本当 server（新旧对比）
 
-每条任务记录：调用的工具序列、轮数、输入 token（含缓存读写）、输出 token、耗时、
-是否用到期望的工具、答案里是否含期望的关键词。会调用真实模型、产生费用。
+每条任务记录：调用的工具序列、发起工具调用的模型回合数（同一回合里的多个调用 = 并行）、轮数、
+输入 token（含缓存读写）、输出 token、耗时、是否用到期望的工具、答案里是否含期望的关键词。
+会调用真实模型、产生费用。
 """
 from __future__ import annotations
 
@@ -37,6 +39,11 @@ TASKS = [
      {"get_message_context"}, None),
     ("张三的聊天里有没有可以导出的图片或语音？", {"get_message_media"}, None),
     ("本地检索库里一共索引了多少条消息？只回答数字。", {"get_account_status"}, "30000"),
+    # 长任务：看要调几次 get_task_status 才等到结束（合成库全量导出约 1–3 s）
+    ("把全部聊天记录全量重新导出一遍，等导出完成后告诉我一共导出了多少条。只回答数字。",
+     {"export_full_history"}, "30000"),
+    # 两个互不依赖的只读调用：看是否在同一回合里并行发出
+    ("分别看看张三和同事1最近各聊了什么，各用一句话概括。", {"get_recent_messages"}, None),
 ]
 
 
@@ -49,7 +56,7 @@ def run_one(prompt: str, cfg: pathlib.Path, model: str) -> dict:
            "--output-format", "stream-json", "--verbose"]
     p = subprocess.run(cmd, capture_output=True, text=True, stdin=subprocess.DEVNULL,
                        timeout=600, cwd=tempfile.gettempdir())
-    tools, calls, result = [], [], {}
+    tools, calls, result, rounds = [], [], {}, set()
     for line in p.stdout.splitlines():
         try:
             o = json.loads(line)
@@ -58,12 +65,14 @@ def run_one(prompt: str, cfg: pathlib.Path, model: str) -> dict:
         if o.get("type") == "assistant":
             for c in o["message"].get("content", []):
                 if c.get("type") == "tool_use":
+                    rounds.add(o["message"].get("id"))
                     tools.append(c["name"].removeprefix("mcp__agent-wechat__"))
                     calls.append({"tool": tools[-1], "input": c.get("input")})
         elif o.get("type") == "result":
             result = o
     u = result.get("usage", {})
-    return {"tools": tools, "calls": calls, "turns": result.get("num_turns"),
+    return {"tools": tools, "calls": calls, "tool_rounds": len(rounds),
+            "turns": result.get("num_turns"),
             "input_tokens": u.get("input_tokens", 0) + u.get("cache_creation_input_tokens", 0)
             + u.get("cache_read_input_tokens", 0),
             "output_tokens": u.get("output_tokens", 0),
@@ -76,15 +85,19 @@ def main() -> None:
     ap.add_argument("--model", default="sonnet")
     ap.add_argument("--reps", type=int, default=2)
     ap.add_argument("--json", type=pathlib.Path)
+    ap.add_argument("--server-src", type=pathlib.Path,
+                    help="server 用这份源码（PYTHONPATH），默认是本仓库的 src")
     args = ap.parse_args()
     with tempfile.TemporaryDirectory(prefix="awmcp-eval-") as d:
         _run(pathlib.Path(d) / "mcp.json", args)
 
 
 def _run(cfg: pathlib.Path, args: argparse.Namespace) -> None:
-    cfg.write_text(json.dumps({"mcpServers": {"agent-wechat": {
-        "command": sys.executable,
-        "args": [str(ROOT / "scripts" / "mcp_bench.py"), "--serve"]}}}))
+    server: dict = {"command": sys.executable,
+                    "args": [str(ROOT / "scripts" / "mcp_bench.py"), "--serve"]}
+    if args.server_src:
+        server["env"] = {"PYTHONPATH": str(args.server_src.resolve())}
+    cfg.write_text(json.dumps({"mcpServers": {"agent-wechat": server}}))
     rows = []
     for prompt, want, keyword in TASKS:
         for _ in range(args.reps):
@@ -92,7 +105,7 @@ def _run(cfg: pathlib.Path, args: argparse.Namespace) -> None:
             r.update(task=prompt, hit=bool(want & set(r["tools"])),
                      keyword_ok=(keyword in r["answer"]) if keyword else None)
             rows.append(r)
-            print(json.dumps({k: r[k] for k in ("task", "tools", "turns", "input_tokens",
+            print(json.dumps({k: r[k] for k in ("task", "tools", "tool_rounds", "turns", "input_tokens",
                                                  "duration_ms", "hit", "keyword_ok")},
                              ensure_ascii=False), flush=True)
     summary = {
@@ -104,6 +117,10 @@ def _run(cfg: pathlib.Path, args: argparse.Namespace) -> None:
         "input_tokens_total": sum(r["input_tokens"] for r in rows),
         "duration_ms_median": statistics.median(r["duration_ms"] or 0 for r in rows),
         "cost_usd_total": round(sum(r["cost_usd"] or 0 for r in rows), 4),
+        "by_task": {t[:12]: {"tools": [r["tools"] for r in g], "tool_rounds": [r["tool_rounds"] for r in g],
+                             "input_tokens": [r["input_tokens"] for r in g],
+                             "hit": [r["hit"] for r in g], "keyword_ok": [r["keyword_ok"] for r in g]}
+                    for t, _, _ in TASKS if (g := [r for r in rows if r["task"] == t])},
     }
     print(json.dumps(summary, ensure_ascii=False))
     if args.json:

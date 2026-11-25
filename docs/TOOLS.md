@@ -279,8 +279,8 @@
 **说明**：
 - `mode`: `fts`（trigram 命中，含高亮 `snip`）| `like`（1-2 字兜底，`snip` 为 null）
 - 命中按时间**从新到旧**。返回带 `truncated`：结果超出体积预算（与 §3 同一个预算）时丢掉较旧的命中，
-  `truncated` 为 `true`，并给出 `next_before_ts`——拿它当 `before_ts` 再调一次续搜（同一秒的命中可能与上一页重叠
-  一两条）。`total` 是本次返回的条数
+  `truncated` 为 `true`，并给出 `next_before_ts` 与一句 `hint`——拿它当 `before_ts` 再调一次续搜（同一秒的命中可能
+  与上一页重叠一两条）。`total` 是本次返回的条数
 - 1-2 字查询**建议传 `contact`**，否则全表扫描（秒级）
 - 索引为空时返回 `{"hits": [], "hint": "本地索引为空：请先运行 export_full_history", ...}`
 - `msg_key` 是消息的稳定标识（短形态，见「通用约定」），跨导出保持不变；
@@ -374,7 +374,7 @@ rebuild 与否）各起一条。（F-D，T7 复验：与 §4 同款的合并语�
 - `msg_key` 是消息的稳定标识（同 `search_history`），可用于 `get_message_media`。
 - `degraded` 键（§3）在显示名降级时非空——那时 `display` / `sender` 会回落成 wxid。
 - 返回带 `truncated`：完整正文超出体积预算（与 §3 同一个预算）时只留最相近的那些，`truncated` 为 `true`，
-  `omitted` 是本页丢掉的条数，`next_offset` 是续读用的 `offset`（同一份索引上翻页结果确定）。
+  `omitted` 是本页丢掉的条数，`next_offset` 是续读用的 `offset`（同一份索引上翻页结果确定），`hint` 说明怎么续读。
 - **没有相关性阈值**：KNN 恒返回距离最近的 `limit` 条（无论多不相关）；`total` 是本次
   返回的条数（≤ `limit`），**不代表相关程度**——结果是否可用由调用方按 `distance` 判断，
   不要把 `hits` 直接当作「相关结果」呈现。
