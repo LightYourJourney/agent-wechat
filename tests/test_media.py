@@ -3190,8 +3190,7 @@ def test_sticker_malformed_msg_key_counts_missing(tmp_path, monkeypatch):
     assert rep.sticker.missing == 1 and called == [], rep.sticker
 
     # 第二道形状闸：段数都在，但 local_id 不是数字 → `_loc_of_msg_key` 返回 None。
-    # 它在 `_locs` 里计一次 missing，而 `_locs` 在一次导出里被调两趟（摊平 + 取件前），
-    # 加上「got is None」那一笔，合计 3。
+    # missing 按**贴纸**计一次（「got is None」那一笔）。此前 `_locs` 每趟都计，合计 3（审查修正）。
     con = _sticker_with_bad_key(ts, "d0f46ed3" + "0" * 24,
                                 "acct|cm|message_0.db|notanumber")
     try:
@@ -3199,9 +3198,9 @@ def test_sticker_malformed_msg_key_counts_missing(tmp_path, monkeypatch):
                                  out_dir=tmp_path / "media", con=con, with_cdn=True)
     finally:
         con.close()
-    assert rep.sticker.missing == 3, rep.sticker   # 一次取件都不会发：all_locs 是空的
+    assert rep.sticker.missing == 1, rep.sticker   # 一次取件都不会发：all_locs 是空的
 
-    # 五段键（v10）的第五段不可解析：同样过段数闸、在 `_locs` 里被挡下，合计 3。
+    # 五段键（v10）的第五段不可解析：同样过段数闸、在 `_locs` 里被挡下，计 1。
     con = _sticker_with_bad_key(ts, "d0f46ed3" + "0" * 24,
                                 "acct|cm|message_0.db|1|notanumber")
     try:
@@ -3209,7 +3208,7 @@ def test_sticker_malformed_msg_key_counts_missing(tmp_path, monkeypatch):
                                  out_dir=tmp_path / "media", con=con, with_cdn=True)
     finally:
         con.close()
-    assert rep.sticker.missing == 3, rep.sticker
+    assert rep.sticker.missing == 1, rep.sticker
 
 
 def test_sticker_nothing_in_window_degrades_nothing(tmp_path, monkeypatch):

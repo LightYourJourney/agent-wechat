@@ -58,7 +58,8 @@ def srv(tmp_path, monkeypatch):
     t = threading.Thread(target=httpd.serve_forever, daemon=True)
     t.start()
     try:
-        yield Simple(port=port, csrf=httpd.aw_state.csrf, tmp=tmp_path)
+        yield Simple(port=port, csrf=httpd.aw_state.csrf, token=httpd.aw_state.token,
+                     tmp=tmp_path)
     finally:
         httpd.shutdown()
         httpd.server_close()
@@ -74,6 +75,8 @@ def _req(s: Simple, path: str, *, method="GET", headers=None, body=None):
     hdrs = dict(headers or {})
     if method == "GET" and path.startswith("/api/"):
         hdrs.setdefault("X-AW-CSRF", s.csrf)      # 前端 `api()` 每次都带；缺 token 的用例显式给 None
+    # 浏览器凭终端链接换到的访问 cookie（见 test_review_media 的令牌用例）；每个请求都带
+    hdrs.setdefault("Cookie", f"aw_token_{s.port}={s.token}")
     hdrs = {k: v for k, v in hdrs.items() if v is not None}
     payload = None
     if body is not None:
@@ -174,7 +177,8 @@ def test_accounts_are_explicit_and_validated(srv):
 def test_read_only_ui_never_creates_an_index(tmp_path, monkeypatch):
     _env(tmp_path, monkeypatch, seed=False)
     httpd = webui.create_server("127.0.0.1", 0)
-    s = Simple(port=httpd.server_address[1], csrf=httpd.aw_state.csrf, tmp=tmp_path)
+    s = Simple(port=httpd.server_address[1], csrf=httpd.aw_state.csrf,
+               token=httpd.aw_state.token, tmp=tmp_path)
     t = threading.Thread(target=httpd.serve_forever, daemon=True); t.start()
     try:
         res, body = _req(s, "/api/status")

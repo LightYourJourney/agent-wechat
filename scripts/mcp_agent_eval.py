@@ -71,10 +71,21 @@ def run_one(prompt: str, cfg: pathlib.Path, model: str) -> dict:
            # 本机 hooks（如压缩大输出的插件）会改写工具结果、干扰对比：评测时全关
            "--settings", json.dumps({"disableAllHooks": True}),
            "--output-format", "stream-json", "--verbose"]
-    p = subprocess.run(cmd, capture_output=True, text=True, stdin=subprocess.DEVNULL,
-                       timeout=600, cwd=tempfile.gettempdir())
+    # 单条失败（超时 / 非零退出）记成 ok=False 的失败行、继续下一条：不许一条卡死就丢掉
+    # 已跑完（已付费）的全部结果。
+    error = None
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, stdin=subprocess.DEVNULL,
+                           timeout=600, cwd=tempfile.gettempdir())
+        stdout = p.stdout
+        if p.returncode != 0:
+            error = f"claude 退出码 {p.returncode}：{(p.stderr or '').strip()[:300]}"
+    except subprocess.TimeoutExpired as exc:
+        out = exc.stdout
+        stdout = out.decode(errors="replace") if isinstance(out, bytes) else (out or "")
+        error = f"超时（{exc.timeout} s）"
     tools, calls, result, rounds = [], [], {}, set()
-    for line in p.stdout.splitlines():
+    for line in stdout.splitlines():
         try:
             o = json.loads(line)
         except json.JSONDecodeError:
@@ -94,7 +105,8 @@ def run_one(prompt: str, cfg: pathlib.Path, model: str) -> dict:
             + u.get("cache_read_input_tokens", 0),
             "output_tokens": u.get("output_tokens", 0),
             "duration_ms": result.get("duration_ms"), "cost_usd": result.get("total_cost_usd"),
-            "answer": (result.get("result") or "")[:300], "ok": not result.get("is_error", True)}
+            "answer": (result.get("result") or "")[:300],
+            "ok": error is None and not result.get("is_error", True), "error": error}
 
 
 def main() -> None:
@@ -125,6 +137,8 @@ def _run(cfg: pathlib.Path, args: argparse.Namespace) -> None:
         server["env"] = env
     cfg.write_text(json.dumps({"mcpServers": {"agent-wechat": server}}))
     tasks = [t for t in TASKS if not args.tasks or any(x in t[0] for x in args.tasks)]
+    if not tasks:
+        raise SystemExit(f"--tasks {args.tasks} 一个任务都没匹配上")
     rows = []
     for prompt, want, keyword in tasks:
         for _ in range(args.reps):
@@ -136,10 +150,21 @@ def _run(cfg: pathlib.Path, args: argparse.Namespace) -> None:
             rows.append(r)
             print(json.dumps({k: r[k] for k in ("task", "tools", "tool_rounds", "max_concurrency",
                                                  "turns", "input_tokens",
-                                                 "duration_ms", "hit", "keyword_ok")},
+                                                 "duration_ms", "hit", "keyword_ok", "ok", "error")},
                              ensure_ascii=False), flush=True)
-    summary = {
+    summary = _summary(rows, tasks)
+    print(json.dumps(summary, ensure_ascii=False))
+    if args.json:
+        args.json.write_text(json.dumps({"summary": summary, "rows": rows},
+                                        ensure_ascii=False, indent=1), encoding="utf-8")
+
+
+def _summary(rows: list[dict], tasks: list) -> dict:
+    if not rows:                 # --reps 0 等：没有可统计的行，均值/中位数无从谈起
+        return {"runs": 0}
+    return {
         "runs": len(rows),
+        "failed": sum(not r["ok"] for r in rows),
         "tool_calls_mean": round(statistics.mean(len(r["tools"]) for r in rows), 2),
         "hit_rate": round(sum(r["hit"] for r in rows) / len(rows), 3),
         "keyword_ok": [r["keyword_ok"] for r in rows if r["keyword_ok"] is not None],
@@ -153,10 +178,6 @@ def _run(cfg: pathlib.Path, args: argparse.Namespace) -> None:
                              "hit": [r["hit"] for r in g], "keyword_ok": [r["keyword_ok"] for r in g]}
                     for t, _, _ in tasks if (g := [r for r in rows if r["task"] == t])},
     }
-    print(json.dumps(summary, ensure_ascii=False))
-    if args.json:
-        args.json.write_text(json.dumps({"summary": summary, "rows": rows},
-                                        ensure_ascii=False, indent=1), encoding="utf-8")
 
 
 if __name__ == "__main__":

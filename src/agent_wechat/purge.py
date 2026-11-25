@@ -19,7 +19,7 @@ import sqlite3
 import stat
 import subprocess
 import tempfile
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 
 from . import (bootstrap, decrypt, errors, exclusions, keys, media, messages, moments, paths,
@@ -230,21 +230,21 @@ def _user_homes() -> tuple[pathlib.Path, ...]:
 def _check_home_is_sane(home: pathlib.Path) -> None:
     """拒绝看起来不像数据目录的 HOME_DIR。**这是一道数据丢失闸门，不是洁癖。**
 
-    `paths.HOME_DIR` 来自 `$AGENT_WECHAT_HOME`，而**设了但为空**的环境变量会让
-    `os.environ.get(...)` 返回 `""` 而不是默认值，`Path("")` 就是 `.`——于是
-    `purge --all --yes` 会递归删掉**当前工作目录**（实测确认，且输出最后一行还打着 ✅）。
-    该变量是文档化的一等开关（含 MCP 的 env），所以「shell 里没设上」是现实输入。
+    `paths.HOME_DIR` 来自 `$AGENT_WECHAT_HOME`。**空值**自 EA-003 起已在 `paths` 那一侧回落
+    默认目录（取值用 `or`）；但**相对路径**（如 `AGENT_WECHAT_HOME=.` 或 `data`）仍会按当前
+    工作目录解析——于是 `purge --all --yes` 会递归删掉**当前工作目录**（此前空值时实测确认，
+    且输出最后一行还打着 ✅）。该变量是文档化的一等开关（含 MCP 的 env），写错是现实输入。
 
     「用户主目录」跑的是 `_user_homes()` 的**全部候选**（`$HOME` ∪ 本进程 uid 的家 ∪
     `$SUDO_UID` 的家），而不是单个 `Path.home()`：提权下 `$HOME` 变成 `/var/root`，
     只比一个的话 `/Users/<你>` 就过闸了。
     """
     if not home.is_absolute():
-        # 先判这个再 resolve：`Path("")` 是相对路径，但它 resolve 之后就是 CWD 了，
+        # 先判这个再 resolve：相对路径 resolve 之后就落在 CWD 下了，
         # 先 resolve 会让消息退化成「拒绝销毁用户主目录」——指不到真正的原因。
         raise errors.PurgeRefused(
             f"拒绝在相对路径上执行销毁：{home!r}",
-            hint="AGENT_WECHAT_HOME 是否被设成了空值？空值会被解析成当前目录")
+            hint="AGENT_WECHAT_HOME 被设成了相对路径？它会按当前工作目录解析；请改成绝对路径")
     try:
         resolved = home.resolve(strict=False)
     except (OSError, RuntimeError) as exc:
@@ -752,7 +752,7 @@ class ChatEntry:
 @dataclass(frozen=True)
 class ChatPlan:
     entries: tuple[ChatEntry, ...]
-    # 默认导出根的 `chat index` 总目录页——**列着本会话时**才进删除面（见 `_index_page_listing`）。
+    # 默认导出根的 `chat index` 总目录页——**列着本会话时**才进删除面（见 `index_page_listing`）。
     index_page: pathlib.Path | None = None
 
 
@@ -815,8 +815,13 @@ def chat_export_dir(chat_id: str) -> pathlib.Path:
     return media.export_root() / messages.chat_md5(chat_id)
 
 
-def _index_page_listing(md5s: set[str]) -> pathlib.Path | None:
+def index_page_listing(chat_ids: Iterable[str]) -> pathlib.Path | None:
     """默认导出根的总目录页（`chat index` 写的 `media/index.html`）若列着这些会话，返回它。
+
+    **公开**（此前叫 `_index_page_listing`、收 md5 集合）：`purge --chat` 在索引库不在的那条路
+    上也要把这一页算进残留，而那条路不能调 `plan_chat`（理由见 `chat_export_dir`）——与
+    `name_there` / `chat_export_dir` 同一个理由：入口层与计划用**同一个**判据。会话 md5 在这里
+    就地派生（同 `chat_export_dir`），调用方不必自己拼。
 
     那一页按 `chat_md5` 列出每个已导出会话（会话 id、条数、指向 `<md5>/chat/` 的链接）：
     `media/<md5>/` 删掉之后，这一行还留着会话 id 与条数。整页由 `chat index` 从磁盘现状
@@ -837,7 +842,7 @@ def _index_page_listing(md5s: set[str]) -> pathlib.Path | None:
         raise errors.PurgeRefused(
             f"总目录页读不出来，未生成销毁计划：{page}（{exc}）",
             hint="确认该文件可读（它由 `chat index` 生成，删掉后重跑即重建）") from exc
-    return page if any(m in text for m in md5s) else None
+    return page if any(messages.chat_md5(c) in text for c in chat_ids) else None
 
 
 def plan_chat(resolved: list[dict]) -> ChatPlan:
@@ -872,7 +877,7 @@ def plan_chat(resolved: list[dict]) -> ChatPlan:
             entries.append(ChatEntry(
                 item["account"], item["chat_id"], md5, counts, counts["messages"],
                 d, exists, _tree_size(d) if exists and not d.is_symlink() else 0))
-        index_page = _index_page_listing({e.chat_md5 for e in entries})
+        index_page = index_page_listing(e.chat_id for e in entries)
     except (sqlite3.Error, OSError, errors.IndexUnavailable, errors.SchemaMigrationError) as exc:
         # 索引打不开/读不了（损坏、权限、被别的进程占着）时，裸 `sqlite3.DatabaseError` /
         # `sqlite3.OperationalError` 会一路逃到 CLI 的 `except AgentWeChatError` 之外——
@@ -1147,10 +1152,27 @@ def execute_chat(plan: ChatPlan) -> tuple[ChatReport, ...]:
         out.append(ChatReport(e.account, deleted, written, removed))
     if plan.index_page is not None and not plan.index_page.is_symlink():
         # 失败不抛（同导出目录的「部分失败继续」）：核查会把还在的那一页列进 leftover。
-        # 符号链接**不删**：删名字不删内容（见 `_index_page_listing`），留给核查去报。
+        # 符号链接**不删**：删名字不删内容（见 `index_page_listing`），留给核查去报。
         with contextlib.suppress(FileNotFoundError, OSError):
             plan.index_page.unlink()
+    # 任务注册表里的 `chat_id` 也是该会话的副本（会话导出把它写进记录，最长留 30 天）。
+    # 走 tasks 自己的锁与合并式落盘，只删已结束的——在飞的任务上面那道闸门已经挡掉了。
+    # 失败不抛（同总目录页）：核查会把还在的记录列进 leftover。
+    md5s = _chat_md5s(plan)
+    with contextlib.suppress(OSError, errors.AgentWeChatError):
+        tasks.forget(lambda rec: _task_names_chat(rec, md5s))
     return tuple(out)
+
+
+def _chat_md5s(plan: ChatPlan) -> frozenset[str]:
+    return frozenset(messages.chat_md5(e.chat_id) for e in plan.entries)
+
+
+def _task_names_chat(rec: dict, md5s: frozenset[str]) -> bool:
+    """这条任务记录是否指名本会话。按 `chat_md5` 比（真名与退化形态 `md5:<hex>` 同一个会话），
+    不分账号——与 `media/<md5>/` 同一口径：会话 id 留在哪个账号的记录里都是残留。"""
+    chat = rec.get("chat_id")
+    return isinstance(chat, str) and bool(chat) and messages.chat_md5(chat) in md5s
 
 
 def verify_chat(plan: ChatPlan) -> ChatResidue:
@@ -1188,6 +1210,15 @@ def verify_chat(plan: ChatPlan) -> ChatResidue:
             e.export_dir for e in plan.entries if name_there(e.export_dir)))
         if plan.index_page is not None and name_there(plan.index_page):
             leftover.append(f"总目录页 {plan.index_page}")
+        # 任务注册表：读不出来 ≠ 没有残留（它可能正留着会话 id），照残留报。
+        registry = tasks.snapshot()
+        if registry is None:
+            leftover.append(f"任务注册表 {tasks.TASKS_FILE}（读不出来，无法核查）")
+        else:
+            md5s = _chat_md5s(plan)
+            n = sum(1 for rec in registry.values() if _task_names_chat(rec, md5s))
+            if n:
+                leftover.append(f"任务注册表 {tasks.TASKS_FILE}：{n} 条记录")
     except (sqlite3.Error, OSError, errors.IndexUnavailable, errors.SchemaMigrationError) as exc:   # EA-074：connect 段已翻过一次
         # 同 plan_chat：读不了库时不许裸 sqlite3.Error 逃到 CLI。而且**「核查不了」必须与
         # 「核查通过」区分开**——静默返回一个空 leftover 就是对着未知状态报 ✅。

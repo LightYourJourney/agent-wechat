@@ -40,6 +40,12 @@
    bootstrap 的 5 分钟窗口内执行微信内「退出登录 → 重新登录」
 3. lldb 是否可用：`which lldb`（无则 `xcode-select --install`）
 
+### 1.2b `lldb 在捕获完成前就退出了（多半是 attach 微信失败）：error: …`
+
+lldb 没等到断点就退出了，bootstrap 当场报错，不再空等满 5 分钟；冒号后面是 lldb 自己的
+`error:` 行（attach 失败的原因）。最常见的两种：没有以 `sudo` 运行，或微信签名已被还原——
+按 1.2 第 1 点重签名后重跑。
+
 ### 1.3 `捕获值未通过任何库的 HMAC 校验（N 个库），拒绝落缓存`
 
 捕获到了值但它是错误时刻的派生（如捕获到了别的 PBKDF2 调用）。直接重跑 bootstrap
@@ -83,7 +89,9 @@ sudo chown -R "$USER" ~/.agent-wechat
    导出**（此前批次已落库，重跑从水位线继续，但会在同一库再次失败）——先按第 1/4 点
    排除密钥与版本问题
 3. 「读取微信库时页校验失败」：快照那一刻微信正在写，复制到的库前后不一致——**重试一次**即可；
-   反复出现再按第 1 点核对密钥
+   反复出现再按第 1 点核对密钥。报的是「库结构页读不出来（…；密钥校验通过）」时，第 1 页的 HMAC
+   用这把密钥验得过，**密钥是对的**，不必重新 bootstrap：是后面的结构页损坏或快照撕裂（`sync`
+   把它归为 `source_unavailable`）。重试一次即可，反复出现说明该库已损坏
 4. 怀疑是进程内后端的问题：设 `AGENT_WECHAT_DECRYPT=cli` 强制回退到 sqlcipher CLI 对照
    （需要 `brew install sqlcipher`；CLI 版本过旧（< 4.x）时 `brew upgrade sqlcipher`）。
    两个后端结果不一致请附 `agent-wechat doctor` 输出反馈
@@ -108,6 +116,12 @@ sudo chown -R "$USER" ~/.agent-wechat
 正常使用微信即可。正常情况下快照是自洽的；微信重度写入的瞬间偶发不一致时，主库在拷贝
 前后变了就整组重拍，最多 5 次（`SNAPSHOT_TRIES`），仍在变才以 `source_unavailable` 报错
 ——重跑即可（详见 ARCHITECTURE.md §3.10 / §7 已知边界）。
+
+### 2.6 `purge --chat --yes` 报「未删除任何文件：该会话的导出物还在盘上」（退出码 1）
+
+索引库（`index.db`）不在，而 `media/<会话md5>/` 导出物还在（或判不出来在不在）。删除路线要开索引，
+会把刚删掉的索引库建回来，所以这时什么都不删。先重跑 `agent-wechat export` 把索引建回来再
+`purge --chat`，或手工删除那个目录。
 
 ## 3. 检索相关
 
@@ -172,7 +186,7 @@ agent-wechat recent filehelper -n 3           # 端到端读取
 
 | 现象 | 原因 | 处置 |
 |---|---|---|
-| `迁移失败：main vN（…）：database is locked` | 另一个进程正持写锁（导出 / 向量构建 / 另一个 MCP server） | 等它结束再重试；`status` 可看长任务 |
+| `迁移失败：main vN（…）：database is locked` | 另一个进程正持写锁（导出 / 向量构建 / 另一个 MCP server） | 等它结束再重试；长任务用 MCP 的 `get_task_status` 查（`status` 不列任务） |
 | `迁移失败：…：disk I/O error` / `No space left` | 磁盘满、只读卷、权限 | 修好磁盘/权限后重跑同一命令即可续 |
 | `索引库版本过新：main 已到 vN，本程序只认到 vM` | 你降级运行了旧版程序 | 升级 `agent-wechat` 到匹配版本；或从备份恢复旧库。**不要**用旧版继续写 |
 | 升级后 `status` 的 `schema_notes` 提示触发器不一致 | 迁移之后再被手工改动过 | 只报不改库；重跑一次 `export` 或手工重建触发器 |
@@ -207,7 +221,7 @@ agent-wechat recent filehelper -n 3           # 端到端读取
 | `key_missing` | 该账号没有 passphrase 缓存 | 完成一次性引导（需要 sudo，必须由人执行） |
 | `account_not_found` | 显式 `--account` 指向不存在的目录 | 用 `status` 看已有账号，或省略该参数 |
 | `key_invalid` | 解密失败（sqlcipher/密钥） | 重新 bootstrap；确认微信升级过 |
-| `source_unavailable` | 微信数据目录/分片读不到（含快照复制失败） | 检查完整磁盘访问权限与容器路径 |
+| `source_unavailable` | 微信数据目录/分片读不到（含快照复制失败；密钥校验通过但库页损坏也归这里） | 检查完整磁盘访问权限与容器路径；库页损坏时重试一次 |
 | `index_unavailable` | 索引库打不开 / 迁移失败 | 看 `doctor` 的 schema 段；必要时恢复备份 |
 | `vector_unavailable` | 消息已同步，向量阶段失败（含**没装**可选组件 `[semantic]` 的情形） | 没装语义检索组件时先装：`uv sync --extra semantic`（或 INSTALL.md §2.1 的安装方式）；否则准备本地模型缓存后重跑 `vector-build` |
 | `disk_low` | 可用空间 < 200 MB | 清理磁盘 |

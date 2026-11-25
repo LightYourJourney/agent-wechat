@@ -14,9 +14,17 @@ from agent_wechat import sync, webui
 from test_sync_ops import ACCT, FRIEND, _env as _sync_env
 
 
+_TOKEN = {}     # port → 访问令牌（浏览器凭终端链接换到的 cookie）
+
+
+def _cookie(port: int) -> str:
+    return f"aw_token_{port}={_TOKEN[port]}"
+
+
 def _req(port: int, csrf: str, path: str):
     conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
-    conn.request("GET", urllib.parse.quote(path, safe="/?&=%"), headers={"X-AW-CSRF": csrf})
+    conn.request("GET", urllib.parse.quote(path, safe="/?&=%"),
+                 headers={"X-AW-CSRF": csrf, "Cookie": _cookie(port)})
     res = conn.getresponse()
     raw = res.read()
     conn.close()
@@ -28,7 +36,7 @@ def _post(port: int, csrf: str, path: str, body: dict):
     conn.request("POST", path, body=json.dumps(body).encode(),
                  headers={"Content-Type": "application/json",
                           "Origin": f"http://127.0.0.1:{port}",
-                          "X-AW-CSRF": csrf})
+                          "X-AW-CSRF": csrf, "Cookie": _cookie(port)})
     res = conn.getresponse()
     raw = res.read()
     conn.close()
@@ -43,6 +51,7 @@ def test_sync_search_evidence_and_derived_delete(tmp_path, monkeypatch):
     httpd = webui.create_server("127.0.0.1", 0)
     port = httpd.server_address[1]
     csrf = httpd.aw_state.csrf
+    _TOKEN[port] = httpd.aw_state.token
     t = threading.Thread(target=httpd.serve_forever, daemon=True)
     t.start()
     try:

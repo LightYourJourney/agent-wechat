@@ -65,13 +65,19 @@ def _harvest(rec: dict, now: int) -> dict:
 
     EA-015：此前无条件把 running 改判 failed——另一个进程（MCP server）里正在跑的任务
     被这里一读就写死，而 `get_task_status` 会答「失败」，使用者据得出的结论是**错的**。
-    F6：只看 pid 不够（pid 会被复用），再加一条时间兜底（STALE_RUNNING_SECONDS）。
+    F6：只看 pid 不够（pid 会被复用）。第一道是「该 pid 现在的进程**晚于任务开始**才启动」
+    （`paths.pid_started_after`，与 `store.fts_bulk_interrupted` 同一判据）——起任务的进程必然
+    早于 `started_at` 启动，晚于它的只能是复用者；判不出来时它答 False，于是还有第二道：
+    时间兜底（STALE_RUNNING_SECONDS）。本进程自己的记录不问 `ps`：答案恒为否，且 update 很密。
     """
     if rec.get("status") != "running":
         return rec
     seen = rec.get("updated_at") or rec.get("started_at")   # 老记录没有心跳 → 回落开始时刻
     stale = isinstance(seen, int) and now - seen > STALE_RUNNING_SECONDS
-    if stale or not paths.pid_alive(rec.get("pid")):
+    pid, started = rec.get("pid"), rec.get("started_at")
+    if (stale or not paths.pid_alive(pid)
+            or (isinstance(pid, int) and isinstance(started, int) and pid != os.getpid()
+                and paths.pid_started_after(pid, started))):
         return {**rec, "status": "failed", "error": ORPHAN_ERROR}
     return rec
 
@@ -162,7 +168,7 @@ def _prune(recs: dict[str, dict], now: int) -> dict[str, dict]:
     return {tid: r for tid, r in recs.items() if tid not in drop}
 
 
-def _persist_locked(changed: dict[str, dict]) -> None:
+def _persist_locked(changed: dict[str, dict], drop: frozenset[str] = frozenset()) -> None:
     """把**本操作改动的记录**合并进磁盘现状后原子落盘（EA-014 + F2；调用方必须已持 `_lock`）。
 
     合并而非整表覆写：别的进程在我们读盘之后写下的记录必须留着——整表覆写正是那次真实
@@ -170,11 +176,14 @@ def _persist_locked(changed: dict[str, dict]) -> None:
     （V2 两进程探针实测 957 次坏读），故写临时文件再 `os.replace`。tmp 名带 pid（F5）：
     固定名会让两个进程共用同一个临时文件，一方的 `os.replace` 撞上另一方刚搬走它的
     ENOENT 窗口。读不动时以内存视图为准照常写——下一次落盘就把坏文件修好。
+    `drop`：本操作要**删掉**的 id（`forget` 用；合并式写回本身只会加、不会删）。
     """
     paths.ensure_home_dirs()          # 收口闸：HOME 指进容器时在这里拒绝（复审补）
     disk = snapshot()
     merged = disk if disk is not None else dict(_tasks)
     merged.update(changed)
+    for tid in drop:
+        merged.pop(tid, None)
     merged = _prune(merged, int(time.time()))
     try:
         # 读者要么看到旧全量、要么看到新全量；失败不留 tmp 残骸（见 `paths.atomic_write`）
@@ -225,6 +234,44 @@ def start(kind: str, runner: Callable[[str], int | None], **fields: object) -> s
             raise
     threading.Thread(target=_run, args=(task_id, runner), daemon=True).start()
     return task_id
+
+
+@contextlib.contextmanager
+def claim(kind: str, **fields: object) -> Iterator[None]:
+    """**同步执行**的写盘工作在整个写盘期间占一条 running 记录（不起线程、没有 runner）。
+
+    给 CLI `media export` / `chat export` 与 MCP `export_chat_media` / `export_chat` 用：它们
+    在调用方的线程里跑完，不经 `start`，`purge --chat` 的「在飞任务」闸门（`running()`）此前
+    看不见它们——purge 删完 `media/<md5>/` 之后，导出照样把解密图片或含正文的 HTML 写回去。
+    占着这条记录，闸门不改就能覆盖它们。
+
+    记录与 `start` 同形（pid / started_at / updated_at），所以进程崩溃后由 `_harvest` 照常收割
+    成 failed（随后 `purge --chat` 的 `forget` 会清掉指名该会话的那条）。kind 必须与 `start`
+    用的不同：`start` 按 kind + 目标吸收在跑的任务，同 kind 会把后台导出吸收进一条没有 runner
+    的记录。**退出时（含异常）删掉这条记录**，而不是写成 done：已结束记录只留
+    `KEEP_FINISHED` 条，短时间大量同步导出会把真正长任务的结果挤出去。
+    删除失败（注册表写不动）不掩盖导出本身的结果：记录留在盘上，由收割兜底。
+    """
+    paths.ensure_home_dirs()             # 同 `start`：失败发生在任何状态改动之前
+    task_id = uuid.uuid4().hex[:12]
+    now = int(time.time())
+    rec = {"id": task_id, "kind": kind, "status": "running", "rows": 0,
+           "started_at": now, "updated_at": now, "error": None, "pid": os.getpid(), **fields}
+    with _lock, _file_lock():
+        _load_locked()
+        _tasks[task_id] = rec
+        try:
+            _persist_locked({task_id: rec})
+        except (OSError, errors.AgentWeChatError):
+            _tasks.pop(task_id, None)
+            raise
+    try:
+        yield
+    finally:
+        with contextlib.suppress(OSError, errors.AgentWeChatError), _lock, _file_lock():
+            _load_locked()
+            _tasks.pop(task_id, None)
+            _persist_locked({}, frozenset({task_id}))
 
 
 def _error_text(exc: BaseException) -> str:
@@ -295,6 +342,29 @@ def update(task_id: str, **fields: object) -> None:
             rec.update(status="running", error=None)
         rec.update(fields, updated_at=int(time.time()))
         _persist_locked({task_id: rec})
+
+
+def forget(match: Callable[[dict], bool]) -> int:
+    """删掉 `match` 命中的**已结束**记录，返回删掉的条数（`purge --chat` 用：记录里的 `chat_id`
+    也是该会话的副本）。running 永不删（同 `_prune`）。
+
+    注册表不存在 → 0，一个字节都不写（不为此建锁文件）；**读不出来**也什么都不写、返回 0：
+    这里不能照「以内存视图为准照常写」的惯例——那等于用一张空表覆写别的进程的记录。
+    残留由调用方的核查去报。
+    """
+    global _tasks
+    if not TASKS_FILE.exists():
+        return 0
+    with _lock, _file_lock():
+        disk = snapshot()
+        if disk is None:
+            return 0
+        drop = frozenset(tid for tid, r in disk.items()
+                         if r.get("status") != "running" and match(r))
+        if drop:
+            _tasks = {tid: r for tid, r in disk.items() if tid not in drop}
+            _persist_locked({}, drop)
+        return len(drop)
 
 
 def running() -> list[dict]:

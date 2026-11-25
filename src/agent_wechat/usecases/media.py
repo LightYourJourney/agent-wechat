@@ -9,7 +9,7 @@ import zlib
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from .. import appmsg, errors, media, messages, msgextra, paths, store
+from .. import appmsg, errors, media, messages, msgextra, paths, retrieval, store, tasks
 from ._core import (MEDIA_KINDS, MONTH_RE, ChatContext, Degradation,
                     NeedConfirm, pkg_call, pkg_clamp_limit, pkg_context)
 
@@ -29,7 +29,8 @@ class MediaExportResult:
 def media_export(contact: str, *, kinds: list[str], months: list[str] | None = None,
                  out_dir: str | None = None, limit: int = 500, force: bool = False,
                  account: str | None = None,
-                 with_cdn: bool = False) -> MediaExportResult | NeedConfirm:
+                 with_cdn: bool = False,
+                 deny: frozenset[str] = frozenset()) -> MediaExportResult | NeedConfirm:
     """媒体导出用例：会话消歧 + 交 media.export_media。kinds/months 由入口解析成列表。
 
     chat_ids 恒为单元素——当前调用方一次只导一个会话，重复无从发生，故**不去重**；
@@ -50,6 +51,7 @@ def media_export(contact: str, *, kinds: list[str], months: list[str] | None = N
     `AGENT_WECHAT_HOME` 落在同一范围时同样拒绝：本用例的默认产物根是 `HOME_DIR/media`，
     而 `media.export_media` 在语音分支之前就先 `ensure_tree(export_root())`——不在这里
     先过闸，`--kinds image`（默认根）就会把图片写进容器的 `media/`（整支复审实测）。
+    `deny`：读取范围（MCP 入口传 `AGENT_WECHAT_DENY`，CLI 不传）。
     """
     if out_dir:
         paths.refuse_container_out(out_dir)
@@ -58,6 +60,7 @@ def media_export(contact: str, *, kinds: list[str], months: list[str] | None = N
     chat_id = ctx.resolve(contact)
     if isinstance(chat_id, NeedConfirm):
         return chat_id
+    retrieval.ensure_allowed(chat_id, deny)
     bad = [k for k in kinds if k not in MEDIA_KINDS]
     if bad:
         raise errors.SearchInputError(f"未知的媒体类型: {bad}（可用: {', '.join(MEDIA_KINDS)}）")
@@ -83,6 +86,9 @@ def media_export(contact: str, *, kinds: list[str], months: list[str] | None = N
                 kinds_to_export = [k for k in kinds if k not in ("video", "sticker")]
         # 显式 out_dir 走 `_resolve_out` 绝对化（同 chat_export / message_media）：相对路径
         # 会原样回到信封的 out_dir 里，MCP 客户端拿它没用。
+        # 整个写盘期间在任务注册表里占一条 running 记录：`purge --chat` 的在飞闸门据此拒绝，
+        # 不会在导出中途删掉 `media/<md5>/`、核查报 ✅ 之后又被这里写回明文（见 `tasks.claim`）。
+        stack.enter_context(tasks.claim("media_export", account=ctx.account, chat_id=chat_id))
         report = media.export_media(ctx.account, [chat_id], kinds=kinds_to_export, months=months,
                                     out_dir=_resolve_out(out_dir) if out_dir else None,
                                     max_files=pkg_clamp_limit(limit),   # 不再硬卡 2000
@@ -267,7 +273,8 @@ def message_media(contact: str, *, keys: Sequence[str] | None = None,
                   months: list[str] | None = None, limit: int = 200,
                   out_dir: str | None = None, account: str | None = None,
                   _ctx: ChatContext | None = None,
-                  _con: sqlite3.Connection | None = None) -> MessageMediaResult | NeedConfirm:
+                  _con: sqlite3.Connection | None = None,
+                  deny: frozenset[str] = frozenset()) -> MessageMediaResult | NeedConfirm:
     """消息 → 媒体状态（spec §4.1 的四态）。
 
     keys=None → 该会话**所有媒体类型的消息**（msg_type ∈ {3,43,34,47}），受 limit 约束
@@ -280,6 +287,7 @@ def message_media(contact: str, *, keys: Sequence[str] | None = None,
     chat_id = ctx.resolve(contact)
     if isinstance(chat_id, NeedConfirm):
         return chat_id
+    retrieval.ensure_allowed(chat_id, deny)      # 读取范围（MCP 入口传入，CLI 不传）
     # 与 media_export / moments_export 同一口径：格式错的月份串永远比不中，不拦就是
     # 静默 0 命中、exit 0（用户看到「这个月没有媒体」而不是「月份写错了」）。
     bad_months = [m for m in (months or []) if not MONTH_RE.fullmatch(m)]

@@ -175,7 +175,7 @@ AGENT_WECHAT_HOME = "/Users/you/.agent-wechat"
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `AGENT_WECHAT_HOME` | `~/.agent-wechat` | 密钥缓存、索引库、临时文件的根目录（自动 0700） |
-| `AGENT_WECHAT_DENY` | 空 | 逗号分隔的 chat_id；**只约束 Phase 05 的 `retrieve` / `context`**，不给既有工具加行为 |
+| `AGENT_WECHAT_DENY` | 空 | 逗号分隔的 chat_id（按会话 md5 判）。MCP 侧约束**所有读会话内容的工具**（点名读取报错、检索里排除；`export_full_history` 不受约束，见 TOOLS.md「通用约定」）；CLI 只约束 `retrieve` / `context` |
 | `AGENT_WECHAT_MCP_OUT_ROOTS` | 空 | `:` 分隔的**绝对**路径；MCP 导出类工具的 `out_dir` 除数据目录外还允许落在这些目录之下（CLI 的 `--out` 不受它约束） |
 | `AGENT_WECHAT_WHISPER_MODEL` | 自动探测本地模型 | Phase 06 的 ASR 模型路径；**只读本地文件，绝不下载** |
 | `AGENT_WECHAT_DECRYPT` | 空（进程内 sqlcipher3） | 设为 `cli` 时强制回退 sqlcipher 命令行后端（整库导出明文副本再只读打开；排障用，见 ARCHITECTURE.md §3.10） |
@@ -188,6 +188,7 @@ agent-wechat ui --port 8765 --open # 顺便打开浏览器
 ```
 
 - **默认关闭**：不装 launchd、不开机自启；只有这条命令会起服务。
+- 用终端印出的带令牌链接（`http://127.0.0.1:<端口>/?token=…`）打开；不带令牌一律 403，链接别贴给别人（见 USAGE.md §13）。
 - 页面显示聊天内容：仅本机使用，不要截图外传；浏览器不做缓存（`no-store`）。
 - 绑定非 loopback 地址会被拒绝；`Host`/`Origin` 只认 `127.0.0.1` / `localhost` / `::1`。
 

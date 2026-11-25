@@ -78,13 +78,18 @@ def _pkcs7_strip(plain: bytes) -> bytes:
     return plain[:-pad]
 
 
+def _xor1(data: bytes, key: int) -> bytes:
+    """单字节 XOR，走 `bytes.translate`（C 层查表）。此前逐字节纯 Python，10 MB dat 实测 1.95 s。"""
+    return data.translate(bytes(i ^ key for i in range(256)))
+
+
 def decrypt_dat(data: bytes, keys: MediaKeys) -> bytes:
     """dat 解密：V2 = 15B 头 + aligned(aesSize) AES-128-ECB 段 + 中段直通 + 末 xorSize XOR；
     V1 = 剥 6B 明文魔数后余下单字节 XOR；V0 = 全文件单字节 XOR。布局与恒等式见 spec §2.1。"""
     if data[:6] != V2_SIG:
         if data[:6] == V1_SIG:
             data = data[6:]        # V1 魔数明文存储：剥掉再 XOR，输出才是图片本体（乱前缀过不了 detect_ext）
-        return bytes(b ^ keys.xor_key for b in data)
+        return _xor1(data, keys.xor_key)
     if len(data) < 15:
         raise errors.DecryptError("dat 文件不足 15 字节头")
     aes_size = int.from_bytes(data[6:10], "little")
@@ -97,7 +102,7 @@ def decrypt_dat(data: bytes, keys: MediaKeys) -> bytes:
     plain = _pkcs7_strip(dec.update(payload[:aligned]) + dec.finalize())
     remaining = payload[aligned:]
     raw_len = len(remaining) - xor_size
-    tail = bytes(b ^ keys.xor_key for b in remaining[raw_len:])
+    tail = _xor1(remaining[raw_len:], keys.xor_key)
     return plain + remaining[:raw_len] + tail
 
 
@@ -999,8 +1004,14 @@ class _ExportState:
             # pilk 在时 `.slk` 只是**解码失败**留下的回退产物，不算完成：每轮重试转 WAV
             # （pilk 升级后自动补回）。读侧（`exported_path`）照旧认 `.slk`——文件确实在那儿。
             cands = tuple(c for c in cands if c[1] != "slk")
-        return any(_out_path(self.out_root, cm, kind, mon, s, e).exists()
-                   for s, e in cands)
+        hit = next((e for s, e in cands
+                    if _out_path(self.out_root, cm, kind, mon, s, e).exists()), None)
+        if hit == "wxgf" and _find_ffmpeg() is not None:
+            # 与上面的 `.slk` 同一立场：`.wxgf` 是没转成 JPEG 时存的原容器（浏览器打不开），
+            # 有 ffmpeg 时不算完成、每轮重试转码。没有 ffmpeg 时照旧算完成——重跑也只会再存
+            # 一份同样的容器。`wxgf` 在候选里排最后（MAGICS 序），命中它说明没有别的产物。
+            return False
+        return hit is not None
 
     def full(self) -> bool:
         return self.produced >= self.max_files
@@ -1062,7 +1073,8 @@ def _export_images(st: _ExportState, chat_ids: list[str]) -> None:
                         st.report.image.failed += 1
                         continue
                     if ext == "wxgf":
-                        # 转码成功时 jpeg 已由 ffmpeg 直写 out_root 下的终路径
+                        # 转码成功时 jpeg 已原子落到 out_root 下的终路径（ffmpeg 出 stdout →
+                        # `atomic_write`，见 `_wxgf_to_jpeg`）
                         converted = _wxgf_to_jpeg(
                             buf, _dest(st.out_root, cm, "image", mon, dat.stem, "jpg"))
                     else:
@@ -1072,6 +1084,12 @@ def _export_images(st: _ExportState, chat_ids: list[str]) -> None:
                             st.report.degraded.append(
                                 "wxgf 图未转 JPEG（无 ffmpeg 或转码失败），存原容器")
                             wxgf_warned = True
+                        if (ext == "wxgf" and not st.force and _out_path(
+                                st.out_root, cm, "image", mon, dat.stem, "wxgf").exists()):
+                            # 上一轮已存过原容器、这次重试又没转成：不重写、**不占 limit**
+                            # （同语音 `.slk` 的重试，见 `_export_voice`）
+                            st.report.image.skipped += 1
+                            continue
                         if save_artifact(st.out_root, cm, "image", mon, dat.stem, ext, buf) is None:
                             st.report.image.failed += 1     # 落盘失败（Ruling 20）
                             continue
@@ -1415,9 +1433,15 @@ def sticker_cdn_urls(account: str, items: Sequence[tuple[str, str, int]]
     return out, note
 
 
+# CDN 单件下载上限（字节）。响应体整个读进内存，不设上限时一个恶意/异常的超大响应能把进程撑爆。
+# 超了**整件作废**（`too_large`）：不截断、不落盘。朋友圈媒体的同款上限见 `sns_media.MAX_FETCH_BYTES`。
+CDN_MAX_BYTES = 200 * 1024 * 1024
+
+
 def _fetch_cdn_bytes(url: str, expect_md5: str, *, timeout: float = 15.0
                      ) -> tuple[bytes | None, str]:
-    """取一次并校验。→ `(字节, "ok")` / `(None, "refused")` / `(None, "failed")`，**不抛**。
+    """取一次并校验。→ `(字节, "ok")` / `(None, "refused")` / `(None, "failed")` /
+    `(None, "too_large")`（超 `CDN_MAX_BYTES`），**不抛**。
 
     第二项把「**不会去取**」与「联网了但没取到」分开：前者是白名单外或 URL 畸形，发请求之前
     就返回，重试**永远无效**；后者是网络/状态码/md5 不符，重试可能有用。两者混在一起记
@@ -1435,13 +1459,15 @@ def _fetch_cdn_bytes(url: str, expect_md5: str, *, timeout: float = 15.0
         with _cdn_opener().open(url, timeout=timeout) as resp:
             if resp.status != 200:
                 return None, "failed"
-            body = resp.read()
+            body = resp.read(CDN_MAX_BYTES + 1)     # 多读 1 字节才分得出「正好上限」与「超了」
     except Exception:                    # noqa: BLE001 —— 见下
         # **必须宽到 `Exception`**：`http.client.HTTPException`（`BadStatusLine` 等）与
         # `ssl.SSLError` 不是 `OSError` 的子类，按类型列举会漏；漏出去的异常违反
         # 「core 层只抛项目异常」的契约（`sns_media.fetch` 对网络调用同样是宽接）。
         # **不回显任何内容**：错误消息里可能带 `filekey`，连类型名都不带出去。
         return None, "failed"
+    if len(body) > CDN_MAX_BYTES:
+        return None, "too_large"
     return (body, "ok") if hashlib.md5(body).hexdigest() == expect_md5 else (None, "failed")
 
 
@@ -1531,10 +1557,11 @@ def _export_stickers(st: _ExportState, chat_ids: list[str],
         out = []
         for k in keys:
             loc = _loc_of_msg_key(k)             # EA-085：形状校验收在一个可测的纯函数里
-            if loc is None:
-                st.report.sticker.missing += 1      # EA-022：与上面那条「msg_key 形状不对」同支归口
-                continue
-            out.append(loc)
+            if loc is not None:
+                out.append(loc)
+            # 定位不了的键**这里不计数**：`_locs` 一次导出要调两趟（摊平 + 取件前），在这里计
+            # missing 会让一个坏键记成 2（不联网）/ 3（`--with-cdn`）。missing 按**贴纸**计，
+            # 由下面「不联网 → len(order)」与「got is None」两处各计一次（EA-022 同支归口）。
         return out
 
     # 去重：候选跨月后同一个 msg_key 会出现在多个月份键里，重复的行查询是白费。
@@ -1561,6 +1588,7 @@ def _export_stickers(st: _ExportState, chat_ids: list[str],
 
     # ── 第三趟：每个不同贴纸取一次件 + 落盘 ──
     wxgf_warned = False          # once-flag：一次导出只说一次（与图片分支同款）
+    too_large = 0
     for cm, mon, md5 in order:
         if st.full():
             st.report.truncated = True
@@ -1579,6 +1607,9 @@ def _export_stickers(st: _ExportState, chat_ids: list[str],
                 # 白名单外 / URL 畸形：**一次请求都没发**，重试永远无效。归 `missing`
                 # （EA-022 那一族「不会去取」），而不是 `failed`（「联网了但没取到」）。
                 st.report.sticker.missing += 1
+            elif why == "too_large":
+                st.report.sticker.failed += 1
+                too_large += 1
             else:
                 st.report.sticker.failed += 1   # 联网了但没取到，**如实计失败**
             continue
@@ -1588,7 +1619,8 @@ def _export_stickers(st: _ExportState, chat_ids: list[str],
             st.report.sticker.failed += 1
             continue
         # **wxgf 是容器、不是图片，直接落盘用户打不开**——与图片分支同一手法：
-        # 有 ffmpeg 就转 JPEG（直写终路径，不留半成品），没有/转码失败则退回存原容器**并公告**。
+        # 有 ffmpeg 就转 JPEG（stdout → `atomic_write` 落终路径，不留半成品），没有/转码失败则
+        # 退回存原容器**并公告**。
         # （这条分支在贴纸侧此前是漏的：全库实测 0 个 wxgf 贴纸，所以从未被走到——
         #   一旦遇到，产物会是 `file` 认不出、用户打不开的 .wxgf 而不报任何异常。）
         converted = False
@@ -1598,11 +1630,18 @@ def _export_stickers(st: _ExportState, chat_ids: list[str],
             if ext == "wxgf" and not wxgf_warned:
                 st.report.degraded.append("wxgf 贴纸未转 JPEG（无 ffmpeg 或转码失败），存原容器")
                 wxgf_warned = True
+            if (ext == "wxgf" and not st.force
+                    and _out_path(st.out_root, cm, "sticker", mon, md5, "wxgf").exists()):
+                st.report.sticker.skipped += 1      # 重试又没转成：不重写、不占 limit（同图片分支）
+                continue
             if save_artifact(st.out_root, cm, "sticker", mon, md5, ext, data) is None:
                 st.report.sticker.failed += 1
                 continue
         st.report.sticker.ok += 1
         st.bump()
+    if too_large:
+        st.report.degraded.append(
+            f"{too_large} 个贴纸超过 {CDN_MAX_BYTES // (1 << 20)} MB 下载上限：已中止下载、未落盘（计入 failed）")
 
 
 # 语音解码 worker 的源码：`sys.executable -I -c` 起一个**隔离子进程**跑 pilk。

@@ -173,6 +173,17 @@ def cmd_inspect(args: argparse.Namespace) -> int:
     return 0
 
 
+def _non_negative_int(text: str) -> int:
+    """`inspect --sample` 的 argparse type：负数会变成 `LIMIT -1`，把每张表的全部行明文打出来。"""
+    try:
+        n = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"应为整数：{text}") from None
+    if n < 0:
+        raise argparse.ArgumentTypeError(f"不能为负数：{text}")
+    return n
+
+
 def _decode(v: object) -> object:
     """bytes 尽力解码为 str，失败保留 repr 摘要。"""
     if isinstance(v, bytes):
@@ -363,7 +374,13 @@ def cmd_memory(args: argparse.Namespace) -> int:
     elif args.memory_cmd == "show":
         res = derived.get_claim(args.claim_id)
     elif args.memory_cmd == "delete":
-        res = {"deleted": derived.delete_claim(args.claim_id)}
+        # 与 show / confirm 同一口径：找不到就是错误（exit 1），不回 `{"deleted": false}` + 退 0
+        # ——这是硬删除，id 打错时用户必须知道什么都没删。
+        if not derived.delete_claim(args.claim_id):
+            raise errors.DataNotFound(
+                f"找不到主张 {args.claim_id}",
+                hint="用 `agent-wechat memory list --account <账号>` 查看现有主张的 id")
+        res = {"deleted": True}
     else:
         status = {"confirm": "confirmed", "retract": "retracted",
                   "dispute": "disputed"}[args.memory_cmd]
@@ -653,6 +670,14 @@ def cmd_chat_export(args: argparse.Namespace) -> int:
     for f in res.files:
         print(f"产物：{f}")
     _render_degradations(res.degraded)
+    # `chatview.write` 吞掉单文件的写失败、只回真正落盘的那些：这里拿请求的格式对一遍，
+    # 少了就点名并退 1——否则全部写失败也是「零行产物 + exit 0」，stderr 一个字都没有。
+    missing = [fmt for fmt in dict.fromkeys(formats)
+               if not any(str(f).endswith(f".{fmt}") for f in res.files)]
+    if missing:
+        print(f"没写成：{', '.join(f'index.{m}' for m in missing)}"
+              "（磁盘满 / 权限 / 只读挂载？）", file=sys.stderr)
+        return 1
     return 0
 
 
@@ -843,7 +868,8 @@ def _render_plan(plan: purge.PurgePlan, ex_count: int | None,
     # 据以说 --yes 的唯一依据。一个能省掉参数的默认值，就是让那句在该印的时候消失的入口。
     print("将删除：")
     # 绝对目标必须先印：下面每行的路径都可能与用户以为的那个目录无关（AGENT_WECHAT_HOME
-    # 被设成空值时全都相对当前工作目录），而「将删除：」这四个字是这张表唯一的上下文。
+    # 被设成相对路径时全都相对当前工作目录；空值回落默认目录，见 paths.HOME_DIR / EA-003），
+    # 而「将删除：」这四个字是这张表唯一的上下文。
     print(f"目标目录：{paths.HOME_DIR.resolve()}")
     for i in plan.items:
         # 目录现在也有整树体积（_item 走 _tree_size），不再印「—」——那张表是用户据以说
@@ -1098,22 +1124,42 @@ def _cmd_purge_chat(args: argparse.Namespace) -> int:
         # 不说这句，用户会把「没有活消息可删」读成「这个会话在本工具里什么都不剩了」——
         # 而那份解密后的图/视频/语音（外加可直接打开的 HTML）还摊在盘上（M-3）。
         # 判据走 purge 的那一个 `name_there`：不跟随符号链接、也不把 EACCES 吞成「不在」
-        # （CLI 不另写一套存活判据，同 M-4 的理由）；它抛 `OSError` 时什么都不说——
-        # 这句提示不该把命令本身弄成失败。
+        # （CLI 不另写一套存活判据，同 M-4 的理由）。它抛 `OSError` 时预览里什么都不说，
+        # 但 `--yes` 下记为「判不出来」——那同样不能报成功。
         # 目录同样走 purge 的那一个 `chat_export_dir`：导出根与会话 md5 的单一来源都在 core
         # （CLI 自己拼一遍就是同一件事的第二个说法，改了一处漏一处的老毛病）。
         left = []
+        unknown: list[str] = []
         for t in targets:
             d = purge.chat_export_dir(t["chat_id"])
             try:
                 if purge.name_there(d):
                     left.append(d)
-            except OSError:
-                continue
+            except OSError as exc:
+                unknown.append(f"{d}（{exc}）")
+        # 总目录页（`media/index.html`）里该会话那一行也是导出物：会话 id 与条数还在上面。
+        # 判据走 purge 的那一个 `index_page_listing`（与有索引时的计划同源）。
+        try:
+            page = purge.index_page_listing(t["chat_id"] for t in targets)
+            if page is not None:
+                left.append(page)
+        except errors.PurgeRefused as exc:
+            unknown.append(str(exc))
         if left:
             dirs = "、".join(str(p) for p in dict.fromkeys(left))
             print(f"该会话的导出物仍在盘上：{dirs}——索引库不在，本命令不会动它；"
                   "要删它得先重跑 export 把索引建回来，或手工删除。", file=sys.stderr)
+        if args.yes and (left or unknown):
+            # 这一支**删不了**导出物：删除路线（`plan_chat` / `execute_chat`）要开索引，会把
+            # 刚删掉的 index.db 连 schema 建回来；CLI 自己 rmtree 又绕过 core 的链接/硬链接
+            # 闸门。所以明确失败：`--yes` 要的是「删掉」，解密出的导出物原封不动时退 0
+            # 就是上面那条注释禁掉的「stderr 一句 + 退 0」（EA-029：部分失败退 1）。
+            if unknown:
+                print(f"判不出导出物还在不在：{'、'.join(dict.fromkeys(unknown))}",
+                      file=sys.stderr)
+            raise errors.PurgeRefused(
+                "未删除任何文件：该会话的导出物还在盘上（或判不出来，见上）",
+                hint="先重跑 export 把索引建回来再 purge --chat，或手工删除那个目录")
         return 0
     plan = purge.plan_chat(targets)
     _render_chat_plan(plan, args.chat)
@@ -1191,7 +1237,7 @@ def main(argv: list[str] | None = None) -> None:
 
     sp = sub.add_parser("inspect", help="解密并 dump 表结构（schema 探测）")
     sp.add_argument("db", help="相对 db_storage 的路径")
-    sp.add_argument("--sample", type=int, default=2, help="每表样本行数（默认 2）")
+    sp.add_argument("--sample", type=_non_negative_int, default=2, help="每表样本行数（≥0，默认 2）")
     sp.add_argument("--account", help="目标账号目录名；省略用当前登录账号")
     sp.set_defaults(fn=cmd_inspect)
 
@@ -1342,7 +1388,7 @@ def main(argv: list[str] | None = None) -> None:
 
     sp = sub.add_parser("logs", help="同步日志清理")
     lsp = sp.add_subparsers(dest="logs_cmd", required=True)
-    one = lsp.add_parser("clean", help="删除 sync.log（默认预览，加 --yes 才删）")
+    one = lsp.add_parser("clean", help="删除 sync.log 与 launchd 的 out/err 日志（默认预览，加 --yes 才删）")
     one.add_argument("--yes", action="store_true")
     one.set_defaults(fn=cmd_logs_clean)
 

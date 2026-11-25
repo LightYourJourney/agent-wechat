@@ -119,7 +119,7 @@ class _Resp:
         self._body = body
         self.headers = headers or {}
 
-    def read(self):
+    def read(self, amt=None):           # fetch 按上限读：`read(MAX_FETCH_BYTES + 1)`
         return self._body
 
     def __enter__(self):
@@ -391,7 +391,7 @@ class _Buf:
     def info(self):
         return self.headers
 
-    def read(self):
+    def read(self, amt=None):
         return self._body
 
     def close(self):
@@ -576,7 +576,7 @@ def _isaac_wrap(plain: bytes, seed: str) -> bytes:
 class _FakeResp:
     def __init__(self, body: bytes, headers: dict[str, str]):
         self._body, self.headers = body, headers
-    def read(self) -> bytes:
+    def read(self, amt=None) -> bytes:
         return self._body
     def __enter__(self):
         return self

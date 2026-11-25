@@ -113,6 +113,8 @@ class RecentMessages:
     display: str
     messages: list[reader.Message]
     degraded: tuple[Degradation, ...] = ()
+    # 只在 whole_second 补全了一整秒时有值：更早是否还有消息（None = 没补全，按条数自己判）
+    earlier: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -186,6 +188,8 @@ DEGRADE_EFFECT: dict[str, str] = {
     # 贴纸名字是**锦上添花**的来源（spec §6.3）：少了它仍有消息 XML 里的 desc，
     # 再兜不住才回落短 ID——所以这句说的是「名字变少」，不是「功能没了」。
     "stickers": "贴纸名称少一部分，取不到名字的会回落短 ID",
+    # reader 逐条兜住 zstd 坏帧（`reader._decode_row`）：只坏那几条，其余照常。
+    "message_content": f"部分消息正文解压失败，以 {reader.UNDECODABLE} 占位",
 }
 
 
@@ -228,9 +232,13 @@ def collect_degradations(rdr: reader.MessageReader) -> tuple[Degradation, ...]:
         key = (capability, db)
         if key not in seen:
             effect = DEGRADE_EFFECT.get(capability, "部分功能降级")
+            if db:
+                # `message_content` 的库读得出来、坏的只是其中几条正文：只点出是哪个库，
+                # 不说「读不出来」（那会把用户支去查一个好好的库）。
+                effect += f"（{db}）" if capability == "message_content" else f"（{db} 读不出来）"
             seen[key] = Degradation(
                 capability=capability, db=db, table="", missing_columns=(),
-                effect=f"{effect}（{db} 读不出来）" if db else effect, drift=False)
+                effect=effect, drift=False)
     return tuple(seen.values())
 
 

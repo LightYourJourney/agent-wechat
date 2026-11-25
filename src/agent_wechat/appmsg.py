@@ -146,7 +146,19 @@ _NAMED_LEAVES = {KIND_LINK: ("url", "des")}
 #
 # 名字过滤**逐段**判，不只看末段：`<aeskey><value>…</value></aeskey>` 的末段是 `value`，
 # 只锚末段会让**密钥值原样进字段表**（审阅发现、控制器复现，实测泄漏）。
-_SECRET_SEG = re.compile(r"(aeskey|passphrase|token|key)$", re.I)
+#
+# **后缀锚定**（与 `filekey` / `fileuploadtoken` 同理）。审查后补了会话/签名/票据类凭据，依据是
+# 真机只计数核实（只看名字不看值）：URL 参数 `sessionid` 1206、`sign` 1101、`ranksessionid` 594、
+# `signature` 193、`pass_ticket` 2、`password` 1…；字段 `ecsgift.appmsg_sign`、
+# `finderLive.enterSessionId`。**`sign` 只认 `_sign` 后缀**：整段就叫 `sign` 的字段是个性签名
+# （`photoaccountnamecard.sign` 1579 条）；URL 参数名正好是 `sign` 的另见 `_SECRET_PARAM_EXACT`。
+# 不误伤（测试逐个列出）：`auth_icon*` / `authorUsername` / `designershared.*` / `designerid`
+# （`sign` 在词中、不在尾）、`secretmsg.issecretmsg`（`secret` 不在尾）、`geoauth` / `author_share`。
+_SECRET_SEG = re.compile(
+    r"(aeskey|passphrase|token|key|ticket|signatures?|sig|sessionid|password|secret|_sign)$", re.I)
+# 参数名**整名**就是它才算的凭据：`?sign=` 是签名，字段路径里整段的 `sign` 却是个性签名，
+# 所以它不能进 `_SECRET_SEG`（那张表同时判字段路径段）。只在参数位上多这一个整名。
+_SECRET_PARAM_EXACT = ("sign",)
 # 分隔符集含 `;` 与 `,`：实测 `http://c/x;token=…` 在只有 `?`/`&` 时不被丢。
 #
 # **参数名复用 `_SECRET_SEG`，不另写一张备选表**：此前写的是
@@ -163,7 +175,8 @@ _SECRET_PARAM = re.compile(r"[?&;,]([A-Za-z0-9_.\-]+)=")
 
 def _has_credential_param(value: str) -> bool:
     """值里是否带着凭据查询参数（`?filekey=…` / `;token=…`）。"""
-    return any(_SECRET_SEG.search(m.group(1)) for m in _SECRET_PARAM.finditer(value))
+    return any(_SECRET_SEG.search(m.group(1)) or m.group(1).lower() in _SECRET_PARAM_EXACT
+               for m in _SECRET_PARAM.finditer(value))
 
 
 def _is_secret(path: str, value: str) -> bool:

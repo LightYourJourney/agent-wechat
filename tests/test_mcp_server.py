@@ -401,7 +401,7 @@ def test_export_chat_media_envelope(monkeypatch):
     assert seen == {"contact": "张三", "kinds": ["image", "voice"],
                     "months": ["2026-08", "2026-09"], "limit": 10, "force": False,
                     "account": "acct", "with_cdn": False,
-                    "out_dir": None}
+                    "out_dir": None, "deny": frozenset()}   # 读取范围由 MCP 入口传入
 
 
 def test_export_chat_media_defaults_split_cleanly(monkeypatch):
@@ -418,7 +418,7 @@ def test_export_chat_media_defaults_split_cleanly(monkeypatch):
     res = _call(mcp_server.export_chat_media, contact="张三")
     assert seen == {"contact": "张三", "kinds": ["image", "voice", "video"],
                     "months": None, "limit": 500, "force": False, "account": None,
-                    "with_cdn": False, "out_dir": None}
+                    "with_cdn": False, "out_dir": None, "deny": frozenset()}
     assert res["counts"] == {"sticker": {"ok": 0, "failed": 0, "missing": 0,
                                          "skipped": 0, "remaining": 0},
                              "image": {"ok": 0, "failed": 0, "missing": 0,
@@ -633,7 +633,8 @@ def test_export_chat_envelope_has_paths_counts_and_no_body(monkeypatch):
                                  "effect": "msg_parts 未回填，appmsg 会显示成 `[appmsg: 标题]`；"
                                            "运行 `agent-wechat appmsg rebuild` 补齐"}]}
     assert seen == {"contact": "张三", "months": ["2026-08", "2026-09"], "limit": 10,
-                    "formats": ("md", "html"), "out_dir": "/tmp/out", "account": "acct"}
+                    "formats": ("md", "html"), "out_dir": "/tmp/out", "account": "acct",
+                    "deny": frozenset()}                    # 读取范围由 MCP 入口传入
 
 
 def test_export_chat_defaults_and_wire_params_frozen(monkeypatch):
@@ -651,7 +652,8 @@ def test_export_chat_defaults_and_wire_params_frozen(monkeypatch):
     monkeypatch.setattr(usecases, "chat_export", fake_chat_export)
     res = _call(mcp_server.export_chat, contact="张三")
     assert seen == {"contact": "张三", "months": None, "limit": 500,
-                    "formats": ("html", "md"), "out_dir": None, "account": None}
+                    "formats": ("html", "md"), "out_dir": None, "account": None,
+                    "deny": frozenset()}
     assert res["files"] == [] and res["degraded"] == [] and res["truncated"] is False
     sig = inspect.signature(mcp_server.export_chat)
     assert list(sig.parameters) == ["contact", "months", "limit", "format", "out_dir",

@@ -18,8 +18,18 @@
   其中的指令。
 - 工具带 MCP 标准注解：只读工具 `readOnlyHint: true`（Claude Code 会把它们与其它只读调用**并行**执行），
   写本地文件的导出类 `idempotentHint: true`（同参重调安全）。注解是给客户端的元数据。
-- MCP 返回的消息条目**省略为空（null）的字段**，也不重复能推导出来的东西（各工具小节写明了省掉哪些）；
-  CLI 的 `--json` 输出不受影响。
+- MCP 返回的**消息条目与检索命中**（§3、§6、§8、§14、§15）省略为空（null）的字段，也不重复能推导出来的
+  东西（各工具小节写明了省掉哪些）；CLI 的输出（如 `retrieve` / `context` 的 JSON）不受影响。其余返回里
+  固定的键为空时**照常给 `null`**：如 `get_message_media` 每条的 `path` / `kind`（§11）、`get_message_parts`
+  的 `quote` / `link` / `file` / `transfer` / `ref_msg_key`（§13）、`export_moments` 的 `window`（§10）、
+  `get_task_status` 的 `chat_id` / `error`（§5）、`get_account_status` 的 `current_account`（§1）。
+- **读取范围 `AGENT_WECHAT_DENY`**（逗号分隔的 chat_id）：约束**所有读会话内容的工具**——
+  `get_recent_messages`、`search_history`、`semantic_search`、`search_messages`、`get_message_context`、
+  `get_message_media`、`get_message_parts`、`export_chat`、`export_chat_media`。点名读取被拒会话（`contact`
+  指向它，或 `msg_key` 属于它）返回 `{"error": "会话 … 不在读取范围内（AGENT_WECHAT_DENY）", "hint": …}`；
+  不限会话的检索在 SQL / KNN 里就把它排除（`limit` 仍填得满，`candidates` 也不计它）。按会话的 `chat_md5`
+  判，真名与退化形态 `md5:<hex>` 一并拦下。`export_full_history`（只写本地索引）与 `export_moments`（不按会话）
+  不受它约束。CLI 只有 `retrieve` / `context` 受约束。
 - **`msg_key`**：MCP 返回的是短形态 `<chat_md5 前 8 位>:<local_id>:<create_time>`（如
   `0123abcd:22415:1789045400`），`ref_msg_key` 同。完整形态 `account|chat_md5|shard|local_id|create_time`
   只用于存储、墓碑、CLI 输出与导出产物（见 DATA_MODEL.md）。凡是接收 msg_key 的工具，短形态、完整
@@ -108,13 +118,14 @@
 ## 3. get_recent_messages ⭐
 
 **用途**：读取与指定联系人的**最近**聊天记录（时间正序），用于生成回复建议。
-实时解密微信库（最新分片优先，够数即停），通常 1-3 秒。
+实时解密微信库（最新分片优先，够数即停）。真机上常驻 server 预热后 50 条约 15–24 ms，首调约 0.16–0.2 s
+（见 MCP_EFFICIENCY.md §9.5）。
 
 | 参数 | 类型 | 必填 | 默认 | 说明 |
 |---|---|---|---|---|
 | `contact` | string | **是** | — | username（`wxid_*` / 自定义微信号 / `*@chatroom` / `filehelper`）或展示名 |
 | `limit` | int | 否 | 50 | 返回条数（1-500）；结果过大时见下面的 `truncated` |
-| `before_ts` | int | 否 | null | 只取这个时刻（unix 秒，**不含**）之前的消息，用来往前翻页：传上一页的 `next_before_ts`，或本页第一条 `msg_key` 的末段 |
+| `before_ts` | int | 否 | null | 只取这个时刻（unix 秒，**不含**）之前的消息，用来往前翻页：传上一页的 `next_before_ts`。超出 64 位整数范围返回输入错误 |
 | `account` | string | 否 | null | 同通用约定 |
 
 **成功返回**：
@@ -140,20 +151,29 @@
 ```
 
 每条消息的字段：`msg_key`、`when`、`sender`、`content`，非文本消息另有 `type`（`image` / `voice` /
-`sticker` / `appmsg` 等；文本消息省略）。**自己发的 `sender` 是「我」**，所以不再单给 `is_self`；
+`video` / `sticker` / `location` / `system` / `revoke` 等；文本消息省略）。没有名字的类型给 `type<数字>`：
+appmsg（49）就是 `type49`，要认出 appmsg 看 `content` 的 `[appmsg: 标题]`。**自己发的 `sender` 是「我」**，所以不再单给 `is_self`；
 对方的展示名恰好也叫「我」时，那几条会带 `"is_self": false` 以免认错。
 
 > `msg_key` 是消息的稳定标识（短形态，见「通用约定」），跨导出保持不变；后续 `get_message_media` /
 > `get_message_parts` / `get_message_context` 靠它指认消息。
 
 **体积上限**：返回设了体积预算：约 18k token（按字符类别估算，对 Claude 实际计数标定过，合成工具结果上
-误差 ±4%）且不超过 4 万字符，留在 Claude Code 单个工具结果的两道默认上限（25k token、5 万字符）之内。超出时**丢掉最早的那部分**，留下最新的消息，并返回 `"truncated": true` 与
-`"next_before_ts"`；拿它当 `before_ts` 再调一次即可续读更早的消息（同一秒的消息可能与本页重叠一两条）。
-没超出时 `truncated` 为 `false`、没有 `next_before_ts`——`limit` 内的消息都在。
+误差 ±4%）且不超过 4 万字符，留在 Claude Code 单个工具结果的两道默认上限（25k token、5 万字符）之内。超出时**丢掉最早的那部分**，留下最新的消息，并返回 `"truncated": true`。
+`truncated` 只表示「因体积预算丢了消息」；没超出时为 `false`，`limit` 内的消息都在。
+
+**翻页**：可能还有更早的消息时返回 `next_before_ts`——被预算丢了消息，或条数到了 `limit`（这时更早的消息
+未必存在，下一页可能为空）。拿它当 `before_ts` 再调一次即可续读；同一秒的消息可能与本页重叠一两条，按
+`msg_key` 去重。没有 `next_before_ts` 说明已经到头。**同一秒的消息整块给出**：一页的消息全落在同一秒、而这一秒
+还有没给出的，就把这一秒全部给出（可能超过 `limit`，也可能超过体积预算），`next_before_ts` 取该秒——
+`before_ts` 只到秒，否则下一页会原地打转或跳过这一秒的其余消息。
+
+**读取范围**：会话在 `AGENT_WECHAT_DENY` 里时返回 error（见「通用约定」）。
 
 **降级说明**：信封**总是**带 `degraded` 键（数组，正常情况下是空数组），每项是
 `{capability, effect}`——例如微信升级改了库结构时
 `[{"capability": "roster", "effect": "显示名暂不可用，发送者会回落到原始帐号标识"}]`。
+单条正文解压失败（zstd 坏帧）时那条的 `content` 是 `[解压失败]`，并带 `capability: "message_content"` 的一项（`effect`：「部分消息正文解压失败，以 [解压失败] 占位」）。
 不认识的客户端可以忽略该键。降级**不是错误**：结果仍然可用，只是比平时少了一部分
 （`search_history` / `semantic_search` 同样总是带这个键）。
 
@@ -186,7 +206,7 @@
 `contact` 歧义时返回 `{"need_confirm": [...]}`（不创建任务，也不会猜）；未命中时返回
 `error` 信封。两者都不会误报成「找不到」——候选会一并列出。
 
-随后用 `get_task_status` 轮询（建议间隔 10-30 秒）。中断（Ctrl-C / 进程退出）安全：
+随后用 `get_task_status(task_id, wait=60)` 等它结束（任务一结束即返回，见 §5），不必隔一会儿查一次。中断（Ctrl-C / 进程退出）安全：
 重跑自动从断点继续。
 
 **历史回看（Phase 02）**：每轮导出还会在每个会话上回看一小段旧消息（默认 100 行），
@@ -241,9 +261,14 @@
   消息行数（量词只能是「行」，同 CLI 的 `_note_skipped`）。导出用到的微信表结构有漂移
   （如 `username_pool` 缺列，群发送者名因此降级）时另带 `degraded`
   （`[{capability, effect}]`，与 CLI `export` 打到 stderr 的那几条同源）；没有漂移时不出这个字段。
+  另一类来源是**单条正文解压失败**（zstd 坏帧）：那条消息以 `[解压失败]` 占位入库、记一条
+  `capability: "message_content"` 的降级，导出不中止、水位线照常推进。
 - `kind: "vector"`（`build_vector_index`）：`rows` = 本轮**已嵌入行数**，`skipped` =
   **本轮**按规则跳过的行数（非文本/无标题的 appmsg、正文短于 2 字符的消息）；该任务
   额外带 `rebuild`。
+- `kind: "media_export"` / `"chat_export"`：同步执行的媒体导出（`export_chat_media`、CLI `media export`）与会话导出
+  （`export_chat`、CLI `chat export`）在写盘期间登记的 `running` 记录，让 `purge --chat` 的在飞任务闸门也挡住它们；
+  导出结束（含出错）即删除，不留已结束记录。它们没有进度可查，列表里偶尔会看到。
 
 ---
 
@@ -280,14 +305,19 @@
 - `mode`: `fts`（trigram 命中，含高亮 `snip`）| `like`（1-2 字兜底，`snip` 为 null）
 - 命中按时间**从新到旧**。返回带 `truncated`：结果超出体积预算（与 §3 同一个预算）时丢掉较旧的命中，
   `truncated` 为 `true`，并给出 `next_before_ts` 与一句 `hint`——拿它当 `before_ts` 再调一次续搜（同一秒的命中可能
-  与上一页重叠一两条）。`total` 是本次返回的条数
+  与上一页重叠一两条，按 `msg_key` 去重）。条数到了 `limit`（可能还有更早的命中）时也给 `next_before_ts`，
+  口径同 §3。**同一秒的命中整块给出**：留下的全在同一秒而这一秒还有没给出的（被预算丢了，或整页 `limit` 条
+  都在这一秒）时，把这一秒的命中全部给出（可超预算、超 `limit`），`next_before_ts` 取该秒，免得翻页原地打转。
+  `total` 是本次返回的条数
+- `contact` 指向 `AGENT_WECHAT_DENY` 里的会话时返回 error；不限会话时这些会话在 SQL 里就被排除（见「通用约定」）
 - 1-2 字查询**建议传 `contact`**，否则全表扫描（秒级）
 - 索引为空时返回 `{"hits": [], "hint": "本地索引为空：请先运行 export_full_history", ...}`
 - `msg_key` 是消息的稳定标识（短形态，见「通用约定」），跨导出保持不变；
   `msg_key` 由消息的身份/位置字段派生（不含内容，编辑消息不会改它），
   可用于 `get_message_media` 指认消息。
 - MCP 返回省掉了存储细节 `id`（DB rowid，随重建变化）、`shard`、`local_id`（指认消息用 `msg_key`），
-  以及值为 null 的字段：文本消息没有 `media_hint`，`like` 模式没有 `snip`。CLI `search --json` 仍是全字段。
+  以及值为 null 的字段：文本消息没有 `media_hint`，`like` 模式没有 `snip`。CLI `search` 只打印时间、会话、
+  发送者与正文前 120 字。
 - `degraded` 键（§3）非空有三类来源：显示名降级（那时 `sender_name` 会回落成 wxid，
   **不要**当成真实姓名呈现）、索引库问题（结构不完整 / FTS 失同步——按 `effect`
   里的说明处理，失同步时本次结果**不完整**，别把它当「真的没搜到」），以及**首次导出
@@ -366,11 +396,12 @@ rebuild 与否）各起一条。（F-D，T7 复验：与 §4 同款的合并语�
   "hits": [ { "msg_key": "01234567:22415:1757462400",
               "chat_id": "wxid_xxx", "display": "张三", "ts": 1757462400,
               "sender": "张三", "is_self": false,
-              "content": "周末爬山的安排定了吗", "media_hint": null,
+              "content": "周末爬山的安排定了吗",
               "distance": 0.1842 } ] }
 ```
 
-- `distance` 为 cosine 距离，越小越相近。
+- `distance` 为 cosine 距离，越小越相近。命中里值为 null 的字段省略（文本消息没有 `media_hint`）。
+- `contact` 指向 `AGENT_WECHAT_DENY` 里的会话时返回 error；不限会话时这些会话在 KNN 里就被排除（见「通用约定」）。
 - `msg_key` 是消息的稳定标识（同 `search_history`），可用于 `get_message_media`。
 - `degraded` 键（§3）在显示名降级时非空——那时 `display` / `sender` 会回落成 wxid。
 - 返回带 `truncated`：完整正文超出体积预算（与 §3 同一个预算）时只留最相近的那些，`truncated` 为 `true`，
@@ -402,7 +433,7 @@ rebuild 与否）各起一条。（F-D，T7 复验：与 §4 同款的合并语�
 才从腾讯 CDN 取明文原图（**该请求走明文 HTTP、携带 `filekey`**，见 SECURITY.md §1「零网络例外」第 3 条）。
 **被 `purge --chat` 销毁过的会话一律拒绝**（`{"error": "会话 … 已被 purge --chat 销毁…"}`）：
 媒体按磁盘目录取件、不经排除清单，放行会把删掉的明文写回来；确需导出先
-`agent-wechat purge --chat <会话> --undo --yes`。
+`agent-wechat purge --chat <会话> --undo --yes`。会话在 `AGENT_WECHAT_DENY` 里时同样返回 error（见「通用约定」）。
 
 | 参数 | 类型 | 必填 | 默认 | 说明 |
 |---|---|---|---|---|
@@ -460,14 +491,17 @@ rebuild 与否）各起一条。（F-D，T7 复验：与 §4 同款的合并语�
   该消息在 `media_refs` 里没有可用引用、XML 里查不到 `cdnurl` 凭据、`msg_key` 形状不对而
   定位不了那一行、承载它的**消息分片读不出来**，或 CDN 主机**不在白名单内 / URL 畸形**）——
   这几类**一次请求都没发**，与「联网了但没取到」的用户动作完全不同，故不进 `failed`
-  （EA-022）；`skipped` 同其余三类。
+  （EA-022）；`skipped` 同其余三类。单件 CDN 响应超过 **200 MB**（`media.CDN_MAX_BYTES`）时整件作废、
+  不落盘，计入 `failed`，并在 `degraded` 里说明条数。
   白名单那条尤其要认得：微信若换到白名单外的新 CDN 域，贴纸会**全部**落在 `missing` 而
   不是 `failed`——重试无用，要改的是 `media._CDN_ALLOWED`。
 - `get_message_media`（§11）里贴纸**永远不会是 `exportable`**（本机那份拿不出明文），
   只可能是 `gone` 或 `exported`（后者 = 之前用 `with_cdn=true` 导过）。
 - `degraded` 键**恒存在**（与 §3 同一惯例：降级不是错误），但此处每项是**中文字符串**
-  （图片密钥推导失败、pilk 缺失、wxgf 未转 JPEG、输出目录权限未收紧、视频索引相关等），
+  （图片密钥推导失败、pilk 缺失、wxgf 未转 JPEG、贴纸超出下载上限、输出目录权限未收紧、视频索引相关等），
   不是 `{capability, effect}`。图片密钥问题不影响语音/视频导出。
+- **`.wxgf` 原容器会重试转码**：没装 ffmpeg 时 wxgf 图片 / 贴纸存成 `.wxgf` 原容器（浏览器打不开）并算已导出；
+  装了 ffmpeg 之后重跑，已有的 `.wxgf` 不算完成、会重新转成 JPEG；这次仍没转成的不重写、记入 `skipped`、不占 `limit`。
 - **视频与贴纸是仅有的两个依赖索引的类型**（它们的归属都按 `media_refs` 判定），
   **视频**因此多出四种降级说明（措辞已指明该做什么，别混成一件事）：
   1. 该账号一条视频引用都没有 → 索引建立在 `media_refs` 之前（或建索引时本机没有视频消息）
@@ -547,6 +581,8 @@ rebuild 与否）各起一条。（F-D，T7 复验：与 §4 同款的合并语�
   绝不进日志、异常消息或本信封。
 - **`media_failed` 是常态而非错误**：微信服务端会清理老媒体，本期 **620 条可下载媒体里
   实测 58 条未落盘**（约一成，且 58 是上界）。单条媒体失败只计数，不中断整次导出。
+  单件响应超过 **200 MB**（`sns_media.MAX_FETCH_BYTES`）时该件报错、不落盘（不留半截文件）。
+- `out_dir` 被拒时 `hint` 给的默认根是 `~/.agent-wechat/moments`（不是媒体导出的 `media/`）。
   **它计的是失败次数而非媒体条数**：
   一条视频本体成功、封面失败时同时贡献 `media_downloaded +1` 与 `media_failed +1`；
   **白名单外的媒体不计失败**——它们落 `media_not_downloaded`（「不去取」而非「取失败」）。
@@ -656,9 +692,10 @@ rebuild 与否）各起一条。（F-D，T7 复验：与 §4 同款的合并语�
 - `truncated=true` 表示触及 `limit` 提前收手——此时 `counts` / `by_kind` 只是**答完的
   这些**，不是全量；可按 `months` 分批重跑。
 - **不写微信目录、不写 `out_dir`、不联网**——判定只做 `pathlib` 探测与索引只读查询。
-  唯一的磁盘写入是**语音本体判定**：要解密 `media_*.db`，明文只在 `~/.agent-wechat/tmp/`（0700）
-  短暂存在、用后即焚（与解密管道是同一个机制，见 SECURITY.md §4「临时文件」）。
-  该会话一条语音消息都没有时，连这一步都不发生。
+  唯一的磁盘写入是**语音本体判定**：要解密 `media_*.db`，默认（进程内解密后端）只有**密文**快照在
+  `~/.agent-wechat/tmp/`（0700）短暂存在，回退到 CLI 后端时才是明文，都用后即焚（与解密管道是同一个
+  机制，见 SECURITY.md §4「临时文件」）。该会话一条语音消息都没有时，连这一步都不发生。
+- 会话在 `AGENT_WECHAT_DENY` 里时返回 error（见「通用约定」）。
 
 ---
 
@@ -696,7 +733,9 @@ rebuild 与否）各起一条。（F-D，T7 复验：与 §4 同款的合并语�
 **说明**：
 - 信封**不回传正文与逐条消息的明细**（沿用 §9 的既定原则：大结果膨胀上下文）：只给产物
   **路径**与计数，会话内容在产物里，用文件系统工具在 `out_dir` 下自行打开。`files` 只有
-  **真正落盘**的那几个——写失败的不进列表，所以「少了一行」本身就是信号。
+  **真正落盘**的那几个——写失败的不进列表，所以「少了一行」本身就是信号。写失败时盘上若有上一次
+  导出的同名产物，它**原样保留**（原子写，不留半截、也不删旧文件）。CLI `chat export` 遇到这种情况在
+  stderr 点名没写成的文件并退出码 1。
 - `out_dir` 是**本会话的媒体树根**（`{--out}/{会话md5}`），产物在它的 `chat/` 子目录里
   （`index.html` / `index.md`）。刻意不回传输出**根**：那需要重算一次会话 md5，而「两套路径
   推导」的分歧就是产物里所有媒体引用的静默 404。
@@ -715,6 +754,8 @@ rebuild 与否）各起一条。（F-D，T7 复验：与 §4 同款的合并语�
   2. `msg_media` 媒体状态覆盖不足（媒体状态最多答 500 条）→ **没覆盖到的消息在产物里不会
      出现媒体块**（`effect` 里给了「答了 N/M 条」）；
   3. 显示名降级（`roster`，如 `contact.db` 漂移）→ 标题与发送者回落成原始标识。
+- 贴纸导出过（§9）时，产物里按**图片**显示（HTML 内嵌、Markdown 图片引用），与图片同一渲染。
+- 会话在 `AGENT_WECHAT_DENY` 里时返回 error（见「通用约定」）。
 - **不联网、不写微信目录**：只往 `out_dir` 下写产物（目录 0700、文件 0600 的聊天原文）。
 
 ---
@@ -809,10 +850,13 @@ rebuild 与否）各起一条。（F-D，T7 复验：与 §4 同款的合并语�
   `fields` 里）。
 - `fields` 是未具名建模的叶子字段，`[[点分路径, 值], …]`，文档序（如 `[["sources.source",
   "weibo"]]`）。**密钥 / 凭据已剔除**，两道规则——**名字**（路径逐段命中
-  `aeskey|passphrase|token|key`，匹配的是**段尾**，故 `aeskey` / `fileuploadtoken` 中招；
+  `aeskey|passphrase|token|key|ticket|signature(s)|sig|sessionid|password|secret|_sign`，匹配的是**段尾**，
+  故 `aeskey` / `fileuploadtoken` / `pass_ticket` / `enterSessionId` / `appmsg_sign` 中招，而 `sign` 在词中的
+  `designerid`、`secret` 不在尾的 `issecretmsg` 不受影响；整段就叫 `sign` 的字段是个性签名，**保留**；
   逐段而不是只看末段，是为了挡住 `<aeskey><value>…</value></aeskey>` 这种末段叫 `value`
   的形态）与**值**（值里带凭据查询参数：参数名在 `[?&;,]` 之后、`=` 之前，**按同一份
-  规则**匹配，所以 `&filekey=` / `&xsec_token=` 这类**复合名**一并拦下；链接的 `url`
+  规则**匹配，所以 `&filekey=` / `&xsec_token=` 这类**复合名**一并拦下；参数名**整名**是 `sign`（`?sign=`）
+  也算凭据（只在参数位上，字段路径不按它判）；链接的 `url`
   同样过滤。分隔符集含 `;` 与 `,`，实测 `http://c/x;token=…` 也拦得住）。
   此外**长 Base64 块按形状剔除**（≥128 个 Base64 字符的值）：`emojiinfo` / `cdnthumburl`
   这类名字干净、凭据被 Base64 包住的载荷靠上面两道规则看不见，只能按形状挡；剔掉的条数
@@ -852,6 +896,7 @@ rebuild 与否）各起一条。（F-D，T7 复验：与 §4 同款的合并语�
 - 索引库打不开 / 读不了（损坏、半拷贝的 WAL、权限）→ `{"error": "本地检索库不可用：…",
   "hint": "索引库可能损坏；删除 index.db 后重跑一次导出即可重建（MCP：`export_full_history`）"}`，**不是**一个空
   `parts`——空答案会把「库坏了」谎报成「没有可读内容」。
+- 会话在 `AGENT_WECHAT_DENY` 里时返回 error（见「通用约定」）。
 - **不联网、不写微信目录、不写任何产物**：只读本地检索库；`contact` 的解析要读一次
   `contact.db`（只读，同其它 contact 类工具）。
 
@@ -877,7 +922,10 @@ rebuild 与否）各起一条。（F-D，T7 复验：与 §4 同款的合并语�
 `distance`。**没有 `content`**——完整正文用 §15。顶层 `untrusted: true` 标明整份结果是不可信数据
 （CLI `--json` 每条 hit 上也各有一个，MCP 省掉了这份重复）。
 
-- 片段 ≤200 字符、总量 ≤8000 字符；超出截断并 `truncated=true`。
+- 片段 ≤200 字符、总量 ≤8000 字符。`truncated=true` 有两种情形：片段被截断（单条超 200 字，或总量用尽、
+  后面的命中没放进来），或命中多于 `limit`（`candidates` 是去重后的命中数，`total` 是本次返回的条数）。
+- `contact` 指向 `AGENT_WECHAT_DENY` 里的会话时返回 error；不限会话时这些会话在三路取数的 SQL / KNN 里就被排除，
+  不占候选、不进 `candidates`（见「通用约定」）。
 - 片段里的 `wxid_*` / `*@chatroom` / 11 位以上数字被替换成 `<已遮盖>`；不以 `wxid_` 开头的自定义微信号认不出形状，只遮**本账号名册里有的**那些（按整词比对，名册里没有的照常显示）。
 - `hybrid` 还会融合 Phase 06 的本地 OCR/ASR 派生文本（`sources` 里出现 `derived`）。
 - **没有向量索引时**：`hybrid` 退化成关键词并在 `degraded` 说明；`semantic` 返回空结果 +
@@ -896,11 +944,13 @@ rebuild 与否）各起一条。（F-D，T7 复验：与 §4 同款的合并语�
 | `after` | int | 否 | 2 | 向后取几条（0–10） |
 | `account` | string | 否 | null | 同通用约定 |
 
-**返回**：`chat_id / msg_key / messages[{msg_key,when,sender,content}] / untrusted / notice`。
-消息条目的形态同 §3：自己发的 `sender` 是「我」；秒级时间在 `msg_key` 末段；顶层 `untrusted: true`
-覆盖全部消息（CLI `--json` 的每条消息仍带 `time / is_self / untrusted`）。只返回**同账号同会话**；被 `purge --chat` 销毁的消息**拒绝返回**
-（`{"error": "该消息已被销毁…"}`）。会话在 `AGENT_WECHAT_DENY` 里时拒绝（**按会话的 `chat_md5` 判**，因此真名与退化
-`md5:<hex>` 两种形态一并拒绝；该变量只约束本工具与 §14，不改变其它工具）。
+**返回**：`chat_id / msg_key / messages[{msg_key,when,sender,type?,content}] / untrusted / notice`。
+消息条目的形态同 §3：非文本消息带 `type`（取值口径同 §3，文本省略）；自己发的 `sender` 是「我」；秒级时间在
+`msg_key` 末段；顶层 `untrusted: true` 覆盖全部消息（CLI `context` 的每条消息仍带 `time / is_self / type / untrusted`）。
+只返回**同账号同会话**；被 `purge --chat` 销毁的消息**拒绝返回**（`{"error": "该消息已被销毁…"}`）。
+`contact` 的归属校验按会话的 `chat_md5` 比，索引里会话名是真名还是退化形态 `md5:<hex>` 都认；不属于时返回
+`{"error": "msg_key 不属于该联系人", "hint": "核对 contact 是否就是该 msg_key 所属的会话"}`。
+会话在 `AGENT_WECHAT_DENY` 里时拒绝（同样按 `chat_md5` 判，见「通用约定」）。
 
 ## 附：本地工作台与工具的关系
 

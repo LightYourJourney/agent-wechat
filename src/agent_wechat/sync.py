@@ -415,14 +415,26 @@ def run_sync(account: str | None = None, *, full: bool = False,
             try:
                 # 源侧的瞬时失败（页校验不过、快照期间主库被反复改写：微信正在写）本轮内再试一次，
                 # 不等下一轮。导出幂等、已提交的批次不重做；第一次读到的降级不重复计。
+                # 计数按各次尝试**累加**：失败的那次可能已提交了部分分片，重试时水位线已前进、
+                # 只返回剩下的行——只记最后一次会把「导进了 N 行」报成 no_new / exported=0。
+                # 失败的尝试拿不到返回值，它已提交/已跳过的行由 `on_partial` 报回来。`full` 不累加：
+                # 重试会清水位线重扫整段历史，失败那次的行会被重试再数一遍。
                 base = len(res.degraded)
+
+                def _partial(rows: int, skipped: int) -> None:
+                    if not full:
+                        res.exported += rows
+                        skipped_rows["n"] += skipped
+
                 for attempt in range(1 + SOURCE_RETRIES):
                     try:
-                        res.exported = export.run_export(
+                        res.exported += export.run_export(
                             acct, full=full,
                             on_reader=lambda r: res.degraded.extend(
                                 d.envelope() for d in usecases.collect_degradations(r)),
-                            on_skipped=lambda n: skipped_rows.__setitem__("n", n))
+                            on_skipped=lambda n: skipped_rows.__setitem__(
+                                "n", skipped_rows["n"] + n),
+                            on_partial=_partial)
                         break
                     except errors.SourceUnreadable:
                         if attempt == SOURCE_RETRIES:

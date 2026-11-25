@@ -114,6 +114,10 @@ reader.recent(chat_id, limit)
   → 分片按时间分区：从最新分片起，快照→进程内打开加密快照→读表尾 N 条，够数即停
     （只解密查询触及的页：237 MB 分片取 20 条约 12 ms，见 §3.10）
   → 解码（zstd / 类型掩码 / 群前缀）→ 时间正序返回
+    （群文本的 `<发送者>:\n` 前缀只在发送者不是自己、且前缀等于 Name2Id 解出的发送者时剥，
+     解不出发送者时才按前缀认；
+     单条 zstd 坏帧以 `[解压失败]` 占位并记 `message_content` 降级，不让整页失败；
+     带 before_ts 时按 create_time 取前 N 条，不带时按 local_id 倒取）
 ```
 
 ### 3.4 全量导出（离线路径，长任务）
@@ -261,7 +265,8 @@ decrypt.open_db(db, passphrase)                     # reader / 语音 / 朋友�
 
 **消息信封契约**：`get_recent_messages` / `search_history` / `semantic_search` 三处返回的消息
 统一带 `msg_key` 字段（`account|chat_md5|shard|local_id|create_time`，由消息的身份/位置字段派生，
-跨导出稳定）。
+跨导出稳定）。这是存储与 CLI 输出的形态；MCP 返回的是短键 `<chat_md5 前 8 位>:<local_id>:<create_time>`，
+且 `search_history` 的命中去掉了 `id` / `shard` / `local_id`（见 TOOLS.md「通用约定」与 §6）。
 `msg_key` 与 `search_history` hits 里既有的 `id`（`messages.id`，DB rowid）不是同一件事
 ——rowid 随重建变化，`msg_key` 是指认消息的稳定句柄，供 `get_message_media` 指认
 「这条消息的媒体是什么」。三处消费点同步添加，避免字段名冲突（`id` 已被占用）。
@@ -287,7 +292,7 @@ decrypt.open_db(db, passphrase)                     # reader / 语音 / 朋友�
 | 1-2 字高频查询 | LIKE 兜底（限 contact 时够用） | 增加 bigram 影子 FTS 表（存储约 +2×，做成配置项） |
 | 更大规模（千万级） | 单文件 SQLite（百万级实测流畅） | 分库（按账号/年份）或迁移 PostgreSQL + pgvector |
 | 媒体导出 | 已实现：`media.py`（图片 dat 解密 / 语音 SILK→WAV / 视频定位）+ `media_refs` 映射 | 按会话导出与存量回填已就绪；按相册批量导出未做 |
-| 媒体与消息关联 | 已实现：CLI `media locate` / MCP `get_message_media` 按 `msg_key` 回答四态（`none` / `exported` / `exportable` / `gone`），信封另给 `counts` 与 `by_kind` 拆分（`image` / `video` / `voice` / `sticker` 四项） | 不写微信目录、不写 `out_dir`、不联网；判定做 `pathlib` 探测与索引只读查询，语音的本体判定要解密 `media_*.db`（明文只在 `tmp/` 短暂存在，见 SECURITY.md）。`exportable` 在本机实质上是语音专属——图片/视频本体只为**近期（尚未导出）**的消息保留；**贴纸是第四类，只可能 `gone` 或 `exported`（永不 `exportable`）**，那个 `gone` 的语义是「取不出来」：微信把它存成加密格式、方案未破（且本机那份是缩略档），与「本机有没有」无关。**贴纸的字节来源是 CDN 取件**（`media export --kinds …sticker --with-cdn`），默认关，见 TOOLS.md §9 / §11 与 SECURITY.md §1「零网络例外」第 3 条 |
+| 媒体与消息关联 | 已实现：CLI `media locate` / MCP `get_message_media` 按 `msg_key` 回答四态（`none` / `exported` / `exportable` / `gone`），信封另给 `counts` 与 `by_kind` 拆分（`image` / `video` / `voice` / `sticker` 四项） | 不写微信目录、不写 `out_dir`、不联网；判定做 `pathlib` 探测与索引只读查询，语音的本体判定要解密 `media_*.db`（默认只有密文快照在 `tmp/` 短暂存在，CLI 回退后端时才是明文，见 SECURITY.md §4）。`exportable` 在本机实质上是语音专属——图片/视频本体只为**近期（尚未导出）**的消息保留；**贴纸是第四类，只可能 `gone` 或 `exported`（永不 `exportable`）**，那个 `gone` 的语义是「取不出来」：微信把它存成加密格式、方案未破（且本机那份是缩略档），与「本机有没有」无关。**贴纸的字节来源是 CDN 取件**（`media export --kinds …sticker --with-cdn`），默认关，见 TOOLS.md §9 / §11 与 SECURITY.md §1「零网络例外」第 3 条 |
 | 会话时间线导出（appmsg 富文本） | 已实现：`appmsg.py`（三步规范化 + 解析）+ `msg_parts` 原始载荷表 + `chatview.py`（`ChatView` 组装与落盘）+ `chat_html.py` / `chat_md.py`（两个纯模板，措辞共享在 `chat_text.py`）+ `chat_index.py`（索引页）；CLI `chat export` / `chat index` / `appmsg rebuild`，MCP `export_chat` / `get_message_parts` | appmsg（引用 / 链接 / 文件 / 转账）渲染成结构化块，媒体以相对路径引用**同级**的既有媒体树（`chat export` 的 `--out` 必须与 `media export` 同根）；`appmsg rebuild` / `extras rebuild` 是显式的一次性动作（幂等；后者补位置/名片的结构化载荷）；Markdown 有三处固有损失（第四处「语法不转义」已在 EA-037 收口），**不假装与 HTML 等价**（见 USAGE.md §7） |
 | 朋友圈读取与导出 | 已实现：`moments.py`（离线解析 `sns.db`）+ `moments_html.py`（单文件 HTML）+ `sns_media.py`（远程媒体，默认关） | 远程媒体需联网——`--with-media` / `with_media=True` 显式开启，只连微信 CDN——后缀 `*.qpic.cn` / `*.video.qq.com`，加精确主机 `wxapp.tc.qq.com`（**不含子域**）；默认全程零网络；本地缓存图不参与（文件名与动态对不上）；发布 / 删除等写操作不做 |
 | 群成员显示名 | 已实现：索引库存 `display_names` 名册，查询时 join；实时路径 `recent` 用内存名册 | 群昵称在 `contact.db` 的 `chat_room.ext_buffer`（protobuf，字段 f2，可选），回落 `contact.remark` / `nick_name` |

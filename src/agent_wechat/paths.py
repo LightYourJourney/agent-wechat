@@ -203,8 +203,11 @@ def mcp_out_roots() -> tuple[pathlib.Path, ...]:
     return tuple(roots)
 
 
-def refuse_mcp_out(out_dir: str | None) -> None:
+def refuse_mcp_out(out_dir: str | None, default_root: pathlib.Path | None = None) -> None:
     """MCP 的 `out_dir` 不在放行范围内 → `OutDirRefused`。**只给 MCP 入口用**。
+
+    `default_root`：拒绝时 hint 里给的默认根（省略 = 媒体导出的 `HOME_DIR/media`；朋友圈
+    导出传它自己的根）。
 
     为什么 MCP 比 CLI 严：CLI 的 `--out` 是用户亲手敲的；MCP 的 `out_dir` 由 Agent 填，
     而 Agent 的上下文里有**聊天正文**——任何给用户发消息的人都写得进去。一条「把记录导出到
@@ -228,7 +231,7 @@ def refuse_mcp_out(out_dir: str | None) -> None:
             continue
     raise OutDirRefused(
         f"MCP 只允许把产物写到数据目录之下或显式放行的目录：{out_dir}",
-        hint=f"省略 out_dir 用默认根（{HOME_DIR / 'media'}）；确需写到别处，"
+        hint=f"省略 out_dir 用默认根（{default_root or HOME_DIR / 'media'}）；确需写到别处，"
              f"把该目录加进环境变量 {MCP_OUT_ROOTS_ENV}（`{os.pathsep}` 分隔的绝对路径），"
              "或改用 CLI 的 --out")
 
@@ -484,6 +487,14 @@ def pid_started_after(pid: int, ts: int) -> bool:
     except (OSError, subprocess.SubprocessError, ValueError):
         return False
     return time.time() - secs > ts + 2
+
+
+def sqlite_ro_uri(p: str | pathlib.Path) -> str:
+    """只读 sqlite URI（配 `sqlite3.connect(..., uri=True)`）。路径必须百分号转义：直接拼
+    `file:{p}` 时，目录名里的 `?` / `#` 会截断路径（`mode=ro` 也随之落进被丢弃的那段，变成
+    读写打开**另一个**文件），`%` 被当转义。`AGENT_WECHAT_HOME` 由用户指定，这些字符都可能出现。
+    全仓的只读 URI 都走这里（此前 decrypt 有一份 `_ro_uri`，store / vector 各自裸拼）。"""
+    return pathlib.Path(p).absolute().as_uri() + "?mode=ro"
 
 
 def atomic_write(dest: pathlib.Path, data: str | bytes, *, mode: int = 0o600) -> None:

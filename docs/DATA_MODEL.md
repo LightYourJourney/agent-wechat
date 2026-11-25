@@ -11,7 +11,7 @@
 ├── index.db                # 本地检索库（SQLite, WAL 模式，明文 + FileVault）
 ├── index.db-wal / -shm     # WAL 伴生文件
 ├── exclusions.db           # 排除清单：被销毁会话的墓碑；**唯一不可重建的产物**（见 §3、§9）
-├── tasks.json              # 导出长任务的状态与进度（已结束的最多留 200 条、30 天）
+├── tasks.json              # 导出长任务的状态与进度（已结束的最多留 200 条、30 天；purge --chat 删掉指名该会话的已结束记录）
 ├── media/                  # 媒体导出产物（图片/语音 WAV/视频，0700，明文）
 ├── moments/                # 朋友圈导出产物（单文件 HTML + 媒体，0700，明文）
 ├── models/                 # 向量模型缓存（fastembed，0700；首次构建索引时下载约 95 MB，之后离线）
@@ -391,7 +391,8 @@ SELECT md5_, caption_ FROM kStoreEmoticonCaptionsTable WHERE language_ = 'defaul
 两种取用方式：
 
 **MCP/CLI 即取即用**：`get_recent_messages`（近期上下文）、`search_history`
-（按相关性召回，带 snippet 高亮与上下文定位字段 `shard`/`local_id`）。
+（按相关性召回，带 snippet 高亮）。`shard`/`local_id` 是索引库里的上下文定位列；
+MCP 返回短键 `msg_key`、去掉 `id`/`shard`/`local_id`（见 TOOLS.md「通用约定」与 §6）。
 
 **批量转 JSONL**（按对话分块喂给 LLM）：
 
@@ -414,8 +415,8 @@ for chat, in con.execute("SELECT DISTINCT chat_id FROM messages"):
 
 ## 9. 备份与销毁
 
-- 备份：拷贝 `index.db`（+`-wal`/`-shm`）**与 `exclusions.db`** 即可；`~/.agent-wechat/` 已排除出
-  Time Machine。**`exclusions.db` 不能漏**：它是唯一不可重建的产物，只恢复 `index.db` 的话，
+- 备份：拷贝 `index.db`（+`-wal`/`-shm`）**与 `exclusions.db`** 即可；`~/.agent-wechat/` 会自动尝试排除出
+  Time Machine（用 `status` 的「备份排除」一行确认）。**`exclusions.db` 不能漏**：它是唯一不可重建的产物，只恢复 `index.db` 的话，
   被销毁的会话会在下次 `export --full` 时**整批复活**——索引里没有墓碑可拦，而文件系统上看
   不出任何异常
 - 销毁：`agent-wechat purge --all --yes`（密钥缓存与全部索引一并清除；微信源数据不受影响）。默认 dry-run，手工 `rm -rf ~/.agent-wechat` 仍是等价后备
@@ -432,7 +433,7 @@ CREATE TABLE IF NOT EXISTS schema_version (
 ) WITHOUT ROWID;
 ```
 
-- **三个 scope**：`main`（`index.db` 主表，当前 **9**）、`vector`（vec0 三表，当前 **1**）、
+- **三个 scope**：`main`（`index.db` 主表，当前 **11**）、`vector`（vec0 三表，当前 **1**）、
   `exclusions`（在 `exclusions.db` 里，SQL 写作 `exclusions.schema_version`，当前 **1**）。
 - **ensure 与 migrate 分工**：`CREATE … IF NOT EXISTS` 每次连接照跑（缺对象就补建的自愈）；
   迁移只处理 `IF NOT EXISTS` **表达不了**的变更（改触发器体、加列、重建表），每条只跑一次。
@@ -471,7 +472,7 @@ CREATE TABLE IF NOT EXISTS audit_cursor (
 走到表尾绕回 0——`ceil(行数 / 100)` 轮覆盖整段历史。游标**只在数据提交之后**才落盘
 （先游标后数据会丢历史；反过来最坏只是重看一遍，upsert 幂等）。
 
-**`pending_reembed`**——内容/会话名被改写、等待重嵌的消息：
+**`pending_reembed`**——内容/发送者/类型被改写、等待重嵌的消息：
 
 ```sql
 CREATE TABLE IF NOT EXISTS pending_reembed (
@@ -481,8 +482,8 @@ CREATE TABLE IF NOT EXISTS pending_reembed (
 ) WITHOUT ROWID;
 ```
 
-由触发器 `msg_reembed_au` 维护（`AFTER UPDATE OF content, chat_id, sender_name, msg_type`，
-`WHEN old IS NOT new`）：
+由触发器 `msg_reembed_au` 维护（`AFTER UPDATE OF content, sender_name, msg_type`，
+`WHEN old IS NOT new`；会话名 `chat_id` 自 `main v9` 起不在内）：
 它与消息行、FTS 索引在**同一笔事务**里更新。**它是集合不是日志**：同一条改十次也只有
 一行，消费时读 `messages` 的当前内容。
 

@@ -23,7 +23,7 @@
 #    ——实测 vulture 2.16 对带装饰器的函数不认 noqa（noqa 匹配定义行，装饰器改变了报出的
 #    节点行；2026-11-21 用最小样本确认）。
 # ② **Python 协议的隐式调用**（`do_GET` / `do_POST` / `log_message` / `server_version` /
-#    `daemon_threads` / `text_factory` / `row_factory` / `do_DELETE` / `do_PATCH`）：
+#    `daemon_threads` / `address_family` / `text_factory` / `row_factory` / `do_DELETE` / `do_PATCH`）：
 #    `http.server`、`sqlite3` 与我们自己的别名赋值在运行期按名字取，静态分析同样看不见。
 #    同样不能 noqa。
 # ③ **有意保留的旧 API**：`paths.key_info_dat` / `key_info_db`（磁盘解密路线已结项，留路径
@@ -41,7 +41,6 @@
 # **新增候选不在上面五类里 = 真死代码，必须删或写清理由**（门禁按候选集比较，
 # 新增即红）。
 src/agent_wechat/appmsg.py:: unused variable 'from_usr' (60% confidence)
-src/agent_wechat/cli.py:: unused attribute 'text_factory' (60% confidence)
 src/agent_wechat/mcp_server.py:: unused function 'export_chat' (60% confidence)
 src/agent_wechat/mcp_server.py:: unused function 'export_chat_media' (60% confidence)
 src/agent_wechat/mcp_server.py:: unused function 'export_full_history' (60% confidence)
@@ -53,8 +52,6 @@ src/agent_wechat/mcp_server.py:: unused function 'get_message_parts' (60% confid
 src/agent_wechat/mcp_server.py:: unused function 'get_recent_messages' (60% confidence)
 src/agent_wechat/mcp_server.py:: unused function 'get_task_status' (60% confidence)
 src/agent_wechat/mcp_server.py:: unused function 'list_contacts' (60% confidence)
-src/agent_wechat/media.py:: unused attribute 'text_factory' (60% confidence)
-src/agent_wechat/moments.py:: unused attribute 'text_factory' (60% confidence)
 src/agent_wechat/moments.py:: unused variable 'duration' (60% confidence)
 src/agent_wechat/moments.py:: unused variable 'enc_idx' (60% confidence)
 src/agent_wechat/moments.py:: unused variable 'is_rich' (60% confidence)
@@ -64,13 +61,13 @@ src/agent_wechat/moments.py:: unused variable 'post_id' (60% confidence)
 src/agent_wechat/paths.py:: unused function 'key_info_dat' (60% confidence)
 src/agent_wechat/paths.py:: unused function 'key_info_db' (60% confidence)
 src/agent_wechat/paths.py:: unused function 'in_wechat_container' (60% confidence)
-src/agent_wechat/reader.py:: unused attribute 'text_factory' (60% confidence)
 src/agent_wechat/store.py:: unused attribute 'row_factory' (60% confidence)
 src/agent_wechat/store.py:: unused function 'get_watermark' (60% confidence)
 src/agent_wechat/webui.py:: unused attribute 'daemon_threads' (60% confidence)
 src/agent_wechat/webui.py:: unused method 'do_GET' (60% confidence)
 src/agent_wechat/webui.py:: unused method 'do_POST' (60% confidence)
 src/agent_wechat/webui.py:: unused method 'log_message' (60% confidence)
+src/agent_wechat/webui.py:: unused variable 'address_family' (60% confidence)
 src/agent_wechat/webui.py:: unused variable 'do_DELETE' (60% confidence)
 src/agent_wechat/webui.py:: unused variable 'do_PATCH' (60% confidence)
 src/agent_wechat/webui.py:: unused variable 'server_version' (60% confidence)

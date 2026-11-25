@@ -85,7 +85,7 @@ def _media_block(m: MediaRefState, prefix: str, out_dir: str) -> str:
             # （空白看起来与「这条消息没有媒体」一模一样）。
             return f'<div class="ph">[{chat_text.INCONSISTENT_EXPORTED}]</div>'
         src = _esc(chat_text.media_src(m.path, out_dir, prefix))
-        if kind == "image":
+        if kind in ("image", "sticker"):    # 贴纸导出的就是图片（gif/png/jpg…），按图显示
             return f'<div class="media"><img loading="lazy" src="{src}" alt="{_esc(label)}"></div>'
         if kind == "voice":
             return f'<div class="media"><audio controls src="{src}"></audio></div>'

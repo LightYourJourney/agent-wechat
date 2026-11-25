@@ -75,6 +75,9 @@ class Message:
 # `media_refs` 的一行：(msg_key, kind, file_key, extra)。前向扫描与回看共用（见 `_batched`）。
 RefRow = tuple[str, str, str | None, str | None]
 
+# 单条正文解压失败时的占位正文（见 `_decode_row`）。
+UNDECODABLE = "[解压失败]"
+
 
 def _decode_content(raw: bytes | str | None, ct_flag: int | None) -> str | None:
     """WCDB 压缩列解码：CT=0 明文，CT=4 zstd。"""
@@ -563,17 +566,28 @@ class MessageReader:
     def _decode_row(self, lid: int, ltype: int, sender: int | None, ts: int,
                     mc: bytes | str | None, ct: int | None, md5hex: str,
                     chat_map: Mapping[str, str], n2i: Mapping[int, str],
-                    sticker_names: Mapping[str, str] | None = None) -> Message:
+                    sticker_names: Mapping[str, str] | None = None,
+                    shard: str = "") -> Message:
         """单行解码：压缩、类型掩码、群前缀、媒体提示。所有读取路径共用此函数。"""
         chat_id = chat_map.get(md5hex) or messages.degraded_chat_id(md5hex)
-        content = _decode_content(mc, ct)
+        try:
+            content = _decode_content(mc, ct)
+        except errors.DecryptError:
+            # 一条坏帧只坏这一条：此前它让 `iter_all` 整轮中止（水位线推不过去，之后永远导不进）、
+            # `recent` 整页失败。占位正文 + 一条源级降级，不静默。
+            content = UNDECODABLE
+            self._record_source_degrade("message_content", f"message/{shard}" if shard else "")
         t = ltype & 0xffffffff
         sender_u, sender_name = (n2i.get(sender) if sender is not None else None), None
         if chat_id.endswith("@chatroom") and content:
             head, sep, rest = content.partition(":\n")
             if sep and head and "\n" not in head:   # 群消息 "<X>:\n正文" 前缀
                 if t == messages.TYPE_TEXT:
-                    sender_u, sender_name, content = head, head, rest
+                    # 真机计数核实：自己发的群文本**全部不带**前缀，别人发的**全部带**且 head 恒等于
+                    # Name2Id 解出的发送者。所以自己发的不剥（否则「提醒:\n明天开会」被拆成
+                    # sender=提醒、正文被削）；解得出发送者时只在 head 等于它时剥；解不出才按 head 认。
+                    if sender_u is None or (sender_u != self.self_wxid and head == sender_u):
+                        sender_u, sender_name, content = head, head, rest
                 elif head.endswith("@chatroom"):
                     # 非文本：head 是群 id 的**残留**前缀（实测 1,952 条，全是 10000），
                     # 只剥正文、**不当发送者**——head 是群 id，当成 sender 会污染 sender_id。
@@ -621,16 +635,23 @@ class MessageReader:
         sql = (f"SELECT local_id, local_type, real_sender_id, create_time, "
                f"message_content, WCDB_CT_message_content FROM '{table}'")
         params: tuple = ()
+        desc = " DESC" if order_desc else ""
         if before_ts is not None:
+            # 带 before_ts 时按**时间**取：local_id 与时间顺序不一致（历史迁移、补同步）时，按
+            # local_id 取前 N 条会漏掉更新的消息、翻页跳段。create_time 上没有索引，但 WHERE 本就
+            # 要扫整表，多出来的只是取前 N 的排序。不带 before_ts 的默认路径仍按 local_id（主键）
+            # 倒取，只读 N 行——改成按时间就成了每次整表扫描。
             sql += " WHERE create_time < ?"
             params = (int(before_ts),)
-        sql += " ORDER BY local_id" + (" DESC" if order_desc else "")
+            sql += f" ORDER BY create_time{desc}, local_id{desc}"
+        else:
+            sql += " ORDER BY local_id" + desc
         if limit:
             sql += f" LIMIT {int(limit)}"
         out = []
         for lid, ltype, sender, ts, mc, ct in con.execute(sql, params):
             m = self._decode_row(lid, ltype, sender, ts, mc, ct, md5hex, chat_map, n2i,
-                                 sticker_names=sticker_names)
+                                 sticker_names=sticker_names, shard=shard)
             m.shard = shard
             m.msg_key = messages.row_key(self.acct, md5hex, shard, m.local_id, m.ts)
             out.append(m)
@@ -695,12 +716,16 @@ class MessageReader:
         """
         lid, ltype, sender, ts, mc, ct, packed = row
         m = self._decode_row(lid, ltype, sender, ts, mc, ct, md5hex, chat_map, n2i,
-                             sticker_names=sticker_names)
+                             sticker_names=sticker_names, shard=shard)
         ref = None
         if m.msg_type in (messages.TYPE_IMAGE, messages.TYPE_VIDEO):
             # 提取只用原始 XML（_decode_row 产出的 content 是 [image] 占位）；
-            # 只在图片/视频上多解一次压缩，量小可忽略
-            got = media.extract_media_ref(m.msg_type, _decode_content(mc, ct), packed)
+            # 只在图片/视频上多解一次压缩，量小可忽略。解不开的那条 `_decode_row` 已记过降级。
+            try:
+                raw_xml = _decode_content(mc, ct)
+            except errors.DecryptError:
+                raw_xml = None
+            got = media.extract_media_ref(m.msg_type, raw_xml, packed)
             if got:
                 kind, fk, xm = got
                 ref = (messages.row_key(self.acct, md5hex, shard, lid, m.ts), kind, fk, xm)

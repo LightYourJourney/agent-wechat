@@ -229,7 +229,8 @@ def test_message_items_drop_derivable_fields(wx):
     ctx = _call("get_message_context", {"contact": "张三", "msg_key": msgs[0]["msg_key"]})
     assert ctx["untrusted"] is True                                # 顶层仍标不可信
     assert ctx["messages"][1]["sender"] == "我"                    # 自己发的：sender 换成「我」
-    assert all(set(m) <= {"msg_key", "when", "sender", "content"} for m in ctx["messages"])
+    assert all(set(m) <= {"msg_key", "when", "sender", "content", "type"} for m in ctx["messages"])
+    assert [m.get("type") for m in ctx["messages"]] == [m.get("type") for m in msgs]  # 同 recent 口径
 
     hits = _call("search_history", {"query": "说的"})["hits"]
     assert hits and all(not {"shard", "local_id", "id"} & set(h) for h in hits)

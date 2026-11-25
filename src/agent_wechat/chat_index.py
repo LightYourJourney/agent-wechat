@@ -21,8 +21,11 @@
 from __future__ import annotations
 
 import html
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
+
+from . import chat_text
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -51,6 +54,12 @@ class ChatIndexEntry:
                             # 只有 md——枚举只有 html 时它们**整批不出现在索引页上**）
 
 
+# 产物目录名就是 `chat_md5`（小写 hex）。它直接进 `href`：目录名是 `javascript:alert(1)` 时
+# 链接就成了脚本 URL，`../x` 则指出产物树——不是 hex 的目录一律跳过（不是我们写的产物）。
+# 只认字母表、不卡 32 位：hex 字符拼不出 scheme 也拼不出路径分隔符，安全性只取决于字母表。
+_CHAT_DIR = re.compile(r"[0-9a-f]+")
+
+
 def _esc(v: str | None) -> str:
     return html.escape(v or "", quote=True)
 
@@ -63,6 +72,8 @@ def render(entries: Sequence[ChatIndexEntry]) -> str:
     """
     rows = []
     for e in sorted(entries, key=lambda e: (e.label, e.chat_md5)):
+        if not _CHAT_DIR.fullmatch(e.chat_md5):
+            continue
         base = _esc(e.chat_md5)
         # 查不到索引时条数未知（`None`）：印 0 条是**编**一条信息（那个会话的产物里显然有消息）
         meta = (f"{e.messages} 条" if e.messages is not None
@@ -77,8 +88,9 @@ def render(entries: Sequence[ChatIndexEntry]) -> str:
         rows.append(f'<li class="chat"><a class="name" href="{name_href}">'
                     f'{_esc(e.label)}</a><span class="n">{meta}</span>{md}</li>')
     return ('<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">'
+            f"{chat_text.CSP_META}"
             '<meta name="viewport" content="width=device-width,initial-scale=1">'
             "<title>会话导出索引</title><style>" + _CSS + "</style></head><body>"
-            f'<div class="notice">共 <b>{len(entries)}</b> 个会话；'
+            f'<div class="notice">共 <b>{len(rows)}</b> 个会话；'
             "链接都是相对路径，整棵产物目录可以搬走。</div>"
             f'<ul class="chats">{"".join(rows)}</ul></body></html>')

@@ -196,13 +196,10 @@ def write(view: ChatView, *, formats: Sequence[str] = FORMATS) -> list[pathlib.P
             # 原子写：两次并发导出（或写到一半被中断）不会在 `index.*` 上留下互相拼接的半截页。
             paths.atomic_write(p, _RENDERERS[fmt](view).encode("utf-8"))
         except OSError:
-            # R2-A-009：短写/中途失败会在盘上留半截 `index.html`（实测 739 B），而本函数
-            # 又把它从返回列表里剔掉——调用方以为「没有这个产物」，浏览器却能打开一个残缺页。
-            # 「没写成」必须同时意味着**盘上也没有它**。
-            try:
-                p.unlink(missing_ok=True)
-            except OSError:
-                pass
+            # 原子写失败时终路径**原样不动**、不留半截（见 `paths.atomic_write`），所以这里
+            # 什么都不删：盘上若有，那是上一次导出的完好产物。此前（R2-A-009，直接写终路径
+            # 的年代）在这里 `unlink`，换成原子写之后删掉的就是那份好文件了。
+            # 返回列表只含本次真正写成的文件。
             continue
         # EA-109：`chmod` **不在**上面那个 try 里——它排在写入之后，同一个 try 会让「chmod
         # 失败」被当成「没写成」：文件已在盘上（0644），而函数不把它进返回列表，调用方以为

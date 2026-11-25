@@ -290,7 +290,7 @@ def warm_up_if_ready() -> bool:
     try:
         if not any(MODEL_CACHE_DIR.iterdir()):
             return False
-        con = sqlite3.connect(f"file:{store.DB_PATH}?mode=ro", uri=True)
+        con = sqlite3.connect(paths.sqlite_ro_uri(store.DB_PATH), uri=True)
         try:
             row = con.execute("SELECT embedded FROM vector_meta WHERE model_id=?",
                               (MODEL_ID,)).fetchone()

@@ -1,21 +1,39 @@
 """检索与长任务用例：关键词/统一检索、上下文、向量构建与任务查询。"""
 from __future__ import annotations
 
-from .. import errors, retrieval, search, store, tasks, vector
+from .. import errors, messages, retrieval, search, store, tasks, vector
 from ._core import (DEGRADE_EFFECT, LIMIT_SEMANTIC, NeedConfirm, _display_or_id,
                     _refresh_roster, pkg_clamp_limit, pkg_context, to_accounts)
 
 def search_history(query: str, contact: str | None = None, limit: int = 20,
-                   account: str | None = None, before_ts: int | None = None) -> dict | NeedConfirm:
+                   account: str | None = None, before_ts: int | None = None, *,
+                   deny: frozenset[str] = frozenset(),
+                   whole_second: bool = False) -> dict | NeedConfirm:
     """hits 的 `sender_name` 来自名册（`search.py:13`），而 `_refresh_roster` 吞掉漂移——
-    所以降级说明必须随结果带出去（Ruling 13），否则显示名**静默**回落成 wxid。"""
+    所以降级说明必须随结果带出去（Ruling 13），否则显示名**静默**回落成 wxid。
+
+    `deny`：读取范围（MCP 入口传 `AGENT_WECHAT_DENY`，CLI 不传）。点名的会话被拒就报错，
+    不限会话时在 SQL 里排除（limit 仍填得满）。
+
+    `whole_second`（MCP 翻页用，同 `recent_messages`）：整页 limit 条都落在同一秒时，把这一秒的
+    命中全部取回（可能超过 limit），并在 `second_complete` 里给出该秒——否则续搜位置只能是
+    「该秒 + 1」，翻页原地打转。"""
     ctx = pkg_context(account)
     chat_id = ctx.resolve_optional(contact)
     if isinstance(chat_id, NeedConfirm):
         return chat_id
+    retrieval.ensure_allowed(chat_id, deny)
     _refresh_roster(ctx)
-    res = search.search(query, chat_id=chat_id, limit=pkg_clamp_limit(limit),
-                        account=ctx.account, before_ts=before_ts)
+    lim = pkg_clamp_limit(limit)
+    res = search.search(query, chat_id=chat_id, limit=lim,
+                        account=ctx.account, before_ts=before_ts, exclude_chats=deny)
+    hits = res.get("hits", [])
+    if whole_second and len(hits) >= lim and hits[0].get("ts") == hits[-1].get("ts") is not None:
+        t = hits[-1]["ts"]
+        res["hits"] = search.search(query, chat_id=chat_id, limit=pkg_clamp_limit(1 << 31),
+                                    account=ctx.account, after_ts=t, before_ts=t + 1,
+                                    exclude_chats=deny)["hits"]
+        res["total"], res["second_complete"] = len(res["hits"]), t
     res["degraded"] = [*res.get("degraded", []), *ctx.degradations()]   # EA-013：合并 FTS 降级说明
     return res
 
@@ -52,16 +70,19 @@ def message_context(msg_key: str, *, contact: str | None = None,
         return chat_id
     res = retrieval.get_context(msg_key, account=ctx.account,
                                 before=before, after=after)
-    if chat_id and res["chat_id"] != chat_id:
+    # 按 chat_md5 比：索引里的会话名可能退化成 `md5:<hex>`，而 contact 解析出的是真名
+    if chat_id and messages.chat_md5(res["chat_id"]) != messages.chat_md5(chat_id):
         raise errors.DataNotFound(
             "msg_key 不属于该联系人",
-            hint="只传 msg_key、省略 contact，或核对两者是否同属一个会话")
+            hint="核对 contact 是否就是该 msg_key 所属的会话")
     return res
 
 
 def semantic_search(query: str, contact: str | None = None, limit: int = 10,
-                    account: str | None = None, offset: int = 0) -> dict | NeedConfirm:
-    """同 search_history：hits 的 `display` 也由名册富化（Ruling 13）。"""
+                    account: str | None = None, offset: int = 0, *,
+                    deny: frozenset[str] = frozenset()) -> dict | NeedConfirm:
+    """同 search_history：hits 的 `display` 也由名册富化（Ruling 13）；`deny` 同 search_history
+    （不限会话时下推进 KNN）。"""
     if offset > SEMANTIC_OFFSET_MAX:
         # KNN 一次最多取 vector.K_MAX 个候选（且要多取三倍留给过滤）：再往后的页取不到，明说
         raise errors.SearchInputError(f"offset 最大 {SEMANTIC_OFFSET_MAX}",
@@ -70,10 +91,11 @@ def semantic_search(query: str, contact: str | None = None, limit: int = 10,
     chat_id = ctx.resolve_optional(contact)
     if isinstance(chat_id, NeedConfirm):
         return chat_id
+    retrieval.ensure_allowed(chat_id, deny)
     _refresh_roster(ctx)
     res = vector.semantic_search(query, chat_id=chat_id,
                                  limit=pkg_clamp_limit(limit, LIMIT_SEMANTIC),
-                                 account=ctx.account, offset=offset)
+                                 account=ctx.account, offset=offset, exclude_chats=deny)
     fell_back = False
     for h in res.get("hits", []):
         try:

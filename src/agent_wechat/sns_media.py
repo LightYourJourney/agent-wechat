@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import http.client
 import re
+import struct
 import time
 import urllib.error
 import urllib.parse
@@ -21,6 +22,9 @@ MASK64 = (1 << 64) - 1
 # 一个字符之差会静默解出乱码而不是报错 —— 见 spec §2.8。
 GOLDEN = 0x9E3779B97F4A7C13
 VIDEO_HEAD = 128 * 1024
+# 单件下载上限（字节）：响应体整个读进内存，视频不设上限能把进程撑爆。超了**明确报错**，
+# 不截断、不落盘。贴纸 CDN 的同款上限见 `media.CDN_MAX_BYTES`。
+MAX_FETCH_BYTES = 200 * 1024 * 1024
 USER_AGENT = "MicroMessenger Client"
 ALLOWED_SUFFIXES = (".qpic.cn", ".video.qq.com")
 ALLOWED_HOSTS = ("wxapp.tc.qq.com",)
@@ -80,25 +84,38 @@ class WxIsaac64:
         self._gen()
 
     def _gen(self) -> None:
-        mm, rsl = self._mm, self._rsl
-        self._cc = (self._cc + 1) & MASK64
-        self._bb = (self._bb + self._cc) & MASK64
-        for i in range(256):
+        # 热路径（5 MB 图要跑 2560 轮）：状态放局部变量、`i & 3` 的四种移位按步长 4 展开。
+        # 运算与经典写法逐步相同，输出逐字节一致（test_review_media 用旧实现对拍）。
+        mm, rsl, m = self._mm, self._rsl, MASK64
+        cc = (self._cc + 1) & m
+        bb = (self._bb + cc) & m
+        aa = self._aa
+        for i in range(0, 256, 4):
             x = mm[i]
-            k = i & 3
-            if k == 0:
-                self._aa = ((self._aa ^ ((self._aa << 21) & MASK64)) ^ MASK64) & MASK64
-            elif k == 1:
-                self._aa ^= (self._aa >> 5)
-            elif k == 2:
-                self._aa ^= ((self._aa << 12) & MASK64)
-            else:
-                self._aa ^= (self._aa >> 33)
-            self._aa = (mm[(i + 128) & 255] + self._aa) & MASK64
-            y = (mm[(x >> 3) & 255] + self._aa + self._bb) & MASK64
+            aa = (mm[(i + 128) & 255] + ((aa ^ ((aa << 21) & m)) ^ m)) & m
+            y = (mm[(x >> 3) & 255] + aa + bb) & m
             mm[i] = y
-            self._bb = (mm[(y >> 11) & 255] + x) & MASK64
-            rsl[i] = self._bb
+            bb = (mm[(y >> 11) & 255] + x) & m
+            rsl[i] = bb
+            x = mm[i + 1]
+            aa = (mm[(i + 129) & 255] + (aa ^ (aa >> 5))) & m
+            y = (mm[(x >> 3) & 255] + aa + bb) & m
+            mm[i + 1] = y
+            bb = (mm[(y >> 11) & 255] + x) & m
+            rsl[i + 1] = bb
+            x = mm[i + 2]
+            aa = (mm[(i + 130) & 255] + (aa ^ ((aa << 12) & m))) & m
+            y = (mm[(x >> 3) & 255] + aa + bb) & m
+            mm[i + 2] = y
+            bb = (mm[(y >> 11) & 255] + x) & m
+            rsl[i + 2] = bb
+            x = mm[i + 3]
+            aa = (mm[(i + 131) & 255] + (aa ^ (aa >> 33))) & m
+            y = (mm[(x >> 3) & 255] + aa + bb) & m
+            mm[i + 3] = y
+            bb = (mm[(y >> 11) & 255] + x) & m
+            rsl[i + 3] = bb
+        self._aa, self._bb, self._cc = aa, bb, cc
 
     def keystream(self, size: int) -> bytes:
         out = bytearray()
@@ -106,8 +123,11 @@ class WxIsaac64:
             if self._cnt == 0:
                 self._gen()
                 self._cnt = 256
-            self._cnt -= 1
-            out += self._rsl[self._cnt].to_bytes(8, "big")
+            # 降序取池：一次取走本池还剩的、且够用的那几个字（按字消耗，与逐字取同一口径）
+            take = min(self._cnt, -(-(size - len(out)) // 8))
+            top = self._cnt
+            self._cnt -= take
+            out += struct.pack(f">{take}Q", *self._rsl[self._cnt:top][::-1])
         return bytes(out[:size])
 
 
@@ -189,7 +209,9 @@ def decrypt_stream(data: bytes, key: str, *, video: bool = False) -> bytes:
     if n <= 0:
         return data
     ks = WxIsaac64(seed).keystream(n)
-    return bytes(a ^ b for a, b in zip(data[:n], ks)) + data[n:]
+    # 整段当大整数异或（C 层），此前逐字节 zip，5 MB 朋友圈图实测 4.2 s
+    plain = (int.from_bytes(data[:n], "big") ^ int.from_bytes(ks, "big")).to_bytes(n, "big")
+    return plain + data[n:]
 
 
 class _AllowlistedRedirect(urllib.request.HTTPRedirectHandler):
@@ -278,7 +300,7 @@ def fetch(m: moments.SnsMedia, *, timeout: float = 20.0, attempts: int = 3,
             req = urllib.request.Request(
                 url, headers={"User-Agent": USER_AGENT, "Accept": "*/*"})
             with op.open(req, timeout=timeout) as resp:
-                raw = resp.read()
+                raw = resp.read(MAX_FETCH_BYTES + 1)    # 多读 1 字节才分得出「正好上限」与「超了」
                 enc = str(resp.headers.get("x-enc") or "").strip()
         except urllib.error.HTTPError as exc:
             # EA-007：4xx 是**确定性失败**——重试既白等，又把根因改写成「下载失败（重试 N 次）」，
@@ -293,6 +315,11 @@ def fetch(m: moments.SnsMedia, *, timeout: float = 20.0, attempts: int = 3,
         except Exception as exc:                       # 网络异常种类多，统一重试
             last = exc
         else:
+            if len(raw) > MAX_FETCH_BYTES:
+                # 确定性失败（同一条媒体重下还是这么大），放在重试面之外；调用方拿不到字节，
+                # 自然不会落半截文件。
+                raise SnsMediaError(
+                    f"媒体超过 {MAX_FETCH_BYTES // (1 << 20)} MB 下载上限，已中止、未保存")
             # 解密放在重试面**之外**（EA-007）：它只依赖响应体与 XML、与网络无关。此前它在
             # `try` 内，任何解密失败（如 `key` 不是数字）都被宽 `except` 吞掉重试三次，最后
             # 只剩「下载失败（重试 3 次）」——真正的原因反而丢了（同上方 `m.encrypted and not m.key` 那条早退的理由）。

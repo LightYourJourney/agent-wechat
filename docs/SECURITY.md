@@ -30,7 +30,9 @@
 既有的性质，不是本次新增：`get_recent_messages` / `search_history` / `semantic_search` 一直
 在返回消息正文。本次新增的 `get_message_parts` 沿同一约定，按 `msg_key` 返回 appmsg 的结构化
 内容，**包括转账（type 2000）的金额 `amount_desc`、备注 `memo`、双方用户名 `payer` /
-`receiver` 与交易号 `transaction_id`**（凭据类字段另有剔除，见 TOOLS.md §13）。**这是刻意的、
+`receiver` 与交易号 `transaction_id`**（凭据类字段另有剔除：字段名或 URL 参数名以 `aeskey` / `passphrase` /
+`token` / `key` / `ticket` / `signature(s)` / `sig` / `sessionid` / `password` / `secret` / `_sign` 结尾的，以及参数名
+整名为 `sign` 的；字段路径里整段叫 `sign` 的是个性签名，保留。规则见 TOOLS.md §13）。**这是刻意的、
 有据的**——2026-09-16 的裁定 8：与 `search_history` 已在信封返回正文一致，**不为转账单开例外**，
 不是遗漏。不想让某类内容离开本机，就不要调用会返回它的工具。
 
@@ -92,6 +94,7 @@
 - **发送内容**：请求只携带微信自己签发的媒体 `token` 与固定 `User-Agent`
   （`MicroMessenger Client`），**不含本机任何聊天 / 索引 / 密钥内容**，无请求体。
 - **不走代理**：一律直连，不读 `http_proxy` 等环境变量。
+- **单件上限 200 MB**（`sns_media.MAX_FETCH_BYTES`）：响应体整个读进内存，超了该件报错、不落盘、不留半截文件。
 - **目录只读**：产物只写 `~/.agent-wechat/moments/`（或用户显式 `--out`），
   绝不写回微信目录。
 
@@ -131,6 +134,7 @@
 - **不走代理**：一律直连，不读 `http_proxy` 等环境变量（macOS 的系统代理会让请求超时，
   实测）。
 - **校验后落盘**：下载内容按 XML 的 `md5` 属性校验，不符即判失败、**不落盘**。
+- **单件上限 200 MB**（`media.CDN_MAX_BYTES`）：超了整件作废、不落盘，计入 `sticker.failed` 并在降级说明里给出条数。
 - **目录只读**：产物只写 `~/.agent-wechat/media/`（或用户显式 `--out`），
   绝不写回微信目录。
 
@@ -186,7 +190,7 @@
 | 临时文件 | 默认（进程内解密后端）`tmp/`（0700）里只有**密文**快照，查询在内存里按页解密，**明文不落盘**；快照用后即焚。回退到 CLI 后端（`AGENT_WECHAT_DECRYPT=cli`，或 sqlcipher3 不可用）时，解密明文在 `tmp/` 短暂存在，单分片、用后即焚——**按消息查媒体归属（`media locate` / `get_message_media`）的语音本体判定也走这一条**；唯一例外是 `decrypt --out` 显式导出的明文库（见上表） |
 | 传输 | MCP 走 stdio；无网络监听、无云同步路径 |
 | 销毁 | `agent-wechat purge --all --yes` 清除**整个 `~/.agent-wechat/` 超集**——不只是「密钥 + 索引」，还包括 `media/`、`moments/`、`models/`、`tasks.json`、`tmp/` 等全部产物；不加 `--yes` 只预览，删完给出残留核查。手工 `rm -rf ~/.agent-wechat` 仍是等价后备 |
-| 按会话销毁 | `agent-wechat purge --chat <会话> --yes` 只删该会话在**本工具里的副本**（索引行、向量、appmsg 部件、位置/名片载荷 `msg_extras`、媒体引用、群成员显示名、`media/<会话md5>/`），并把它们的 `msg_key` 逐条写进 `exclusions.db`——那批内容不会因重导复活（`export --full` / `appmsg rebuild` / `extras rebuild` / `media rebuild-refs` / 名册重建五条路都在写入端被拦；`media export` / `export_chat_media` 对该会话**整体拒绝**——媒体按磁盘目录取件、没有逐条过滤的抓手，代价是 purge 之后新到的媒体也要先 `purge --chat <会话> --undo --yes` 才导得出），而删除之后新来的消息照常进索引。**微信容器一个字节都不动**（只读红线不变）；**朋友圈导出不在范围内**（`moments/` 是一份 HTML 装所有人，不按会话分目录）。默认导出根的 `chat index` 总目录页（`media/index.html`）列着该会话时**一并删除**（重跑 `chat index` 即重建、不含已删会话）；**不在保证内的一处**：自定义 `--out` 根下的那一页本命令无从得知，那一行会留到下次在那个根上重跑 `chat index` |
+| 按会话销毁 | `agent-wechat purge --chat <会话> --yes` 只删该会话在**本工具里的副本**（索引行、向量、appmsg 部件、位置/名片载荷 `msg_extras`、媒体引用、群成员显示名、`media/<会话md5>/`、任务注册表 `tasks.json` 里指名该会话的已结束任务记录——核查同样覆盖它），并把它们的 `msg_key` 逐条写进 `exclusions.db`——那批内容不会因重导复活（`export --full` / `appmsg rebuild` / `extras rebuild` / `media rebuild-refs` / 名册重建五条路都在写入端被拦；`media export` / `export_chat_media` 对该会话**整体拒绝**——媒体按磁盘目录取件、没有逐条过滤的抓手，代价是 purge 之后新到的媒体也要先 `purge --chat <会话> --undo --yes` 才导得出），而删除之后新来的消息照常进索引。**微信容器一个字节都不动**（只读红线不变）；**朋友圈导出不在范围内**（`moments/` 是一份 HTML 装所有人，不按会话分目录）。默认导出根的 `chat index` 总目录页（`media/index.html`）列着该会话时**一并删除**（重跑 `chat index` 即重建、不含已删会话）；**不在保证内的一处**：自定义 `--out` 根下的那一页本命令无从得知，那一行会留到下次在那个根上重跑 `chat index` |
 | 会话转录 | `~/.claude/projects/`、`~/.claude/file-history/` 等承载内容的位置**已移出 Time Machine 备份范围**（`tmutil addexclusion`），配置与插件照常备份。**注意：这是"移出备份"，不是"清除"——转录本身仍在盘上** |
 
 > **按消息查媒体归属**（`media locate` / MCP `get_message_media`）**不新增任何例外**：不联网、
@@ -272,7 +276,7 @@ Time Machine 的排除是绑在 **inode** 上的扩展属性，文件一旦被�
 | 2 | **git 提交**（含提交信息） | `pre-commit` + `commit-msg` 两个钩子，命中即拦。**这是本仓库唯一反复复发过的出口（2026-09-13 / 09-17 / 09-27 三次）**。机制：钩子**源随仓库入库**（`security/hooks/`，带执行位），每个 clone 跑一次 `git config core.hooksPath security/hooks`；`pull` 后**立即生效、不需要重装**，且**安装路径**上丢不了执行位（由 git 跟踪）——但本地 `chmod -x` 仍会让 git 跳过钩子，自检会报出来。⚠️ 该 clone 下 `.git/hooks/` 被**整体旁路**。**自检**：`uv run python security/scan.py --check-hooks`（五态；它的失效形态可以完全静默，所以要主动跑）。本机**已装且已验**：2026-10-12 实测伪造值提交被 `pre-commit` 拦、只进提交信息的同串被 `commit-msg` 拦（四条与收尾自证见 spec §7 的执行记录）——「**已装**」与「**已验**」是两件事，这行现在两者都有 |
 | 3 | 备份 | 承载内容的位置已 `tmutil addexclusion`（见 §4），**当下七条全在排除范围内**。⚠️ 其中 `~/.claude/bash-commands.log` 是**活跃日志**：文件重建后排除随旧 inode 一起丢失（实测发生过一次），**要定期用 `tmutil isexcluded` 复查、丢了就 `tmutil addexclusion` 重做**。**清单是短的、人工确认的**——不要照抄扫描输出（扫描会把第三方插件夹具也列进来） |
 | 4 | `/tmp` | 一次性清理，不改配置。系统重启也会清 |
-| 5 | MCP 信封 → LLM | **无机制，且已不可撤回**（见 §1）。Phase 05 只给检索加了读取范围（`AGENT_WECHAT_DENY`，仅 `retrieve`/`context`），不改变既有工具的披露行为 |
+| 5 | MCP 信封 → LLM | **无机制，且已不可撤回**（见 §1）。读取范围 `AGENT_WECHAT_DENY` 约束 MCP 所有读会话内容的工具（点名读取报错、检索在 SQL/KNN 里排除，按 `chat_md5` 判；`export_full_history` 只写本地索引，不受约束），CLI 上只约束 `retrieve`/`context`。它是本地配置，不是安全边界——数据仍在索引里，管的只是「哪些会话不进信封」 |
 
 **自动层的触发边界**（EA-066）：`pre-commit` / `commit-msg` 只由 `git commit` 触发（`merge`
 会触发 `commit-msg`）；`cherry-pick` / `revert` / `rebase` **两枚都不触发**。经这些路径进来的
@@ -341,7 +345,8 @@ Time Machine 的排除是绑在 **inode** 上的扩展属性，文件一旦被�
 
 ## Phase 07 补充：本地工作台的信任边界
 
-- 只监听 `127.0.0.1`/`::1`；`Host`/`Origin` 钉死在本机地址，防 DNS rebinding 与跨站请求。
+- 只监听 loopback：CLI `ui` 绑 `127.0.0.1`，`webui.create_server` 也接受 `::1`（走 IPv6 套接字），其它地址拒绝；`Host`/`Origin` 钉死在本机地址，防 DNS rebinding 与跨站请求。
+- **访问令牌**：loopback 挡不住**本机的其他账户与进程**（它们一样连得上 `127.0.0.1`，Host 校验也挡不住）。所以每次启动生成一个随机令牌，只出现在终端打印的链接里（`/?token=…`，同 Jupyter）；首次打开时换成 HttpOnly、SameSite=Strict 的 cookie（`aw_token_<端口>`）并 302 到不带令牌的 `/`，令牌不留在地址栏与历史里。没有它，首页、静态资源与接口一律 403。令牌的边界：看得到这个终端输出的人拿得到它；同一账户下的进程本就能直接读 `~/.agent-wechat/`，不在它的防护范围内。
 - 每进程随机 CSRF 令牌：**`/api/*` 的 GET 也要带**（`X-AW-CSRF` 头）——Host 校验挡不住跨站的简单 GET，任意网页都能触发检索与模型加载；POST 另加 Origin 校验，唯一 POST 是派生文本删除。
 - 不服务文件系统、无路径拼接；CSP `default-src 'none'`；页面无外部资源、`no-store`。
 - 不写访问日志（查询串本身敏感）；无遥测、无外联客户端。

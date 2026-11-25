@@ -72,8 +72,8 @@ def _terminate_capture(proc: subprocess.Popen) -> None:
     ESRCH，此前两轮都因此「不可用」，落到按名 `pkill -9 -x lldb`，一次普通的「没在时限内
     重新登录」就以 root 杀掉本机所有 lldb（含用户自己的调试会话）。
 
-    bash 已退出 = 管道全员已结束（bash 等齐才退），只补一刀 SIGKILL 兜住「bash 被外力杀掉、
-    lldb 成孤儿」；还在跑就 SIGTERM → 等 3 s → SIGKILL → 再等 3 s，最后无论如何再对本组
+    bash 已退出 = lldb 已结束，但喂 stdin 的进程替换（`sleep`）可能还活着，补一刀 SIGKILL
+    把它（以及「bash 被外力杀掉、lldb 成孤儿」的情形）一并收掉；还在跑就 SIGTERM → 等 3 s → SIGKILL → 再等 3 s，最后无论如何再对本组
     补一刀 SIGKILL。失败一律吞掉：清理是尽力而为，不因它把引导打挂（A 矩阵 73）。
     """
     pgid = proc.pid
@@ -95,6 +95,9 @@ def _read_capture(proc: subprocess.Popen, deadline: float) -> str:
     会让 `readline` 无限阻塞——deadline 只在两次 readline 之间被检查，整个引导因此可能
     远超 `timeout`。`os.read` 有多少读多少，循环每次都回到 deadline 判断。
     （`text=True` 只是给调用方方便；这里绕开 TextIOWrapper 直接读 fd。）
+
+    lldb 提前退出（attach 失败、微信没重签名）时管道等不到 EOF——喂 stdin 的 `sleep` 还占着
+    stderr——所以读不到新数据时还要看进程是否已退出，退出了就立刻返回，不等满 deadline。
     """
     buf = ""
     out = proc.stdout
@@ -111,6 +114,8 @@ def _read_capture(proc: subprocess.Popen, deadline: float) -> str:
                     break
                 continue
             buf += chunk.decode("utf-8", "replace")
+        elif proc.poll() is not None:
+            break                     # lldb 已退出且输出已读尽
         if _parse_passphrase(buf):
             break
     return buf
@@ -163,13 +168,14 @@ def capture_passphrase_lldb(timeout: int = DEFAULT_TIMEOUT) -> str:
             hint=f"{exc}；请确认临时目录可写、磁盘有空间") from exc
 
     # cat 脚本后用 sleep 保活 stdin：lldb continue 是异步的，stdin EOF 会提前退出，
-    # 等不到用户重新登录触发断点。
+    # 等不到用户重新登录触发断点。走**进程替换**而不是管道：管道里 bash 要等 sleep 结束才退，
+    # lldb 提前退出（attach 失败）就看不出来；进程替换下 lldb 一退 bash 就退（`_read_capture` 盯它）。
     # EA-004：起**独立进程组**（start_new_session）——收尾靠 killpg 精确命中本次的
     # bash→lldb 进程树，而不是按名字杀（见 _terminate_capture）。
     try:
         proc = subprocess.Popen(
             # 路径要 shell 转义：`TMPDIR` 含空格或 `;` 时，不转义的 cat 读不到脚本。
-            ["bash", "-c", f"( cat {shlex.quote(sp)}; sleep {timeout} ) | TERM=dumb lldb"],
+            ["bash", "-c", f"TERM=dumb lldb < <(cat {shlex.quote(sp)}; sleep {timeout})"],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
             start_new_session=True)
     except (OSError, subprocess.TimeoutExpired) as exc:
@@ -192,6 +198,13 @@ def capture_passphrase_lldb(timeout: int = DEFAULT_TIMEOUT) -> str:
             pass
 
     ph = _parse_passphrase(buf)
+    if not ph and time.time() < deadline:
+        # `_read_capture` 只在解析出 passphrase 或 lldb 已退出时提前返回：这是 lldb 自己退了。
+        # 只回显 lldb 的 error 行（attach 失败的原因），hexdump 片段不进消息。
+        err = next((ln.strip() for ln in buf.splitlines() if ln.strip().startswith("error:")), "")
+        raise CaptureError(f"lldb 在捕获完成前就退出了（多半是 attach 微信失败）{'：' + err if err else ''}。"
+                           "请确认：以 sudo 运行；微信已重签名"
+                           "（sudo codesign --force --deep --sign - /Applications/WeChat.app）")
     if not ph:
         raise CaptureError("未捕获到 passphrase。请确认：捕获期间已在微信内退出登录并重新登录；"
                            "微信已重签名（sudo codesign --force --deep --sign - /Applications/WeChat.app）")

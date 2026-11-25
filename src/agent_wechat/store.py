@@ -591,7 +591,7 @@ def open_readonly(db_path: pathlib.Path | None = None) -> Iterator[sqlite3.Conne
     「忙」报成「库坏了」。这里只读，版本落后由调用方如实提示。
     """
     try:
-        con = sqlite3.connect(f"file:{db_path or DB_PATH}?mode=ro", uri=True)
+        con = sqlite3.connect(paths.sqlite_ro_uri(db_path or DB_PATH), uri=True)
     except (sqlite3.Error, OSError) as exc:
         raise index_unavailable(exc) from exc
     try:
@@ -930,7 +930,7 @@ def upsert_batch(con: sqlite3.Connection, rows: list[messages.MessageRow]) -> in
 
 def has_table(con: sqlite3.Connection, name: str) -> bool:
     """该表在本连接上存不存在。**向量那三张表在轻装安装上根本不存在**——
-    它们在 `VECTOR_SCHEMA` 里，而 `store.connect()` 只跑 `SCHEMA`（`store.py:83` 的注释就是
+    它们在 `VECTOR_SCHEMA` 里，而 `store.connect()` 只跑 `SCHEMA`（`SCHEMA` 里那行注释就是
     写这件事的：「向量表不在本 SCHEMA：sqlite-vec 需运行时加载扩展后建表，owner 是 vector.py」）。
     无条件查它们会让 purge --chat 直接崩在 `no such table`（spec §2.3 的警示框）。
     """
@@ -1058,7 +1058,7 @@ def accounts_holding_chat(con: sqlite3.Connection, chat_id: str) -> list[str]:
 
 
 def delete_chat(con: sqlite3.Connection, *, account: str, chat_id: str) -> dict[str, int]:
-    """删掉一个会话在本工具里的全部副本。**十二处，一处不漏**（spec §5.1；第八处是 EA-041 的 `msg_extras`——它与 `msg_parts` / `media_refs` 同属按 `msg_key` 前缀删的宽谓词那一类，孤儿行照样盖得住）。
+    """删掉一个会话在本工具里的全部副本。**十二张表，一张不漏**（spec §5.1；另有两张 FTS 由触发器跟随、两张向量元数据表就地改写。EA-041 补的 `msg_extras` 与 `msg_parts` / `media_refs` 同属按 `msg_key` 前缀删的宽谓词那一类，孤儿行照样盖得住）。
 
     **调用方负责**：① 事务边界（自己 `BEGIN IMMEDIATE` / `commit`）；
     ② `PRAGMA secure_delete=ON`——实测默认设置下被删消息的正文仍留在 index.db 的 freelist
@@ -1073,8 +1073,8 @@ def delete_chat(con: sqlite3.Connection, *, account: str, chat_id: str) -> dict[
     - **墓碑必须先落**（由调用方在本函数之前写，同一事务）：先删后挡的话，崩在中间就是
       「删了但没挡」，那批东西会复活；先挡后删最坏只是「挡住了但没删掉」，核查看得见、重跑能收口。
 
-    另**四**处**按宽谓词删**（`vec_messages` 用 `acct_chat` 分区键，`msg_parts`/`media_refs` 用
-    `msg_key` 前缀），不是经 `messages` 子查询删——所以它们与 `messages` 的先后不再有约束，
+    另**九**处**按宽谓词删**（`vec_messages` 用 `acct_chat` 分区键，其余八张用 `msg_key` 前缀：
+    见 `_MSG_KEY_TABLES`），不是经 `messages` 子查询删——所以它们与 `messages` 的先后不再有约束，
     而且消息行早就不在了的**孤儿行照样盖得住**（子查询版会漏掉孤儿，见 `chat_row_counts`）。
     """
     before = chat_row_counts(con, account, chat_id)

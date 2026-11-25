@@ -176,7 +176,7 @@ def _media_block(m: MediaRefState, prefix: str, out_dir: str) -> str:
         if not m.path:
             return "〔{}〕".format(_t(chat_text.INCONSISTENT_EXPORTED))
         src = chat_text.media_src(m.path, out_dir, prefix)
-        if kind == "image":
+        if kind in ("image", "sticker"):    # 贴纸导出的就是图片，按图嵌入
             return f"![{_t(label)}]({src})"
         # 音视频没有原生语法（模块头的固有损失 1）：给链接。
         return f"[{_t(label) or '媒体'}]({src})"

@@ -1916,7 +1916,8 @@ def test_purge_chat_without_an_index_names_the_leftover_export(tmp_path, monkeyp
     _stub_resolution(monkeypatch, "victim")
     with pytest.raises(SystemExit) as ei:
         cli.main(["purge", "--chat", "小李", "--yes"])
-    assert ei.value.code == 0
+    # `--yes` 而导出物原封不动：退 1（全量审查修正，此前断言的 0 正是那个缺陷）
+    assert ei.value.code == 1
     err = capsys.readouterr().err
     assert "索引库不在" in err and "--undo" in err
     assert "导出物仍在盘上" in err, f"盘上那份导出物必须点名：{err!r}"

@@ -3,6 +3,57 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 风格，
 版本号语义为 0.x 阶段（API 可能变动）。
 
+### 全量审查修复（2026-11-26）
+
+**安全**
+
+- `AGENT_WECHAT_DENY` 从只管 `search_messages` / `get_message_context` 扩到 MCP 所有读会话内容的工具：点名读取被拒会话报错，
+  不限会话的检索在 SQL / KNN 里排除，按 `chat_md5` 判；CLI 仍只约束 `retrieve` / `context`，`export_full_history` 不受约束。
+- 本地工作台加访问令牌：令牌只出现在终端打印的链接里，首次打开换成 HttpOnly / SameSite=Strict 的 cookie（`aw_token_<端口>`），
+  没有它首页、静态资源与接口一律 403；`--open` 打开带令牌的链接；`::1` 现在能监听（IPv6 套接字）。
+- appmsg 字段的凭据过滤补上 `ticket` / `signature(s)` / `sig` / `sessionid` / `password` / `secret` 后缀与 `_sign` 后缀；URL 参数名整名为
+  `sign` 也算凭据，字段路径里整段叫 `sign` 的（个性签名）保留。
+- 贴纸 CDN 与朋友圈媒体下载设 200 MB 单件上限（`media.CDN_MAX_BYTES` / `sns_media.MAX_FETCH_BYTES`）：超了贴纸计 `failed` 并带降级说明，
+  朋友圈媒体报错，都不落半截文件。
+- 会话总目录页（`chat index`）只列十六进制目录名，页面带 CSP。
+- `purge --chat` 同时删掉 `tasks.json` 里指名该会话的已结束任务记录，残留核查也覆盖它。
+- `inspect --sample` 拒绝负数（此前 `-1` 会把每张表的全部行明文打出来）。
+
+**正确性**
+
+- `get_recent_messages` 条数到 `limit` 时也返回 `next_before_ts`；同一秒的消息多到一页装不下时整秒给出（可超 `limit` 与体积预算），
+  `next_before_ts` 取该秒，翻页不再原地打转。`search_history` 同样在条数到 `limit` 时给 `next_before_ts`、同一秒的命中整秒给出。`truncated` 仍只表示因体积预算丢了消息。
+- `get_recent_messages` 的 `before_ts` 超出 int64 报输入错误（此前是内部错误）；带 `before_ts` 时按 `create_time` 取前 N 条。
+- `get_message_context` 的消息条目带 `type`（口径同 `get_recent_messages`）；`contact` 归属按 `chat_md5` 校验，会话名退化成 `md5:` 时不再误报不属于。
+- `semantic_search` 命中省略空值字段（与 `search_history` 同口径）。
+- `export_moments` 拒绝 `out_dir` 时，`hint` 给的是朋友圈导出的默认根。
+- 单条正文 zstd 坏帧以 `[解压失败]` 占位并记 `message_content` 降级，导出不再整轮中止。
+- 群文本前缀只在发送者不是自己、且前缀等于解出的发送者时剥（自己发的「提醒:\n…」不再被拆成发送者）。
+- 密钥校验通过但库结构页损坏时报源不可读（`sync` 归为 `source_unavailable`），不再提示重新引导。
+- bootstrap 时 lldb 提前退出立即报「lldb 在捕获完成前就退出了」并带 lldb 的 `error:` 行，不再空等满超时。
+- 贴纸导出后在会话 HTML / Markdown 里按图片显示；`.wxgf` 原容器在装了 ffmpeg 后重跑会重新转码。
+- 会话导出写失败时不再删掉上一次导出的完好产物。
+- `sync` 源侧失败重试时，导出条数与跳过条数按各次尝试累加（此前只记最后一次，可能把已导入的报成 `no_new`）；
+  失败那次已提交 / 已跳过的条数由导出自己报上来（`--full` 重试会重扫全部，失败那次的计数不重复计）。
+- `purge --chat` 的在飞任务闸门也挡住同步执行的媒体导出与会话导出（它们在写盘期间登记一条 `running` 记录，结束即删）；
+  索引库不在时，默认导出根总目录页里还列着该会话也算残留。
+- 读索引库、向量库与解密快照的 SQLite URI 统一做百分号转义：数据目录名含 `?` `#` `%` 空格时不再打开到别的路径、丢掉只读。
+- `message_content` 降级有了自己的说明文案（「部分消息正文解压失败，以 [解压失败] 占位」）。
+
+**CLI**
+
+- `purge --chat --yes` 在索引库不存在、导出物还在（或判不出来）时什么都不删、退出码 1。
+- `chat export` 有格式没写成时在 stderr 点名并退出码 1。
+- `memory delete` 给不存在的 id 报「找不到主张」、退出码 1。
+- `logs clean` 也删 launchd 的 out/err 日志。
+
+**文档**
+
+- 按代码核对并更正：schema 版本（main v11）、重嵌触发器列（v9 起不含 `chat_id`）、非文本 `type` 取值（appmsg 是 `type49`）、
+  `search_messages` 的 `truncated` 含义、MCP 返回哪些字段仍为 null、语音判定时 `tmp/` 里默认只有密文快照、
+  `get_recent_messages` 的延迟与 `get_task_status(wait=60)`、CLI 与 MCP 的 msg_key 形态、`media locate --keys` 示例与 key 的来源、
+  `AGENT_WECHAT_HOME` 空值回落默认目录、Time Machine 排除要用 `status` 确认、CLI `search` 不打印高亮片段、`media export` 输出含贴纸行。
+
 ### MCP 使用效率 · 第四轮（2026-11-25）
 
 逐项对比见 [MCP_EFFICIENCY.md](MCP_EFFICIENCY.md) §9。全部向后兼容（只加参数与字段）。
@@ -848,6 +899,8 @@
   落于 `~/.agent-wechat` 之外（或判不出来）的链接**——树内的随整树一并删除，huggingface_hub 的
   `models/` blob/snapshot 布局就是这种；`AGENT_WECHAT_HOME` 指向不像数据目录的位置（空值会被
   解析成当前目录，或指向 `/`、`~` 及其祖先）时，dry-run 与 `--yes` 两处都拒绝
+  （更正，2026-11-26：自 EA-003 起空值已回落默认目录 `~/.agent-wechat`，只有相对路径才按当前目录解析；
+  这条闸门现在拦的是相对路径）
 - 只做 CLI，MCP 工具面不变
 
 ### purge：补上 `--media` / `--moments` 两个具名范围（**行为变更**）

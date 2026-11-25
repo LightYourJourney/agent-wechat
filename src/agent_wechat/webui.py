@@ -2,6 +2,8 @@
 
 **默认关闭**：只有显式运行 `agent-wechat ui` 才会起服务；进程退出即关闭。
 **只监听 loopback**，并把 Host/Origin 钉死在本机——防 DNS rebinding 与跨站请求。
+**凭访问令牌进门**：令牌只出现在终端打印的链接里（同 Jupyter），首次访问换成 HttpOnly
+cookie；没有它，页面、静态资源与接口一律 403——loopback 挡不住本机的其他账户与进程。
 **不服务任何文件系统路径**：页面/脚本/样式都是本模块里的字符串，`/../index.db`
 这类请求一律 404（没有路径拼接这条路）。**不写访问日志**：查询串本身就是敏感内容。
 
@@ -11,10 +13,12 @@
 from __future__ import annotations
 
 import dataclasses
+import hmac
 import ipaddress
 import json
 import os
 import secrets
+import socket
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -200,6 +204,15 @@ class _State:
     def __init__(self, port: int) -> None:
         self.port = port
         self.csrf = secrets.token_hex(16)
+        # 访问令牌：只印在终端的链接里。CSRF 令牌嵌在首页 HTML 里、防的是跨站；
+        # 它防的是**本机**的其他账户/进程（loopback 对它们是敞开的，Host 校验也挡不住）。
+        self.token = secrets.token_urlsafe(32)
+        # cookie 不分端口：名字带上端口，同时开两个工作台时互不覆盖。
+        self.cookie = f"aw_token_{port}"
+
+
+def _same(given: str, expect: str) -> bool:
+    return hmac.compare_digest(given.encode(), expect.encode())
 
 
 def _json(handler: BaseHTTPRequestHandler, code: int, obj: object) -> None:
@@ -245,6 +258,38 @@ class _Handler(BaseHTTPRequestHandler):
             return True
         return False
 
+    def _authed(self) -> bool:
+        for part in (self.headers.get("Cookie") or "").split(";"):
+            name, _, value = part.strip().partition("=")
+            if name == self.state.cookie and _same(value, self.state.token):
+                return True
+        return False
+
+    def _reject_unauthed(self, *, api: bool) -> bool:
+        if self._authed():
+            return False
+        if api:
+            _json(self, 403, {"error": "未授权：请用 `agent-wechat ui` 在终端打印的链接打开工作台"})
+        else:
+            _text(self, 403, "请用终端打印的链接打开（`agent-wechat ui` 启动时印出的带 token 的地址）。",
+                  "text/plain; charset=utf-8")
+        return True
+
+    def _token_login(self, query: str) -> bool:
+        """`/?token=…` 对了 → 种 cookie 并 302 到不带 token 的 `/`（令牌不留在地址栏/历史里）。"""
+        token = (urllib.parse.parse_qs(query).get("token") or [""])[0]
+        if not (token and _same(token, self.state.token)):
+            return False
+        self.send_response(302)
+        self.send_header("Location", "/")
+        self.send_header("Set-Cookie", f"{self.state.cookie}={self.state.token}; "
+                                       "HttpOnly; SameSite=Strict; Path=/")
+        self.send_header("Content-Length", "0")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.end_headers()
+        return True
+
     def _reject_csrf(self) -> bool:
         """每进程随机令牌（`X-AW-CSRF`）。GET `/api/*` 与 POST 共用这一份判据。"""
         if self.headers.get("X-AW-CSRF") != self.state.csrf:
@@ -256,6 +301,10 @@ class _Handler(BaseHTTPRequestHandler):
         if self._reject_host():
             return
         path = urllib.parse.urlparse(self.path)
+        if path.path == "/" and path.query and self._token_login(path.query):
+            return
+        if self._reject_unauthed(api=path.path.startswith("/api/")):
+            return
         if path.path == "/":
             _text(self, 200, _INDEX_HTML.replace("__CSRF__", self.state.csrf),
                   "text/html; charset=utf-8")
@@ -286,6 +335,8 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:               # noqa: N802
         if self._reject_host():
+            return
+        if self._reject_unauthed(api=True):
             return
         if not _origin_ok(self.headers.get("Origin"), self.state.port):
             _json(self, 403, {"error": "Origin 不在本机允许列表"})
@@ -475,17 +526,23 @@ def create_server(host: str = "127.0.0.1", port: int = DEFAULT_PORT
     if not ip.is_loopback:
         raise errors.ScopeDenied("工作台只允许监听 loopback 地址",
                                  hint="用 127.0.0.1 或 ::1")
-    httpd = ThreadingHTTPServer((host, port), _Handler)
+    # ThreadingHTTPServer 默认只开 IPv4 套接字：`::1` 要显式换 AF_INET6，否则 bind 抛 gaierror。
+    httpd = (_V6Server if ip.version == 6 else ThreadingHTTPServer)((host, port), _Handler)
     httpd.daemon_threads = True
     httpd.aw_state = _State(httpd.server_address[1])     # type: ignore[attr-defined]
     return httpd
 
 
+class _V6Server(ThreadingHTTPServer):
+    address_family = socket.AF_INET6
+
+
 def serve(port: int = DEFAULT_PORT, *, open_browser: bool = False) -> None:
     """显式启动才起服务；Ctrl-C 退出。默认**不**自动打开浏览器。"""
     httpd = create_server("127.0.0.1", port)
-    url = f"http://127.0.0.1:{httpd.server_address[1]}/"
-    print(f"本地工作台：{url}（仅本机；Ctrl-C 停止）")
+    # 带访问令牌的链接只印在这里：凭它进门，别贴给别人（同 Jupyter）。
+    url = f"http://127.0.0.1:{httpd.server_address[1]}/?token={httpd.aw_state.token}"  # type: ignore[attr-defined]
+    print(f"本地工作台：{url}（仅本机；链接含访问令牌，勿外传；Ctrl-C 停止）")
     if open_browser:
         import webbrowser
         webbrowser.open(url)

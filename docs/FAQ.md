@@ -92,10 +92,12 @@ lldb attach 需要 `task_for_pid` 权限；Hardened Runtime 会阻止它，所�
 全部数据：`agent-wechat purge --all --yes`（`~/.agent-wechat` 目录包含密钥缓存、索引库与临时
 文件）；不加 `--yes` 只预览。核查报告会告诉你还有什么没清干净——如 `$TMPDIR` 下 bootstrap 崩溃
 残留的 `awcap_*` 脚本，**这些只报告、不代删，需手工处理**。
-该目录已排除出 Time Machine 备份。
+本工具会尝试把该目录排除出 Time Machine 备份（`tmutil addexclusion`），是否成功用 `agent-wechat status`
+的「备份排除」一行确认；显示 `[Included]` 时手动执行一次（见 INSTALL.md §7）。
 
 只删某一个会话：`agent-wechat purge --chat 小李`（预览）→ `--yes`（执行）——它删的是**本工具里的
-副本**（索引行、向量、appmsg 部件、位置/名片载荷 `msg_extras`、媒体引用、群成员显示名、`media/<会话md5>/`），**不是微信里
+副本**（索引行、向量、appmsg 部件、位置/名片载荷 `msg_extras`、媒体引用、群成员显示名、`media/<会话md5>/`、
+`tasks.json` 里指名该会话的已结束任务记录），**不是微信里
 的记录**（微信目录只读）；**朋友圈导出不在范围内**（`moments/` 是一份 HTML 装所有人，那个人的
 动态与互动仍可能留在其中）。那批内容的 `msg_key` 会写进 `~/.agent-wechat/exclusions.db`，
 所以重跑 `export --full` / `appmsg rebuild` / `media rebuild-refs` 都不会把它们带回来，而删除

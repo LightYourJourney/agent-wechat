@@ -71,19 +71,21 @@ def denied_chat_ids() -> frozenset[str]:
     return frozenset(x.strip() for x in raw.split(",") if x.strip())
 
 
-def _denied_md5(chat_id: str) -> bool:
-    """这个 `chat_id` 的会话是否被拒读。
+def _denied_md5(chat_id: str, denied: frozenset[str] | None = None) -> bool:
+    """这个 `chat_id` 的会话是否被拒读（`denied` 省略 = 读环境变量）。
 
     **按 `chat_md5` 判，不按 `chat_id` 字面比**：同一会话在索引里可以同时有真名与退化 id
     `md5:<hex>` 两种 `chat_id`，而两者共享同一个 `chat_md5`（`messages.chat_md5` 两侧共用
     同一个解析）——只比 `chat_id` 时退化那一批照常返回，读取范围就静默漏掉半个会话。
     """
     return messages.chat_md5(chat_id) in {
-        messages.chat_md5(c) for c in denied_chat_ids()}
+        messages.chat_md5(c) for c in (denied_chat_ids() if denied is None else denied)}
 
 
-def _ensure_allowed(chat_id: str | None) -> None:
-    if chat_id and _denied_md5(chat_id):
+def ensure_allowed(chat_id: str | None, denied: frozenset[str] | None = None) -> None:
+    """会话被拒读就抛 `ScopeDenied`。`denied` 省略 = 读环境变量（本模块两个工具的口径）；
+    usecases 的其它用例由 MCP 入口显式传入，CLI 不传（空集合 = 不限）。"""
+    if chat_id and _denied_md5(chat_id, denied):
         raise errors.ScopeDenied(
             f"会话 {chat_id} 不在读取范围内（AGENT_WECHAT_DENY）",
             hint="从 AGENT_WECHAT_DENY 里去掉它，或改用其它会话")
@@ -228,7 +230,7 @@ def search_messages(query: str, *, account: str, chat_id: str | None = None,
         raise errors.SearchInputError(
             f"未知检索模式：{mode}（可用：{', '.join(MODES)}）")
     limit = max(1, min(int(limit), MAX_LIMIT))
-    _ensure_allowed(chat_id)
+    ensure_allowed(chat_id)
     candidates = min(limit * CANDIDATE_FACTOR, MAX_LIMIT)
     # 拒读会话在**三路取数的 SQL / KNN 里**就排除：取回后再滤（哪怕在截断之前），被拒会话
     # 的命中也会先占满每路 limit×4 的候选窗，把放行会话挤出去；`candidates` 还会把它们
@@ -322,7 +324,7 @@ def get_context(msg_key: str, *, account: str, before: int = 2, after: int = 2) 
     after = max(0, min(int(after), 10))
     # 列与发送者显示名的口径由 store 的常量持有：`_SENDER_EXPR` / `_SENDER_JOIN`
     # **必须成对使用**（别名 dn），否则显示名会静默回落成 wxid。
-    select = ("SELECT m.msg_key, m.chat_id, m.ts, m.local_id, m.is_self, m.content,"
+    select = ("SELECT m.msg_key, m.chat_id, m.ts, m.local_id, m.is_self, m.msg_type, m.content,"
               " m.media_hint, " + store._SENDER_EXPR + " AS sender"
               " FROM messages m " + store._SENDER_JOIN)
     with store.open() as con:
@@ -337,7 +339,7 @@ def get_context(msg_key: str, *, account: str, before: int = 2, after: int = 2) 
             raise errors.DataNotFound(
                 f"找不到消息 {msg_key}",
                 hint="它可能还没导出：先运行一次 export_full_history / export")
-        _ensure_allowed(row["chat_id"])
+        ensure_allowed(row["chat_id"])
         # 同会话邻居：按 (ts, local_id) 定序，前后各取有限条
         prev_rows = con.execute(
             select + " WHERE m.account=? AND m.chat_id=?"
@@ -356,6 +358,8 @@ def get_context(msg_key: str, *, account: str, before: int = 2, after: int = 2) 
         return {"msg_key": r["msg_key"], "time": r["ts"],
                 "sender": r["sender"] or "?",
                 "is_self": bool(r["is_self"]),
+                # 与 get_recent_messages 同一套类型名（reader._type_name）；MCP 入口省略 text
+                "type": messages.TYPE_NAMES.get(r["msg_type"], f"type{r['msg_type']}"),
                 "content": r["content"] if r["content"] is not None else r["media_hint"],
                 "untrusted": True}
 

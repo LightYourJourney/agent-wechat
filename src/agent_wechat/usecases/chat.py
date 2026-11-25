@@ -7,7 +7,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from .. import (appmsg, chatview, errors, exclusions, export, keys, media, messages,
-                migrations, msgextra, paths, reader, search, store, tasks)
+                migrations, msgextra, paths, reader, retrieval, search, store, tasks)
 from .. import account as acc_mod
 from .. import chat_index as index_html
 from ._core import (LIMIT_RECENT, MONTH_RE, Degradation, ExportPlan,
@@ -121,17 +121,36 @@ def warm_up(account: str | None = None) -> None:
 
 def recent_messages(contact: str, limit: int = 50,
                     account: str | None = None,
-                    before_ts: int | None = None) -> RecentMessages | NeedConfirm:
-    """before_ts（unix 秒，不含）：只取它之前的消息，用来往前翻页。"""
+                    before_ts: int | None = None, *,
+                    deny: frozenset[str] = frozenset(),
+                    whole_second: bool = False) -> RecentMessages | NeedConfirm:
+    """before_ts（unix 秒，不含）：只取它之前的消息，用来往前翻页。
+
+    `deny`：读取范围（MCP 入口传 `AGENT_WECHAT_DENY`，CLI 不传）。
+    `whole_second`（MCP 翻页用）：整页 limit 条都落在同一秒时，把这一秒的消息补全（可能超过
+    limit），并在 `earlier` 里答「更早还有没有」——before_ts 只到秒，否则下一页只能是
+    `该秒 + 1`（与这一页相同，原地打转）或 `该秒`（同秒没取到的永远读不到）。
+    """
+    search.check_ts("before_ts", before_ts)      # 超出 int64 的值绑定进 SQL 时抛裸 OverflowError
     ctx = pkg_context(account)
     chat_id = ctx.resolve(contact)
     if isinstance(chat_id, NeedConfirm):
         return chat_id
-    msgs = ctx.reader.recent(chat_id, limit=pkg_clamp_limit(limit, LIMIT_RECENT),
-                             before_ts=before_ts)
+    retrieval.ensure_allowed(chat_id, deny)
+    lim = pkg_clamp_limit(limit, LIMIT_RECENT)
+    msgs = ctx.reader.recent(chat_id, limit=lim, before_ts=before_ts)
+    earlier = None
+    if whole_second and len(msgs) >= lim and msgs[0].ts == msgs[-1].ts:
+        sec, n = msgs[0].ts, lim
+        while len(msgs) >= n and msgs[0].ts == sec:   # 取到的还全在这一秒、且没取尽：加倍再取
+            n *= 2
+            msgs = ctx.reader.recent(chat_id, limit=n, before_ts=before_ts)
+        earlier = msgs[0].ts != sec
+        msgs = [m for m in msgs if m.ts == sec]
     return RecentMessages(chat_id=chat_id, display=_display_or_id(ctx, chat_id),
                           messages=msgs,
-                          degraded=pkg_call("collect_degradations", ctx.reader))
+                          degraded=pkg_call("collect_degradations", ctx.reader),
+                          earlier=earlier)
 
 
 def export_plan(contact: str | None = None, full: bool = False,
@@ -205,7 +224,8 @@ class ChatExportResult:
 
 def chat_export(contact: str, *, months: list[str] | None = None, limit: int = 500,
                 formats: Sequence[str] = ("html", "md"), out_dir: str | None = None,
-                account: str | None = None) -> ChatExportResult | NeedConfirm:
+                account: str | None = None,
+                deny: frozenset[str] = frozenset()) -> ChatExportResult | NeedConfirm:
     """导出会话为可读时间线（HTML / Markdown）。产物落 `{--out}/{chat_md5}/chat/index.*`。
 
     `months` 复用 `media.month_bounds` 与同一套校验：格式不符、**非升序**、**不连续**
@@ -223,6 +243,7 @@ def chat_export(contact: str, *, months: list[str] | None = None, limit: int = 5
     contact 表漂移时回落 `chat_id`（漂移随 degraded 出去）。
 
     `out_dir` 落在微信容器目录之内时**拒绝**（C-11）——在任何读取之前叫停。
+    `deny`：读取范围（MCP 入口传 `AGENT_WECHAT_DENY`，CLI 不传）。
     """
     if out_dir:
         paths.refuse_container_out(out_dir)
@@ -230,6 +251,7 @@ def chat_export(contact: str, *, months: list[str] | None = None, limit: int = 5
     chat_id = ctx.resolve(contact)
     if isinstance(chat_id, NeedConfirm):
         return chat_id
+    retrieval.ensure_allowed(chat_id, deny)
     bad_months = [m for m in (months or []) if not MONTH_RE.fullmatch(m)]
     if bad_months:
         raise errors.SearchInputError(f"月份格式应为 YYYY-MM：{', '.join(bad_months)}")
@@ -254,111 +276,115 @@ def chat_export(contact: str, *, months: list[str] | None = None, limit: int = 5
                 "；非连续月份只能取包络、会把中间的月份也静默带进来，而反序会得到倒置"
                 "（或退化成空区间）的窗口——0 行、truncated 还报 False：两者都会静默产出空产物")
         after_ts, before_ts = bounds[0][0], bounds[-1][1]
-    # 输出根绝对化：`--out 相对路径` 时 `view.out_dir` 是相对的，而媒体状态的路径是绝对的
-    # （`message_media` 自己 resolve 过），`chat_text.media_src` 用 `os.path.relpath` 算
-    # 相对引用时按 **cwd** 展开相对的那一侧 —— 产物的 `<img>` 照常渲染、打不开
-    # （静默 404）。与 `message_media` 同款处理。
-    out_root = _resolve_out(out_dir)
-    try:
-        rows, truncated = search.messages_in_range(
-            chat_id, account=ctx.account, after_ts=after_ts, before_ts=before_ts,
-            limit=pkg_clamp_limit(limit))
-        keys = [r["msg_key"] for r in rows]
-        with store.open() as con:
-            got = store.msg_parts_by_keys(con, keys)
-            # 「回填过没有」**只能**由表的状态回答：`appmsg rebuild` 只写 msg_parts、不写
-            # messages，join 出来的条数会把「没回填」与「这些消息本来就没有可读内容」混成
-            # 一种（丙 R23 的教训——两者在产物里长得一模一样）。
-            backfilled = store.count_msg_parts(con, ctx.account)
-            # EA-041 的位置/名片：**与 parts 同一趟、同一个 keys 集合**读出原始载荷，
-            # 解析在库外做（与 parts 的分工一致：store 只管字节，解析归用例层）。
-            extras_raw = store.extras_by_keys(con, keys)
-    except (sqlite3.Error, OSError) as exc:
-        # 裸 sqlite3/OSError 会穿透 core 层（CLI 印 traceback、MCP 落 generic_payload 兜底）。
-        # 索引读不了就是什么都答不了：一个空产物只会把「库坏了」谎报成「这个会话没有消息」。
-        raise errors.IndexUnavailable(
-            f"本地检索库不可用：{errors.redact(str(exc))}",
-            hint="索引库可能损坏；删除 index.db 后重跑一次导出即可重建"
-        ) from exc
+    # 读索引 → 写产物的整段在任务注册表里占一条 running 记录：`purge --chat` 的在飞闸门据此
+    # 拒绝，不会在两段之间删掉会话、核查报 ✅ 之后又被这里写回正文（见 `tasks.claim`）。
+    # 闸门是「先查后删」，claim 晚于闸门的那一窗由 `_discard_if_purged_meanwhile` 兜底。
+    with tasks.claim("chat_export", account=ctx.account, chat_id=chat_id):
+        # 输出根绝对化：`--out 相对路径` 时 `view.out_dir` 是相对的，而媒体状态的路径是绝对的
+        # （`message_media` 自己 resolve 过），`chat_text.media_src` 用 `os.path.relpath` 算
+        # 相对引用时按 **cwd** 展开相对的那一侧 —— 产物的 `<img>` 照常渲染、打不开
+        # （静默 404）。与 `message_media` 同款处理。
+        out_root = _resolve_out(out_dir)
+        try:
+            rows, truncated = search.messages_in_range(
+                chat_id, account=ctx.account, after_ts=after_ts, before_ts=before_ts,
+                limit=pkg_clamp_limit(limit))
+            keys = [r["msg_key"] for r in rows]
+            with store.open() as con:
+                got = store.msg_parts_by_keys(con, keys)
+                # 「回填过没有」**只能**由表的状态回答：`appmsg rebuild` 只写 msg_parts、不写
+                # messages，join 出来的条数会把「没回填」与「这些消息本来就没有可读内容」混成
+                # 一种（丙 R23 的教训——两者在产物里长得一模一样）。
+                backfilled = store.count_msg_parts(con, ctx.account)
+                # EA-041 的位置/名片：**与 parts 同一趟、同一个 keys 集合**读出原始载荷，
+                # 解析在库外做（与 parts 的分工一致：store 只管字节，解析归用例层）。
+                extras_raw = store.extras_by_keys(con, keys)
+        except (sqlite3.Error, OSError) as exc:
+            # 裸 sqlite3/OSError 会穿透 core 层（CLI 印 traceback、MCP 落 generic_payload 兜底）。
+            # 索引读不了就是什么都答不了：一个空产物只会把「库坏了」谎报成「这个会话没有消息」。
+            raise errors.IndexUnavailable(
+                f"本地检索库不可用：{errors.redact(str(exc))}",
+                hint="索引库可能损坏；删除 index.db 后重跑一次导出即可重建"
+            ) from exc
 
-    # 媒体：直接复用丙的 message_media，`states` 就是 `MediaRefState`。`_ctx=ctx` 复用刚解析
-    # 好的会话（省一次 contact.db 解密），`contact` 仍按原样传（入口签名不变）。
-    # `limit` 跟着 keys 走（message_media 自己封顶 500，所以 keys 超过 500 条时它会只答
-    # 最近的那 500 个 key）——没答到的 key 在产物里与「本来就没有媒体」一模一样，
-    # 故下面按**答回的条数**公告（判据见 degraded 那一段，`truncated` 在 keys 路径上不适用）。
-    mm = pkg_call("message_media", contact, keys=keys, out_dir=str(out_root),
-                  limit=len(keys) or 1, _ctx=ctx)
-    states = {s.msg_key: s for s in mm.states}
+        # 媒体：直接复用丙的 message_media，`states` 就是 `MediaRefState`。`_ctx=ctx` 复用刚解析
+        # 好的会话（省一次 contact.db 解密），`contact` 仍按原样传（入口签名不变）。
+        # `limit` 跟着 keys 走（message_media 自己封顶 500，所以 keys 超过 500 条时它会只答
+        # 最近的那 500 个 key）——没答到的 key 在产物里与「本来就没有媒体」一模一样，
+        # 故下面按**答回的条数**公告（判据见 degraded 那一段，`truncated` 在 keys 路径上不适用）。
+        mm = pkg_call("message_media", contact, keys=keys, out_dir=str(out_root),
+                      limit=len(keys) or 1, _ctx=ctx)
+        states = {s.msg_key: s for s in mm.states}
 
-    # 会话根：chat_md5 取**行里那个**（`messages.chat_md5` 列就是 Msg_<md5> 表的 md5 部分，
-    # 也是 msg_key 的第二段）；范围内没有消息时回落到 `messages.chat_md5(chat_id)`。
-    chat_md5 = rows[0]["chat_md5"] if rows else messages.chat_md5(chat_id)
+        # 会话根：chat_md5 取**行里那个**（`messages.chat_md5` 列就是 Msg_<md5> 表的 md5 部分，
+        # 也是 msg_key 的第二段）；范围内没有消息时回落到 `messages.chat_md5(chat_id)`。
+        chat_md5 = rows[0]["chat_md5"] if rows else messages.chat_md5(chat_id)
 
-    # 四元组的第一、二项（`appmsg_type` / `ref_svrid`）**刻意不用**：它们是 raw_xml 的投影，
-    # 存在的理由是「不必解压就能筛选 / 重解析」，而这里已经把 XML 解开了 —— 用解析结果更权威。
-    parts: dict[str, appmsg.AppMsg] = {}
-    refs: dict[str, str] = {}
-    unparsed = rejected = 0
-    for key, (_appmsg_type, _ref_svrid, ref_key, raw_xml) in got.items():
-        if ref_key:
-            refs[key] = ref_key       # `None` 的不进表：build 靠「在不在表里」判退化
-        # 解压 + 解析是**共用的一份**（`_decode_part`，`message_parts` 用的是同一个）：
-        # 两处各写一遍时，「解压失败算哪一种」这种口径迟早分叉。
-        # 第三项（剔掉的不透明块数）导出侧**不消费**：本任务的消费点只有 MCP 信封
-        # （`MessagePartsResult.dropped_blobs`），产物侧不新开计数（那是另一处入口的渲染决定，
-        # 不是「没人读的死字段」——计数在这里照样算得出来，只是本期没人接）。
-        parsed, outcome, _dropped = _decode_part(raw_xml)
-        if outcome == "rejected":
-            rejected += 1             # 我们主动拒绝（DTD / 实体），与「解不开」分开计数
-        elif outcome == "unparsed":
-            unparsed += 1
-        elif parsed is not None:
-            parts[key] = parsed
+        # 四元组的第一、二项（`appmsg_type` / `ref_svrid`）**刻意不用**：它们是 raw_xml 的投影，
+        # 存在的理由是「不必解压就能筛选 / 重解析」，而这里已经把 XML 解开了 —— 用解析结果更权威。
+        parts: dict[str, appmsg.AppMsg] = {}
+        refs: dict[str, str] = {}
+        unparsed = rejected = 0
+        for key, (_appmsg_type, _ref_svrid, ref_key, raw_xml) in got.items():
+            if ref_key:
+                refs[key] = ref_key       # `None` 的不进表：build 靠「在不在表里」判退化
+            # 解压 + 解析是**共用的一份**（`_decode_part`，`message_parts` 用的是同一个）：
+            # 两处各写一遍时，「解压失败算哪一种」这种口径迟早分叉。
+            # 第三项（剔掉的不透明块数）导出侧**不消费**：本任务的消费点只有 MCP 信封
+            # （`MessagePartsResult.dropped_blobs`），产物侧不新开计数（那是另一处入口的渲染决定，
+            # 不是「没人读的死字段」——计数在这里照样算得出来，只是本期没人接）。
+            parsed, outcome, _dropped = _decode_part(raw_xml)
+            if outcome == "rejected":
+                rejected += 1             # 我们主动拒绝（DTD / 实体），与「解不开」分开计数
+            elif outcome == "unparsed":
+                unparsed += 1
+            elif parsed is not None:
+                parts[key] = parsed
 
-    # 位置/名片：**空表是常态**（老库、没跑过 `extras rebuild` 的机器），两个模板因此一行
-    # 都不印——不是印「未知」。**不发降级**：这一族没有 `msg_parts` 那种「回填过没有」的
-    # 可判定状态（「表是空的」与「这些消息本来就没有位置/名片」在库里分不开），公告一句
-    # 「可能没回填」会在绝大多数会话上是假警（丙 R23：两者在产物里长得一样，那就别猜）。
-    extras: dict[str, msgextra.Extra] = {}
-    for key, (msg_type, payload) in extras_raw.items():
-        x = _decode_extra(msg_type, payload)
-        if x is not None:
-            extras[key] = x
+        # 位置/名片：**空表是常态**（老库、没跑过 `extras rebuild` 的机器），两个模板因此一行
+        # 都不印——不是印「未知」。**不发降级**：这一族没有 `msg_parts` 那种「回填过没有」的
+        # 可判定状态（「表是空的」与「这些消息本来就没有位置/名片」在库里分不开），公告一句
+        # 「可能没回填」会在绝大多数会话上是假警（丙 R23：两者在产物里长得一样，那就别猜）。
+        extras: dict[str, msgextra.Extra] = {}
+        for key, (msg_type, payload) in extras_raw.items():
+            x = _decode_extra(msg_type, payload)
+            if x is not None:
+                extras[key] = x
 
-    degraded: list[Degradation] = []
-    if not backfilled:
-        # 与「这些消息本来就没有可读内容」**必须印得不一样**：前者可以补救（跑一次回填），
-        # 后者是数据本身就长这样（丙 R23）。复用 Degradation 信封，不新造并行类型。
-        degraded.append(Degradation(
-            capability="msg_parts", db="index.db", table="msg_parts", missing_columns=(),
-            effect="msg_parts 未回填，appmsg 会显示成 `[appmsg: 标题]`；"
-                   "运行 `agent-wechat appmsg rebuild` 补齐",
-            drift=False))
-    if len(states) < len(keys):
-        # 判据是**答回的条数**，不是 `mm.truncated`：keys 路径下 message_media 是「一个 key
-        # 一行」（非媒体消息也在里面、状态为 `none`），于是 `truncated`（= `len(rows) >= lim`）
-        # 在「limit 恰好等于 key 数」时恒为真 —— 照它公告就是每次导出都报一次假警
-        # （真机实测：`--limit 200` 时 states 与 keys 等长，却报「可能被截断」）。
-        # 而「答回得比 keys 少」正是产物里会**静默少一块**的那个条件。
-        degraded.append(Degradation(
-            capability="msg_media", db="index.db", table="messages", missing_columns=(),
-            drift=False,
-            effect=f"媒体状态只覆盖了 {len(states)}/{len(keys)} 条消息"
-                   "（message_media 的 limit 上限 500）：没覆盖到的消息在产物里不会出现"
-                   "媒体块"))
+        degraded: list[Degradation] = []
+        if not backfilled:
+            # 与「这些消息本来就没有可读内容」**必须印得不一样**：前者可以补救（跑一次回填），
+            # 后者是数据本身就长这样（丙 R23）。复用 Degradation 信封，不新造并行类型。
+            degraded.append(Degradation(
+                capability="msg_parts", db="index.db", table="msg_parts", missing_columns=(),
+                effect="msg_parts 未回填，appmsg 会显示成 `[appmsg: 标题]`；"
+                       "运行 `agent-wechat appmsg rebuild` 补齐",
+                drift=False))
+        if len(states) < len(keys):
+            # 判据是**答回的条数**，不是 `mm.truncated`：keys 路径下 message_media 是「一个 key
+            # 一行」（非媒体消息也在里面、状态为 `none`），于是 `truncated`（= `len(rows) >= lim`）
+            # 在「limit 恰好等于 key 数」时恒为真 —— 照它公告就是每次导出都报一次假警
+            # （真机实测：`--limit 200` 时 states 与 keys 等长，却报「可能被截断」）。
+            # 而「答回得比 keys 少」正是产物里会**静默少一块**的那个条件。
+            degraded.append(Degradation(
+                capability="msg_media", db="index.db", table="messages", missing_columns=(),
+                drift=False,
+                effect=f"媒体状态只覆盖了 {len(states)}/{len(keys)} 条消息"
+                       "（message_media 的 limit 上限 500）：没覆盖到的消息在产物里不会出现"
+                       "媒体块"))
 
-    view = chatview.build(
-        chat_id, title=_display_or_id(ctx, chat_id), rows=rows, parts=parts, media=states,
-        out_dir=str(out_root / chat_md5), truncated=truncated, unparsed=unparsed,
-        rejected=rejected,
-        # 富化（取展示名）**先**做，降级**后**收：`_display_or_id` 回落 chat_id 的那次
-        # SchemaDrift 记在 `ctx.reader._drift` 上，这个顺序才让它随 degraded 出去
-        # （`_display_or_id` 的注释把这条顺序写成约定）。
-        degraded=tuple(degraded) + pkg_call("collect_degradations", ctx.reader),
-        refs=refs,
-        extras=extras)
-    files = chatview.write(view, formats=formats)
-    _discard_if_purged_meanwhile(keys, files)
+        view = chatview.build(
+            chat_id, title=_display_or_id(ctx, chat_id), rows=rows, parts=parts, media=states,
+            out_dir=str(out_root / chat_md5), truncated=truncated, unparsed=unparsed,
+            rejected=rejected,
+            # 富化（取展示名）**先**做，降级**后**收：`_display_or_id` 回落 chat_id 的那次
+            # SchemaDrift 记在 `ctx.reader._drift` 上，这个顺序才让它随 degraded 出去
+            # （`_display_or_id` 的注释把这条顺序写成约定）。
+            degraded=tuple(degraded) + pkg_call("collect_degradations", ctx.reader),
+            refs=refs,
+            extras=extras)
+        files = chatview.write(view, formats=formats)
+        _discard_if_purged_meanwhile(keys, files)
     return ChatExportResult(
         chat_id=chat_id, out_dir=view.out_dir, files=tuple(str(p) for p in files),
         counts=view.counts, truncated=truncated, unparsed=unparsed, rejected=rejected,
@@ -450,8 +476,8 @@ class MessagePartsResult:
     unanswered: tuple[str, ...] = ()
 
 
-def message_parts(contact: str, *, keys: Sequence[str],
-                  account: str | None = None) -> MessagePartsResult | NeedConfirm:
+def message_parts(contact: str, *, keys: Sequence[str], account: str | None = None,
+                  deny: frozenset[str] = frozenset()) -> MessagePartsResult | NeedConfirm:
     """消息 → appmsg 结构化内容（spec §4.5 的 `get_message_parts`）。
 
     `keys` 只答**属于该会话**的：`msg_key = account|chat_md5|shard|local_id|create_time`，第二段对不上
@@ -469,6 +495,7 @@ def message_parts(contact: str, *, keys: Sequence[str],
     chat_id = ctx.resolve(contact)
     if isinstance(chat_id, NeedConfirm):
         return chat_id
+    retrieval.ensure_allowed(chat_id, deny)      # 读取范围（MCP 入口传入，CLI 不传）
     prefix = messages.msg_key_prefix(ctx.account, messages.chat_md5(chat_id))
     # 去重保序在**这里**做（与 `message_media` 的 `list(dict.fromkeys(keys))` 同位置）：
     # 入口只管把逗号串拆成 list，归属过滤与去重是入口策略。

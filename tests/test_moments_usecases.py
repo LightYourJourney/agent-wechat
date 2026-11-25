@@ -473,7 +473,7 @@ def _url_opener(body_for):
         # 症状是 `media_downloaded == 0` 且 `media_failed == 2`（已实测踩过）。
         def __init__(self, body: bytes):
             self._body, self.headers = body, {}
-        def read(self) -> bytes:
+        def read(self, amt=None) -> bytes:       # fetch 按上限读：`read(MAX_FETCH_BYTES + 1)`
             return self._body
         def __enter__(self):
             return self

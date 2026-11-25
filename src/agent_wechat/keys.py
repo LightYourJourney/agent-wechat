@@ -45,8 +45,9 @@ def _load_cache() -> dict:
         raw = json.loads(CACHE_FILE.read_text())
     except FileNotFoundError:
         return {"accounts": {}}          # 真的没有：首次使用
-    except json.JSONDecodeError:
-        return {"accounts": {}}          # 缓存损坏：与「没有」等价，重新 bootstrap 即可
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        # 缓存损坏（含不是合法 UTF-8：read_text 在 json 之前就抛）：与「没有」等价，重新 bootstrap 即可
+        return {"accounts": {}}
     except OSError as exc:
         # 读不到 ≠ 不存在。当成「没有缓存」会让 status 印「缓存 ✗」，而真相是根本读不了
         # ——用户会照着去重新 bootstrap（那也会失败）。core 层只抛项目异常（errors.py 开篇）。

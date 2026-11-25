@@ -12,7 +12,8 @@ def run_export(acct: str, chat_id: str | None = None, full: bool = False,
                on_reader: Callable[[reader.MessageReader], None] | None = None,
                on_skipped: Callable[[int], None] | None = None,
                _reader_factory: Callable[[str], reader.MessageReader] | None = None,
-               audit_rows: int | None = None) -> int:
+               audit_rows: int | None = None,
+               on_partial: Callable[[int, int], None] | None = None) -> int:
     """全量/增量导出。恒定内存：reader 流式产批 → store 批量幂等 upsert。
 
     **返回值 = 未被排除的行数**（= 实际入库行数，spec §5.4 的计数契约）。加了排除清单之后
@@ -32,6 +33,12 @@ def run_export(acct: str, chat_id: str | None = None, full: bool = False,
     量词只能是「行」：`media rebuild-refs` / `appmsg rebuild` 那两个同款回调一条 `messages`
     都不写，说「条」会被读成消息条数（`cli._note_skipped` 记着同一笔账）。
 
+    `on_partial`：本次**失败**时回调一次 `(已入库行数, 已跳过行数)`，随后异常照常抛出；成功时
+    不回调（两个数在返回值与 `on_skipped` 里）。失败时拿不到返回值、`on_skipped` 也不回调，
+    而失败前那些批次已经连同水位线提交（`upsert_batch` 逐批提交）——重试不会再读到它们，
+    不报出来就永远数不到（`sync` 的源侧重试靠它累加）。`full` 例外：重跑会清水位线重扫整段，
+    失败那次的计数被重跑覆盖，由调用方丢弃。
+
     `_reader_factory`：测试用的桩入口（省略即 `reader.MessageReader`）。
 
     `audit_rows`（Phase 02）：每个 `(分片, 会话)` 本轮**回看**的行数上限，默认
@@ -43,63 +50,69 @@ def run_export(acct: str, chat_id: str | None = None, full: bool = False,
     r = (_reader_factory or reader.MessageReader)(acct)
     total = 0
     skipped = 0
-    with store.open() as con:
-        if full and not chat_id:
-            # 只重置本账号：run_export 只重导 acct，连带清掉别的账号的水位线会让
-            # 它们白跑一次全量（upsert 幂等，不丢数据，但纯属浪费）
-            store.clear_export_watermarks(con, acct)
-            # 全量重扫 = 整段历史都看过了，回看游标也一起归零（否则会把同一段再走一遍）
-            store.clear_audit_cursors(con, acct)
-            try:
-                con.commit()
-            except (sqlite3.Error, OSError) as exc:
-                # A 矩阵 43：全量导出的水位线复位提交此前裸穿（ENOSPC/EACCES/EIO/
-                # locked/corrupt）。出口共享构造器，**调用点留在原地**——冻结表按调用点记账。
-                raise store.index_unavailable(exc) from exc
-        resume = {} if full else None
-        anchors: dict[tuple[str, str], int | None] = {}
-        if resume is None:
-            resume = store.load_export_watermarks(con, acct)
-            anchors = store.load_export_anchors(con, acct)
-        # `full` = 前向扫描已经读完整段历史，回看是纯重复（而游标刚被清零，不回看的话
-        # 下一轮会从 0 重新走）。全量时不回看，也别读游标。
-        audit_window = 0 if full else (store.AUDIT_ROWS if audit_rows is None else audit_rows)
-        audit_cursors = store.load_audit_cursors(con, acct) if audit_window > 0 else {}
-        def _audit_sink(rows: list, refs: list) -> None:
-            """回看批次：写法与前向一致，但**不计入** `total`（见 run_export 的契约）。"""
-            if refs:
-                store.upsert_media_refs(con, refs)
-            store.upsert_batch(con, rows)
-
-        # 消息表为空（首次导出）时走 FTS 批量路径：拆触发器灌库、退出时一次 rebuild（成败都收口；
-        # 进程被杀则由下次 `store.connect()` 按中断标记补做）。
-        with store.fts_bulk(con, enabled=chat_id is None):
-            for rows, refs in r.iter_all(chat_id=chat_id, resume=resume,
-                                         audit_cursors=audit_cursors,
-                                         audit_rows=audit_window,
-                                         audit_sink=_audit_sink if audit_window > 0 else None,
-                                         anchors=anchors,
-                                         on_rebuilt=lambda shard, md5: store.reset_export_watermark(
-                                             con, acct, shard, md5)):
+    try:
+        with store.open() as con:
+            if full and not chat_id:
+                # 只重置本账号：run_export 只重导 acct，连带清掉别的账号的水位线会让
+                # 它们白跑一次全量（upsert 幂等，不丢数据，但纯属浪费）
+                store.clear_export_watermarks(con, acct)
+                # 全量重扫 = 整段历史都看过了，回看游标也一起归零（否则会把同一段再走一遍）
+                store.clear_audit_cursors(con, acct)
+                try:
+                    con.commit()
+                except (sqlite3.Error, OSError) as exc:
+                    # A 矩阵 43：全量导出的水位线复位提交此前裸穿（ENOSPC/EACCES/EIO/
+                    # locked/corrupt）。出口共享构造器，**调用点留在原地**——冻结表按调用点记账。
+                    raise store.index_unavailable(exc) from exc
+            resume = {} if full else None
+            anchors: dict[tuple[str, str], int | None] = {}
+            if resume is None:
+                resume = store.load_export_watermarks(con, acct)
+                anchors = store.load_export_anchors(con, acct)
+            # `full` = 前向扫描已经读完整段历史，回看是纯重复（而游标刚被清零，不回看的话
+            # 下一轮会从 0 重新走）。全量时不回看，也别读游标。
+            audit_window = 0 if full else (store.AUDIT_ROWS if audit_rows is None else audit_rows)
+            audit_cursors = store.load_audit_cursors(con, acct) if audit_window > 0 else {}
+            def _audit_sink(rows: list, refs: list) -> None:
+                """回看批次：写法与前向一致，但**不计入** `total`（见 run_export 的契约）。"""
                 if refs:
-                    # 先写 refs，再 upsert_batch。refs 自己 BEGIN IMMEDIATE（判据的读也因此落在
-                    # 写事务里，Task 4 fix1）；upsert_batch 复用同一事务并在尾部 commit——
-                    # 两者同事务（spec §4.3），本批的读与写之间没有窗口。
-                    skipped += store.upsert_media_refs(con, refs)
-                dropped = store.upsert_batch(con, rows)
-                skipped += dropped
-                total += len(rows) - dropped
-                if progress and total % 20_000 < store.BATCH:
-                    progress(total)
+                    store.upsert_media_refs(con, refs)
+                store.upsert_batch(con, rows)
 
-        # ---- 历史回看（Phase 02）----
-        # 回看在同一次分片解密里完成（`iter_all` 的 audit_* 参数）：另开一趟会多付一次
-        # 分片快照 + 全表扫描（CLI 回退后端下还是一次整库导出）。游标**最后统一落盘**——
-        # 它必须晚于数据提交；中途失败就整批不推进，下一轮重看同一段（upsert 幂等）。
-        if audit_window > 0:
-            # 显式取属性：fake reader 忘了 `audit_marks` 时要响亮地红，而不是静默地
-            # 永远不推进游标（那会让同一段历史被无限重读）。
-            store.save_audit_cursors(con, acct, r.audit_marks)
+            # 消息表为空（首次导出）时走 FTS 批量路径：拆触发器灌库、退出时一次 rebuild（成败都收口；
+            # 进程被杀则由下次 `store.connect()` 按中断标记补做）。
+            with store.fts_bulk(con, enabled=chat_id is None):
+                for rows, refs in r.iter_all(chat_id=chat_id, resume=resume,
+                                             audit_cursors=audit_cursors,
+                                             audit_rows=audit_window,
+                                             audit_sink=_audit_sink if audit_window > 0 else None,
+                                             anchors=anchors,
+                                             on_rebuilt=lambda shard, md5: store.reset_export_watermark(
+                                                 con, acct, shard, md5)):
+                    if refs:
+                        # 先写 refs，再 upsert_batch。refs 自己 BEGIN IMMEDIATE（判据的读也因此落在
+                        # 写事务里，Task 4 fix1）；upsert_batch 复用同一事务并在尾部 commit——
+                        # 两者同事务（spec §4.3），本批的读与写之间没有窗口。
+                        skipped += store.upsert_media_refs(con, refs)
+                    dropped = store.upsert_batch(con, rows)
+                    skipped += dropped
+                    total += len(rows) - dropped
+                    if progress and total % 20_000 < store.BATCH:
+                        progress(total)
+
+            # ---- 历史回看（Phase 02）----
+            # 回看在同一次分片解密里完成（`iter_all` 的 audit_* 参数）：另开一趟会多付一次
+            # 分片快照 + 全表扫描（CLI 回退后端下还是一次整库导出）。游标**最后统一落盘**——
+            # 它必须晚于数据提交；中途失败就整批不推进，下一轮重看同一段（upsert 幂等）。
+            if audit_window > 0:
+                # 显式取属性：fake reader 忘了 `audit_marks` 时要响亮地红，而不是静默地
+                # 永远不推进游标（那会让同一段历史被无限重读）。
+                store.save_audit_cursors(con, acct, r.audit_marks)
+    except Exception:
+        # 失败前已提交的计数报给调用方（`on_partial`），异常照常抛出。
+        if on_partial is not None:
+            on_partial(total, skipped)
+        raise
     if on_skipped is not None and skipped:
         on_skipped(skipped)
     if on_reader is not None:

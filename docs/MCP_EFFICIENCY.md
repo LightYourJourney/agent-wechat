@@ -149,7 +149,7 @@ get_recent_messages` 变成 `get_recent_messages` 一步；「找提到报销的
 
 `test_descriptions_are_dedented_and_within_budget` 把「描述 + inputSchema」的总字符数限定在 10,500
 以内（现在约 9.6k）。给工具补内容是允许的，但请有意识地调高这个预算，并在本文记一笔，
-不要悄悄把每个会话的固定开销涨回去。
+不要悄悄把每个会话的固定开销涨回去。第四轮与全量审查修复之后实测为 9,864（2026-11-26）。
 
 ## 7. 第二轮：短 msg_key、可读时间、翻页与按需加载
 

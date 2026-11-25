@@ -54,7 +54,7 @@ agent-wechat search "周末爬山"                  # 全库检索
 agent-wechat search "合同" --contact wxid_abc123def456   # 限定会话
 ```
 
-返回（`snippet` 中 `【】` 为命中高亮）：
+返回（CLI 只打印时间、会话、发送者与正文前 120 字；`【】` 命中高亮只在 MCP `search_history` 命中的 `snip` 里）：
 
 ```
 mode=fts total=2
@@ -284,7 +284,7 @@ Agent 侧对应 MCP 工具 `export_moments`——参数与返回结构见 TOOLS.
 agent-wechat status                 # 登录态/账号/密钥缓存一览
 agent-wechat status --verify-keys   # + 对每个库做 HMAC 校验（较慢）
 agent-wechat contacts [词]          # 联系人模糊搜索（备注/昵称/微信号）
-agent-wechat inspect session/session.db    # 解密并 dump 库结构（排障/适配用）
+agent-wechat inspect session/session.db    # 解密并 dump 库结构（排障/适配用；--sample N 每表样本行数，≥0）
 agent-wechat decrypt message/message_0.db --out m0.db   # 导出明文库（调试）
 # ⚠️ --out 产物是持久明文库（~/.agent-wechat/m0.db），用后手动删除
 ```
@@ -360,14 +360,16 @@ EA-037 代码收口，见下）：**
 - 与其它命令一样，`--chat` 的会话消歧（以及标题里的人员名）要读 `contact.db`，因此**需要
   passphrase 缓存**（先 bootstrap）；缺缓存时整条命令失败并指向 bootstrap。
 - CLI 印一行 `appmsg=12 image=3 …`（`kind=条数`）与每条**真正落盘**的产物路径——写失败的产物不进列表，
-  所以「少了一行」本身就是信号。
+  另在 stderr 印「没写成：index.html …」并以退出码 1 结束。写失败时盘上上一次导出的同名产物**原样保留**
+  （原子写，不留半截，也不删旧文件）。
+- 导出过贴纸（`media export --kinds …,sticker --with-cdn`）时，产物里贴纸按图片显示。
 - `--limit` 触顶（`truncated`）与 appmsg 的 `unparsed`（解不开）/ `rejected`（载荷含 DTD /
   实体声明，我们主动拒绝）**各印两处**：stderr 一次、产物顶部一次——产物会离开这次会话，
   只回终端的话读产物的人看不到。
 - 三条降级说明走 stderr（`⚠️` 前缀），并同时印在产物顶部（`降级：…`）：`msg_parts` 未回填
   （appmsg 只显示 `[appmsg: 标题]`，跑 `appmsg rebuild`）、媒体状态覆盖不足（最多答 500 条，
   **没覆盖到的消息在产物里不会出现媒体块**）、显示名降级（标题与发送者回落成原始标识）。
-- 索引页只列**磁盘上真有产物**的会话；索引里查不到的会话（导出之后重建过索引 / `purge --index`）
+- 索引页只列**磁盘上真有产物**、且目录名是十六进制会话 md5 的会话（别的目录不是本工具写的，跳过），页面带 CSP；索引里查不到的会话（导出之后重建过索引 / `purge --index`）
   印「条数未知（索引里没有这个会话）」——**不是「0 条」**；一个产物都没有时不写空壳页面，
   只印一句「没有已导出的会话；先运行 `chat export`」、退出码 0。
 
@@ -430,6 +432,7 @@ agent-wechat media export --chat 小李
 # 图片   ok=12  skipped=0  failed=1  missing=0
 # 语音   ok=8  skipped=0  failed=0  raw_only=2  decode_failed=0
 # 视频   ok=3  skipped=0  thumb=1  missing=0
+# 贴纸   ok=0  skipped=0  failed=0  missing=0
 # 输出目录: /Users/you/.agent-wechat/media
 
 # 只导图片、限定月份、限制数量
@@ -457,7 +460,7 @@ agent-wechat media rebuild-refs
   `decode_failed` = pilk 在、但解码失败而存成 `.slk` 的数量（下次导出会重试转 WAV）；
   `thumb` = 视频本体不在、回退缩略图的数量；`skipped` = 本次因产物**已存在**、或**本轮内
   重复**（同一个贴纸 md5 只取一次件）而跳过的**文件**数（**按文件**计，不是消息条数）；`remaining` = 撞上 `--limit` 时还有多少个**未导出**
-  （CLI 印的是三类之和）。`image.missing` 恒为 0（图片按目录枚举，不按消息清点）
+  （CLI 印的是四类之和）。`image.missing` 恒为 0（图片按目录枚举，不按消息清点）
 - **`--limit` 只数本次新增**（已存在的产物不计），而且**只封顶写入、不封顶扫描**：撞顶后仍会
   扫完所有剩余条目（图片与视频是逐个 `stat` 产物路径；语音还要把每条 `voice_data` 从库里读出来）
   才返回——大语料上表现为「还在跑」，不是卡住。触及 `--limit` 时会多印
@@ -471,7 +474,7 @@ agent-wechat media rebuild-refs
   命令一样，`media export` 需要 passphrase 缓存——会话消歧要读 `contact.db`。缺缓存时
   命令**整体失败**（报错指向 bootstrap），不存在「只退图片、语音照常」的部分可用形态。
   缓存齐备后各能力才独立降级：语音要 pilk（缺失则出原始 `.slk`）、wxgf 图要 ffmpeg
-  （缺失则存 `.wxgf` 原容器）。缺哪项只退哪项，降级说明走 stderr
+  （缺失则存 `.wxgf` 原容器；装上 ffmpeg 后重跑会把已有的 `.wxgf` 重新转成 JPEG）。缺哪项只退哪项，降级说明走 stderr
 - **贴纸要两个开关**：`sticker` 是合法值，但**默认不导**。要
   `--kinds image,voice,video,sticker --with-cdn`（两个都显式）才从腾讯 CDN 取件。
   **本机那份取不出来**——微信把它存成加密格式、解密方案未破（两轮 spike），
@@ -523,18 +526,17 @@ agent-wechat media locate --chat 小李
 # 提示：gone 表示消息引用了媒体但本机找不到——微信只为近期（尚未导出）的消息保留本体，所以导出更多历史比「修复」有用。
 # 提示：贴纸的 gone 是「取不出来」而不是「本机找不到」——微信把它存成加密格式，解密方案未破，导出更多历史也拿不出来。
 
-# 只看指定几条：--keys 是 msg_key 的逗号分隔列表
-# （msg_key 只在 MCP 工具的返回信封里给出，见下）
-agent-wechat media locate --chat 小李 --keys 'wxid_abc123def456|9f2c1a…|message_0.db|81234'
+# 只看指定几条：--keys 是 msg_key 的逗号分隔列表（短键或完整键都收，从哪来见下）
+agent-wechat media locate --chat 小李 --keys '9f2c1a0b:81234:1789046102,9f2c1a0b:81240:1789046300'
 
 # 限定月份，或调高条数上限（1-500，默认 200）
 agent-wechat media locate --chat 小李 --months 2026-08,2026-09 --limit 500
 ```
 
-> **`--keys` 的 msg_key 从哪来**：只来自 MCP 工具的返回信封——`get_recent_messages` /
-> `search_history` / `semantic_search` 每条消息都带 `msg_key`。**CLI 自己的 `recent` /
-> `search` / `semantic` 不打印它**，所以从命令行拿不到 key；只用 `--chat` 时不需要 key
-> （它答该会话全部媒体类型的消息）。
+> **`--keys` 的 msg_key 从哪来**：MCP 工具的返回信封（`get_recent_messages` / `search_history` /
+> `semantic_search` / `search_messages` 每条都带短键 `<会话前缀8位hex>:<local_id>:<create_time>`），
+> 或 CLI `retrieve` / `context` 的 JSON 输出（完整键 `account|chat_md5|shard|local_id|create_time`）。
+> CLI 的 `recent` / `search` / `semantic` 不打印它；只用 `--chat` 时不需要 key（它答该会话全部媒体类型的消息）。
 
 **四态**（判定顺序严格按此序）：
 
@@ -601,7 +603,8 @@ agent-wechat purge --all --yes        # 整个 ~/.agent-wechat（含 models/、t
 - 有长任务正在运行（**仅 `purge --chat`**）——向量构建 / 导出是「先读消息、再写派生行」的
   两段式，删除落在那两段之间时，核查看不到还没写回的行、报 ✅，随后构建把 `vec_messages`
   写回来（`preview` 列就是被删正文的纯文本），孤儿向量永久留存。判据是任务注册表里
-  `status == "running"` 的那批。**不要用 `agent-wechat status` 判断**：那条命令印的是登录态、
+  `status == "running"` 的那批；同步执行的媒体导出（`media export` / `export_chat_media`）与会话导出
+  （`chat export` / `export_chat`）在写盘期间也登记一条，同样会挡住 `purge --chat`。**不要用 `agent-wechat status` 判断**：那条命令印的是登录态、
   账号与密钥缓存，根本不列任务；只回最近 10 条的是 MCP 的 `get_task_status`；
 - 待删路径是符号链接。**文件型产物（`--keys`/`--index` 的目标）本身是链接时无条件拒绝**
   ——unlink 只删链接、目标必留存，核查会报「已清空」；**目录型产物（`--media`/`--moments`/
@@ -623,8 +626,9 @@ agent-wechat purge --all --yes        # 整个 ~/.agent-wechat（含 models/、t
   APFS 的写时复制克隆（`cp -c`）连 `nlink` 都不变，检测不到——那半靠人（见 SECURITY.md §4）。
 - **请求了不存在的范围**（例如开关名与实现漂移）——响亮的拒绝，绝不静默空操作：一门用来
   销毁数据的命令报「已删除 0 项」并退 0 是最坏的一种假象；
-- `AGENT_WECHAT_HOME` 指向不像数据目录的位置（空值会被解析成当前目录，或指向 `/`、`~` 及其祖先）
-  ——dry-run 与 `--yes` 两处都拦，绝不在这种路径上执行销毁。
+- `AGENT_WECHAT_HOME` 指向不像数据目录的位置（设成相对路径——它按当前工作目录解析——或指向 `/`、`~`
+  及其祖先）——dry-run 与 `--yes` 两处都拦，绝不在这种路径上执行销毁。设了但为空时回落默认目录
+  `~/.agent-wechat`（EA-003），不在此列。
 
 #### 按会话销毁（`purge --chat`）
 
@@ -640,13 +644,18 @@ agent-wechat purge --excluded              # 列出排除清单的规模（按�
 ```
 
 - 删的是**本工具的副本**——该会话在 `messages` / 向量 / `msg_parts` / `msg_extras` /
-  `media_refs` / `display_names` 里的行，以及 `media/<会话md5>/` 整份导出物；**不是微信里的记录**
+  `media_refs` / `display_names` 里的行、`media/<会话md5>/` 整份导出物，以及任务注册表 `tasks.json` 里指名该
+  会话的**已结束**任务记录（会话导出把会话 id 写进记录，最长留 30 天；核查会把还在的记录列为残留）；**不是微信里的记录**
   （微信容器恒只读）。账号按**每一张**存副本的表找：回填命令（`appmsg rebuild` /
   `media rebuild-refs` / 名册刷新）扫的是整个微信库，没导出过消息的账号也可能有这个会话的
   `msg_parts` / `media_refs` / 显示名——它们一并删掉，其中按 `msg_key` 存的那几张也进排除清单，
   回填不会写回来。
 - 删除期间正在跑的 `media export` 会在写完最后一个文件后再判一次墓碑：这个会话被销毁了，
   就把它在默认导出根下的目录删掉并报错退出（自定义 `--out` 根只报错、不删）。
+- **索引库不在、导出物还在时 `--yes` 什么都不删、退出码 1**：删除路线要开索引，会把刚删掉的 `index.db`
+  建回来，所以这时明确失败（导出物在不在判不出来时同样如此；默认导出根的总目录页 `media/index.html` 还列着
+  该会话也算导出物还在），提示先重跑 `export` 把索引建回来再 `purge --chat`，
+  或手工删除那个目录。预览照常印。
 - **朋友圈不在范围内**（spec §3.1 / §9）：`moments/` 是一份 HTML 装所有人，不按会话分目录，
   那个人的动态与互动**仍可能留在其中**——计划表会把这句原样印出来。
 - **只清当时已有的**（spec §4.1②）：墓碑逐条记在那批 `msg_key` 上，删除之后新来的消息
@@ -745,8 +754,9 @@ agent-wechat context "<msg_key>" --contact 张三 --before 2 --after 2
 - `retrieve` 只给**片段**（≤200 字符、已遮盖账号/长数字）与 `msg_key`；要全文用 `context`。
 - 没有向量索引时 `hybrid` 自动退化成关键词（结果里 `degraded` 会说明）。
 - 想排除某些会话：`AGENT_WECHAT_DENY=wxid_xxx,123@chatroom`（逗号分隔；按会话的
-  `chat_md5` 生效，退化 `md5:<hex>` 形态一并排除）——
-  **只作用于 `retrieve` / `context`**，不改变既有 `search_history` 等工具的返回。
+  `chat_md5` 生效，退化 `md5:<hex>` 形态一并排除）。CLI 上**只作用于 `retrieve` / `context`**；
+  MCP 侧约束所有读会话内容的工具（点名读取报错、检索里排除，见 TOOLS.md「通用约定」），
+  `export_full_history` 不受它约束。
 - ⚠️ 检索结果会进入 Agent 会话，也就可能进入云端模型上下文；消息正文是不可信数据。
 
 
@@ -769,6 +779,7 @@ agent-wechat memory confirm <claim_id>
   程序不下载、不联网。
 - `derived delete` 留墓碑，重扫不会复活；`purge --chat` 会连同派生与证据一起销毁。
 - `memory add` 永远是**候选**；只有 `memory confirm` 才是用户确认。
+- `memory delete <claim_id>` 是硬删除；id 不存在时报「找不到主张」、退出码 1（不会静默回成功）。
 
 
 ## 13. 本地工作台（Phase 07）
@@ -777,6 +788,11 @@ agent-wechat memory confirm <claim_id>
 agent-wechat ui --port 8765
 ```
 
-浏览器打开 `http://127.0.0.1:8765/`。可选账号/会话、日期范围、keyword/semantic/hybrid
+启动时终端印出带访问令牌的链接 `http://127.0.0.1:8765/?token=…`，用它打开（`--open` 打开的也是这条）。
+首次打开时服务端把令牌写进 HttpOnly、SameSite=Strict 的 cookie（名 `aw_token_<端口>`，同时开两个工作台
+互不覆盖）并跳转到不带令牌的 `/`；没有这个 cookie 时首页、静态资源与接口一律 403。令牌每次启动重新生成、
+只出现在终端里，链接别贴给别人。
+
+可选账号/会话、日期范围、keyword/semantic/hybrid
 检索；点结果看证据、时间线与媒体状态。只有「派生文本删除」是写操作（需要页面令牌）。
 服务默认关闭、只监听本机、无访问日志；不提供导出/purge/bootstrap 等危险操作。

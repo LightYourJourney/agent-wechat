@@ -111,7 +111,8 @@ def ensure_home_dirs() -> None:
             hint=f"{exc}；请检查 AGENT_WECHAT_HOME 指向的位置是否可用") from exc
     if not _swept_stale:
         # 挂在「第一次解密之前」这条路径上（两个后端都经 `_keyed_snapshot` 先调本函数）：
-        # 清扫必须发生在**新建**临时目录之前，否则刚建的目录会被自己扫掉。
+        # 本进程建的目录带的是活 pid，清扫永远不碰它；放在这里是为了让崩溃残留的明文在
+        # 本进程开始解密之前就被收掉，而不必等哪条命令专门去扫。
         # flag 置在**清扫之后**（复审 N1）：清扫万一将来开始抛，本进程下次还会再试，
         # 而不是永久放弃清扫。
         sweep_stale_tempdirs()
@@ -243,6 +244,11 @@ def _keyed_snapshot(db: pathlib.Path, passphrase: bytes
             pass                       # 临时目录清不掉不该盖过真正的失败，也不该自己冒出去
 
 
+def _sql_str(p: pathlib.Path) -> str:
+    """路径放进 SQL 单引号字面量：`'` 双写。"""
+    return str(p).replace("'", "''")
+
+
 _KEY_MISMATCH_HINT = ("最常见的成因是密钥与库不匹配（微信重新登录过）：跑 "
                       "`agent-wechat status --verify-keys` 核对，不通过就重新 `agent-wechat bootstrap`")
 
@@ -257,7 +263,9 @@ def decrypted(db: pathlib.Path, passphrase: bytes) -> Iterator[pathlib.Path]:
         out = td / "plain.db"
         cmds = [
             f'PRAGMA key = "x\'{enc_key.hex()}\'";',
-            f"ATTACH DATABASE '{out}' AS plain KEY '';",   # 必须绝对路径：ATTACH 相对路径按进程 CWD 解析
+            # 必须绝对路径：ATTACH 相对路径按进程 CWD 解析。单引号要双写：AGENT_WECHAT_HOME
+            # 带 `'` 时不转义就是语法错误，还会被下面报成「密钥不匹配」。
+            f"ATTACH DATABASE '{_sql_str(out)}' AS plain KEY '';",
             "SELECT sqlcipher_export('plain');",
             "DETACH DATABASE plain;",
         ]
@@ -297,7 +305,7 @@ def decrypted(db: pathlib.Path, passphrase: bytes) -> Iterator[pathlib.Path]:
 def open_plain(plain: pathlib.Path) -> sqlite3.Connection:
     """打开明文副本（只读模式）。"""
     try:
-        return sqlite3.connect(f"file:{plain}?mode=ro", uri=True)
+        return sqlite3.connect(paths.sqlite_ro_uri(plain), uri=True)
     except (sqlite3.Error, OSError) as exc:
         # A 矩阵 145：这处此前裸穿 OperationalError/DatabaseError/OSError。
         raise DecryptError(
@@ -348,8 +356,9 @@ def _translate(exc: BaseException) -> BaseException:
     `sqlcipher3.dbapi2.*Error` **不是** `sqlite3.Error` 的子类：不翻译的话，仓里所有
     `except sqlite3.Error`（读微信库的路径上就有十几处）会静默失效。规则：
     - 恰好是 `DatabaseError`（SQLITE_CORRUPT / NOTADB：页 HMAC 校验失败、快照撕裂）→
-      `DecryptError`。明文时代这种库在 `sqlcipher_export` 那一步就以 DecryptError 失败了，
-      进程内是**按页惰性**解密，同一个失败推迟到了查询中途——异常类型保持原来的口径。
+      `errors.SourceUnreadable`（DecryptError 的子类）。明文时代这种库在 `sqlcipher_export`
+      那一步就以 DecryptError 失败了，进程内是**按页惰性**解密，同一个失败推迟到了查询中途——
+      仍接得住 `except DecryptError`，同时让调用方能把它当作可重试的源侧失败。
     - 其余子类（OperationalError 之类）→ **同名**的 sqlite3 异常，与查明文副本时逐类一致。
     """
     if type(exc) is sqlcipher3.DatabaseError:
@@ -436,7 +445,7 @@ def _connect_encrypted(snap: pathlib.Path, enc_key: bytes) -> _CipherConnection:
     快照缺 -shm 时也能读（用例覆盖）；任何写语句都被拒成 `sqlite3.OperationalError`。
     """
     try:
-        raw = sqlcipher3.connect(f"file:{snap}?mode=ro", uri=True)
+        raw = sqlcipher3.connect(paths.sqlite_ro_uri(snap), uri=True)
     except sqlcipher3.Error as exc:
         raise DecryptError(f"{snap.name}: 快照打不开（{type(exc).__name__}）",
                            hint="确认 AGENT_WECHAT_HOME 下的 tmp/ 可读写后重试") from None
@@ -446,6 +455,13 @@ def _connect_encrypted(snap: pathlib.Path, enc_key: bytes) -> _CipherConnection:
         raw.execute("SELECT count(*) FROM sqlite_master").fetchone()
     except sqlcipher3.Error as exc:
         raw.close()
+        # sqlite_master 可能跨多页：第 1 页之后的页损坏 / 快照撕裂也会在这里失败。第 1 页的
+        # HMAC 用这把钥匙验得过，钥匙就是对的——报源不可读，不许把用户送去重新引导。
+        page1 = keys.read_page1(snap)
+        if page1 is not None and len(page1) >= keys.PAGE_SZ and keys.page1_hmac_ok(enc_key, page1):
+            raise errors.SourceUnreadable(
+                f"{snap.name}: 库结构页读不出来（{type(exc).__name__}；密钥校验通过）",
+                hint="多半是快照那一刻微信正在写入：重试一次即可；反复出现说明该库已损坏") from None
         # `from None`：异常链里不留 sqlcipher 的原文——PRAGMA key 那条语句带着密钥。
         raise DecryptError(f"{snap.name}: 解密失败（{type(exc).__name__}）",
                            hint=_KEY_MISMATCH_HINT) from None
@@ -457,21 +473,47 @@ def _connect_encrypted(snap: pathlib.Path, enc_key: bytes) -> _CipherConnection:
 # 按线程计、同一线程内的嵌套打开不再占名额——否则 4 个线程各持一个、都在等第二个就死锁。
 OPEN_DB_CONCURRENCY = 4
 _open_db_slots = threading.BoundedSemaphore(OPEN_DB_CONCURRENCY)
-_open_db_depth = threading.local()
+
+
+class _SlotDepth(threading.local):
+    """每线程一个计数对象（`box[0]`）。open_db 生成器可能在**别的线程**被收尾（GC 终结、
+    跨线程 close）：退出时必须操作进入时取到的**那个对象**，而不是收尾线程自己的那份。"""
+
+    def __init__(self) -> None:
+        self.box = [0]
+
+    @property
+    def n(self) -> int:
+        return self.box[0]
+
+
+_open_db_depth = _SlotDepth()
+_open_db_depth_lock = threading.Lock()     # 跨线程收尾时两个线程会同时改同一个计数
 
 
 @contextlib.contextmanager
 def _open_db_slot() -> Iterator[None]:
-    if getattr(_open_db_depth, "n", 0) == 0:
-        _open_db_slots.acquire()
-    _open_db_depth.n = getattr(_open_db_depth, "n", 0) + 1
+    box = _open_db_depth.box               # 局部持有：退出时不再查线程局部
+    with _open_db_depth_lock:
+        took = box[0] == 0                 # 同一线程内的嵌套打开不再占名额
+        box[0] += 1
+    if took:
+        try:
+            _open_db_slots.acquire()
+        except BaseException:
+            with _open_db_depth_lock:
+                box[0] -= 1
+            raise
     try:
         yield
     finally:
         # 递减而不是恢复进入时的值：同一线程里两个 open_db 生成器不按 LIFO 关闭时，
         # 「恢复」会让计数卡在 ≥1，这个线程从此不再占名额，并发上限对它失效。
-        _open_db_depth.n -= 1
-        if _open_db_depth.n == 0:
+        # 名额在 1→0 时释放：它与占名额的 0→1 严格成对（计数为 0 时没有别的持有者能改它）。
+        with _open_db_depth_lock:
+            box[0] -= 1
+            last = box[0] == 0
+        if last:
             _open_db_slots.release()
 
 
