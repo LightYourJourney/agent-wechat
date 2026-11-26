@@ -181,6 +181,7 @@
     "skip_vector": false
   },
   "ui": {
+    "host": "127.0.0.1",
     "open": false,
     "port": 8765
   },

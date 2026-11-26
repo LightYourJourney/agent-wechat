@@ -394,7 +394,7 @@ def cmd_memory(args: argparse.Namespace) -> int:
 def cmd_ui(args: argparse.Namespace) -> int:
     from . import webui
     try:
-        webui.serve(args.port, open_browser=args.open)
+        webui.serve(args.port, host=args.host, open_browser=args.open)
     except errors.ScopeDenied as exc:
         print(str(exc), file=sys.stderr)
         return 1
@@ -1361,6 +1361,7 @@ def main(argv: list[str] | None = None) -> None:
 
     sp = sub.add_parser("ui", help="本地只读工作台（仅 loopback，默认关闭）")
     sp.add_argument("--port", type=int, default=8765)
+    sp.add_argument("--host", default="127.0.0.1", help="监听地址：127.0.0.1 或 ::1（只收 loopback）")
     sp.add_argument("--open", action="store_true", help="启动后打开浏览器")
     sp.set_defaults(fn=cmd_ui)
 

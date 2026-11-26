@@ -247,7 +247,8 @@ def test_exported_sticker_renders_as_an_image():
 _BLOCK_PARAMS = ("sessionid", "sign", "ranksessionid", "signature", "team_sign", "pindansig",
                  "sig", "pass_ticket", "signatures", "password", "Sign", "client_secret")
 _BLOCK_PATHS = ("ecsgift.appmsg_sign", "finderLive.enterSessionId", "x.pass_ticket",
-                "x.signature", "x.password", "x.app_secret")
+                "x.signature", "x.password", "x.app_secret",
+                "finderLive.byPassInfoString")   # 视频号直播的进场凭据：名字以 String 结尾，后缀规则看不见
 _KEEP_NAMES = ("photoaccountnamecard.sign", "x.auth_icon", "x.auth_icon_url", "x.auth_job",
                "x.authIconType", "x.authIconUrl", "x.authorUsername",
                "designershared.designeruin", "designershared.designername",

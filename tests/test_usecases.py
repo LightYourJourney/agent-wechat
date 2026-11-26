@@ -220,7 +220,10 @@ def test_recent_same_contact_same_limit_both_entrances(stub, capsys):
     capsys.readouterr()
     assert (mcp_res["chat_id"], cli_code, stub["contacts"]) == \
         ("wxid_target", 0, ["张三", "张三"])
-    assert stub["limits"] == [500, 500]          # 同一上界：MCP 与 CLI 都不超过 500
+    # 同一上界：CLI 取 500；MCP 多取一条只为看出页尾那一秒是否被 limit 切开（整秒翻页），
+    # 返回给模型的仍然不超过 limit。
+    assert stub["limits"] == [501, 500]
+    assert len(mcp_res["messages"]) <= 500
     assert stub["readers"] == ["acct", "acct"]   # 各自一次，不再满文件重复构造
 
 

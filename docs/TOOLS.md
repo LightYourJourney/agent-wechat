@@ -163,10 +163,9 @@ appmsg（49）就是 `type49`，要认出 appmsg 看 `content` 的 `[appmsg: 标
 `truncated` 只表示「因体积预算丢了消息」；没超出时为 `false`，`limit` 内的消息都在。
 
 **翻页**：可能还有更早的消息时返回 `next_before_ts`——被预算丢了消息，或条数到了 `limit`（这时更早的消息
-未必存在，下一页可能为空）。拿它当 `before_ts` 再调一次即可续读；同一秒的消息可能与本页重叠一两条，按
-`msg_key` 去重。没有 `next_before_ts` 说明已经到头。**同一秒的消息整块给出**：一页的消息全落在同一秒、而这一秒
-还有没给出的，就把这一秒全部给出（可能超过 `limit`，也可能超过体积预算），`next_before_ts` 取该秒——
-`before_ts` 只到秒，否则下一页会原地打转或跳过这一秒的其余消息。
+未必存在，下一页可能为空）。拿它当 `before_ts` 再调一次即可续读。**每页都以整秒为界**：页尾那一秒哪怕
+只差一条也整块给出（可能超过 `limit`，也可能超过体积预算），所以 `next_before_ts` 一定是本页最早一条的秒，
+页与页**既不重复也不漏**（不用再按 `msg_key` 去重）。没有 `next_before_ts` 说明已经到头。
 
 **读取范围**：会话在 `AGENT_WECHAT_DENY` 里时返回 error（见「通用约定」）。
 
@@ -304,11 +303,9 @@ appmsg（49）就是 `type49`，要认出 appmsg 看 `content` 的 `[appmsg: 标
 **说明**：
 - `mode`: `fts`（trigram 命中，含高亮 `snip`）| `like`（1-2 字兜底，`snip` 为 null）
 - 命中按时间**从新到旧**。返回带 `truncated`：结果超出体积预算（与 §3 同一个预算）时丢掉较旧的命中，
-  `truncated` 为 `true`，并给出 `next_before_ts` 与一句 `hint`——拿它当 `before_ts` 再调一次续搜（同一秒的命中可能
-  与上一页重叠一两条，按 `msg_key` 去重）。条数到了 `limit`（可能还有更早的命中）时也给 `next_before_ts`，
-  口径同 §3。**同一秒的命中整块给出**：留下的全在同一秒而这一秒还有没给出的（被预算丢了，或整页 `limit` 条
-  都在这一秒）时，把这一秒的命中全部给出（可超预算、超 `limit`），`next_before_ts` 取该秒，免得翻页原地打转。
-  `total` 是本次返回的条数
+  `truncated` 为 `true`，并给出 `next_before_ts` 与一句 `hint`——拿它当 `before_ts` 再调一次续搜。
+  条数到了 `limit`（可能还有更早的命中）时也给 `next_before_ts`，口径同 §3：**每页都以整秒为界**，
+  页尾那一秒的命中整块给出（可超预算、超 `limit`），页与页既不重复也不漏。`total` 是本次返回的条数
 - `contact` 指向 `AGENT_WECHAT_DENY` 里的会话时返回 error；不限会话时这些会话在 SQL 里就被排除（见「通用约定」）
 - 1-2 字查询**建议传 `contact`**，否则全表扫描（秒级）
 - 索引为空时返回 `{"hits": [], "hint": "本地索引为空：请先运行 export_full_history", ...}`
@@ -854,8 +851,10 @@ rebuild 与否）各起一条。（F-D，T7 复验：与 §4 同款的合并语�
   故 `aeskey` / `fileuploadtoken` / `pass_ticket` / `enterSessionId` / `appmsg_sign` 中招，而 `sign` 在词中的
   `designerid`、`secret` 不在尾的 `issecretmsg` 不受影响；整段就叫 `sign` 的字段是个性签名，**保留**；
   逐段而不是只看末段，是为了挡住 `<aeskey><value>…</value></aeskey>` 这种末段叫 `value`
-  的形态）与**值**（值里带凭据查询参数：参数名在 `[?&;,]` 之后、`=` 之前，**按同一份
-  规则**匹配，所以 `&filekey=` / `&xsec_token=` 这类**复合名**一并拦下；参数名**整名**是 `sign`（`?sign=`）
+  的形态；另外**末段整名**为 `byPassInfoString` 的也算凭据——视频号直播的进场凭据，名字以
+  `String` 结尾、值只有 12 个字符，后缀规则与值规则都看不见它）与**值**（值里带凭据查询参数：
+  参数名在 `[?&;,]` 之后、`=` 之前，**按同一份规则**匹配，所以 `&filekey=` / `&xsec_token=`
+  这类**复合名**一并拦下；参数名**整名**是 `sign`（`?sign=`）
   也算凭据（只在参数位上，字段路径不按它判）；链接的 `url`
   同样过滤。分隔符集含 `;` 与 `,`，实测 `http://c/x;token=…` 也拦得住）。
   此外**长 Base64 块按形状剔除**（≥128 个 Base64 字符的值）：`emojiinfo` / `cdnthumburl`

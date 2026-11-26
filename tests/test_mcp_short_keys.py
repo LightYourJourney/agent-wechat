@@ -85,8 +85,8 @@ def test_mcp_returns_short_keys_and_when_and_takes_them_back(wx):
     wx([(i, T0 + i * 60, f"第{i}条") for i in range(1, 6)])
     export.run_export(ACCT)
     res = _call("get_recent_messages", {"contact": "张三", "limit": 3})
-    # 条数到 limit：可能还有更早的，给 next_before_ts（本页最早一条那一秒可能还有没取到的，+1）
-    assert res["truncated"] is False and res["next_before_ts"] == T0 + 181
+    # 条数到 limit：可能还有更早的，给 next_before_ts——本页最早那一秒是完整的，从它之前续读
+    assert res["truncated"] is False and res["next_before_ts"] == T0 + 180
     first = res["messages"][0]
     assert first["msg_key"] == f"{md5(FRIEND)[:8]}:3:{T0 + 180}"
     assert first["when"] == time.strftime("%Y-%m-%d %H:%M", time.localtime(T0 + 180))
@@ -132,15 +132,30 @@ def test_recent_messages_over_budget_keeps_the_newest_and_says_where_to_continue
     assert _ts(more["messages"][-1]) == got[0] - 60                 # 接得上，不重不漏
 
 
-def test_next_before_ts_steps_past_a_shared_second(wx, monkeypatch):
-    """被丢的消息里有与本页第一条同秒的：before_ts 不含上界，要往后挪一秒，宁可重叠不漏。
-    （整页都在那一秒时改为整秒给出，见 test_review_mcp：否则下一页与这一页相同。）"""
+def test_next_before_ts_stops_on_a_whole_second_boundary(wx, monkeypatch):
+    """预算把页尾切在同一秒上：那一秒整块留下（超预算也给），续读位置从它之前开始——
+    下一页既不重复也不漏（以前只能给「该秒 + 1」，这一页的同秒消息会在下一页重复）。"""
     wx([(1, T0, "长" * 400), (2, T0 + 60, "长" * 400), (3, T0 + 60, "长" * 400),
         (4, T0 + 120, "长" * 400)])
     monkeypatch.setattr(mcp_server, "OUTPUT_TOKEN_BUDGET", 1100)
     res = _call("get_recent_messages", {"contact": "张三", "limit": 4})
-    assert [_ts(m) for m in res["messages"]] == [T0 + 60, T0 + 120]
-    assert res["next_before_ts"] == T0 + 61
+    assert [_ts(m) for m in res["messages"]] == [T0 + 60, T0 + 60, T0 + 120]
+    assert res["next_before_ts"] == T0 + 60
+    more = _call("get_recent_messages", {"contact": "张三", "limit": 4,
+                                         "before_ts": res["next_before_ts"]})
+    assert [_ts(m) for m in more["messages"]] == [T0]
+    assert "next_before_ts" not in more
+
+
+def test_pages_never_repeat_when_the_boundary_is_a_whole_second(wx):
+    """不同秒的消息按 limit 翻页：下一页从上一页最早那一秒之前开始，两页没有重复的 msg_key。"""
+    wx([(i, T0 + i * 60, f"第{i}条") for i in range(1, 6)])
+    first = _call("get_recent_messages", {"contact": "张三", "limit": 2})
+    second = _call("get_recent_messages", {"contact": "张三", "limit": 2,
+                                           "before_ts": first["next_before_ts"]})
+    a = {m["msg_key"] for m in first["messages"]}
+    b = {m["msg_key"] for m in second["messages"]}
+    assert a and b and not (a & b)
 
 
 def test_a_single_message_larger_than_the_budget_is_still_returned(wx, monkeypatch):

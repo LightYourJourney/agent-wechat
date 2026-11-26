@@ -281,7 +281,7 @@ Agent 端到端：见 §7.2。
 |---|---|---|
 | 工具注解：10 个只读工具 `readOnlyHint`，5 个导出类 `idempotentHint` | `mcp_server._READ_ONLY` / `_IDEMPOTENT` | 只加 `annotations` 字段（给客户端的元数据；`/context` 的增量与新参数说明的增量相符） |
 | `get_task_status(task_id, wait=0)`：任务还在跑时最多等 `wait` 秒（上限 60），一结束立即返回 | `mcp_server.get_task_status` | 新参数默认 0 = 旧行为；同步工具跑在 SDK 线程池里，等待不挡别的调用（有测试） |
-| 完整正文类工具共用一个体积预算：18k token（按字符类别估算，见 §9.4）且 ≤4 万字符，同时低于 25k token 与 5 万字符两道上限 | `mcp_server._fit_budget` / `_est_tokens` / `_next_before_ts` | 中文会话的截断位置与旧的「13k 粗估」基本相同；英文、链接、emoji 多的会话会更早截断（以前会被低估） |
+| 完整正文类工具共用一个体积预算：18k token（按字符类别估算，见 §9.4）且 ≤4 万字符，同时低于 25k token 与 5 万字符两道上限 | `mcp_server._fit_budget` / `_est_tokens` / `_whole_second` | 中文会话的截断位置与旧的「13k 粗估」基本相同；英文、链接、emoji 多的会话会更早截断（以前会被低估） |
 | `search_history` 超预算时丢掉较旧的命中，返回 `truncated: true` 与 `next_before_ts`；新增 `before_ts` 参数续搜（核心的 `search.search` 本来就支持） | `mcp_server.search_history`、`usecases.search_history` | 新增 `truncated`（总是有）、`before_ts`；`total` 仍等于本次返回条数 |
 | `semantic_search` 超预算时只留最相近的，返回 `truncated` / `omitted` / `next_offset`；新增 `offset` 参数翻页（0–1000，再大明确报错） | `mcp_server.semantic_search`、`usecases.semantic_search`、`vector.semantic_search` | 新增参数与字段 |
 | `get_message_parts` 恒返回 `unanswered`、`get_message_media` 给了 keys 时返回 `unanswered`：没答的 key 原样列出，不再静默略过 | `usecases.message_parts` / `message_media` | 新增字段 |
@@ -404,17 +404,16 @@ Agent 端到端：见 §7.2。
   返回的消息可能还没导出；这时把它的短键交给 `get_message_context` 会答「找不到」——不过完整键在这种情况下
   本来也找不到（这个工具读的是索引），`get_message_media` 也一样。只有 `get_message_parts` 例外：
   它原来能凭完整键查到「已回填、未导出」的消息，现在凭短键也能查到（走 `msg_parts` 那一支），没有退步。
-- **`next_before_ts` 在同一秒边界上可能与本页重叠一两条**：`before_ts` 不含上界，而被丢掉的消息里可能有和本页
-  第一条同一秒的，这时往后挪一秒，宁可重叠也不漏。要做到严格不重叠需要再加一个 local_id 游标，跨分片处理较复杂，
-  这次没做。
 - **体积预算仍是估算**（§9.4，标定于 Sonnet 的计数）：合成结果上误差 ±4%，英文偏高约一成四；没有本地分词器，
   不是硬保证。18k 的预算离 25k 上限留了约三成。
 - **`get_message_context` 的 sender 来自索引里的名册**，与 `get_recent_messages`（实时读微信库的名册）不是同一来源，
   名册刷新前可能还是 wxid。这是原有行为，这轮没动。
 - **每次读微信库都要先克隆、再解密打开**（`get_recent_messages` 至少开 contact.db 与若干分片）。密钥派生已缓存、
   首调前预热（§9.5）；连接本身没缓存——分片随消息变化，失效判断复杂，而预热后单次调用已在 20 ms 上下。
-- **`get_recent_messages` 的 `before_ts` 第一次跳到很早时仍慢**（真机一年前约 0.33 s）：此后往前翻页已降到几毫秒
-  （§9.7），但第一次不扫就不知道较新的分片里有没有更早的消息。
+- **`get_recent_messages` 的 `before_ts` 第一次跳到很早时仍要逐片打开**（真机约 0.27 s，6 片各约 28 ms 花在
+  SQLCipher 连接上）：「这一片里没有更早的消息」现在按分片签名落盘（`~/.agent-wechat/shard_hints.json`，
+  签名不符即作废）。同一进程里第二次同样的跳转 0.265 s → 0.009 s；新进程（包括每条 CLI 命令）复用上一趟的提示，
+  签名没变的稳定分片直接跳过——微信还在写的活跃分片仍要重开，从没翻过的分片组合仍要逐片打开一次。
 - `get_account_status` 的 `index` 计数仍是三次全表扫描（30 万条约 24ms）。这个工具确实需要这些数，
   而且不在热路径上。
 - server 冷启动的大头仍是 MCP SDK 自身的 import（约八成），本项目这一侧能省的已经省了。

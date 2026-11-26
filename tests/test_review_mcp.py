@@ -55,6 +55,18 @@ def test_limit_pages_join_up_across_distinct_seconds(wx):
     assert sorted(set(seen), key=lambda s: int(s[1:-1])) == [f"第{i}条" for i in range(1, 8)]
 
 
+def test_pages_partition_the_history_exactly(wx):
+    """多页翻下来每条消息恰好出现一次：同秒的边界整秒给出，页与页既不重复也不漏。"""
+    wx([(1, T0, "a"), (2, T0, "b"), (3, T0, "c"),
+        (4, T0 + 1, "d"), (5, T0 + 1, "e"),
+        (6, T0 + 5, "f"), (7, T0 + 5, "g"), (8, T0 + 5, "h"),
+        (9, T0 + 9, "i")])
+    pages = _pages("get_recent_messages", {"contact": "张三", "limit": 2}, "messages")
+    keys = [m["msg_key"] for p in pages for m in p["messages"]]
+    assert len(keys) == len(set(keys)) == 9
+    assert {m["content"] for p in pages for m in p["messages"]} == set("abcdefghi")
+
+
 # ---------- 2. 同一秒的消息多到超预算：整秒给出，不原地打转 ----------
 
 def test_recent_over_budget_within_one_second_does_not_loop(wx, monkeypatch):

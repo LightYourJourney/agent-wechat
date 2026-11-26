@@ -15,9 +15,9 @@ def search_history(query: str, contact: str | None = None, limit: int = 20,
     `deny`：读取范围（MCP 入口传 `AGENT_WECHAT_DENY`，CLI 不传）。点名的会话被拒就报错，
     不限会话时在 SQL 里排除（limit 仍填得满）。
 
-    `whole_second`（MCP 翻页用，同 `recent_messages`）：整页 limit 条都落在同一秒时，把这一秒的
-    命中全部取回（可能超过 limit），并在 `second_complete` 里给出该秒——否则续搜位置只能是
-    「该秒 + 1」，翻页原地打转。"""
+    `whole_second`（MCP 翻页用，同 `recent_messages`）：每一页都以整秒为界。多取一条只为看出
+    页尾那一秒是否被 limit 切开——切开了就把这一秒的命中全部取回（可能超过 limit），并在
+    `more` 里答「还有没有更早的」；于是下一页传「本页最早一条的秒」既不重复也不漏。"""
     ctx = pkg_context(account)
     chat_id = ctx.resolve_optional(contact)
     if isinstance(chat_id, NeedConfirm):
@@ -25,15 +25,21 @@ def search_history(query: str, contact: str | None = None, limit: int = 20,
     retrieval.ensure_allowed(chat_id, deny)
     _refresh_roster(ctx)
     lim = pkg_clamp_limit(limit)
-    res = search.search(query, chat_id=chat_id, limit=lim,
+    res = search.search(query, chat_id=chat_id, limit=lim + 1 if whole_second else lim,
                         account=ctx.account, before_ts=before_ts, exclude_chats=deny)
     hits = res.get("hits", [])
-    if whole_second and len(hits) >= lim and hits[0].get("ts") == hits[-1].get("ts") is not None:
-        t = hits[-1]["ts"]
-        res["hits"] = search.search(query, chat_id=chat_id, limit=pkg_clamp_limit(1 << 31),
-                                    account=ctx.account, after_ts=t, before_ts=t + 1,
-                                    exclude_chats=deny)["hits"]
-        res["total"], res["second_complete"] = len(res["hits"]), t
+    if whole_second:
+        more = len(hits) > lim
+        if more and hits[lim].get("ts") == hits[lim - 1].get("ts") is not None:
+            t = hits[lim]["ts"]           # 页尾那一秒被 limit 切开：整秒取全
+            res["hits"] = ([h for h in hits if (h.get("ts") or 0) > t]
+                           + search.search(query, chat_id=chat_id,
+                                           limit=pkg_clamp_limit(1 << 31),
+                                           account=ctx.account, after_ts=t, before_ts=t + 1,
+                                           exclude_chats=deny)["hits"])
+        else:
+            res["hits"] = hits[:lim]      # 边界落在整秒上（或本来就取尽了）
+        res["total"], res["more"] = len(res["hits"]), more
     res["degraded"] = [*res.get("degraded", []), *ctx.degradations()]   # EA-013：合并 FTS 降级说明
     return res
 

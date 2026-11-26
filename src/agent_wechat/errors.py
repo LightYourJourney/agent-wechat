@@ -178,6 +178,10 @@ class TaskNotFound(AgentWeChatError):
     """查询的任务 id 不在注册表里（含重启后记录仍在、但 id 写错的情形）。"""
 
 
+class TaskBusy(AgentWeChatError):
+    """另一个会改写同一份产物的同步任务正在运行。**不是故障**：等它结束再试。"""
+
+
 class PurgeRefused(AgentWeChatError):
     """purge 的拒绝或失败。hint 承载具体原因（被占用 / 符号链接 / 权限）。
 

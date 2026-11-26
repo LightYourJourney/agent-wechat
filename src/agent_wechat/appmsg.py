@@ -159,6 +159,12 @@ _SECRET_SEG = re.compile(
 # 参数名**整名**就是它才算的凭据：`?sign=` 是签名，字段路径里整段的 `sign` 却是个性签名，
 # 所以它不能进 `_SECRET_SEG`（那张表同时判字段路径段）。只在参数位上多这一个整名。
 _SECRET_PARAM_EXACT = ("sign",)
+# 字段**末段整名**就是它才算的凭据（大小写不敏感）。后缀规则会漏掉以普通词结尾的名字，
+# 而下面的值规则也看不见它们：真机只计数核实（只看名字不看值）——61,479 条 appmsg 里
+# `finderLive.byPassInfoString` 出现 4 次，值一律 12 字符，不含 `=` / sign / session /
+# token / key，也不是长 Base64；它是视频号直播的进场凭据，只是名字以 `String` 结尾。
+# **名单只收有计数依据的**：不是在猜「哪些单词像凭据」，是给已证实的漏网补一条整名。
+_SECRET_NAMES_EXACT = frozenset({"bypassinfostring"})
 # 分隔符集含 `;` 与 `,`：实测 `http://c/x;token=…` 在只有 `?`/`&` 时不被丢。
 #
 # **参数名复用 `_SECRET_SEG`，不另写一张备选表**：此前写的是
@@ -180,8 +186,10 @@ def _has_credential_param(value: str) -> bool:
 
 
 def _is_secret(path: str, value: str) -> bool:
-    """该字段是否为密材 —— 名字**逐段**命中，或值里带凭据参数。"""
-    return (any(_SECRET_SEG.search(seg) for seg in path.split("."))
+    """该字段是否为密材 —— 名字**逐段**命中（或末段在整名名单里），或值里带凭据参数。"""
+    segments = path.split(".")
+    return (any(_SECRET_SEG.search(seg) for seg in segments)
+            or segments[-1].lower() in _SECRET_NAMES_EXACT
             or _has_credential_param(value))
 
 

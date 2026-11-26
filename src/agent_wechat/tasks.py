@@ -237,8 +237,12 @@ def start(kind: str, runner: Callable[[str], int | None], **fields: object) -> s
 
 
 @contextlib.contextmanager
-def claim(kind: str, **fields: object) -> Iterator[None]:
+def claim(kind: str, **fields: object) -> Iterator[str]:
     """**同步执行**的写盘工作在整个写盘期间占一条 running 记录（不起线程、没有 runner）。
+
+    产出本条记录的 id：互相排斥的两个同步任务（`purge --chat` 与 `chat index`）先各自登记、
+    再看 `running()`——查的时候要把自己排除掉，于是「先登记的看得到后登记的、后登记的看得到
+    先登记的」，两边不可能同时进入写盘段。
 
     给 CLI `media export` / `chat export` 与 MCP `export_chat_media` / `export_chat` 用：它们
     在调用方的线程里跑完，不经 `start`，`purge --chat` 的「在飞任务」闸门（`running()`）此前
@@ -266,7 +270,7 @@ def claim(kind: str, **fields: object) -> Iterator[None]:
             _tasks.pop(task_id, None)
             raise
     try:
-        yield
+        yield task_id
     finally:
         with contextlib.suppress(OSError, errors.AgentWeChatError), _lock, _file_lock():
             _load_locked()

@@ -127,9 +127,9 @@ def recent_messages(contact: str, limit: int = 50,
     """before_ts（unix 秒，不含）：只取它之前的消息，用来往前翻页。
 
     `deny`：读取范围（MCP 入口传 `AGENT_WECHAT_DENY`，CLI 不传）。
-    `whole_second`（MCP 翻页用）：整页 limit 条都落在同一秒时，把这一秒的消息补全（可能超过
-    limit），并在 `earlier` 里答「更早还有没有」——before_ts 只到秒，否则下一页只能是
-    `该秒 + 1`（与这一页相同，原地打转）或 `该秒`（同秒没取到的永远读不到）。
+    `whole_second`（MCP 翻页用）：每一页都以**整秒**为界——最旧那一秒哪怕只差一条也整块取全
+    （可能超过 limit），并在 `earlier` 里答「更早还有没有」。before_ts 只到秒，这样下一页传
+    「本页最早一条的秒」既不重复也不漏（边界落在半秒时只能给「该秒 + 1」，下一页会重复一两条）。
     """
     search.check_ts("before_ts", before_ts)      # 超出 int64 的值绑定进 SQL 时抛裸 OverflowError
     ctx = pkg_context(account)
@@ -138,19 +138,41 @@ def recent_messages(contact: str, limit: int = 50,
         return chat_id
     retrieval.ensure_allowed(chat_id, deny)
     lim = pkg_clamp_limit(limit, LIMIT_RECENT)
-    msgs = ctx.reader.recent(chat_id, limit=lim, before_ts=before_ts)
+    # 多取一条：只为看出页尾那一秒是不是被 limit 切开了（见 `_whole_second_page`）
+    msgs = ctx.reader.recent(chat_id, limit=lim + 1 if whole_second else lim,
+                             before_ts=before_ts)
     earlier = None
-    if whole_second and len(msgs) >= lim and msgs[0].ts == msgs[-1].ts:
-        sec, n = msgs[0].ts, lim
-        while len(msgs) >= n and msgs[0].ts == sec:   # 取到的还全在这一秒、且没取尽：加倍再取
-            n *= 2
-            msgs = ctx.reader.recent(chat_id, limit=n, before_ts=before_ts)
-        earlier = msgs[0].ts != sec
-        msgs = [m for m in msgs if m.ts == sec]
+    if whole_second:
+        earlier, msgs = _whole_second_page(ctx, chat_id, before_ts, msgs, lim)
     return RecentMessages(chat_id=chat_id, display=_display_or_id(ctx, chat_id),
                           messages=msgs,
                           degraded=pkg_call("collect_degradations", ctx.reader),
                           earlier=earlier)
+
+
+def _whole_second_page(ctx, chat_id: str, before_ts: int | None,
+                       msgs: list[reader.Message],
+                       lim: int) -> tuple[bool, list[reader.Message]]:
+    """把取到的消息收到整秒边界上，并答「还有没有更早的」。
+
+    `msgs` 是 `reader.recent(limit=lim+1)` 的结果（时间正序）。多出的那一条只用来判边界：
+    它比本页最早的还早 → 边界正好落在秒上；与本页最早的同秒 → 这一秒被 limit 切开了，
+    加倍再取直到这一秒取全（可能超过 limit）。两种情况下这一秒都是完整的，调用方从
+    「本页最早一条的秒」之前接着读即可，页与页不重复也不漏。"""
+    if len(msgs) <= lim:              # 取到的不够 limit：源头已经到头
+        return False, msgs
+    page = msgs[-lim:]                # 最新的 lim 条
+    sec = page[0].ts                  # 本页最早一条所在的秒
+    if msgs[0].ts != sec:
+        return True, page             # 边界正好落在整秒上
+    n = len(msgs)
+    while True:                       # 边界切在同一秒：加倍再取，直到这一秒取全
+        n *= 2
+        msgs = ctx.reader.recent(chat_id, limit=n, before_ts=before_ts)
+        if len(msgs) < n:             # 取尽了：这一秒就是最早的
+            return False, msgs
+        if msgs[0].ts != sec:
+            return True, [m for m in msgs if m.ts >= sec]
 
 
 def export_plan(contact: str | None = None, full: bool = False,
@@ -585,12 +607,33 @@ def chat_index(out_dir: str | None = None, account: str | None = None) -> ChatIn
     只有 18% 在窗口内）——那条已 park，别在这里顺手接上。
 
     `out_dir` 落在微信容器目录之内时**拒绝**（C-11）——在任何读取之前叫停。
+
+    **与 `purge --chat` 互斥**（只在默认导出根上）：purge 会删总目录页与 `media/<md5>/`，
+    而本命令是「先枚举目录、再写页」——两者交错时，枚举发生在删除之前、写页发生在删除之后，
+    被删的会话就那样留在索引页上（死链 + 条数）。互斥用任务注册表：本命令与
+    `purge.execute_chat` 各自先登记一条 running 记录、再查 `running()`（排除自己）——先登记的
+    看得到后登记的，不可能两边同时进入写盘段。自定义 `--out` 不在 purge 的删除面里
+    （SECURITY.md），不占记录、保持零依赖。
     """
     if out_dir:
         paths.refuse_container_out(out_dir)
     # 与 `chat_export` 同款绝对化：`--out` 给相对路径时，`out_dir`/`file` 才是能直接打开、
     # 也能与 `chat export` 对齐的路径。
     out_root = _resolve_out(out_dir)
+    if (out_root != media.export_root().resolve()   # `_resolve_out` 解析过符号链接，这边同口径
+            or not out_root.exists()):               # 导出根都没有：没有页可写，保持零依赖
+        return _write_index(out_root, account)
+    with tasks.claim("chat_index") as own:
+        running = [t for t in tasks.running() if t.get("id") != own]
+        if any(t.get("kind") == "purge_chat" for t in running):
+            raise errors.TaskBusy(
+                "正在按会话销毁（purge --chat），暂不重建总目录页",
+                hint="等它结束后重跑 chat index；它删的会话本来也不该留在索引页上")
+        return _write_index(out_root, account)
+
+
+def _write_index(out_root: pathlib.Path, account: str | None) -> ChatIndexResult:
+    """`chat_index` 的读—渲染—写三段（互斥已由调用方处理）。"""
     # EA-035：枚举 `index.*` 后按 `{chat_md5}` **归并**——此前只枚举 `index.html`，
     # 于是用 `--format md` 导出的会话**永远不出现在索引页上**（`has_md` 只覆盖反方向）。
     # 排序让页面顺序不依赖文件系统。

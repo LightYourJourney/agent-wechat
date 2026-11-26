@@ -969,6 +969,21 @@ def _link_target(link: pathlib.Path) -> str:
 
 
 def execute_chat(plan: ChatPlan) -> tuple[ChatReport, ...]:
+    """占一条 `purge_chat` 在飞任务记录后执行（见 `_execute_chat_locked`）。
+
+    记录的意义是与 `chat index` 互斥：它先登记 `chat_index` 再检查 `running()`，这里先登记
+    `purge_chat` 再检查 `running()`——两边都看得到对方，不可能一个在删 `media/<md5>/` 与
+    总目录页、另一个在枚举后把旧会话写回索引页。
+
+    HOME 那道闸必须在**登记之前**：登记会先 `ensure_home_dirs()`，HOME 指到容器目录时那里
+    抛的是 `ContainerWriteRefused`——而本命令对坏 HOME 的口径是 `PurgeRefused`（「未做任何
+    删除」），文案与修法都不同。"""
+    _check_home_is_sane(paths.HOME_DIR)
+    with tasks.claim("purge_chat") as own:
+        return _execute_chat_locked(plan, own)
+
+
+def _execute_chat_locked(plan: ChatPlan, own_task: str) -> tuple[ChatReport, ...]:
     """执行：**墓碑先落，然后才删**，两段式（spec §5.4）。
 
     顺序不能反：先删后挡的话崩在中间就是「删了但没挡」——那批东西会复活；
@@ -983,11 +998,8 @@ def execute_chat(plan: ChatPlan) -> tuple[ChatReport, ...]:
     `store.FTS_SECURE_DELETE`）。要字节级
     清除只能重建：`purge --index` 后重跑 export。
     """
-    # 与 `execute()` 同一道闸门、同一位置（先闸门，再链接，最后占用/删除）：会话轴此前**只有
-    # `plan_chat` 一道**，执行侧没有——CLI 路径上 `_cmd_purge_chat` 先走 plan_chat 所以今天
-    # 不可达，但「执行前必须过闸」这条不变量没落在执行的那一侧，将来多一个入口就会漏
-    # （EA-099）。顺序不能反：`_escaping_links` 读 `paths.HOME_DIR` 当基准，坏树下判据失真。
-    _check_home_is_sane(paths.HOME_DIR)
+    # HOME 那道闸在 `execute_chat` 里、登记任务之前（见那里的 docstring）：顺序不能反——
+    # `_escaping_links` 读 `paths.HOME_DIR` 当基准，坏树下判据失真。
 
     # 逃逸链接闸门：**必须在任何删除/提交之前**（与 `execute()` 同一位置——先扫链接，再做
     # 占用/fail-closed 那些检查）。它挡的不是「目标在树外」这件事本身，而是**删完之后目标还
@@ -1026,7 +1038,7 @@ def execute_chat(plan: ChatPlan) -> tuple[ChatReport, ...]:
     # server 也会被算进去，那会让 `purge --chat` 在 MCP 运行时**恒被拒绝**——把一个可修的
     # 竞态换成一个必现的可用性回归。注册表里的 `running` 才是真的在写。
     try:
-        running = tasks.running()
+        running = [t for t in tasks.running() if t.get("id") != own_task]
     except Exception:                     # noqa: BLE001 —— 注册表读不出来不挡删除
         running = []                      # （与 `_holders` 的「判不出来就留着」不同：
         #   那边是「说不定有人持有，别删」；这边是「没有证据表明有人正在写」，而任务

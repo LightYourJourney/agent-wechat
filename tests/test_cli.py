@@ -2652,7 +2652,7 @@ def test_ui_reports_a_bad_port_in_one_line(monkeypatch, capsys):
     """
     from agent_wechat import webui
 
-    def boom(port, *, open_browser=False):
+    def boom(port, *, host="127.0.0.1", open_browser=False):
         raise OverflowError("bind(): port must be 0-65535.")
     monkeypatch.setattr(webui, "serve", boom)
 
@@ -2662,6 +2662,18 @@ def test_ui_reports_a_bad_port_in_one_line(monkeypatch, capsys):
     err = capsys.readouterr().err
     assert "无法在端口 -1 上启动工作台" in err
     assert "Traceback" not in err
+
+
+def test_ui_passes_the_host_through(monkeypatch):
+    """`--host ::1`（只解析 IPv6 的机器用得上）：CLI 要把地址原样交给 webui.serve。"""
+    from agent_wechat import webui
+    seen = []
+    monkeypatch.setattr(webui, "serve",
+                        lambda port, *, host, open_browser: seen.append((port, host)))
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["ui", "--port", "9001", "--host", "::1"])
+    assert ei.value.code == 0
+    assert seen == [(9001, "::1")]
 
 
 def test_cli_status_prints_the_same_index_notes_as_mcp(tmp_path, monkeypatch, capsys):

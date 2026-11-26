@@ -280,6 +280,41 @@ def test_server_refuses_non_loopback_bind():
         webui.create_server("0.0.0.0", 0)
 
 
+def test_server_refuses_a_hostname_instead_of_a_traceback():
+    """`--host localhost`：`ipaddress` 抛的裸 ValueError 此前会印一整屏 traceback。"""
+    with pytest.raises(errors.ScopeDenied, match="不是一个 IP 地址") as ei:
+        webui.create_server("localhost", 0)
+    assert "127.0.0.1" in (ei.value.hint or "")
+
+
+def test_serve_on_ipv6_loopback_prints_a_bracketed_url(monkeypatch, capsys):
+    """`--host ::1`：地址要原样交给 create_server，URL 里的 IPv6 要加方括号。"""
+    seen = []
+
+    class _Stop(Exception):
+        pass
+
+    class _Fake:
+        server_address = ("::1", 8765)
+        aw_state = type("S", (), {"token": "tok"})()
+
+        def serve_forever(self):
+            raise _Stop
+
+        def server_close(self):
+            pass
+
+    def _create(host, port):
+        seen.append((host, port))
+        return _Fake()
+
+    monkeypatch.setattr(webui, "create_server", _create)
+    with pytest.raises(_Stop):
+        webui.serve(0, host="::1")
+    assert seen == [("::1", 0)]
+    assert "http://[::1]:8765/?token=tok" in capsys.readouterr().out
+
+
 def test_context_with_a_chat_id_contact_needs_no_wechat_key(srv):
     """contact 已是 chat_id 时不得去读密钥：本环境没有 passphrase 缓存，读即抛。
 

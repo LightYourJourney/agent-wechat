@@ -9,10 +9,13 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import hashlib
 import html
+import json
 import pathlib
 import sqlite3
 import threading
+import time
 import zlib
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, asdict
@@ -156,6 +159,101 @@ def _file_sig(db: pathlib.Path) -> tuple:
 _EMPTY_BEFORE_MAX = 4096
 _empty_before: dict[tuple, float] = {}
 _empty_lock = threading.Lock()
+
+# 上面那张表只活在进程里：CLI 每条命令都是新进程，于是「第一次大幅往前翻」每次都要把比目标
+# 新的分片逐个打开一遍（真机 6 片 × 约 28 ms）。把条目按**分片签名**落到 HOME 下的小文件，
+# 下次启动读回来；签名不符（微信写过这个分片）的条目直接丢。只存时间戳与会话 md5，不存正文；
+# 读写失败一律忽略——它只是缓存，不能影响读消息。
+_HINTS_NAME = "shard_hints.json"
+_HINTS_MAX = 512                 # 落盘条数（内存里仍是 _EMPTY_BEFORE_MAX）
+_HINTS_SAVE_SECONDS = 30.0       # 首次立即写（CLI 跑完一条命令就退出），之后限流
+_hints_loaded = False
+_hints_lock = threading.Lock()
+_hints_saved_at: float | None = None      # None = 本进程还没写过；首次**立即**写
+
+
+def _hints_path() -> pathlib.Path:
+    """调用时求值：测试把 HOME_DIR 指到临时目录后要跟着走。"""
+    return paths.HOME_DIR / _HINTS_NAME
+
+
+def _sig_digest(sig: tuple) -> str:
+    """分片签名的摘要：落盘用（绝对路径不进文件），比较时重算同一份。"""
+    return hashlib.sha1(repr(sig).encode("utf-8", "surrogatepass")).hexdigest()
+
+
+def _load_hints() -> None:
+    """把上次进程记下的「这片里没有更早的消息」读回来；签名不符的条目直接丢。"""
+    global _hints_loaded
+    with _hints_lock:
+        if _hints_loaded:
+            return
+        _hints_loaded = True
+    try:
+        data = json.loads(_hints_path().read_text(encoding="utf-8"))
+        entries = data["entries"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return
+    sigs: dict[str, tuple] = {}
+    for e in entries:
+        try:
+            shard, md5, digest, below = e
+        except (TypeError, ValueError):
+            continue
+        if (not isinstance(shard, str) or not isinstance(md5, str)
+                or not (below is None or isinstance(below, int))):
+            continue
+        below = float("inf") if below is None else below     # null = 分片里根本没有这个会话
+        sig = sigs.get(shard)
+        if sig is None:
+            sig = sigs[shard] = _file_sig(pathlib.Path(shard))
+        if sig[1] is None or _sig_digest(sig) != digest:
+            continue                 # 分片被微信写过 / 删了：这条不再可信
+        with _empty_lock:
+            if len(_empty_before) >= _EMPTY_BEFORE_MAX:
+                return
+            key = (sig, md5)
+            _empty_before[key] = max(_empty_before.get(key, float("-inf")), below)
+
+
+def _save_hints() -> None:
+    """把内存里的条目并回文件（限流；失败不影响读消息）。"""
+    global _hints_saved_at
+    now = time.monotonic()
+    with _hints_lock:
+        # 用 None 表示「还没写过」而不是拿 0 当哨兵：`monotonic()` 是开机时长，
+        # 刚开机 30 秒内跑的那条 CLI 命令会被 30 秒限流误挡，提示一条都存不下来。
+        if _hints_saved_at is not None and now - _hints_saved_at < _HINTS_SAVE_SECONDS:
+            return
+        _hints_saved_at = now
+    with _empty_lock:
+        items = list(_empty_before.items())[-_HINTS_MAX:]
+    try:
+        data = json.loads(_hints_path().read_text(encoding="utf-8"))
+        old = [e for e in data["entries"] if isinstance(e, list) and len(e) == 4]
+    except (OSError, ValueError, KeyError, TypeError):
+        old = []
+    # `below` 为 None 表示「这一片里根本没有该会话的表」（内存里是 inf）
+    fresh = {(sig[0], md5): [sig[0], md5, _sig_digest(sig),
+                             None if below == float("inf") else int(below)]
+             for (sig, md5), below in items}
+    merged: dict[tuple, list] = {(e[0], e[1]): e for e in old
+                                 if isinstance(e[0], str) and isinstance(e[1], str)}
+    for key, e in fresh.items():
+        prev = merged.get(key)
+        # 同一份分片（摘要相同）的两条提示取更强的那个；分片变过则直接换成新的
+        if prev is not None and prev[2] == e[2] and isinstance(prev[3], (int, type(None))):
+            stronger = max(float("inf") if prev[3] is None else prev[3],
+                           float("inf") if e[3] is None else e[3])
+            e = [e[0], e[1], e[2], None if stronger == float("inf") else int(stronger)]
+        merged[key] = e
+    try:
+        paths.ensure_home_dirs()
+        paths.atomic_write(_hints_path(), json.dumps(
+            {"version": 1, "entries": list(merged.values())[-_HINTS_MAX:]},
+            ensure_ascii=False).encode("utf-8"))
+    except (OSError, errors.AgentWeChatError):
+        pass
 
 
 # 按 username 精确取行时 TEXT 与 BLOB 两种存储类别都认：SQLite 里 TEXT 参数与 BLOB 值永不
@@ -665,8 +763,11 @@ class MessageReader:
         """
         md5hex = messages.md5_of(chat_id)
         chat_map = {md5hex: chat_id}
+        if before_ts is not None:
+            _load_hints()                      # 上次进程记下的「这片里没有更早的」
         names = self.sticker_captions()        # **循环外取一次**，见该方法 docstring
         pieces: list[Message] = []
+        learned = False                              # 这一趟有没有学到新的「这片是空的」
         bound = float("inf") if before_ts is None else before_ts
         for shard in reversed(paths.message_shards(self.acct)):
             sig = (_file_sig(shard), md5hex)
@@ -691,10 +792,17 @@ class MessageReader:
                 with _empty_lock:
                     if len(_empty_before) >= _EMPTY_BEFORE_MAX:
                         _empty_before.clear()
-                    _empty_before[sig] = max(_empty_before.get(sig, float("-inf")), empty_below)
+                    # pop 再插：落盘时只留最后 _HINTS_MAX 条，最近用到的排到最后才不被截掉
+                    below0 = _empty_before.pop(sig, float("-inf"))
+                    _empty_before[sig] = max(below0, empty_below)
+                learned = True
             pieces += got
             if len(pieces) >= limit:
                 break
+        # 一趟扫描学到的提示**一次写盘**：放到循环里逐片写的话，30 s 的限流会让这次跳转
+        # 只存下第一片，其余几片下次还要重开（实测只落下 1/6 条，跨进程提速几乎为零）。
+        if learned and before_ts is not None:
+            _save_hints()
         # EA-016：排序键此前只有 `m.ts`——扫描是 `ORDER BY local_id DESC`（`order_desc=True`），
         # 稳定排序会让同秒的两条保持**降序**到达序（「后发的在前」），与「时间正序」的契约、
         # 与索引侧（`ORDER BY ts`）都不一致。加 `local_id` 作次键：先发的在前，且确定。

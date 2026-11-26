@@ -175,19 +175,16 @@ def _fit_budget(items: list[dict], *, newest_first: bool) -> int:
     return len(items)
 
 
-def _next_before_ts(kept_oldest: int | None, dropped_ts: Sequence[int | None]) -> int:
-    """续读用的 before_ts（不含上界）：被丢的里有与留下的最早一条同秒的，就往后挪一秒——宁可
-    下一页重叠一两条，也不漏。"""
-    oldest = kept_oldest or 0
-    return oldest + 1 if oldest in dropped_ts else oldest
-
-
 def _whole_second(ts_newest_first: Sequence[int | None], keep: int) -> int:
-    """留下的整页都在同一秒、被丢的里还有这一秒的：把这一秒整块留下（超预算也给）。否则
-    next_before_ts 只能是「该秒 + 1」，下一页与这一页完全相同，翻页原地打转。"""
+    """把 keep 扩到整秒边界：留下的最后一条所在的那一秒整块留下（超预算也给）。
+
+    每一页都以整秒为界，下一页传 `before_ts=本页最早一条的秒`（不含上界）就既不重复也不漏。
+    keep 之前已由用例保证「本页最旧那一秒是完整的」，这里只处理体积预算把边界切在半秒上的
+    情况——不扩的话，同一秒剩下的消息只能靠「该秒 + 1」续读，下一页会重复一两条。"""
     ts = ts_newest_first
-    if 0 < keep < len(ts) and ts[0] == ts[keep - 1] == ts[keep]:
-        while keep < len(ts) and ts[keep] == ts[0]:
+    if 0 < keep < len(ts) and ts[keep - 1] == ts[keep]:
+        sec = ts[keep - 1]
+        while keep < len(ts) and ts[keep] == sec:
             keep += 1
     return keep
 
@@ -306,8 +303,8 @@ def get_recent_messages(contact: str, limit: int = 50, before_ts: int | None = N
 
     contact 填展示名或 username。每条含 msg_key、when、sender（自己发的是「我」）、
     content（非文本为 [image] 等提示），非文本消息另有 type。before_ts（unix 秒，不含）只取它
-    之前的消息。可能还有更早的消息时返回 next_before_ts，往前翻页就传它（同一秒的消息可能与
-    本页重叠，按 msg_key 去重；一秒内的消息整块给出，可能超过 limit）。结果过大时丢掉最早的
+    之前的消息。可能还有更早的消息时返回 next_before_ts，往前翻页就传它：每页都以整秒为界
+    （一秒内的消息整块给出，可能超过 limit），页与页既不重复也不漏。结果过大时丢掉最早的
     部分并标 truncated=true。
     """
     res = usecases.recent_messages(contact, limit=limit, account=account, before_ts=before_ts,
@@ -316,18 +313,14 @@ def get_recent_messages(contact: str, limit: int = 50, before_ts: int | None = N
         return _need_confirm(res)
     msgs = [_slim_message(_msg_dict(m)) for m in res.messages]
     ts = [m.ts for m in reversed(res.messages)]            # 新 → 旧
-    # 留下的是最新的那些（与「最近 N 条」的语义一致）；用例已补全整秒时整块给出
-    keep = (_whole_second(ts, _fit_budget(msgs, newest_first=False))
-            if res.earlier is None else len(msgs))
+    # 留下的是最新的那些（与「最近 N 条」的语义一致）；用例已保证页尾是完整的整秒
+    keep = _whole_second(ts, _fit_budget(msgs, newest_first=False))
     n_drop = len(msgs) - keep
     out: dict[str, Any] = {"chat_id": res.chat_id, "display": res.display,
                            "messages": msgs[n_drop:], "truncated": n_drop > 0}
-    # 没给出的：被预算丢掉的，以及条数到 limit 时没取到的更早消息（最晚可能与本页最早一条同秒）
-    unseen = ts[keep:]
-    if res.earlier is None and len(msgs) >= usecases.clamp_limit(limit, usecases.LIMIT_RECENT):
-        unseen.append(ts[-1])
-    if res.earlier or unseen:
-        out["next_before_ts"] = _next_before_ts(ts[keep - 1], unseen)
+    # 页尾停在整秒边界上：从本页最早那一秒之前接着读，下一页与这一页不重复、也不漏
+    if n_drop > 0 or res.earlier:
+        out["next_before_ts"] = ts[keep - 1]
     out["degraded"] = [d if isinstance(d, dict) else d.envelope()
                        for d in res.degraded]   # EA-013：两种形态都收
     out["untrusted"] = True                     # 正文是不可信数据（与 search_messages 同一标记）
@@ -373,7 +366,8 @@ def search_history(query: str, contact: str | None = None, limit: int = 20,
     search_messages。contact 可选限定会话。hits 每条含 msg_key、chat_id、ts、sender_id、
     sender_name、is_self、msg_type、content、snip，媒体消息另有 media_hint（为空的字段省略）。
     有 degraded 时 sender_name 可能回落成 wxid，别把它当成真实姓名。命中从新到旧；
-    可能还有更早的命中时返回 next_before_ts，传作 before_ts 续搜（同一秒可能重叠，按 msg_key 去重）。
+    可能还有更早的命中时返回 next_before_ts，传作 before_ts 续搜：每页都以整秒为界，
+    页与页既不重复也不漏。
     """
     res = usecases.search_history(query, contact=contact, limit=limit, account=account,
                                   before_ts=before_ts, deny=retrieval.denied_chat_ids(),
@@ -384,19 +378,12 @@ def search_history(query: str, contact: str | None = None, limit: int = 20,
     hits = [{k: v for k, v in h.items() if v is not None and k not in ("shard", "local_id", "id")}
             for h in res["hits"]]
     ts = [h.get("ts") for h in hits]
-    complete = res.pop("second_complete", None)     # 用例已把整秒取全：整块给出（超预算也给）
-    keep = len(hits) if complete is not None else _whole_second(
-        ts, _fit_budget(hits, newest_first=True))
+    more = res.pop("more", False)                   # 用例：还有更早的命中（边界那一秒已给全）
+    keep = _whole_second(ts, _fit_budget(hits, newest_first=True))
     res["hits"], res["total"], res["truncated"] = hits[:keep], keep, keep < len(hits)
-    # 没给出的：被预算丢掉的，以及条数到 limit 时没取到的更早命中（最晚可能与本页最早一条同秒，
-    # 与 get_recent_messages 同一口径）
-    unseen = ts[keep:]
-    if complete is None and hits and len(hits) >= usecases.clamp_limit(limit):
-        unseen.append(ts[-1])
-    if complete is not None:
-        res["next_before_ts"] = complete            # 这一秒已经给全：从它之前接着搜
-    elif unseen:
-        res["next_before_ts"] = _next_before_ts(ts[keep - 1], unseen)
+    # 页尾停在整秒边界上：从本页最早那一秒之前接着搜，与 get_recent_messages 同一口径
+    if more or keep < len(hits):
+        res["next_before_ts"] = ts[keep - 1]
     if keep < len(hits):
         # 说明放在截断时的结果里而不是工具描述里：只在真截断时才付这几十个 token
         res["hint"] = "结果过大，只给了较新的命中：传 before_ts=next_before_ts 续搜更早的"

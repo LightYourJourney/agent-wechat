@@ -31,8 +31,10 @@
 在返回消息正文。本次新增的 `get_message_parts` 沿同一约定，按 `msg_key` 返回 appmsg 的结构化
 内容，**包括转账（type 2000）的金额 `amount_desc`、备注 `memo`、双方用户名 `payer` /
 `receiver` 与交易号 `transaction_id`**（凭据类字段另有剔除：字段名或 URL 参数名以 `aeskey` / `passphrase` /
-`token` / `key` / `ticket` / `signature(s)` / `sig` / `sessionid` / `password` / `secret` / `_sign` 结尾的，以及参数名
-整名为 `sign` 的；字段路径里整段叫 `sign` 的是个性签名，保留。规则见 TOOLS.md §13）。**这是刻意的、
+`token` / `key` / `ticket` / `signature(s)` / `sig` / `sessionid` / `password` / `secret` / `_sign` 结尾的，参数名
+整名为 `sign` 的，以及字段路径末段整名为 `byPassInfoString` 的（`finderLive` 下那个：视频号直播的进场
+凭据，名字以 `String` 结尾、值只有 12 个字符，后缀规则与值规则都看不见它）；字段路径里整段叫 `sign` 的是个性签名，保留。
+规则见 TOOLS.md §13）。**这是刻意的、
 有据的**——2026-09-16 的裁定 8：与 `search_history` 已在信封返回正文一致，**不为转账单开例外**，
 不是遗漏。不想让某类内容离开本机，就不要调用会返回它的工具。
 

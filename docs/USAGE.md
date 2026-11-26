@@ -311,6 +311,10 @@ agent-wechat chat index
 # 产物：/Users/you/.agent-wechat/media/index.html
 ```
 
+`chat index` 与 `purge --chat` **互斥**（默认导出根上）：purge 会删总目录页与 `media/<md5>/`，
+而本命令是「先枚举目录、再写页」——两边交错时被删的会话会留在索引页上（死链 + 旧条数）。
+销毁进行中时 `chat index` 报错让你稍后重试；`chat index` 进行中时 `purge --chat` 拒绝执行。
+
 **参数**：
 
 | 参数 | 说明 |
@@ -786,9 +790,11 @@ agent-wechat memory confirm <claim_id>
 
 ```bash
 agent-wechat ui --port 8765
+agent-wechat ui --host ::1          # 只解析 IPv6 的机器：监听 [::1]，链接是 http://[::1]:8765/?token=…
 ```
 
 启动时终端印出带访问令牌的链接 `http://127.0.0.1:8765/?token=…`，用它打开（`--open` 打开的也是这条）。
+`--host` 只收 loopback（`127.0.0.1` 或 `::1`），其它地址、主机名一律单行报错退出。
 首次打开时服务端把令牌写进 HttpOnly、SameSite=Strict 的 cookie（名 `aw_token_<端口>`，同时开两个工作台
 互不覆盖）并跳转到不带令牌的 `/`；没有这个 cookie 时首页、静态资源与接口一律 403。令牌每次启动重新生成、
 只出现在终端里，链接别贴给别人。

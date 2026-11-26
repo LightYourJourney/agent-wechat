@@ -79,6 +79,8 @@ def _reset_process_caches(monkeypatch):
     monkeypatch.setattr(account, "_account_cache", None)
     monkeypatch.setattr(reader, "_contact_cache", {"sig": None, "items": {}})
     monkeypatch.setattr(reader, "_empty_before", {})
+    monkeypatch.setattr(reader, "_hints_loaded", False)
+    monkeypatch.setattr(reader, "_hints_saved_at", None)
 
 
 @pytest.fixture(autouse=True)

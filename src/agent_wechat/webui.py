@@ -522,7 +522,11 @@ def _status() -> dict:
 def create_server(host: str = "127.0.0.1", port: int = DEFAULT_PORT
                   ) -> ThreadingHTTPServer:
     """建服务但不启动。**只允许 loopback**（传其它地址直接拒绝）。"""
-    ip = ipaddress.ip_address(host)
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError as exc:      # `localhost` 这类主机名：裸 ValueError 会印一整屏 traceback
+        raise errors.ScopeDenied(f"不是一个 IP 地址：{host}",
+                                 hint="用 127.0.0.1 或 ::1") from exc
     if not ip.is_loopback:
         raise errors.ScopeDenied("工作台只允许监听 loopback 地址",
                                  hint="用 127.0.0.1 或 ::1")
@@ -537,11 +541,16 @@ class _V6Server(ThreadingHTTPServer):
     address_family = socket.AF_INET6
 
 
-def serve(port: int = DEFAULT_PORT, *, open_browser: bool = False) -> None:
-    """显式启动才起服务；Ctrl-C 退出。默认**不**自动打开浏览器。"""
-    httpd = create_server("127.0.0.1", port)
+def serve(port: int = DEFAULT_PORT, *, host: str = "127.0.0.1",
+          open_browser: bool = False) -> None:
+    """显式启动才起服务；Ctrl-C 退出。默认**不**自动打开浏览器。
+
+    `host` 只能是 loopback（`create_server` 校验）：IPv4 `127.0.0.1` 或 IPv6 `::1`——后者
+    在只解析 IPv6 的机器上才有意义，URL 里的地址要加方括号。"""
+    httpd = create_server(host, port)
+    addr = f"[{host}]" if ":" in host else host
     # 带访问令牌的链接只印在这里：凭它进门，别贴给别人（同 Jupyter）。
-    url = f"http://127.0.0.1:{httpd.server_address[1]}/?token={httpd.aw_state.token}"  # type: ignore[attr-defined]
+    url = f"http://{addr}:{httpd.server_address[1]}/?token={httpd.aw_state.token}"  # type: ignore[attr-defined]
     print(f"本地工作台：{url}（仅本机；链接含访问令牌，勿外传；Ctrl-C 停止）")
     if open_browser:
         import webbrowser

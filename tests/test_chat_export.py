@@ -5,7 +5,7 @@ import zlib
 
 import pytest
 
-from agent_wechat import errors, messages, store, usecases
+from agent_wechat import errors, messages, paths, purge, store, tasks, usecases
 
 
 class _FakeReader:
@@ -680,6 +680,25 @@ def test_chat_index_lists_a_markdown_only_export(con, chat_env):
     page = pathlib.Path(res.file).read_text(encoding="utf-8")
     assert "aaaa/chat/index.md" in page, "名字该链到存在的那份"
     assert "index.html" not in page, "没有 HTML 就不许链 HTML（死链）"
+
+
+def test_chat_index_refuses_while_a_chat_purge_is_running(con, tmp_path):
+    """互斥的一半：`purge --chat` 在跑时不重建总目录页——否则会把它刚删的会话写回页上。"""
+    root = paths.HOME_DIR / "media"          # 默认导出根（conftest 已把 HOME 指到临时目录）
+    root.mkdir(parents=True)
+    with tasks.claim("purge_chat", chat_id="wxid_otherchat"):
+        with pytest.raises(errors.TaskBusy, match="purge --chat"):
+            usecases.chat_index(account="acct")
+    # 自定义 --out 不在 purge 的删除面里，不受这条互斥影响
+    assert usecases.chat_index(out_dir=str(tmp_path / "elsewhere"), account="acct").chats == 0
+
+
+def test_chat_purge_refuses_while_chat_index_is_running(con):
+    """互斥的另一半：`chat index` 在跑时拒绝按会话销毁。两边都是先登记再查 `running()`，
+    所以无论谁先到，另一方都看得见。"""
+    with tasks.claim("chat_index"):
+        with pytest.raises(errors.PurgeRefused, match="chat_index"):
+            purge.execute_chat(purge.ChatPlan(entries=()))
 
 
 def test_chat_index_on_empty_out_dir_writes_nothing(tmp_path):
