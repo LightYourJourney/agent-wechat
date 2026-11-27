@@ -131,7 +131,7 @@ agent-wechat/
 │   ├── reader.py          消息读取与解码
 │   ├── media.py           媒体导出（图片解密 / 语音 SILK→WAV / 视频定位）
 │   ├── moments.py         朋友圈解析（sns.db，只读不联网）
-│   ├── sns_media.py       朋友圈远程媒体下载与解密（HTTP、默认关；media.py 另有贴纸 CDN 取件一条，同为 HTTP、默认关——加上首次建索引时下载模型，共三条零网络例外，全部是入站下载、不上传任何内容，见 SECURITY.md §1）
+│   ├── sns_media.py       朋友圈远程媒体下载与解密（HTTPS、默认关；media.py 另有贴纸 CDN 取件一条，为明文 HTTP、默认关——加上首次建索引时下载模型，共三条零网络例外，全部是入站下载、不上传任何内容，见 SECURITY.md §1）
 │   ├── moments_html.py    朋友圈渲染（单文件 HTML）
 │   ├── chat_text.py       两个会话模板共享的措辞与纯函数
 │   ├── chatview.py        会话时间线组装与落盘
@@ -140,6 +140,7 @@ agent-wechat/
 │   ├── chat_index.py      会话索引页模板
 │   ├── export.py          导出管道与水位线续跑
 │   ├── store.py           本地检索库
+│   ├── migrations.py      版本化 schema 迁移（main / vector / exclusions）
 │   ├── search.py          检索路由
 │   ├── vector.py          向量索引与语义检索
 │   ├── tasks.py           长任务注册表
@@ -160,6 +161,7 @@ agent-wechat/
     ├── USAGE.md           使用指南
     ├── TOOLS.md           MCP 工具参考
     ├── ARCHITECTURE.md    架构设计
+    ├── MCP_EFFICIENCY.md  MCP 上下文与效率评测
     ├── DATA_MODEL.md      数据与存储
     ├── SECURITY.md        隐私与安全
     ├── TROUBLESHOOTING.md 故障排查

@@ -97,7 +97,8 @@ def _cached_pid() -> int | None:
     if _pid_cache is not None and now - _pid_cache[0] < PID_TTL:
         return _pid_cache[1]
     pid = wechat_pid()
-    _pid_cache = (now, pid)
+    # 只缓存确定的 PID——判不出（None）下次照常重判（与 `_cached_current` 同一契约）
+    _pid_cache = (now, pid) if pid is not None else None
     return pid
 
 

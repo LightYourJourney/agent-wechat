@@ -55,14 +55,13 @@ def run_export(acct: str, chat_id: str | None = None, full: bool = False,
             if full and not chat_id:
                 # 只重置本账号：run_export 只重导 acct，连带清掉别的账号的水位线会让
                 # 它们白跑一次全量（upsert 幂等，不丢数据，但纯属浪费）
-                store.clear_export_watermarks(con, acct)
-                # 全量重扫 = 整段历史都看过了，回看游标也一起归零（否则会把同一段再走一遍）
-                store.clear_audit_cursors(con, acct)
                 try:
+                    store.clear_export_watermarks(con, acct)
+                    # 全量重扫 = 整段历史都看过了，回看游标也一起归零（否则会把同一段再走一遍）
+                    store.clear_audit_cursors(con, acct)
                     con.commit()
                 except (sqlite3.Error, OSError) as exc:
-                    # A 矩阵 43：全量导出的水位线复位提交此前裸穿（ENOSPC/EACCES/EIO/
-                    # locked/corrupt）。出口共享构造器，**调用点留在原地**——冻结表按调用点记账。
+                    # A 矩阵 43：全量导出的水位线复位与提交统一收口为 IndexUnavailable
                     raise store.index_unavailable(exc) from exc
             resume = {} if full else None
             anchors: dict[tuple[str, str], int | None] = {}
@@ -79,6 +78,7 @@ def run_export(acct: str, chat_id: str | None = None, full: bool = False,
                     store.upsert_media_refs(con, refs)
                 store.upsert_batch(con, rows)
 
+            last_reported = 0
             # 消息表为空（首次导出）时走 FTS 批量路径：拆触发器灌库、退出时一次 rebuild（成败都收口；
             # 进程被杀则由下次 `store.connect()` 按中断标记补做）。
             with store.fts_bulk(con, enabled=chat_id is None):
@@ -97,7 +97,9 @@ def run_export(acct: str, chat_id: str | None = None, full: bool = False,
                     dropped = store.upsert_batch(con, rows)
                     skipped += dropped
                     total += len(rows) - dropped
-                    if progress and total % 20_000 < store.BATCH:
+                    if progress and total > last_reported and (
+                            last_reported == 0 or total - last_reported >= 20_000):
+                        last_reported = total
                         progress(total)
 
             # ---- 历史回看（Phase 02）----

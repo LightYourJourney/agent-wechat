@@ -23,8 +23,8 @@
 帮我回复 XXX
 ```
 
-Agent 会自动执行：`get_account_status` 确认账号 → `get_recent_messages("XXX")` 读近期 50 条
-（名字直接可用，重名时返回候选）→ 生成 2-3 条不同风格的候选回复。
+Agent 会直接调用 `get_recent_messages("XXX")` 读近期 50 条
+（名字直接可用，重名时返回候选；未登录或密钥未就绪时工具直接报错给 hint，不必预先调 `get_account_status`）→ 生成 2-3 条不同风格的候选回复。
 若「XXX」匹配多个联系人，Agent 会列出让**你**确认，不会猜。
 
 **CLI 方式**：
@@ -150,7 +150,7 @@ agent-wechat semantic "合同什么时候签" --contact 小李 -n 5
 | 参数 | 适用 | 说明 |
 |---|---|---|
 | `--account <wxid_xxx_hex4>` | 两者 | `vector-build` **省略时索引全部账号**——与其它子命令（省略即当前登录账号）相反；`semantic` 省略即当前登录账号 |
-| `--rebuild` | `vector-build` | 先清空索引再全量重嵌：换模型后必须，也是重新生成上下文前缀的办法 |
+| `--rebuild` | `vector-build` | 先清空索引再全量重嵌（换模型后必须，或索引异常时重建） |
 | `--contact 名字` | `semantic` | 限定单个会话（username 或展示名；重名会提示，不会猜） |
 | `-n N` | `semantic` | 返回条数，默认 10 |
 
@@ -168,8 +168,8 @@ agent-wechat semantic "合同什么时候签" --contact 小李 -n 5
 
 - 输出中的 `distance` 越小越相近，但**没有相关性阈值**——即使没有合适的结果也会返回
   最近的 N 条，需要自己看 `distance` 判断可用性
-- **增量运行**（不带 `--rebuild`）不保留每个会话首条被嵌入消息的「上文」前缀；
-  需要完整上下文时用 `--rebuild` 全量重建
+- **增量运行**（不带 `--rebuild`）会自动回查每个会话水位线前的最近一条可嵌入消息作为「上文」前缀（最多回扫 500 条）；
+  仅在连续超过 500 条不可嵌入消息或旧库同会话真名与 `md5:` 混存时取不到前文
 - `--contact` 传展示名时**重名/未命中会报错**（不猜，也不会静默返回空）；无法确定时先用
   `contacts` 取 username。能解析但没有任何已入索引消息的会话返回 0 命中且无提示，
   与「确实没有命中」不可区分
@@ -719,7 +719,7 @@ agent-wechat purge --excluded              # 列出排除清单的规模（按�
 ## 9. 输出约定与错误提示
 
 - 所有失败都会给出中文原因与下一步指引（如密钥缺失时会提示 bootstrap 命令）
-- 名字消歧在 `recent` / `search` / `export` / `semantic` 四个子命令上行为一致：
+- 名字消歧在所有接受联系人/会话参数的 11 个子命令（`recent` / `search` / `export` / `semantic` / `retrieve` / `context` / `media export` / `media locate` / `moments export` / `chat export` / `purge --chat`）上行为一致：
   候选列表（JSON，含 `kind`；与 MCP 的 `need_confirm` 同形）打到 **stdout**，
   一行「无法唯一解析…」打到 **stderr**，退出码 **1**——歧义不会被当成「找不到」，
   也不会替你猜。用候选里的 `username` 重试即可

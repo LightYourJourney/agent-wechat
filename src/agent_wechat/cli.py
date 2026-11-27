@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import pathlib
 import sqlite3
 import sys
 from collections.abc import Iterable
@@ -101,14 +102,28 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
     return 0
 
 
+def _db_under_storage(acc: str, rel: str) -> pathlib.Path:
+    """把 `--db` 解析在账号 `db_storage` 之下，拒绝绝对路径或 `..` 穿越。"""
+    base = paths.db_storage(acc).resolve()
+    cand = (base / rel).resolve()
+    if not cand.is_relative_to(base):
+        raise errors.SearchInputError(
+            f"库路径不能越出 db_storage：{rel}",
+            hint="只填相对 db_storage 的路径（如 message/message_0.db）")
+    return cand
+
+
 def cmd_decrypt(args: argparse.Namespace) -> int:
     if args.out:
         # C-11：整库明文（SECURITY.md §1 标为极高敏感）**绝不**落进微信自己的容器目录。
         # 判据在 paths（四个 `--out` 入口共用），且先于账号解析与解密——那才是真正贵的两步。
         # 路径与下面写入时**逐字一致**（`HOME_DIR / args.out`：绝对路径时 pathlib 丢弃左操作数）。
-        paths.refuse_container_out(paths.HOME_DIR / args.out)
+        out_path = pathlib.Path(args.out)
+        if not out_path.is_absolute():
+            paths.ensure_home_dirs()
+        paths.refuse_container_out(paths.HOME_DIR / out_path)
     acc = account.resolve_account(args.account)
-    db = paths.db_storage(acc) / args.db
+    db = _db_under_storage(acc, args.db)
     if not db.exists():
         print(f"库不存在: {db}", file=sys.stderr)
         return 1
@@ -129,12 +144,7 @@ def cmd_decrypt(args: argparse.Namespace) -> int:
             # 复制（几百 MB 的库不整读进内存），`out` 是符号链接时替换链接本身、不写穿到目标。
             paths.atomic_copy(plain, out, mode=0o600)
         except OSError as exc:
-            # A 矩阵：这三步此前裸穿（`PermissionError`/`OSError` 直接 traceback）。
-            # 整库明文是高敏产物——写不成必须说清，且不许留权限未收紧的半成品。
-            try:
-                out.unlink(missing_ok=True)
-            except OSError:
-                pass
+            # 临时文件已由 `atomic_copy` 清理，这里不再删除可能已存在的旧目标 `out`。
             raise errors.MediaOutputError(
                 f"写明文副本失败：{out}",
                 hint=f"{exc}；请检查磁盘空间与 AGENT_WECHAT_HOME 的目录权限"
@@ -146,7 +156,7 @@ def cmd_decrypt(args: argparse.Namespace) -> int:
 def cmd_inspect(args: argparse.Namespace) -> int:
     """schema 探测：解密指定库，dump 全部表结构与样本行。微信升级后的第一站。"""
     acc = account.resolve_account(args.account)
-    db = paths.db_storage(acc) / args.db
+    db = _db_under_storage(acc, args.db)
     if not db.exists():
         print(f"库不存在: {db}", file=sys.stderr)
         return 1
@@ -162,11 +172,12 @@ def cmd_inspect(args: argparse.Namespace) -> int:
             # 解不成 str 的表名（非 UTF-8）拼不进下面的 SQL，也印不出来：跳过，不抛
             if not isinstance(name, str) or name.startswith("sqlite_"):
                 continue
-            n = con.execute(f"SELECT count(*) FROM '{name}'").fetchone()[0]
+            quoted = '"' + name.replace('"', '""') + '"'
+            n = con.execute(f"SELECT count(*) FROM {quoted}").fetchone()[0]
             print(f"\n--- {name}  ({n} 行) ---\n{sql}")
             if args.sample and n:
-                cols = [_decode(c[1]) for c in con.execute(f"PRAGMA table_info('{name}')")]
-                rows = con.execute(f"SELECT * FROM '{name}' LIMIT {args.sample}").fetchall()
+                cols = [_decode(c[1]) for c in con.execute(f"PRAGMA table_info({quoted})")]
+                rows = con.execute(f"SELECT * FROM {quoted} LIMIT ?", (args.sample,)).fetchall()
                 for row in rows:
                     sample = {c: _shorten(_decode(v)) for c, v in zip(cols, row)}
                     print("  " + json.dumps(sample, ensure_ascii=False, default=str))
@@ -298,7 +309,7 @@ def cmd_vector_status(args: argparse.Namespace) -> int:
                 "watermark": {}, "pending": 0, "failed": 0, "max_attempts": 0,
                 "by_reason": {}}    # 键集与 `vector.freshness` 一致：有没有索引，形状不变
     else:
-        with store.open() as con:
+        with store.open_readonly() as con:
             info = vector.freshness(con, args.account)
     print(json.dumps(info, ensure_ascii=False, indent=2))
     return 0
@@ -395,9 +406,6 @@ def cmd_ui(args: argparse.Namespace) -> int:
     from . import webui
     try:
         webui.serve(args.port, host=args.host, open_browser=args.open)
-    except errors.ScopeDenied as exc:
-        print(str(exc), file=sys.stderr)
-        return 1
     except (OverflowError, OSError) as exc:
         # 端口非法（`-1` / `70000` → `OverflowError`）、无权限（<1024 → `PermissionError`）、
         # 已被占用（`OSError`）。三种此前都印整屏 traceback，破坏「项目错误 → 单行中文 +
@@ -1507,6 +1515,8 @@ def main(argv: list[str] | None = None) -> None:
         # 三条轴各自独立：`--excluded` 是全局查询、`--chat` 问「删哪个会话」、具名范围与
         # `--all` 问「删哪一类文件」。混着给一律退 2——`purge --chat X --media` 若被接受，
         # 用户以为只删了那个会话，实际把整棵 media/ 清空了（不可逆）。
+        if args.account and not args.chat:
+            p.error("--account 只与 --chat 同用（用来解析会话名），具名范围 / --all / --excluded 均作用于整个数据目录")
         if args.excluded:
             # `--yes` 也是「其它 flag」（spec §3 的字面要求：与其它 flag 同给时退 2）：
             # 这条命令一次查询、什么都不改，带 `--yes` 只说明用户以为它会动手——那种误解
@@ -1529,7 +1539,7 @@ def main(argv: list[str] | None = None) -> None:
     except errors.ContactNotFound as exc:
         # 入口专属后缀：CLI 用户该用 `contacts`，而不是 MCP 的工具名 list_contacts
         # （USAGE.md §9「输出约定与错误提示」文档化的就是这一条）。
-        print(f"{exc}，请用 contacts 查询", file=sys.stderr)
+        print(f"{errors.redact(str(exc))}，请用 contacts 查询", file=sys.stderr)
         code = 1
     except errors.AgentWeChatError as exc:
         # 项目错误 → 单行中文（含 hint）打到 stderr，退出码 1。argparse 自己的

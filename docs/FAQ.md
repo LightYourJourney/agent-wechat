@@ -96,8 +96,8 @@ lldb attach 需要 `task_for_pid` 权限；Hardened Runtime 会阻止它，所�
 的「备份排除」一行确认；显示 `[Included]` 时手动执行一次（见 INSTALL.md §7）。
 
 只删某一个会话：`agent-wechat purge --chat 小李`（预览）→ `--yes`（执行）——它删的是**本工具里的
-副本**（索引行、向量、appmsg 部件、位置/名片载荷 `msg_extras`、媒体引用、群成员显示名、`media/<会话md5>/`、
-`tasks.json` 里指名该会话的已结束任务记录），**不是微信里
+副本**（索引行、向量、appmsg 部件、位置/名片载荷 `msg_extras`、媒体引用、群成员显示名、派生文本与墓碑、
+同会话事实主张与证据、`media/<会话md5>/`、`tasks.json` 里指名该会话的已结束任务记录），**不是微信里
 的记录**（微信目录只读）；**朋友圈导出不在范围内**（`moments/` 是一份 HTML 装所有人，那个人的
 动态与互动仍可能留在其中）。那批内容的 `msg_key` 会写进 `~/.agent-wechat/exclusions.db`，
 所以重跑 `export --full` / `appmsg rebuild` / `media rebuild-refs` 都不会把它们带回来，而删除
@@ -121,8 +121,8 @@ lldb attach 需要 `task_for_pid` 权限；Hardened Runtime 会阻止它，所�
 索引先建后查——CLI 用 `agent-wechat vector-build` 构建、`agent-wechat semantic "上次说的那个爬山的安排"`
 检索（MCP 对应 `build_vector_index` / `semantic_search`）；首次构建会下载约 95MB 模型文件到
 `~/.agent-wechat/models`，之后完全离线。精确关键词/人名仍建议用 `search`（FTS5 更快更准），
-`semantic` 用于记不清原话时。用法与前提见 USAGE.md 场景四；**已知限制**（增量运行不保留
-每个会话首条消息的「上文」前缀、没有相关性阈值、没有任何已入索引消息的会话返回 0 命中且无提示）
+`semantic` 用于记不清原话时。用法与前提见 USAGE.md 场景四；**已知限制**（没有相关性阈值、
+没有任何已入索引消息的会话返回 0 命中且无提示、增量回查上文前缀上限 500 条）
 见 TOOLS.md §7–§8 与 ARCHITECTURE.md §7。
 
 **Q16：为什么查到的图片、视频大多是 `gone`？**

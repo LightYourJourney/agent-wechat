@@ -20,6 +20,7 @@ import fcntl
 import json
 import os
 import pathlib
+import plistlib
 import shutil
 import sqlite3
 import sys
@@ -396,7 +397,7 @@ def run_sync(account: str | None = None, *, full: bool = False,
                          str(exc), "用 --account 指定本机已有账号，或先登录微信") from exc
         res.account = acct
 
-        with _sync_lock():
+        with _sync_lock(), tasks.claim("sync", account=acct):
             free = _free_bytes()
             if free and free < MIN_FREE_BYTES:
                 raise _Abort(DISK_LOW,
@@ -438,6 +439,7 @@ def run_sync(account: str | None = None, *, full: bool = False,
                         break
                     except errors.SourceUnreadable:
                         if attempt == SOURCE_RETRIES:
+                            res.skipped = skipped_rows["n"]
                             raise
                         del res.degraded[base:]
                         time.sleep(SOURCE_RETRY_DELAY)
@@ -489,9 +491,9 @@ def run_sync(account: str | None = None, *, full: bool = False,
     except errors.AgentWeChatError as exc:
         res.status, res.detail, res.hint = FAILED, str(exc), exc.hint
     except OSError as exc:
-        res.status, res.detail = DISK_ERROR, f"{type(exc).__name__}: {exc}"
+        res.status, res.detail = DISK_ERROR, errors.redact(f"{type(exc).__name__}: {exc}")
     except Exception as exc:                 # noqa: BLE001 — 编排层兜底：未预期异常也要落终态
-        res.status, res.detail = FAILED, f"{type(exc).__name__}: {exc}"
+        res.status, res.detail = FAILED, errors.redact(f"{type(exc).__name__}: {exc}")
     finally:
         res.finished_at = int(now if now is not None else time.time())
         if res.account:
@@ -551,28 +553,15 @@ def launchd_plist(*, account: str | None = None,
     args = [_program(), "sync", "--json"]
     if account:
         args += ["--account", account]
-    arg_xml = "".join(f"\n        <string>{a}</string>" for a in args)
-    return f"""<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
- "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>{LABEL}</string>
-    <key>ProgramArguments</key>
-    <array>{arg_xml}
-    </array>
-    <key>StartInterval</key>
-    <integer>{int(interval_minutes) * 60}</integer>
-    <key>RunAtLoad</key>
-    <false/>
-    <key>StandardOutPath</key>
-    <string>{paths.HOME_DIR / LAUNCHD_LOGS[0]}</string>
-    <key>StandardErrorPath</key>
-    <string>{paths.HOME_DIR / LAUNCHD_LOGS[1]}</string>
-</dict>
-</plist>
-"""
+    payload = {
+        "Label": LABEL,
+        "ProgramArguments": args,
+        "StartInterval": int(interval_minutes) * 60,
+        "RunAtLoad": False,
+        "StandardOutPath": str(paths.HOME_DIR / LAUNCHD_LOGS[0]),
+        "StandardErrorPath": str(paths.HOME_DIR / LAUNCHD_LOGS[1]),
+    }
+    return plistlib.dumps(payload, fmt=plistlib.FMT_XML, sort_keys=False).decode("utf-8")
 
 
 def schedule_install(*, account: str | None = None,
@@ -581,10 +570,9 @@ def schedule_install(*, account: str | None = None,
     dest = paths.launch_agents_dir() / f"{LABEL}.plist"
     try:
         paths.launch_agents_dir().mkdir(parents=True, exist_ok=True)
-        dest.write_text(launchd_plist(account=account,
-                                      interval_minutes=interval_minutes),
-                        encoding="utf-8")
-        os.chmod(dest, 0o600)
+        paths.atomic_write(dest, launchd_plist(account=account,
+                                               interval_minutes=interval_minutes),
+                           mode=0o600)
     except OSError as exc:
         raise errors.HomeUnavailable(
             f"无法写入 LaunchAgent：{exc}",

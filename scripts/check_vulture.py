@@ -83,10 +83,10 @@ def entries(lines: Iterable[str]) -> set[str]:
 
 
 def run_vulture(src: Path) -> tuple[int, list[str], str]:
-    """跑 vulture，原样返回 (退出码, stdout 行, stderr)。"""
+    """跑 vulture，原样返回 (退出码, stdout 行, stderr)。固定 cwd=ROOT 避免子目录运行相对路径漂移。"""
     proc = subprocess.run(
         [sys.executable, "-m", "vulture", str(src), "--min-confidence", str(MIN_CONFIDENCE)],
-        capture_output=True, text=True,
+        capture_output=True, text=True, cwd=ROOT,
     )
     return proc.returncode, proc.stdout.splitlines(), proc.stderr
 
@@ -124,8 +124,13 @@ def report(rc: int, now: set[str], base: set[str], tool_stderr: str = "") -> int
 
 
 def main() -> int:
+    try:
+        base = baseline(BASELINE)
+    except OSError as exc:
+        print(f"❌ 无法读取 vulture 基线文件 {BASELINE}：{exc}", file=sys.stderr)
+        return 2
     rc, lines, tool_stderr = run_vulture(SRC)
-    return report(rc, entries(lines), baseline(BASELINE), tool_stderr)
+    return report(rc, entries(lines), base, tool_stderr)
 
 
 if __name__ == "__main__":

@@ -19,13 +19,15 @@ set -uo pipefail
 cd "$(dirname "$0")/.."
 
 PY=${PY:-.venv/bin/python}
+[ -x "$PY" ] || PY=/usr/bin/python3
 [ -x "$PY" ] || PY=python3
 FAILED=()
 
 # 每一步的完整输出**同时**落进一个日志文件：失败时只印一行「哪一步」在事后是查不出原因的
 # ——2026-10-14 就吃过一次（③ pytest 红了一次、复跑又绿，而那次的细节已经被截断的终端吃掉）。
 # 日志用 mktemp，失败时把路径印出来。
-LOG=$(mktemp -t awgate)
+LOG=$(mktemp -t awgate) || exit 2
+trap 'rm -f "$LOG"' INT TERM
 
 step() {                      # step <名字> <要跑的...>
   local name=$1; shift
@@ -63,6 +65,7 @@ if [ "${1:-}" != "--fast" ]; then
 
   step "③ pytest" "$PY" -m pytest tests/ -q
   step "④ scan --all" "$PY" security/scan.py --all
+  step "④′ allowlist 校验" "$PY" security/scan.py --verify-allowlist
   step "⑤ 钩子自检" "$PY" security/scan.py --check-hooks
 fi
 

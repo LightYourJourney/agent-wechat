@@ -183,7 +183,7 @@ AGENT_WECHAT_HOME = "/Users/you/.agent-wechat"
 ### 6.4 本地工作台（可选）
 
 ```bash
-agent-wechat ui --port 8765        # 只监听 127.0.0.1；Ctrl-C 停止
+agent-wechat ui --port 8765        # 默认监听 127.0.0.1（--host ::1 支持 IPv6）；Ctrl-C 停止
 agent-wechat ui --port 8765 --open # 顺便打开浏览器
 ```
 

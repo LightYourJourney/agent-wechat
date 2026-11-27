@@ -2245,8 +2245,8 @@ def test_user_homes_includes_the_sudo_users_home_by_uid(tmp_path, monkeypatch):
 
 
 def test_execute_does_not_walk_a_symlinked_dir_artifact(tmp_path):
-    """闸门只该扫**真正会被 rmtree 遍历的树**：`kind="dir"` 但路径本身是链接的产物不在其列。
-    它的目标不会被这次删除跟随，扫过去只会把目标内部无关的逃逸链接算到本次账上，整片误拒。"""
+    """闸门只该扫**真正会被 rmtree 遍历的树**：`kind="dir"` 但路径本身是链接的产物不该被跟随。
+    目标在待删根之外时只拒绝根链接本身（`home/tmp`），不会跟随进入目标把内部 `evil.db` 算上。"""
     outside = tmp_path / "outside"
     outside.mkdir()
     (outside / "secret.db").write_bytes(b"p" * 10)
@@ -2254,11 +2254,11 @@ def test_execute_does_not_walk_a_symlinked_dir_artifact(tmp_path):
     real = home / "real-tmp"
     real.mkdir(parents=True)
     (real / "evil.db").symlink_to(outside / "secret.db")          # 链接目标内部有逃逸链接
-    (home / "tmp").symlink_to(real)                               # 但 tmp 本身只指向树内
-    try:
+    (home / "tmp").symlink_to(real)                               # tmp 本身指向待删根外（保留目录）
+    with pytest.raises(errors.PurgeRefused) as ei:
         purge.execute(purge.plan(frozenset({"tmp"})))
-    except errors.PurgeRefused as exc:                            # 原版不该在这道闸拒绝
-        assert "符号链接" not in str(exc), f"不该因目标内部的链接而拒绝：{exc}"
+    msg = str(ei.value)
+    assert "共 1 处" in msg and str(home / "tmp") in msg and "evil.db" not in msg, msg
     assert (outside / "secret.db").exists()
 
 

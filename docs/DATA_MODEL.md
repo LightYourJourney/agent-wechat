@@ -386,7 +386,7 @@ SELECT md5_, caption_ FROM kStoreEmoticonCaptionsTable WHERE language_ = 'defaul
 - **降级而非报错**：库缺失 / 结构漂移 / 解密失败一律返回空表，贴纸只是少个名字、
   回落短 ID，绝不因此中断导出。表结构实测另见 [schema-4.1.13.md](schema-4.1.13.md) §emoticon.db。
 
-## 8. 面向 LLM 蒖馏的数据获取
+## 8. 面向 LLM 蒸馏的数据获取
 
 导出后的每条消息已是结构化字段（会话/发送者/是否本人/时间/类型/正文）。
 两种取用方式：

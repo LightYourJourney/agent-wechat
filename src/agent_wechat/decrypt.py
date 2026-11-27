@@ -173,13 +173,28 @@ def snapshot(db: pathlib.Path, td: pathlib.Path) -> pathlib.Path:
     try:
         for _ in range(SNAPSHOT_TRIES):
             before = _stamp(db)
+            if before is None:
+                raise errors.SourceUnreadable(
+                    f"微信数据库不存在或已消失：{db.name}",
+                    hint="确认微信已完成登录且数据目录存在")
+            wal_src = pathlib.Path(str(db) + "-wal")
+            wal_before: tuple[int, int, int] | None = None
+            vanished = False
             for suf in ("", "-wal", "-shm"):
                 src = pathlib.Path(str(db) + suf)
                 out = pathlib.Path(str(dst) + suf)
                 out.unlink(missing_ok=True)     # 重拍：clonefile 不覆盖既有文件，上一轮的 -wal 也不能留
+                if suf == "-wal":
+                    wal_before = _stamp(src)
                 if src.exists():
-                    _clone_or_copy(src, out)
-            if _stamp(db) == before:
+                    try:
+                        _clone_or_copy(src, out)
+                    except FileNotFoundError:
+                        if suf:                 # -wal/-shm 在复制瞬间被微信关闭连接删除：重拍而非直接放弃
+                            vanished = True
+                            break
+                        raise
+            if not vanished and _stamp(db) == before and _stamp(wal_src) == wal_before:
                 return dst
     except OSError as exc:
         # A 矩阵：快照那一步此前裸穿 PermissionError/ENOSPC（R2-A-007）。快照是解密的
@@ -224,7 +239,12 @@ def _keyed_snapshot(db: pathlib.Path, passphrase: bytes
     yield (临时目录, 快照路径, enc_key)；退出时整个临时目录删掉。"""
     ensure_home_dirs()
     # 目录名带 **pid**（EA-019）：崩溃后的残留靠它判活（`sweep_stale_tempdirs`）。
-    td = pathlib.Path(tempfile.mkdtemp(prefix=f"awdec-{os.getpid()}-", dir=tmp_dir()))
+    try:
+        td = pathlib.Path(tempfile.mkdtemp(prefix=f"awdec-{os.getpid()}-", dir=tmp_dir()))
+    except OSError as exc:
+        raise errors.HomeUnavailable(
+            f"无法在临时目录创建快照文件夹：{exc}",
+            hint="确认 AGENT_WECHAT_HOME 下的 tmp/ 可写且磁盘有空间") from exc
     try:
         snap = snapshot(db, td)
         # 只读第 1 页（盐在里面）：此前 `read_bytes()[:PAGE_SZ]` 把整个分片读进内存再切，
@@ -263,6 +283,7 @@ def decrypted(db: pathlib.Path, passphrase: bytes) -> Iterator[pathlib.Path]:
         out = td / "plain.db"
         cmds = [
             f'PRAGMA key = "x\'{enc_key.hex()}\'";',
+            "PRAGMA cipher_compatibility = 4;",
             # 必须绝对路径：ATTACH 相对路径按进程 CWD 解析。单引号要双写：AGENT_WECHAT_HOME
             # 带 `'` 时不转义就是语法错误，还会被下面报成「密钥不匹配」。
             f"ATTACH DATABASE '{_sql_str(out)}' AS plain KEY '';",
@@ -297,7 +318,7 @@ def decrypted(db: pathlib.Path, passphrase: bytes) -> Iterator[pathlib.Path]:
             # **折行**，第二处回显因此留下密钥的前缀（实测 62/64 位）——而 redact 只认「恰好
             # 64 位连续 hex」，残段会一路进对外信封。回显块正是藏残段的地方；首行
             # （`Parse error near line N: near "…"`）已带够定位信息。
-            raise DecryptError(f"sqlcipher 解密失败: {_first_line(r.stderr)}",
+            raise DecryptError(f"sqlcipher 解密失败: {errors.redact(_first_line(r.stderr))}",
                                hint=_KEY_MISMATCH_HINT)
         yield out
 

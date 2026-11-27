@@ -565,6 +565,8 @@ def build_index(accounts: Sequence[str] | None = None, rebuild: bool = False,
                     "BEGIN;\n"
                     + store.VECTOR_DROP
                     + f"\nDELETE FROM vector_watermark WHERE model_id='{MODEL_ID}';\n"
+                    # 整表重建删除了整张 vec_messages，同步清掉可能遗留的其他旧模型水位线行
+                    + "\nDELETE FROM vector_watermark;\n"
                     # 整表重建 = 回到未初始化态：版本行必须一起清掉，否则下一次
                     # `apply` 会认为 vector scope 已就绪、将来的迁移被跳过。
                     + f"\nDELETE FROM {migrations.VERSION_TABLE}"
@@ -800,6 +802,11 @@ def apply_dirty(con: sqlite3.Connection, *, accounts: Sequence[str] | None = Non
             if not should_embed(row):
                 _delete_vec(con, row["id"])
                 store.dequeue_reembed(con, key)
+                # 消息变为不可嵌入（如撤回）时同样级联通知后继消息重算上文前缀，避免后继 preview 残留被撤回原文
+                if reasons.get(key) != _NO_CASCADE_REASON:
+                    nxt = _next_embed_key(con, row)
+                    if nxt:
+                        store.enqueue_reembed(con, nxt, reason="prefix")
                 stats["dropped"] += 1
                 continue
             prev = _prev_text(con, row)
@@ -892,11 +899,11 @@ def freshness(con: sqlite3.Connection, account: str | None = None) -> dict:
         if row:
             out["embedded"], out["skipped"] = int(row[0]), int(row[1])
     if store.has_table(con, "vector_watermark"):
-        sql = "SELECT account, last_rowid FROM vector_watermark"
-        args: tuple = ()
+        sql = "SELECT account, last_rowid FROM vector_watermark WHERE model_id=?"
+        args: tuple = (MODEL_ID,)
         if account:
-            sql += " WHERE account=?"
-            args = (account,)
+            sql += " AND account=?"
+            args = (MODEL_ID, account)
         out["watermark"] = dict(con.execute(sql, args).fetchall())
     return out
 
@@ -954,8 +961,12 @@ def semantic_search(query: str, chat_id: str | None = None, limit: int = 10,
         if meta is None or meta["embedded"] == 0:
             raise VectorIndexEmpty("向量索引为空", hint="请先构建向量语义索引")
         k = min((offset + limit) * 3, K_MAX)   # 多取候选，过滤后再截断
-        qvec = _sqlite_vec().serialize_float32(
-            list((embedder or default_embedder()).embed_query(query_text(query))))
+        vec = list((embedder or default_embedder()).embed_query(query_text(query)))
+        if len(vec) != store.VECTOR_DIM:
+            raise VectorError(
+                f"查询向量维度 {len(vec)} 与索引库的 {store.VECTOR_DIM} 不一致：换模型后必须重建索引",
+                hint="用 rebuild=True 重建向量索引")
+        qvec = _sqlite_vec().serialize_float32(vec)
         sql = ("SELECT msg_rowid, distance FROM vec_messages "
                "WHERE embedding MATCH ? AND k = ? AND account = ?")
         args: list = [qvec, k, account]
@@ -989,5 +1000,10 @@ def semantic_search(query: str, chat_id: str | None = None, limit: int = 10,
             hits = [h for h in hits if h["ts"] < before_ts]
         page = hits[offset:offset + limit]
         return {"mode": "semantic", "model": MODEL_ID, "total": len(page), "hits": page}
+    except sqlite3.Error as exc:
+        raise VectorError(
+            f"语义检索读取索引失败：{redact(str(exc))}",
+            hint="索引库可能被占用或损坏：等写任务结束后重试；持续失败可重建向量索引"
+        ) from exc
     finally:
         con.close()

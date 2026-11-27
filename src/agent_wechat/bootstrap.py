@@ -106,16 +106,18 @@ def _read_capture(proc: subprocess.Popen, deadline: float) -> str:
     while time.time() < deadline:
         # 超时不许越过 deadline：固定 3.0 会让「300s 的 timeout」实际超到 303s，
         # 而按秒计的 deadline 承诺在这里就该是准的（EA-052 的测试钉住了这条）。
-        r, _, _ = select.select([out], [], [], max(0.0, min(3.0, deadline - time.time())))
-        if r:
-            chunk = os.read(out.fileno(), 65536)
-            if not chunk:
-                if proc.poll() is not None:
+        try:
+            r, _, _ = select.select([out], [], [], max(0.0, min(3.0, deadline - time.time())))
+            if r:
+                chunk = os.read(out.fileno(), 65536)
+                if not chunk:
+                    # 管道 EOF 后不可能再有数据，立即退出，避免 proc.poll() 暂未回收时 100% CPU 忙等
                     break
-                continue
-            buf += chunk.decode("utf-8", "replace")
-        elif proc.poll() is not None:
-            break                     # lldb 已退出且输出已读尽
+                buf += chunk.decode("utf-8", "replace")
+            elif proc.poll() is not None:
+                break                     # lldb 已退出且输出已读尽
+        except OSError:
+            break
         if _parse_passphrase(buf):
             break
     return buf
@@ -172,6 +174,9 @@ def capture_passphrase_lldb(timeout: int = DEFAULT_TIMEOUT) -> str:
     # lldb 提前退出（attach 失败）就看不出来；进程替换下 lldb 一退 bash 就退（`_read_capture` 盯它）。
     # EA-004：起**独立进程组**（start_new_session）——收尾靠 killpg 精确命中本次的
     # bash→lldb 进程树，而不是按名字杀（见 _terminate_capture）。
+    timeout = int(timeout)
+    if timeout <= 0:
+        raise CaptureError(f"timeout 必须为正整数（收到 {timeout}）")
     try:
         proc = subprocess.Popen(
             # 路径要 shell 转义：`TMPDIR` 含空格或 `;` 时，不转义的 cat 读不到脚本。
@@ -192,6 +197,12 @@ def capture_passphrase_lldb(timeout: int = DEFAULT_TIMEOUT) -> str:
         buf = _read_capture(proc, deadline)
     finally:
         _terminate_capture(proc)
+        out_pipe = getattr(proc, "stdout", None)
+        if out_pipe is not None:
+            try:
+                out_pipe.close()
+            except OSError:
+                pass
         try:
             os.unlink(sp)
         except OSError:

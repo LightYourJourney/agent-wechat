@@ -176,7 +176,7 @@ _SECRET_NAMES_EXACT = frozenset({"bypassinfostring"})
 #
 # 参数名字符集含 `-` 与 `.`：只认 `[A-Za-z0-9_]` 时 `?X-Amz-Security-Token=` /
 # `?access-token=` / `&sig.token=` 会在 `-`/`.` 处断开、整体放行（实测）。
-_SECRET_PARAM = re.compile(r"[?&;,]([A-Za-z0-9_.\-]+)=")
+_SECRET_PARAM = re.compile(r"[?&;,#]([A-Za-z0-9_.\-]+)=")
 
 
 def _has_credential_param(value: str) -> bool:

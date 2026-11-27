@@ -128,11 +128,15 @@ def degraded_chat_id(chat_md5: str) -> str:
 
 
 def chat_md5(chat_id: str) -> str:
-    """解析端：会话 id → md5。退化 id 直接取前缀之后，其余按 md5(chat_id) 计算。
+    """解析端：会话 id → md5。合法退化 id 直接取小写 hex，其余按 md5(chat_id) 计算。
 
     两侧共用本函数，防止「生产写 md5:<hex>、解析又当普通 id 再 md5 一次」的漂移。
     """
-    return chat_id[len(MD5_PREFIX):] if chat_id.startswith(MD5_PREFIX) else md5_of(chat_id)
+    if chat_id.startswith(MD5_PREFIX):
+        tail = chat_id[len(MD5_PREFIX):]
+        if tail and all(c in "0123456789abcdefABCDEF" for c in tail):
+            return tail.lower()
+    return md5_of(chat_id)
 
 
 # ---------- 哨兵二：[appmsg: 标题] 媒体提示 ----------
@@ -241,19 +245,26 @@ class KeyParts:
     create_time: int | None        # 旧 4 段键为 None
 
 
+def _is_ascii_uint(s: str) -> bool:
+    return bool(s) and s.isascii() and s.isdecimal()
+
+
 def split_key(msg_key: str) -> KeyParts | None:
     """拆键；段数不是 4/5 或数字段不可解析 → None（调用方各自报错）。
 
-    local_id 用 `isdecimal` 判而不是直接 `int()`：后者也收 `-1` / ` 1` / `1_0`，
-    那不是本工具写得出来的键。
+    local_id 与 create_time 用 ASCII 十进制判而不是直接 `int()`：后者也收 ` 1` / `1_0` / `+1`，
+    那不是本工具写得出来的键（create_time 允许带前导 `-` 兼容异常负时间戳）。
     """
     parts = msg_key.split("|")
-    if len(parts) not in (4, 5) or not all(parts[:3]) or not parts[3].isdecimal():
+    if len(parts) not in (4, 5) or not all(parts[:3]) or not _is_ascii_uint(parts[3]):
         return None
-    try:
-        ct = int(parts[4]) if len(parts) == 5 else None
-    except ValueError:
-        return None
+    if len(parts) == 5:
+        raw_ct = parts[4][1:] if parts[4].startswith("-") else parts[4]
+        if not _is_ascii_uint(raw_ct):
+            return None
+        ct: int | None = int(parts[4])
+    else:
+        ct = None
     return KeyParts(parts[0], parts[1], parts[2], int(parts[3]), ct)
 
 
@@ -278,7 +289,7 @@ def split_short_key(key: str) -> tuple[str, int, int] | None:
     parts = key.split(":")
     if (len(parts) != 3 or len(parts[0]) != SHORT_KEY_PREFIX_LEN
             or any(c not in "0123456789abcdef" for c in parts[0])
-            or not parts[1].isdecimal() or not parts[2].isdecimal()):
+            or not _is_ascii_uint(parts[1]) or not _is_ascii_uint(parts[2])):
         return None
     return parts[0], int(parts[1]), int(parts[2])
 

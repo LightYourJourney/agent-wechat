@@ -2,10 +2,12 @@
 __pycache__/
 *.pyc
 .pytest_cache/
+.ruff_cache/
 
 # 本机工具状态：只在本机有意义，换机器会重新生成；不靠开发者个人全局 ignore
 .claude/
 .superpowers/
+.remember/
 
 # 本机 MCP 配置：写的是各人的绝对路径，不入库；模板见同名 .example
 .mcp.json
@@ -35,11 +37,13 @@ build/
 *.db-wal
 *.db-shm
 *.db-journal
+passphrase.json
+tasks.json
+tasks.json.lock
 .worktrees/
 
 # C 阶段（review-r2）：hypothesis 的示例库与工作区
 .hypothesis/
-.superpowers/review-r2/
 
 # /graphify 的知识图产物（17 MB，可随时重建：cache/ 是纯缓存，graph.* 由抽取生成）
 graphify-out/

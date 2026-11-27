@@ -19,6 +19,7 @@ import json
 import os
 import secrets
 import socket
+import threading
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -144,8 +145,15 @@ async function showEvidence(msgKey) {
     d.append(el('div', m.content));
     return d;
   }));
-  const media = await api('/api/media?' + params({account: acct(), key: msgKey, chat: $('chat').value}));
-  box.append(el('pre', JSON.stringify(media, null, 2)));
+  const chatId = res.chat_id || $('chat').value;
+  if (chatId) {
+    try {
+      const media = await api('/api/media?' + params({account: acct(), key: msgKey, chat: chatId}));
+      box.append(el('pre', JSON.stringify(media, null, 2)));
+    } catch (e) {
+      box.append(el('div', '媒体状态查询失败：' + String(e), 'meta'));
+    }
+  }
 }
 async function loadTimeline(reset) {
   const q = {account: acct(), chat: $('chat').value, limit: 30};
@@ -196,8 +204,10 @@ def _loopback(host_header: str | None, port: int) -> bool:
 def _origin_ok(origin: str | None, port: int) -> bool:
     if origin is None:
         return False
-    return origin in {f"http://127.0.0.1:{port}", f"http://localhost:{port}",
-                      f"http://[::1]:{port}"}
+    allowed = {f"http://127.0.0.1:{port}", f"http://localhost:{port}", f"http://[::1]:{port}"}
+    if port == 80:
+        allowed |= {"http://127.0.0.1", "http://localhost", "http://[::1]"}
+    return origin in allowed
 
 
 class _State:
@@ -222,6 +232,8 @@ def _json(handler: BaseHTTPRequestHandler, code: int, obj: object) -> None:
     handler.send_header("Content-Length", str(len(raw)))
     handler.send_header("Cache-Control", "no-store")
     handler.send_header("X-Content-Type-Options", "nosniff")
+    handler.send_header("Referrer-Policy", "no-referrer")
+    handler.send_header("Cross-Origin-Resource-Policy", "same-origin")
     handler.end_headers()
     handler.wfile.write(raw)
 
@@ -243,6 +255,7 @@ def _text(handler: BaseHTTPRequestHandler, code: int, text: str,
 
 class _Handler(BaseHTTPRequestHandler):
     server_version = "agent-wechat-ui"
+    timeout = 10
     sys_version = ""
 
     def log_message(self, *args: object) -> None:            # noqa: D401 — 不写访问日志（查询串敏感）
@@ -292,12 +305,24 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _reject_csrf(self) -> bool:
         """每进程随机令牌（`X-AW-CSRF`）。GET `/api/*` 与 POST 共用这一份判据。"""
-        if self.headers.get("X-AW-CSRF") != self.state.csrf:
+        given = self.headers.get("X-AW-CSRF") or ""
+        if not (given and _same(given, self.state.csrf)):
             _json(self, 403, {"error": "CSRF 校验失败"})
             return True
         return False
 
     def do_GET(self) -> None:                # noqa: N802 — BaseHTTPRequestHandler 协议
+        sem = getattr(self.server, "aw_sem", None)
+        if sem is not None and not sem.acquire(blocking=False):
+            _json(self, 503, {"error": "工作台并发请求过多，请稍后重试"})
+            return
+        try:
+            self._handle_get()
+        finally:
+            if sem is not None:
+                sem.release()
+
+    def _handle_get(self) -> None:
         if self._reject_host():
             return
         path = urllib.parse.urlparse(self.path)
@@ -316,24 +341,32 @@ class _Handler(BaseHTTPRequestHandler):
             _text(self, 200, _STYLE, "text/css; charset=utf-8")
             return
         if path.path.startswith("/api/"):
-            # GET 也要 token：Host 校验只挡 DNS rebinding，挡不住**跨站的简单 GET**——任意网页
-            # 都能让浏览器带着 `Host: 127.0.0.1:<port>` 打过来，触发检索 / 语义检索（加载模型）/
-            # 诊断。同源策略让它读不到响应，但计时侧信道与资源消耗都还在。自定义头会让跨站
-            # fetch 先发预检，而本服务不答 CORS，于是跨站请求根本到不了这里。
             if self._reject_csrf():
                 return
             qs = urllib.parse.parse_qs(path.query)
             try:
                 _json(self, 200, _strip_paths(_route(path.path, qs)))
             except errors.AgentWeChatError as exc:
-                # 信封形状与 MCP 侧同一份（`errors.to_payload`，含 redact）；文案里的本机
-                # 路径另行遮蔽——那是本工具自己的话，不是聊天内容。
                 payload = errors.to_payload(exc)
                 _json(self, 400, {k: _scrub_abs_paths(v) for k, v in payload.items()})
+            except Exception as exc:          # noqa: BLE001 — 兜底避免断开连接/裸露 traceback
+                payload = errors.generic_payload(exc)
+                _json(self, 500, {k: _scrub_abs_paths(v) for k, v in payload.items()})
             return
         _json(self, 404, {"error": "not found"})
 
     def do_POST(self) -> None:               # noqa: N802
+        sem = getattr(self.server, "aw_sem", None)
+        if sem is not None and not sem.acquire(blocking=False):
+            _json(self, 503, {"error": "工作台并发请求过多，请稍后重试"})
+            return
+        try:
+            self._handle_post()
+        finally:
+            if sem is not None:
+                sem.release()
+
+    def _handle_post(self) -> None:
         if self._reject_host():
             return
         if self._reject_unauthed(api=True):
@@ -344,11 +377,11 @@ class _Handler(BaseHTTPRequestHandler):
         if self._reject_csrf():
             return
         path = urllib.parse.urlparse(self.path)
-        if not store.DB_PATH.exists():
-            _json(self, 400, {"error": "索引库不存在"})
-            return
         if path.path != "/api/derived/delete":
             _json(self, 404, {"error": "not found"})
+            return
+        if not store.DB_PATH.exists():
+            _json(self, 400, {"error": "索引库不存在"})
             return
         try:
             length = int(self.headers.get("Content-Length") or 0)
@@ -360,12 +393,12 @@ class _Handler(BaseHTTPRequestHandler):
             derivation_id = str(body.get("derivation_id") or "")
             _json(self, 200, derived.delete_derived(derivation_id))
         except (ValueError, errors.AgentWeChatError) as exc:
-            # 与 GET 分支同一个信封：项目异常走 `to_payload`（含 redact 与 hint），
-            # 裸 `ValueError`（json 解析失败）没有 hint，手工包一条。两条路各写一份
-            # 形状就会漂——GET 那份曾经漏过 redact。
             payload = (errors.to_payload(exc) if isinstance(exc, errors.AgentWeChatError)
                        else {"error": errors.redact(str(exc))})
             _json(self, 400, {k: _scrub_abs_paths(v) for k, v in payload.items()})
+        except Exception as exc:             # noqa: BLE001
+            payload = errors.generic_payload(exc)
+            _json(self, 500, {k: _scrub_abs_paths(v) for k, v in payload.items()})
 
     def do_PUT(self) -> None:                # noqa: N802
         if self._reject_host():
@@ -460,18 +493,24 @@ def _route(path: str, qs: dict) -> dict:
         # 只读工作台不得顺手建库：没有索引就如实说，不制造一个空库。
         raise errors.DataNotFound(
             "索引库不存在", hint="先运行一次 `agent-wechat sync` 或导出")
+    denied = retrieval.denied_chat_ids()
     if path == "/api/chats":
-        return {"chats": usecases.chats(acct, query=_one(qs, "q"), limit=_limit(qs, 50))}
+        rows = usecases.chats(acct, query=_one(qs, "q"), limit=_limit(qs, 50))
+        if denied:
+            from . import messages as msg_mod
+            denied_md5 = {msg_mod.chat_md5(c) for c in denied}
+            rows = [r for r in rows if msg_mod.chat_md5(r["chat_id"]) not in denied_md5]
+        return {"chats": rows}
     if path == "/api/timeline":
         chat = _one(qs, "chat")
         if not chat:
             raise errors.SearchInputError("timeline 需要 chat")
+        retrieval.ensure_allowed(chat, denied)
         return usecases.timeline(chat, account=acct, before_ts=_int(qs, "ts"),
                                  before_local_id=_int(qs, "local_id"),
                                  limit=_limit(qs))
     if path == "/api/search":
-        # 直接用 core retrieval + 显式 chat_id：工作台是**索引只读**的，不能因为
-        # 展示名解析去要微信密钥（usecase 的 contact 解析遇到展示名要解密 contact.db）。
+        # 直接用 core retrieval + 显式 chat_id：工作台检索侧只读索引，不做展示名解析
         return retrieval.search_messages(
             _one(qs, "q"), account=acct,
             chat_id=_one(qs, "chat") or None,
@@ -487,14 +526,24 @@ def _route(path: str, qs: dict) -> dict:
             raise errors.SearchInputError("evidence 只按 msg_key 取，不做名字解析")
         return res
     if path == "/api/derived":
-        return derived.list_derived(acct, chat=_one(qs, "chat") or None,
-                                    limit=_limit(qs, 100))
+        chat = _one(qs, "chat") or None
+        if chat:
+            retrieval.ensure_allowed(chat, denied)
+        res = derived.list_derived(acct, chat=chat, limit=_limit(qs, 100))
+        if denied and not chat:
+            from . import messages as msg_mod
+            denied_md5 = {msg_mod.chat_md5(c) for c in denied}
+            items = [it for it in res["items"] if msg_mod.chat_md5(it["chat_id"]) not in denied_md5]
+            res = {"total": len(items), "items": items}
+        return res
     if path == "/api/media":
+        # 注意：语音消息四态探测会解密本机 media_*.db（与 CLI `media locate` 同源）
         key = _one(qs, "key")
         chat = _one(qs, "chat")
         if not (key and chat):
             raise errors.SearchInputError("media 需要 key 与 chat")
-        res = usecases.message_media(chat, keys=[key], account=acct, limit=1)
+        retrieval.ensure_allowed(chat, denied)
+        res = usecases.message_media(chat, keys=[key], account=acct, limit=1, deny=denied)
         return dataclasses.asdict(res) if dataclasses.is_dataclass(res) else dict(res)
     if path == "/api/diagnostics":
         info = sync.diagnose(acct)
@@ -534,6 +583,7 @@ def create_server(host: str = "127.0.0.1", port: int = DEFAULT_PORT
     httpd = (_V6Server if ip.version == 6 else ThreadingHTTPServer)((host, port), _Handler)
     httpd.daemon_threads = True
     httpd.aw_state = _State(httpd.server_address[1])     # type: ignore[attr-defined]
+    httpd.aw_sem = threading.BoundedSemaphore(16)        # type: ignore[attr-defined]
     return httpd
 
 

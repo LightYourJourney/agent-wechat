@@ -19,24 +19,21 @@ import re
 
 # 密钥形态：32 字节密钥/passphrase 的 hex 形态恰好 64 位。md5/chat_md5 是 32 位，不受影响。
 _SECRET_HEX = re.compile(r"[0-9a-fA-F]{64}")
+# 折行截断后的 SQLCipher 密钥字面量残段（如 `x'a1b2c3...` ≥16 位 hex）
+_TRUNCATED_KEY = re.compile(r"x'[0-9a-fA-F]{16,}['\"]?")
+# URL 查询串或 fragment 中的常见鉴权凭据参数
+_URL_SECRET_PARAM = re.compile(
+    r"([?&#](?:token|authkey|key|pass_ticket|filekey|access_token)=)[^&\s#\"']+",
+    re.IGNORECASE,
+)
 _MAX_LEN = 300
 
 
 def redact(text: str) -> str:
-    """剥掉密钥形态的连续 64 位 hex，再截断长度。
-
-    为什么必须做：`decrypt.py` 把派生密钥拼成 `PRAGMA key = "x'<64位hex>'"` 交给
-    sqlcipher，而 sqlcipher 报错时会**回显出错语句并加插入符**。两轮复审都在 /tmp 用真
-    sqlcipher 实测到：**密钥行自身出错时必回显**（stdin 与 argv 两形态一样），且回显块被
-    **截到 80 列**（无续行，截到哪算哪）——被截的那行只剩密钥的**前缀**（实测 62/64 位），
-    而本函数的判据只认「恰好 64 位连续 hex」，对残段无效。所以 `decrypt` 侧只把 stderr 的
-    **首个非空行**交出来（见 `decrypt._first_line`：残段住在回显块里），首行里的完整密钥
-    由本函数换成 `<已脱敏>`。
-    C1 之前这段文字被 MCP SDK 吞掉、只留在服务端日志；C1 之后它会进对外信封、到 agent
-    手上，甚至发往外部 API——直接压在「密钥不进错误信息」这条硬约束上。
-    （EA-053：命令已改走 stdin，密钥不再出现在 argv；回显机制与脱敏的必要性不变。）
-    """
+    """剥掉密钥形态的连续 64 位 hex、截断的 `x'<hex>` 残段与 URL 鉴权参数，再截断长度。"""
     text = _SECRET_HEX.sub("<已脱敏>", text)
+    text = _TRUNCATED_KEY.sub("x'<已脱敏>'", text)
+    text = _URL_SECRET_PARAM.sub(r"\1<已脱敏>", text)
     return text if len(text) <= _MAX_LEN else text[:_MAX_LEN] + "…"
 
 

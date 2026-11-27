@@ -37,6 +37,10 @@ def search_history(query: str, contact: str | None = None, limit: int = 20,
                                            limit=pkg_clamp_limit(1 << 31),
                                            account=ctx.account, after_ts=t, before_ts=t + 1,
                                            exclude_chats=deny)["hits"])
+            # 补全 t 秒后重新判断是否真有 < t 的更早命中，避免末尾多吐一次虚假 next_before_ts
+            more = bool(search.search(query, chat_id=chat_id, limit=1,
+                                      account=ctx.account, before_ts=t,
+                                      exclude_chats=deny).get("hits"))
         else:
             res["hits"] = hits[:lim]      # 边界落在整秒上（或本来就取尽了）
         res["total"], res["more"] = len(res["hits"]), more
@@ -161,9 +165,11 @@ def task_status(task_id: str | None = None) -> dict | list:
 
 
 def index_ready() -> bool:
-    """本地检索库是否已有消息。空索引的提示文案是 MCP 专属渲染，故不放进用例。"""
+    """本地检索库是否已有消息。只读，不建库。空索引的提示文案是 MCP 专属渲染，故不放进用例。"""
+    if not store.DB_PATH.exists():
+        return False
     try:
-        with store.open() as con:
+        with store.open_readonly() as con:
             # 只问「有没有」：`store.counts` 是三次全表扫描（大索引上几十毫秒），这里用不着
             return con.execute("SELECT EXISTS(SELECT 1 FROM messages)").fetchone()[0] == 1
     except Exception:

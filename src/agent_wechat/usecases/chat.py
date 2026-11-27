@@ -641,7 +641,7 @@ def _write_index(out_root: pathlib.Path, account: str | None) -> ChatIndexResult
     for p in out_root.glob("*/chat/index.*"):
         # 白名单：只认**真的两种产物名**（复审 #3）——`index.txt` / `index.md.bak` 这类
         # 外部文件会让条目带一条**必死链**，而 `has_md` 存在的全部意义就是「不印死链」。
-        if p.name in ("index.html", "index.md"):
+        if p.name in ("index.html", "index.md") and index_html.is_chat_dir(p.parent.parent.name):
             found.setdefault(p.parent.parent.name, set()).add(p.name)
     if not found:
         return ChatIndexResult(out_dir=str(out_root), file=None, chats=0)

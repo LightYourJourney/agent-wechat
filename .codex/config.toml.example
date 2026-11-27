@@ -4,6 +4,7 @@ args = [
     "--directory",
     "/Users/you/agent-wechat",
     "run",
+    "--frozen",
     "agent-wechat-mcp",
 ]
 

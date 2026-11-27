@@ -83,8 +83,9 @@
 `accounts` 为空时先看它：`exists=false` 是装法或版本不同，`unrecognized` 里有形似账号的形状是
 目录命名与实测不同。
 
-`schema_notes`：「老库 + 新代码」的触发器体不一致说明（**只报不改库**）。这类差异通常
-不影响既有行为（例如触发器只是多了个触发列），重建索引时自然消除——不需要为它专门重建。
+`schema_notes`：索引库只读诊断说明（**只报不改库**），涵盖四类来源：触发器体不一致（「老库 + 新代码」
+触发列差异，重建索引时自然消除）、触发器缺失、排除清单缺失而索引库存在、以及索引库 schema 版本落后或
+损坏/被写锁占用（此时 `index` 计数按 0 呈现）。
 
 ---
 
@@ -265,9 +266,9 @@ appmsg（49）就是 `type49`，要认出 appmsg 看 `content` 的 `[appmsg: 标
 - `kind: "vector"`（`build_vector_index`）：`rows` = 本轮**已嵌入行数**，`skipped` =
   **本轮**按规则跳过的行数（非文本/无标题的 appmsg、正文短于 2 字符的消息）；该任务
   额外带 `rebuild`。
-- `kind: "media_export"` / `"chat_export"`：同步执行的媒体导出（`export_chat_media`、CLI `media export`）与会话导出
-  （`export_chat`、CLI `chat export`）在写盘期间登记的 `running` 记录，让 `purge --chat` 的在飞任务闸门也挡住它们；
-  导出结束（含出错）即删除，不留已结束记录。它们没有进度可查，列表里偶尔会看到。
+- `kind: "media_export"` / `"chat_export"` / `"chat_index"` / `"purge_chat"` / `"purge"` / `"sync"` / `"derived_ingest"`：
+  同步导出、总目录页生成、销毁、同步编排与本地 OCR/ASR 识别期间通过 `tasks.claim` 登记的在飞 `running` 记录，
+  用于与 `purge` 等操作互斥；结束（含出错）即删除，不留已结束记录。它们没有进度可查，列表里偶尔会看到。
 
 ---
 
@@ -289,6 +290,9 @@ appmsg（49）就是 `type49`，要认出 appmsg 看 `content` 的 `[appmsg: 标
 {
   "mode": "fts",
   "total": 2,
+  "truncated": false,
+  "degraded": [],
+  "untrusted": true,
   "hits": [
     { "msg_key": "01234567:22415:1789045400",
       "chat_id": "wxid_abc123def456", "ts": 1789045400, "when": "2026-09-10 21:03",
@@ -301,7 +305,7 @@ appmsg（49）就是 `type49`，要认出 appmsg 看 `content` 的 `[appmsg: 标
 ```
 
 **说明**：
-- `mode`: `fts`（trigram 命中，含高亮 `snip`）| `like`（1-2 字兜底，`snip` 为 null）
+- `mode`: `fts`（trigram 命中，含高亮 `snip`）| `like`（1-2 字兜底，不含 `snip`）
 - 命中按时间**从新到旧**。返回带 `truncated`：结果超出体积预算（与 §3 同一个预算）时丢掉较旧的命中，
   `truncated` 为 `true`，并给出 `next_before_ts` 与一句 `hint`——拿它当 `before_ts` 再调一次续搜。
   条数到了 `limit`（可能还有更早的命中）时也给 `next_before_ts`，口径同 §3：**每页都以整秒为界**，
@@ -336,7 +340,7 @@ rebuild 与否）各起一条。（F-D，T7 复验：与 §4 同款的合并语�
 
 | 参数 | 类型 | 必填 | 默认 | 说明 |
 |---|---|---|---|---|
-| `rebuild` | bool | 否 | false | true 时先清空索引再全量重嵌（取得连续上下文） |
+| `rebuild` | bool | 否 | false | true 时先清空索引再全量重嵌（换模型或索引异常重建用） |
 | `account` | string | 否 | null | **省略则索引全部账号**（与其它工具相反）；水位线按账号分别记录 |
 
 ```json
@@ -358,9 +362,8 @@ rebuild 与否）各起一条。（F-D，T7 复验：与 §4 同款的合并语�
   之后新增导出的消息再跑一次本工具（省略 `rebuild`）即增量补齐。
 - **`rebuild: true` 会先清空索引并重置进度**（换模型后的唯一路径就是它）：重建期间旧索引
   不存在，被中断后重跑要从头——正因为如此，长任务的每一步都可停只对增量路径成立。
-- **增量运行会丢失每个会话首条消息的上下文前缀**：`上文:` 前缀在**同一轮运行内**按会话累积，
-  增量运行从水位线开始，因此各会话本轮第一条被嵌入的消息没有前缀（即便它确有前一条消息）。
-  需要完整连续的上下文时用 `rebuild: true` 全量重建。
+- **增量运行会自动延续上下文前缀**：从水位线续跑时，各会话本轮第一条可嵌入消息会自动回查水位线前
+  最近一条可嵌入消息（最多回扫 500 条），无需为了连续上文而耗时全量 `rebuild: true`。
 - 进度见 `get_task_status`（`kind: "vector"`，`rows` 为本轮已嵌入行数，`skipped` 为本轮跳过行数）。
 - **历史改写会被增量构建修正**：Phase 02 投递到 `pending_reembed`，本工具每轮消费最多
   4 批（每批 64 条），只重嵌改动的那条与受上文前缀影响的后继。积压与失败次数用
@@ -390,8 +393,12 @@ rebuild 与否）各起一条。（F-D，T7 复验：与 §4 同款的合并语�
 { "mode": "semantic",
   "model": "fastembed:BAAI/bge-small-zh-v1.5:512",
   "total": 1,
+  "truncated": false,
+  "degraded": [],
+  "untrusted": true,
   "hits": [ { "msg_key": "01234567:22415:1757462400",
               "chat_id": "wxid_xxx", "display": "张三", "ts": 1757462400,
+              "when": "2025-09-10 08:00",
               "sender": "张三", "is_self": false,
               "content": "周末爬山的安排定了吗",
               "distance": 0.1842 } ] }
@@ -639,6 +646,7 @@ rebuild 与否）各起一条。（F-D，T7 复验：与 §4 同款的合并语�
   "truncated": false,
   "messages": [
     { "msg_key": "9f2c1a0b:81234:1789046102", "time": 1789046102,
+      "when": "2026-09-10 21:15",
       "kind": "voice", "status": "exportable", "path": null }
   ],
   "degraded": []
@@ -919,7 +927,7 @@ rebuild 与否）各起一条。（F-D，T7 复验：与 §4 同款的合并语�
 每条 hit 有 `msg_key / chat_id / ts / when / sender / is_self / snippet`，`hybrid` 下另有
 `sources / ranks`（命中自哪几路、各路名次；单路模式下它们恒为那一路，MCP 不返回），语义命中另有
 `distance`。**没有 `content`**——完整正文用 §15。顶层 `untrusted: true` 标明整份结果是不可信数据
-（CLI `--json` 每条 hit 上也各有一个，MCP 省掉了这份重复）。
+（CLI `retrieve` 每条 hit 上也各有一个，MCP 省掉了这份重复）。
 
 - 片段 ≤200 字符、总量 ≤8000 字符。`truncated=true` 有两种情形：片段被截断（单条超 200 字，或总量用尽、
   后面的命中没放进来），或命中多于 `limit`（`candidates` 是去重后的命中数，`total` 是本次返回的条数）。

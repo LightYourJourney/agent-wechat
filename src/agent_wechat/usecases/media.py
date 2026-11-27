@@ -61,6 +61,9 @@ def media_export(contact: str, *, kinds: list[str], months: list[str] | None = N
     if isinstance(chat_id, NeedConfirm):
         return chat_id
     retrieval.ensure_allowed(chat_id, deny)
+    if not kinds:
+        raise errors.SearchInputError(
+            "请至少指定一种媒体类型", hint=f"可用: {', '.join(MEDIA_KINDS)}")
     bad = [k for k in kinds if k not in MEDIA_KINDS]
     if bad:
         raise errors.SearchInputError(f"未知的媒体类型: {bad}（可用: {', '.join(MEDIA_KINDS)}）")
@@ -293,7 +296,7 @@ def message_media(contact: str, *, keys: Sequence[str] | None = None,
     bad_months = [m for m in (months or []) if not MONTH_RE.fullmatch(m)]
     if bad_months:
         raise errors.SearchInputError(f"月份格式应为 YYYY-MM：{', '.join(bad_months)}")
-    cm = messages.md5_of(chat_id)
+    cm = messages.chat_md5(chat_id)
     # 绝对化：`--out 相对路径` 会让 states[].path 变成 MCP 客户端用不了的相对路径。
     # `.resolve()` 是纯路径运算，不碰微信数据（红线不受影响）。
     out_root = _resolve_out(out_dir)

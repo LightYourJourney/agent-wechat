@@ -15,5 +15,5 @@ fi
 # **走单一入口**（`scripts/check.sh --fast`）：文档两处都写「门禁的单一入口是 check.sh、
 # pre-commit 跑它的第①步」，而此前这里直调步骤脚本、`--fast` 全仓零调用者——
 # 文档宣称与代码路径不符（review-code 的 Standards 轴 #1）。
-bash "$root/scripts/check.sh" --fast || exit 1
+PY="$py" bash "$root/scripts/check.sh" --fast || exit $?
 exec "$py" "$root/security/scan.py" --staged

@@ -26,7 +26,8 @@ class MomentsExportResult:
 def moments_export(contact: str | None = None, *, months: list[str] | None = None,
                    with_media: bool = False, limit: int = 500, out_dir: str | None = None,
                    account: str | None = None,
-                   fetch: Callable[[moments.SnsMedia], bytes] | None = None
+                   fetch: Callable[[moments.SnsMedia], bytes] | None = None,
+                   deny: frozenset[str] = frozenset(),
                    ) -> "MomentsExportResult | NeedConfirm":
     """朋友圈导出用例：解析 →（可选）下载解密 → 渲染 HTML。
 
@@ -41,11 +42,13 @@ def moments_export(contact: str | None = None, *, months: list[str] | None = Non
     # 而本入口此前不过任何闸——相对 AGENT_WECHAT_HOME 下会经 `media.ensure_tree` 在 CWD 里
     # 建出整棵树（EA-003 的后果换了个入口）。同 `store.connect` / `keys.save_cached_hex` 的立场。
     paths.ensure_home_dirs()
-    from .. import moments, moments_html, sns_media         # 惰性：moments_html 只在导出时用（media 已顶层）
+    from .. import messages, moments, moments_html, retrieval, sns_media
     ctx = pkg_context(account)
     author = ctx.resolve_optional(contact)
     if isinstance(author, NeedConfirm):
         return author
+    retrieval.ensure_allowed(author, deny)
+    denied_md5 = {messages.chat_md5(c) for c in deny}
     bad_months = [m for m in (months or []) if not MONTH_RE.fullmatch(m)]
     if bad_months:
         raise errors.SearchInputError(f"月份格式应为 YYYY-MM：{', '.join(bad_months)}")
@@ -60,6 +63,8 @@ def moments_export(contact: str | None = None, *, months: list[str] | None = Non
     hi: int | None = None
     for p in moments.iter_posts(ctx.account, chat_filter=author, months=months,
                                 report=report):
+        if denied_md5 and p.username and messages.chat_md5(p.username) in denied_md5:
+            continue
         if len(kept) >= cap:
             report.truncated = True
             report.remaining += 1

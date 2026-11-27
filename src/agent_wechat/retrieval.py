@@ -172,6 +172,8 @@ def fuse(keyword_hits: list[dict], semantic_hits: list[dict],
             if entry is None:
                 entry = merged[key] = {"hit": _normalize(hit, source),
                                        "sources": [], "ranks": {}, "score": 0.0}
+            elif source == "semantic" and entry["hit"].get("distance") is None:
+                entry["hit"]["distance"] = hit.get("distance")
             if source not in entry["sources"]:
                 entry["sources"].append(source)
             entry["ranks"][source] = rank
@@ -220,6 +222,8 @@ def search_messages(query: str, *, account: str, chat_id: str | None = None,
         raise errors.SearchInputError(
             "检索串不能为空（或全空白）",
             hint="给一个非空查询；多段文本请拆成多次检索")
+    if "\x00" in query:
+        raise errors.SearchInputError("检索串不能包含 NUL 字符")
     search.check_ts("after_ts", after_ts)     # 语义一路也要绑定它，不能只靠关键词一路的闸
     search.check_ts("before_ts", before_ts)
     if len(query) > MAX_QUERY_CHARS:
@@ -255,11 +259,9 @@ def search_messages(query: str, *, account: str, chat_id: str | None = None,
         # 派生文本（OCR/ASR）作为第三路；它是**旁证**，不取代原消息。
         try:
             dres = derived.search_derived(query, account=account, chat_id=chat_id,
+                                          after_ts=after_ts, before_ts=before_ts,
                                           limit=candidates, exclude_chats=denied)
-            derived_hits = [h for h in dres["hits"]
-                            if after_ts is None or h["ts"] >= after_ts]
-            derived_hits = [h for h in derived_hits
-                            if before_ts is None or h["ts"] < before_ts]
+            derived_hits = dres["hits"]
         except errors.DerivedInputError:
             derived_hits = []
 

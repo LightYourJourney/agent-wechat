@@ -19,7 +19,7 @@ import sqlite3
 import stat
 import subprocess
 import tempfile
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 
 from . import (bootstrap, decrypt, errors, exclusions, keys, media, messages, moments, paths,
@@ -257,13 +257,39 @@ def _check_home_is_sane(home: pathlib.Path) -> None:
     if resolved == pathlib.Path("/"):
         raise errors.PurgeRefused(f"拒绝销毁文件系统根：{resolved}",
                                   hint="AGENT_WECHAT_HOME 指向了不该被销毁的目录")
-    for h in _user_homes():
+    homes = _user_homes()
+    if not homes:
+        raise errors.PurgeRefused(
+            f"无法确认用户主目录位置，拒绝销毁：{resolved}",
+            hint="请检查 HOME 环境变量或系统用户配置后重试")
+    for h in homes:
         if resolved == h:
             raise errors.PurgeRefused(f"拒绝销毁用户主目录：{resolved}",
                                       hint="AGENT_WECHAT_HOME 指向了不该被销毁的目录")
         if h.is_relative_to(resolved):
             raise errors.PurgeRefused(f"拒绝销毁用户主目录的祖先：{resolved}",
                                       hint="AGENT_WECHAT_HOME 指向了不该被销毁的目录")
+    # 常见系统/共享顶层目录（含 $TMPDIR 根）：只按精确相等拦截，不影响其下独立子目录（如测试夹具）。
+    sys_dirs = {
+        pathlib.Path(d).resolve(strict=False)
+        for d in ("/tmp", "/private/tmp", "/var", "/private/var", "/etc", "/private/etc",
+                  "/Library", "/System", "/Applications", "/usr", "/bin", "/sbin",
+                  tempfile.gettempdir())
+    }
+    if resolved in sys_dirs:
+        raise errors.PurgeRefused(f"拒绝销毁系统或共享目录：{resolved}",
+                                  hint="AGENT_WECHAT_HOME 必须指向独立的数据子目录（如 ~/.agent-wechat）")
+    # 微信容器（及其上级）是只读红线：`purge --all/--media/--tmp` 不经过 `paths.ensure_home_dirs()`，
+    # 必须在这里拦截。`None`（判不出来，例如父目录不可读）同样拒绝（fail-closed），文案指明真因。
+    verdict = paths.container_verdict(resolved)
+    if verdict is True:
+        raise errors.PurgeRefused(
+            f"拒绝销毁落在微信容器（或其上级目录）的路径：{resolved}",
+            hint="AGENT_WECHAT_HOME 必须指到容器之外（例如 ~/.agent-wechat）；微信容器是只读的")
+    if verdict is None:
+        raise errors.PurgeRefused(
+            f"数据目录或其父路径不可读，无法确认是否落在微信容器内，拒绝销毁：{resolved}",
+            hint="请先修正父目录权限后重试")
 
 
 def plan(scopes: frozenset[str], all_: bool = False) -> PurgePlan:
@@ -352,60 +378,48 @@ def _remove(item: PlanItem) -> bool:
     return True
 
 
-def _escapes_home(link: pathlib.Path, home: pathlib.Path) -> bool:
-    """该符号链接**是否会在删树之后留下东西**，或**判不出来**——后者也返回 True。
+def _escapes_roots(link: pathlib.Path, roots: Sequence[pathlib.Path]) -> bool:
+    """该符号链接的目标**是否会在删掉这些根之后留下东西**，或**判不出来**——后者也返回 True。
 
-    判据不是「目标在 home 之外」，而是「树删完之后它还会不会在」：目标在树内 → 会被一并
-    删掉 → False；目标在树外且存在 → 留存 → True；解析不出来（符号链接环、EACCES 等）
-    → 无法保证 → True（保守，与「判不出来就别删」一致）。
-
-    判据跟着删除原语走，不是「见到链接就拒」：
-      · **文件型**具名范围走 unlink → 只删链接，**目标必留存** → 无条件拒绝（见 execute 的 links）；
-      · **目录型**具名范围（`tmp/`）的 item 路径与子树、以及 `--all` 的**整树扫描**走 rmtree →
-        目标也在树内时会一并删除，不存在 false-clean，故这几条走本函数判定。
-        （`--all` 的 **item 路径**同样走本函数——EA-100 改判之后，文件型 item 在 `--all` 下
-        不再被无条件拒绝：`--all` 的删除面是整棵树，树内目标会被 rmtree 一并删掉。）
-    只有目标逃出树外时才真的对应 spec §5.1 第 2 步那句「其实还在外置盘上」。
-
-    为什么不能一律拒绝：vector.py 用 huggingface_hub 下载模型，其 blob/snapshot 布局会在
-    models/ 下建若干指向**树内** blobs/ 的符号链接（实测本机 ~/.agent-wechat 有 5 个，
-    全部树内、树外 0 个）。一律拒绝会让 `purge --all` 在标准安装上永远跑不起来，
-    而它什么都没保护到——spec §9 又否掉了 --force，用户只能回去手敲 rm -rf。
+    判据不是「目标在 home 之外」，而是「本次真正会被 rmtree 删掉的目录删完后，目标还会不会在」：
+      · 本身是符号链接的根 `r` **绝不**把 `r.resolve()` 放入合法根集合 `rs`（`rmtree` 不会删除链接目标）；
+      · 目标落在某个非链接删除根内 → 会随 rmtree 一并删掉 → False；
+      · 目标不存在（断链）→ 删掉链接不留东西 → False；
+      · 目标存在且在所有删除根之外、或解析/存在性判定出错 → 无法保证 → True（fail-closed）。
     """
-    home = home.resolve(strict=False)   # 两边都要解析过才能比。macOS 上 /tmp → /private/tmp、
-                                        # $TMPDIR 与 mktemp -d 给出的路径常带符号链接祖先；
-                                        # 只解析 link 不解析 home，会把树内目标一律判成「树外」
-                                        # 而整片拒绝——即整树扫描那条回归的残留形态。
     try:
+        rs = [r.resolve(strict=False) for r in roots if not r.is_symlink()]
         target = link.resolve(strict=False)
     except (OSError, RuntimeError):
-        # 解析不出来就**判为逃逸并拒绝**：判不出来就无法保证目标会随树一起消失，对这种命令
-        # 宁可拒绝。RuntimeError 是 3.12 对符号链接环抛的（3.13 才改成 OSError）；环本身不会
-        # 留下东西，但它是病态配置，拒绝比放行更容易解释。不接住的话它会以裸异常穿透
-        # execute()，违反「core 层只抛 AgentWeChatError 子类」。
         return True
     try:
         if not target.exists():
             return False      # 断链：目标本就不存在，删掉链接不留任何东西
     except OSError:
-        # EACCES 等（pathlib 的 _IGNORED_ERRNOS 不含 EACCES）：目标可能真存在只是读不到。
-        # 同上，判为逃逸。
         return True
-    try:
-        target.relative_to(home)
-    except ValueError:
-        return True           # 目标在 home 之外
-    return False
+    return not any(target.is_relative_to(r) for r in rs)
+
+
+def _escapes_home(link: pathlib.Path, home: pathlib.Path) -> bool:
+    """整棵 `home` 树版本的逃逸判定（`--all` 及单元测试共用）。"""
+    return _escapes_roots(link, (home,))
+
+
+def _raise_oserror(exc: OSError) -> None:
+    raise exc
 
 
 def _tree_entries(root: pathlib.Path) -> list[pathlib.Path]:
     """整树的每个条目。指向目录的符号链接也要收——os.walk 把它们放进 dirnames
     且不跟随（followlinks 默认 False），只遍历 filenames 会漏掉它们。
 
-    与 _tree_size 同样吞掉遍历中的 OSError：算不准的项跳过，不因一个不可读的子目录中断。
+    根不存在时返回空列表；存在的不可读子目录由 `onerror=_raise_oserror` fail-closed 抛出
+    （外层转为 `PurgeRefused`），避免 `0o000` 子目录内藏匿逃逸符号链接/硬链接。
     """
+    if not name_there(root):
+        return []
     out: list[pathlib.Path] = []
-    for dirpath, dirnames, filenames in os.walk(root):
+    for dirpath, dirnames, filenames in os.walk(root, onerror=_raise_oserror):
         for name in (*dirnames, *filenames):
             out.append(pathlib.Path(dirpath) / name)
     return out
@@ -452,65 +466,39 @@ def execute(plan: PurgePlan) -> PurgeReport:
     # execute 之间 paths.HOME_DIR 可能被改指（或首次 plan 走的不是这条路径），到这里就
     # 只剩「已经开始删」了。
     _check_home_is_sane(paths.HOME_DIR)
+    # 仅在 HOME_DIR 已存在且非符号链接时通过 tasks.claim("purge") 与并发长任务互斥；
+    # HOME_DIR 本就不存在时跳过 claim，避免空目录幂等删除凭空造出目录与 tasks.json。
+    if paths.HOME_DIR.exists() and not paths.HOME_DIR.is_symlink():
+        # 记录进 claim 前的整树体积（供 --all 计算 freed，不把本次 claim 临时写入的 tasks.json 算进去）
+        pre_size = _tree_size(paths.HOME_DIR) if plan.all_ else 0
+        try:
+            with tasks.claim("purge") as own:
+                return _execute_locked(plan, own, pre_size=pre_size)
+        except (OSError, errors.AgentWeChatError) as exc:
+            if isinstance(exc, errors.PurgeRefused):
+                raise
+            return _execute_locked(plan, None, pre_size=pre_size)
+    return _execute_locked(plan, None)
 
+
+def _execute_locked(plan: PurgePlan, own_task: str | None, *,
+                    pre_size: int | None = None) -> PurgeReport:
     # 符号链接检查在 **execute 时刻**重算，不用 plan 时刻的 i.is_symlink：CLI 是
     # 「先 plan（dry-run）→ 用户确认 → 再 execute」，这个窗口内路径被换成链接就漏掉了。
-    #
-    # 为什么必须拒绝（实测于 Python 3.12.13 / macOS，三种情形）：
-    #   rmtree(link, onexc=h)  → **不抛**，handler 收到 OSError('Cannot call rmtree on a
-    #                            symbolic link')，链接与目标都完好；
-    #   rmtree(link) 不传 handler → 抛 OSError；
-    #   rmtree(整树) 树内含 symlink → **树被删掉，而链接的目标明文原封不动留在盘上**。
-    # 第三种才是真正的危险：删除后核查会报「计划内路径已清空」，用户以为明文没了，
-    # 其实还在外置盘上——正是 spec §5.1 第 2 步要防的 false-clean。
-    #
-    # 顺序：这一段在**占用检查之前**。两者都会拒绝，但这里的理由更具体、也更便宜；而且
-    # 占用检查走 `lsof <path>`，**lsof 会解析符号链接**——产物是链接时它会报出一堆持有
-    # **目标**的不相关进程（实测：拿 /etc/hosts 做目标，lsof 列出 7 个持有者），用户照着
-    # 那条理由去杀进程也删不掉这个链接，真正的原因只是它是链接。
     try:
-        # EA-100：`--all` 下**文件型** item 不走 unlink 而走整树 rmtree——目标在树内会被
-        # 一并删掉，不存在 false-clean，故与目录型同一个判据。只有**具名轴的**文件型才无条件
-        # 拒绝（那条理由「文件型走 unlink、只删链接、目标必留存」在 `--all` 下不成立）。
-        # 此前一律无条件拒绝，后果是 `purge --all` 被**永久挡住**（spec §9 否掉了 --force，
-        # 用户只能回去手敲 rm -rf），而它什么都没保护到。
+        dir_roots = tuple(i.artifact.path for i in plan.items if i.artifact.kind == "dir")
         links = [i.artifact.path for i in plan.items
                  if i.artifact.path.is_symlink()
                  and (_escapes_home(i.artifact.path, paths.HOME_DIR)
                       if plan.all_
                       else (i.artifact.kind == "file"
-                            or _escapes_home(i.artifact.path, paths.HOME_DIR)))]
-        # kind="dir" 的**具名**产物（tmp/）与 --all 走同一个原语 rmtree，故同样要扫它整棵树：
-        # 树内链接会被 rmtree 当作普通条目 unlink、目标明文留存，而核查会报「已清空」——
-        # 实测 `tmp/evil.db -> /outside/secret.db` + `purge --tmp --yes` 退 0、「已删除 1 项」，
-        # 树外那 700 KB 一个字都没提。判据仍是 _escapes_home 而不是「见到链接就拒」：树内目标
-        # 会被 rmtree 一并删掉，一律拒绝会让 blob/snapshot 式布局永远删不掉。
-        # EA-030：文件型产物走 unlink——同 inode 的另一个名字不受影响。`--all` 时不重复判
-        # （下面那次整树扫描已经覆盖了这些路径）。
+                            or _escapes_roots(i.artifact.path, dir_roots)))]
         hard: list[pathlib.Path] = [
             i.artifact.path for i in plan.items
             if not plan.all_ and i.artifact.kind == "file"
             and _has_another_name(i.artifact.path)]
-        for i in plan.items:
-            if i.artifact.kind != "dir" or i.artifact.path.is_symlink():
-                continue
-            for p in _tree_entries(i.artifact.path):
-                if p.is_symlink():
-                    if _escapes_home(p, paths.HOME_DIR):
-                        links.append(p)
-                elif _has_another_name(p):
-                    # EA-030：具名目录型（`tmp/`、`media/`）同样是 rmtree，里面一个**硬链接**
-                    # 的另一个名字不受影响——判据与符号链接同源（「删名字不删字节」）。
-                    # 条目只写了文件型与 --all 树扫两处；同一形状在具名目录型的树里留半边，
-                    # 正是 EA-100 那类「不对称未修完」，故一并挂上。
-                    hard.append(p)
         if plan.all_:
-            # spec §5.1 第 2 步要求对**每个待删路径**做 lstat。--all 的待删路径是**整棵树**
-            # ——plan.loose 只有顶层，那是 §3 对「计划表逐条展示」的要求，与删除范围是两回事。
-            # 树内任意深度的符号链接都会被 rmtree 当作普通条目 unlink、目标明文留存，而删除后
-            # 核查会报「计划内路径已清空」——正是该步点名的「以为明文没了，其实还在外置盘上」。
-            # 所以这里走一遍整棵树，而不是只看 plan.loose——但只拒绝**目标逃出树外**的链接
-            # （树内目标会被 rmtree 一并删掉，不存在 false-clean；一律拒绝会让标准安装永远跑不起来）。
+            # `--all` 扫整棵 HOME_DIR 即可，不再对具名子目录重复做第二遍 os.walk
             for p in _tree_entries(paths.HOME_DIR):
                 if p.is_symlink():
                     if _escapes_home(p, paths.HOME_DIR):
@@ -519,33 +507,28 @@ def execute(plan: PurgePlan) -> PurgeReport:
                     hard.append(p)
             if paths.HOME_DIR.is_symlink():
                 links.append(paths.HOME_DIR)
+        else:
+            for i in plan.items:
+                if i.artifact.kind != "dir" or i.artifact.path.is_symlink():
+                    continue
+                for p in _tree_entries(i.artifact.path):
+                    if p.is_symlink():
+                        if _escapes_roots(p, dir_roots):
+                            links.append(p)
+                    elif _has_another_name(p):
+                        hard.append(p)
     except OSError as exc:
-        # 这条 lstat 需要父目录的 +x。权限不足时它不是「没找到路径」而是**判不出来**，
-        # 此前会以裸 PermissionError 穿透 execute（CLI 那边就是一个 traceback）。core 层
-        # 一律抛项目异常，且判不出来就该拒绝——所以归到符号链接这道闸门的拒绝里。
         raise errors.PurgeRefused(
             f"无法判定待删路径是否为符号链接，拒绝删除：{exc}",
             hint="请先修正权限（父目录需要读 + 进入权限），再重试") from exc
     links = list(dict.fromkeys(links))     # 同一路径可能既在 items 又在树扫描里，去重
     if links:
-        # **总数放最前**（与 `execute_chat` 那条同形）：`errors.redact` 会把超过 300
-        # 字符的消息从尾部剪掉——一对绝对路径就 ~150 字符起，全部列出来必被剪，
-        # 用户连「有几处」都看不到（复审实测 8 个硬链接即被剪，链接那条同理）。
         raise errors.PurgeRefused(
             f"待删路径是符号链接，共 {len(links)} 处，拒绝删除：{links[0]}"
             + (f"（另有 {len(links) - 1} 处）" if len(links) > 1 else ""),
             hint="删链接不会删目标，会造成「已清干净」的假象；请手工处理")
     hard = list(dict.fromkeys(hard))
     if hard:
-        # EA-030：闸门问的一直是「**名字**是不是符号链接」，而真正要防的是「**字节**还在不在」
-        # ——`unlink(2)` 删的是目录项，同 inode 的另一个名字完全不受影响，`st_nlink` 会诚实地
-        # 说出来。审计实测：`ln $OUT $H/index.db` 之后 `purge --index --yes` 报「✅ 计划内路径
-        # 已清空」并退 0，而那 200 KB 明文在 `$OUT` 下原样可读。
-        #
-        # **不承诺「字节级不存在」**（那是 `purge --index` 都做不到的，见 `execute_chat` 的诚实
-        # 口径）；这里只拒绝「还有另一个名字在盘上」，让用户自己决定怎么处理那个名字。
-        # APFS 的写时复制克隆（`cp -c`）连 `nlink` 都不变，属同一类里**不可检测**的形态，
-        # 已在 SECURITY.md 的「删不干净」清单里申报。
         raise errors.PurgeRefused(
             f"待删路径存在硬链接，共 {len(hard)} 处（同一个 inode 还有别的名字），"
             f"拒绝删除：{hard[0]}"
@@ -553,11 +536,18 @@ def execute(plan: PurgePlan) -> PurgeReport:
             hint="删名字不会删字节，会造成「已清干净」的假象；"
                  "请先处理那些链接（`ls -li` 看 inode 相同的就是）再重试")
 
-    # --all 的删除面是**整棵树**，而 items 只是具名产物：loose（models/、tasks.json、散落明文）
-    # 同样会被 rmtree 删掉，那里一个被写着的文件 unlink 会「成功但空间不释放」——正是这道检查
-    # 存在的理由。此前只遍历 items，而错误文案（「有进程正在使用待删产物」）是个超集说法。
-    # 残余：树**深处**被持有的文件仍探测不到，那需要 `lsof +D`；_holders 的 docstring 已论证
-    # 它的整树代价不可接受。
+    # 在飞任务检查（排除本次 claim 自身）：避免导出/向量构建/同步中途被整库删掉或删后写回。
+    try:
+        running = [t for t in tasks.running() if t.get("id") != own_task]
+    except Exception:                     # noqa: BLE001
+        running = []
+    if running:
+        kinds = sorted({t.get("kind") or "?" for t in running})
+        raise errors.PurgeRefused(
+            f"有长任务正在运行（{', '.join(kinds)}），拒绝销毁："
+            "它可能在本次删除期间或之后写回数据",
+            hint="等任务结束后重试（进度可用 MCP 的 `get_task_status` 查）")
+
     watched = [i.artifact.path for i in plan.items if i.exists]
     if plan.all_:
         watched += [e.path for e in plan.loose]
@@ -565,7 +555,6 @@ def execute(plan: PurgePlan) -> PurgeReport:
     if held:
         detail = "；".join(f"{p.name} 被 pid {','.join(map(str, v))} 持有"
                           for p, v in held.items())
-        # 措辞覆盖全部具名范围：held 可能是 passphrase.json 或解密 tmp，不只是 index
         raise errors.PurgeRefused(f"有进程正在使用待删产物，拒绝删除：{detail}",
                                   hint="等该进程结束（如向量构建任务）后重试")
 
@@ -573,20 +562,19 @@ def execute(plan: PurgePlan) -> PurgeReport:
     failed: list[tuple[pathlib.Path, str]] = []
     freed = 0
 
-    # --all 时 items 只是给计划表看的（含重建代价），实际删除走下面的 rmtree 一次性完成，
-    # 免得对同一棵树做两遍（unlink 一遍再 rmtree 一遍）。
     if not plan.all_:
         for item in plan.items:
-            if not item.exists:
+            try:
+                if not item.exists and not name_there(item.artifact.path):
+                    continue
+            except OSError as exc:
+                failed.append((item.artifact.path, str(exc)))
                 continue
             try:
-                # 目录的 lstat().st_size 是 inode 自身大小（几十到几百字节），不是整树体积。
-                # 直接拿它相加会让 `purge --tmp`——解密明文的临时目录——无论删掉多少都报
-                # 「释放 ~96 B」。与 --all 那条已修的同型：对销毁操作报一个假数字，且这处
-                # 更隐蔽（看起来合理的 96 B，而非显眼的 0 B）。故目录先量整树，且必须在删之前量。
-                size = _tree_size(item.artifact.path) if item.artifact.kind == "dir" else item.size
+                size = _tree_size(item.artifact.path) if item.artifact.kind == "dir" else (
+                    item.size if item.exists else item.artifact.path.lstat().st_size)
                 if not _remove(item):
-                    continue          # 计划生成后已被删掉：spec §5.1 第 5 步算成功，不计数
+                    continue
                 removed.append(item.artifact.path)
                 freed += size
             except OSError as exc:
@@ -595,31 +583,17 @@ def execute(plan: PurgePlan) -> PurgeReport:
     home_removed = False
     if plan.all_:
         if paths.HOME_DIR.exists():
-            # --all 不走上面的 items 循环，removed/freed 必须在这里补齐：否则 CLI 会在
-            # 删光整棵 HOME_DIR 之后打印「已删除 0 项，释放 0 B」，与 spec §3/§6 要求的
-            # 「删了什么 + 释放多少」直接冲突。体积要在 rmtree **之前**取。
-            freed = _tree_size(paths.HOME_DIR)
+            freed = pre_size if pre_size is not None else _tree_size(paths.HOME_DIR)
             shown = ([i.artifact.path for i in plan.items if i.exists]
                      + [e.path for e in plan.loose])
-            # onexc 收集而非抛出：与「部分失败继续删完」同一语义。
-            # 用 onexc 不用 onerror——后者在 3.12 已弃用，本仓库 requires-python >=3.12。
             try:
                 shutil.rmtree(
                     paths.HOME_DIR,
                     onexc=lambda fn, p, exc: failed.append((pathlib.Path(p), str(exc))))
             except OSError as exc:
-                # A 矩阵 609：`rmtree` 自身起不来（ENOSPC/EACCES/EIO）此前裸穿。语义与
-                # `onexc` 收集到的部分失败一致——记成失败项，命令照常给出汇总。
                 failed.append((paths.HOME_DIR, str(exc)))
             if paths.HOME_DIR.exists():
-                # 部分失败：把没删掉的那部分从 freed 里扣回去，否则报出的体积大于实际释放的
-                freed -= _tree_size(paths.HOME_DIR)
-            # 删完再回看谁真的没了：部分失败时不会把仍存在的条目虚报为已删。
-            # EA-098：判据是 `name_there`（不跟随符号链接）——`exists()` 会把**悬空链接**
-            # 读成「已删除」，于是同一个路径既进 `removed` 又进 `failed`（审计原样复现：
-            # 「已删除 1 项」数的正是上面那条「未能删除」）。已被点名失败的路径一律不算删掉
-            # ——两者同真同假时不许并存。回看判不出来（EACCES 等）就当它还在：这份报告宁可
-            # 少报「已删除」，也不许多报。
+                freed = max(0, freed - _tree_size(paths.HOME_DIR))
             failed_paths = {p for p, _ in failed}
             removed = []
             for p in shown:
@@ -630,7 +604,10 @@ def execute(plan: PurgePlan) -> PurgeReport:
                         removed.append(p)
                 except OSError:
                     continue
-            home_removed = not paths.HOME_DIR.exists()
+            try:
+                home_removed = not name_there(paths.HOME_DIR)
+            except OSError:
+                home_removed = False
     return PurgeReport(tuple(removed), tuple(failed), freed, home_removed)
 
 
@@ -917,27 +894,23 @@ def _write_tombstone(con: sqlite3.Connection, account: str, chat_id: str) -> int
             + exclusions.add_from_side_tables(con, account, chat_id))
 
 
-def _escaping_links(plan: ChatPlan, home: pathlib.Path) -> list[pathlib.Path]:
+def _escaping_links(plan: ChatPlan, _home: pathlib.Path | None = None) -> list[pathlib.Path]:
     """导出物里**删完之后还会留下东西**的链接（判不出来也算）——按目录去重。
 
-    与 `execute()` 给目录型产物做的是**同一套判据**（`_tree_entries` + `_escapes_home`），
-    只是根换成了每个 `ChatEntry.export_dir`。为什么必须有：`rmtree` 把树内链接当普通条目
-    unlink、**目标明文原封不动**，于是运行报「导出物已删除」、核查也报干净——正是
-    `execute()` 那段注释点名的 false-clean（终审 I-2）。
-
-    根链接与树内链接**同判**（对齐 `execute()` 的目录型分支）：目标解析到 home 之外、或
-    判不出来 → 拒绝；目标在树内 → 随 rmtree 一并删除，不拒——一律拒绝会让 blob/snapshot
-    式的内部布局永远删不掉（完整论证见 `_escapes_home`）。
+    判据的根是**本次要删的各 `export_dir`**（不是 `HOME_DIR`）：目标逃出这批实际删除目录
+    （含指向 `HOME_DIR` 下其他保留目录，或根本身是非悬空符号链接）一律拒绝。
+    保留可选参数 `_home` 兼容既有单测调用签名。
     """
     out: list[pathlib.Path] = []
     # 跨账号的多条 entry 共享同一个 `media/<md5>/`：同一棵树只扫一遍、同一个链接只报一次。
-    for d in dict.fromkeys(e.export_dir for e in plan.entries):
+    roots = tuple(dict.fromkeys(e.export_dir for e in plan.entries))
+    for d in roots:
         if d.is_symlink():
             # 根是链接时不再往下走：`os.walk` 会**跟随**它，列出来的全是目标的内部条目。
-            if _escapes_home(d, home):
+            if _escapes_roots(d, roots):
                 out.append(d)
             continue
-        out += [p for p in _tree_entries(d) if p.is_symlink() and _escapes_home(p, home)]
+        out += [p for p in _tree_entries(d) if p.is_symlink() and _escapes_roots(p, roots)]
     return out
 
 
@@ -998,30 +971,35 @@ def _execute_chat_locked(plan: ChatPlan, own_task: str) -> tuple[ChatReport, ...
     `store.FTS_SECURE_DELETE`）。要字节级
     清除只能重建：`purge --index` 后重跑 export。
     """
-    # HOME 那道闸在 `execute_chat` 里、登记任务之前（见那里的 docstring）：顺序不能反——
-    # `_escaping_links` 读 `paths.HOME_DIR` 当基准，坏树下判据失真。
-
-    # 逃逸链接闸门：**必须在任何删除/提交之前**（与 `execute()` 同一位置——先扫链接，再做
-    # 占用/fail-closed 那些检查）。它挡的不是「目标在树外」这件事本身，而是**删完之后目标还
-    # 在、而报告与核查都说删干净了**那个 false-clean（终审 I-2）。具名范围对目录型产物是同一
-    # 套判据：只拒绝目标逃出 HOME_DIR（或判不出来）的链接，树内目标随 rmtree 一并删除。
-    links = _escaping_links(plan, paths.HOME_DIR)
-    if links:
-        # **总数放最前**：`errors.redact` 会把超过 300 字符的消息从尾部剪掉，而一对
-        # 「绝对路径的链接 → 目标」就 ~150 字符起——全部列出来必被剪，用户连「有几处」
-        # 都看不到（实测三个链接时消息断在第二处中间）。列第一处足够定位（它们同在该
-        # 导出目录树内），其余按计数说明。
+    # **在飞的长任务闸门**排在最前（紧随 claim 之后）：避免 `chat index` 正在写总目录页或
+    # 导出/向量任务正在往 `media/<md5>/` 落文件时与本函数交叉。
+    try:
+        running = [t for t in tasks.running() if t.get("id") != own_task]
+    except Exception:                     # noqa: BLE001 —— 注册表读不出来不挡删除
+        running = []
+    if running:
+        kinds = sorted({t.get("kind") or "?" for t in running})
         raise errors.PurgeRefused(
-            f"导出目录里有 {len(links)} 处链接指向数据目录之外，拒绝删除："
+            f"有长任务正在运行（{', '.join(kinds)}），拒绝按会话销毁："
+            f"它可能在本次删除之后把派生行写回来",
+            hint="等任务结束后重试（进度可用 MCP 的 `get_task_status` 查）")
+    # 在飞任务检查通过后再重算总目录页：plan 到 execute 之间别的进程可能刚 `chat index` 建出它。
+    index_page = index_page_listing(e.chat_id for e in plan.entries)
+    # 逃逸链接与硬链接闸门：**必须在任何删除/提交之前**。
+    try:
+        links = _escaping_links(plan)
+        hard = _hardlinked_entries(plan)
+    except OSError as exc:
+        raise errors.PurgeRefused(
+            f"无法判定导出目录里的链接状态，拒绝删除：{exc}",
+            hint="请先修正目录权限后重试") from exc
+    if links:
+        raise errors.PurgeRefused(
+            f"导出目录里有 {len(links)} 处链接指向待删目录之外，拒绝删除："
             f"{links[0]} → {_link_target(links[0])}"
             + (f"（另有 {len(links) - 1} 处，同在该目录树内）" if len(links) > 1 else ""),
             hint="删链接不会删目标，会造成「已清干净」的假象；请手工处理这些链接后重试")
-    hard = _hardlinked_entries(plan)
     if hard:
-        # EA-030 的会话轴那一半（复审 T13 的条件②）：`rmtree` 删的是目录项，同 inode 的
-        # 另一个名字不受影响——而本命令的报告（`export_removed=True`）与核查
-        # （`export_still_there=False`）都会说「清干净了」。判据与产物轴同源。
-        # 总数同样放最前（理由见上面那段的注释）。
         raise errors.PurgeRefused(
             f"导出目录里有 {len(hard)} 处硬链接（同一个 inode 还有别的名字），拒绝删除："
             f"{hard[0]}"
@@ -1029,26 +1007,6 @@ def _execute_chat_locked(plan: ChatPlan, own_task: str) -> tuple[ChatReport, ...
             hint="删名字不会删字节，会造成「已清干净」的假象；请先处理那些链接"
                  "（`ls -li` 看 inode 相同的就是）再重试")
     out = []
-    # **在飞的长任务闸门**（与整库那条 `_holders` 同族，但判据不同）：
-    # 向量构建 / 导出都是「先读消息、再写派生行」的两段式。删除落在那两段之间时，
-    # 核查（在删除后立刻跑）看不到还没写回的行，于是报 ✅——随后构建把 `vec_messages`
-    # 插回去（`preview` 列就是被删正文的纯文本），孤儿向量永久留存，水位线还被写回。
-    #
-    # 判据用**任务注册表**而不是 `_holders`：后者只问「谁打开了这个文件」，常驻的 MCP
-    # server 也会被算进去，那会让 `purge --chat` 在 MCP 运行时**恒被拒绝**——把一个可修的
-    # 竞态换成一个必现的可用性回归。注册表里的 `running` 才是真的在写。
-    try:
-        running = [t for t in tasks.running() if t.get("id") != own_task]
-    except Exception:                     # noqa: BLE001 —— 注册表读不出来不挡删除
-        running = []                      # （与 `_holders` 的「判不出来就留着」不同：
-        #   那边是「说不定有人持有，别删」；这边是「没有证据表明有人正在写」，而任务
-        #   注册表**不存在**是最常见的情形——新机器、纯 CLI 用户。挡它等于挡掉正常用法。
-    if running:
-        kinds = sorted({t.get("kind") or "?" for t in running})
-        raise errors.PurgeRefused(
-            f"有长任务正在运行（{', '.join(kinds)}），拒绝按会话销毁："
-            f"它可能在本次删除之后把派生行写回来",
-            hint="等任务结束后重试（进度可用 MCP 的 `get_task_status` 查）")
     # fail-closed（spec §4.2）：读不出排除清单就没法建立不可逆性，这一次删除就只是「暂时看不见」。
     # 宁可什么都不做，也不做一个看起来成功的假删除。
     try:
@@ -1162,11 +1120,11 @@ def _execute_chat_locked(plan: ChatPlan, own_task: str) -> tuple[ChatReport, ...
         #「当前被挡住的条数」是核查那一侧的事（`ChatResidue.tombstone_written`），
         # 它读的是排除清单的实际条数——核查才是证明不可逆性的那个字段。
         out.append(ChatReport(e.account, deleted, written, removed))
-    if plan.index_page is not None and not plan.index_page.is_symlink():
+    if index_page is not None and not index_page.is_symlink():
         # 失败不抛（同导出目录的「部分失败继续」）：核查会把还在的那一页列进 leftover。
         # 符号链接**不删**：删名字不删内容（见 `index_page_listing`），留给核查去报。
         with contextlib.suppress(FileNotFoundError, OSError):
-            plan.index_page.unlink()
+            index_page.unlink()
     # 任务注册表里的 `chat_id` 也是该会话的副本（会话导出把它写进记录，最长留 30 天）。
     # 走 tasks 自己的锁与合并式落盘，只删已结束的——在飞的任务上面那道闸门已经挡掉了。
     # 失败不抛（同总目录页）：核查会把还在的记录列进 leftover。
@@ -1201,7 +1159,11 @@ def verify_chat(plan: ChatPlan) -> ChatResidue:
         leftover = []
         for e in plan.entries:
             with _open_index() as con:
-                counts = store.chat_row_counts(con, e.account, e.chat_id)
+                # 若本会话已立碑，只数「墓碑里有、库里还在」的残留（删除之后并发新到的消息不算残留）；
+                # 若根本没写进任何墓碑（例如删除前即被拒绝），则全量统计，让核查如实报出未删行。
+                has_tombstone = exclusions.count_chat(con, e.account, messages.chat_md5(e.chat_id)) > 0
+                counts = store.chat_row_counts(con, e.account, e.chat_id,
+                                               only_excluded=has_tombstone)
             leftover += [f"{e.account}/{e.chat_id}:{k}={v}" for k, v in counts.items() if v]
         with _open_index() as con:
             # **按会话数，不是全局总数**：全局数会被早先别的会话的排除垫高，于是「本次一条没写成」
@@ -1220,8 +1182,10 @@ def verify_chat(plan: ChatPlan) -> ChatResidue:
         # errno 里），那也要翻成 PurgeRefused，不许裸穿、更不许被吞成「不在」。
         surviving = tuple(dict.fromkeys(
             e.export_dir for e in plan.entries if name_there(e.export_dir)))
-        if plan.index_page is not None and name_there(plan.index_page):
-            leftover.append(f"总目录页 {plan.index_page}")
+        # 重算当下总目录页（含 plan→execute 期间新建或未能删除的符号链接页）
+        live_index = index_page_listing(e.chat_id for e in plan.entries)
+        if live_index is not None and name_there(live_index):
+            leftover.append(f"总目录页 {live_index}")
         # 任务注册表：读不出来 ≠ 没有残留（它可能正留着会话 id），照残留报。
         registry = tasks.snapshot()
         if registry is None:

@@ -60,8 +60,13 @@ class ChatIndexEntry:
 _CHAT_DIR = re.compile(r"[0-9a-f]+")
 
 
+def is_chat_dir(name: str) -> bool:
+    """目录名是否为合法会话导出目录（全小写 hex），枚举侧与渲染侧共用。"""
+    return bool(_CHAT_DIR.fullmatch(name))
+
+
 def _esc(v: str | None) -> str:
-    return html.escape(v or "", quote=True)
+    return html.escape(chat_text.scrub_controls(v or ""), quote=True)
 
 
 def render(entries: Sequence[ChatIndexEntry]) -> str:
@@ -72,7 +77,7 @@ def render(entries: Sequence[ChatIndexEntry]) -> str:
     """
     rows = []
     for e in sorted(entries, key=lambda e: (e.label, e.chat_md5)):
-        if not _CHAT_DIR.fullmatch(e.chat_md5):
+        if not is_chat_dir(e.chat_md5) or not (e.has_html or e.has_md):
             continue
         base = _esc(e.chat_md5)
         # 查不到索引时条数未知（`None`）：印 0 条是**编**一条信息（那个会话的产物里显然有消息）

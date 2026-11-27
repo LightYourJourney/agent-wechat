@@ -141,5 +141,4 @@ CREATE TABLE kStoreEmoticonFilesTable(
 
 ## 对去重键的直接影响
 
-同会话跨分片 local_id 重复（不同消息）→ 检索库主键必须为
-`(account, chat_table_md5, shard, local_id)`，不能省略 chat 或 shard。
+同会话跨分片 local_id 重复（不同消息）→ 检索库主键必须包含 `(account, chat_table_md5, shard, local_id)`，不能省略 chat 或 shard；schema v10 起进一步追加第 5 段 `create_time` 防微信删表重建撞键（见 [DATA_MODEL.md](DATA_MODEL.md) §4）。

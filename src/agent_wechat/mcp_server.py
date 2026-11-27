@@ -218,8 +218,11 @@ server = _Server(name="agent-wechat", instructions=_INSTRUCTIONS)
 # 工具注解（MCP 标准字段，不进模型上下文）。Claude Code 会把 readOnlyHint 的工具与其它只读调用
 # **并行**执行（一轮里同时查两个联系人、同时检索加读近况）；idempotentHint 表示同参重调安全
 # ——导出类工具都是幂等、断点续传的，连接断开后客户端可以放心重发。
-_READ_ONLY = ToolAnnotations(read_only_hint=True)
-_IDEMPOTENT = ToolAnnotations(read_only_hint=False, idempotent_hint=True)
+_READ_ONLY = ToolAnnotations(read_only_hint=True, destructive_hint=False, open_world_hint=False)
+_IDEMPOTENT = ToolAnnotations(read_only_hint=False, destructive_hint=False,
+                              idempotent_hint=True, open_world_hint=False)
+_IDEMPOTENT_NET = ToolAnnotations(read_only_hint=False, destructive_hint=False,
+                                  idempotent_hint=True, open_world_hint=True)
 
 
 def _guard(fn: Callable[..., Any]) -> Callable[..., Any]:
@@ -420,7 +423,7 @@ def semantic_search(query: str, contact: str | None = None, limit: int = 10,
     return res
 
 
-@server.tool(annotations=_IDEMPOTENT)
+@server.tool(annotations=_IDEMPOTENT_NET)
 @_guard
 def build_vector_index(rebuild: bool = False, account: str | None = None) -> dict:
     """[长任务] 构建本地向量索引，供 semantic_search / search_messages 的语义路使用。
@@ -479,7 +482,7 @@ def get_message_context(contact: str, msg_key: str, before: int = 2, after: int 
     return res
 
 
-@server.tool(annotations=_IDEMPOTENT)
+@server.tool(annotations=_IDEMPOTENT_NET)
 @_guard
 def export_chat_media(contact: str, kinds: str = "image,voice,video",
                       months: str | None = None, limit: int = 500,
@@ -558,7 +561,7 @@ def get_message_media(contact: str, keys: str | None = None, months: str | None 
     return payload
 
 
-@server.tool(annotations=_IDEMPOTENT)
+@server.tool(annotations=_IDEMPOTENT_NET)
 @_guard
 def export_moments(contact: str | None = None, months: str | None = None,
                    with_media: bool = False, limit: int = 500,
@@ -582,7 +585,8 @@ def export_moments(contact: str | None = None, months: str | None = None,
         contact,
         months=[m.strip() for m in months.split(",") if m.strip()] if months else None,
         out_dir=out_dir,                                # EA-028：描述承诺过、签名此前没有
-        with_media=with_media, limit=limit, account=account)
+        with_media=with_media, limit=limit, account=account,
+        deny=retrieval.denied_chat_ids())
     if isinstance(res, usecases.NeedConfirm):
         return _need_confirm(res)
     r = res.report

@@ -142,7 +142,8 @@ def _appmsg_block(a: AppMsg, ref_anchor: str | None) -> str:
             # ——照常显示出来（用户看得见去哪），只是不可点。
             if chat_text.url_is_safe(url):
                 # 主机徽章：锚文本是对方可控的标题，不印真实主机就看不出点下去去哪
-                inner.append(f'<div><a href="{_esc(url)}">{_esc(title)}</a>'
+                inner.append(f'<div><a href="{_esc(url)}" target="_blank" '
+                             f'rel="noopener noreferrer nofollow">{_esc(title)}</a>'
                              f'<span class="host">{_esc(chat_text.link_host(url))}</span></div>')
             else:
                 inner.append(f'<div>[链接：{_esc(url)}]</div>')

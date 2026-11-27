@@ -77,6 +77,8 @@ def url_is_safe(url: str) -> bool:
     # 调用方也背上它。EA-090 的裁定写着「保留 `moments*` / `sns_media` 惰性」。
     # （不是防 import 环：`scripts/check_import_cycles.py` 实测 `moments` 顶层不到达 `chat_text`，
     # 提到顶层不会让门禁变红——review-code 的 Standards 轴 #9 替我验过这一条。）
+    if any(ord(c) <= 0x20 or ord(c) == 0x7f for c in url):
+        return False
     from . import moments                      # 复用它的 `split_url`（容错解析）
     s = moments.split_url(url)
     host = (s.hostname or "").lower() if s is not None else ""

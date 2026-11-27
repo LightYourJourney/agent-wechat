@@ -272,10 +272,17 @@ def claim(kind: str, **fields: object) -> Iterator[str]:
     try:
         yield task_id
     finally:
-        with contextlib.suppress(OSError, errors.AgentWeChatError), _lock, _file_lock():
-            _load_locked()
-            _tasks.pop(task_id, None)
-            _persist_locked({}, frozenset({task_id}))
+        with contextlib.suppress(OSError, errors.AgentWeChatError):
+            with _lock:
+                _tasks.pop(task_id, None)
+            # `purge --all` 删空了 HOME_DIR 后再退出 claim：不要因为释放记录把刚删的目录与
+            # tasks.json / tasks.json.lock 重建回来。
+            if paths.HOME_DIR.exists() and TASKS_FILE.exists():
+                with _lock, _file_lock():
+                    if paths.HOME_DIR.exists() and TASKS_FILE.exists():
+                        _load_locked()
+                        _tasks.pop(task_id, None)
+                        _persist_locked({}, frozenset({task_id}))
 
 
 def _error_text(exc: BaseException) -> str:
@@ -310,7 +317,9 @@ def _finish(task_id: str, *, status: str, rows: int | None = None,
         rec.update(status=status, finished_at=int(time.time()), updated_at=int(time.time()))
         if rows is not None:             # 终值覆盖进度值
             rec["rows"] = rows
-        if error is not None:
+        if status == "done":
+            rec["error"] = None
+        elif error is not None:
             rec["error"] = error
         _persist_locked({task_id: rec})
 

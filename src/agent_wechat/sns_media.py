@@ -152,11 +152,11 @@ def build_url(m: moments.SnsMedia) -> str | None:
         # 沿用既有的 `.replace`（不是新 helper）以与 AUTH_SNS 分支同形：它只替换**小写**
         # `http://`，`HTTP://…` 原样过关，而 urllib 会把 scheme 归一成小写。这一跳由
         # `fetch` 里的 `https_allowed` 挡住（判据与重定向的每一跳共用）。
-        out = m.url.replace("http://", "https://")
+        out = re.sub(r"^http://", "https://", m.url, count=1)
     else:
         if not m.token:
             return None
-        url = m.url.replace("http://", "https://")
+        url = re.sub(r"^http://", "https://", m.url, count=1)
         tok = urllib.parse.quote(m.token, safe="")
         if m.kind == moments.KIND_VIDEO:
             head, sep, query = url.partition("?")
@@ -302,12 +302,13 @@ def fetch(m: moments.SnsMedia, *, timeout: float = 20.0, attempts: int = 3,
             with op.open(req, timeout=timeout) as resp:
                 raw = resp.read(MAX_FETCH_BYTES + 1)    # 多读 1 字节才分得出「正好上限」与「超了」
                 enc = str(resp.headers.get("x-enc") or "").strip()
+        except SnsMediaError:
+            raise
         except urllib.error.HTTPError as exc:
-            # EA-007：4xx 是**确定性失败**——重试既白等，又把根因改写成「下载失败（重试 N 次）」，
-            # 用户会去查网络而不是理解「服务端已清理这条媒体」。`HTTPError` 是 `URLError`
-            # 的子类，故本子句必须排在宽 `except` 之前。文案只带状态码（**不带 URL**——
-            # 「消息只含类型名」那条硬约束的同一立场，`test_fetch_error_never_echoes_token` 钉住）。
-            # 取舍（条目明记）：确实存在「CDN 边缘暂时 404」的形态，代价是丢掉一次可恢复的下载。
+            if 300 <= exc.code < 400:
+                # `_AllowlistedRedirect` 拒绝跨跳后 urllib 抛 3xx HTTPError：确定性拒绝，不重复重试外发 token
+                raise SnsMediaError(
+                    f"拒绝非白名单或非 https 重定向（HTTPError {exc.code}），不再重试") from None
             if 400 <= exc.code < 500:
                 raise SnsMediaError(
                     f"服务端已清理（HTTP {exc.code}），不再重试：该媒体已不可取") from None

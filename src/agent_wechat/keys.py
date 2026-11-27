@@ -80,9 +80,11 @@ def _deprivilege(path: pathlib.Path) -> str | None:
     uid, gid = os.environ.get("SUDO_UID"), os.environ.get("SUDO_GID")
     if not (uid and gid):
         return None
+    if path.is_symlink():
+        return f"跳过符号链接的属主归还（{path}）"
     try:
         os.chown(path, int(uid), int(gid))
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         return f"属主未归还（{path}）：{exc}——sudo 之外的用户可能读不到密钥缓存"
     return None
 

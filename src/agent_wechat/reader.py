@@ -272,7 +272,10 @@ def _s(v: object) -> str | None:
 
 
 def is_chat_id(s: str) -> bool:
-    """wxid / 群 / 公众号 / filehelper 形态的 username 可直接当会话 id 用，无需解析。"""
+    """wxid / 群 / 公众号 / filehelper / 退化 md5:<hex> 形态可直接当会话 id 用，无需解析。"""
+    if s.startswith(messages.MD5_PREFIX):
+        tail = s[len(messages.MD5_PREFIX):]
+        return bool(tail) and all(c in "0123456789abcdefABCDEF" for c in tail)
     return s.endswith("@chatroom") or s.startswith(("wxid_", "gh_", "filehelper"))
 
 
@@ -460,7 +463,8 @@ class MessageReader:
                 with self._open(rel) as con:
                     self._check("username_pool", rel, con)
                     pool |= {u.decode("utf-8", "replace")
-                             for (u,) in con.execute("SELECT user_name FROM Name2Id")}
+                             for (u,) in con.execute("SELECT user_name FROM Name2Id")
+                             if isinstance(u, bytes)}
             except (DataNotFound, errors.SchemaDrift):
                 continue
         return pool
@@ -490,8 +494,10 @@ class MessageReader:
                    "WHERE COALESCE(delete_flag,0)=0")
             args: list = []
             if query:
-                sql += " AND (remark LIKE ? OR nick_name LIKE ? OR alias LIKE ? OR username LIKE ?)"
-                args = [f"%{query}%"] * 4
+                escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                sql += (" AND (remark LIKE ? ESCAPE '\\' OR nick_name LIKE ? ESCAPE '\\'"
+                        " OR alias LIKE ? ESCAPE '\\' OR username LIKE ? ESCAPE '\\')")
+                args = [f"%{escaped}%"] * 4
             sql += " ORDER BY remark, nick_name"
             if limit is not None:            # None = 全量（见 docstring）
                 sql += " LIMIT ?"
@@ -554,7 +560,7 @@ class MessageReader:
         两次查询在同一次 contact.db 解密里完成，由 `_open` 管理生命周期。
         名册的**规则**不在这里——`roster.build_rows` 是全项目唯一那份。
         """
-        return self._contact_memo(("roster",), lambda: self._roster_rows(None))
+        return list(self._contact_memo(("roster",), lambda: self._roster_rows(None)))
 
     def roster_for(self, chat_id: str) -> list[roster.RosterRow]:
         """只算一个会话要用的名册行：这个群的成员（私聊就是对方一人）及其联系人信息。
@@ -562,7 +568,7 @@ class MessageReader:
         `recent` 只换一个会话的发送者名，却要解析全部群的成员表（真机 230 个群约 1.4 s）。
         结果是 `roster()` 里该会话那部分的超集，规则同为 `roster.build_rows`。
         """
-        return self._contact_memo(("roster_for", chat_id), lambda: self._roster_rows(chat_id))
+        return list(self._contact_memo(("roster_for", chat_id), lambda: self._roster_rows(chat_id)))
 
     def _roster_rows(self, only_chat: str | None) -> list[roster.RosterRow]:
         groups: dict[str, list[tuple[str, str | None]]] = {}
@@ -761,7 +767,10 @@ class MessageReader:
 
         before_ts（unix 秒，不含）：只取它之前的消息——往前翻页用。
         """
-        md5hex = messages.md5_of(chat_id)
+        # EA-080：入口即早退，避免 limit <= 0 时不拼 SQL LIMIT 触发全表扫描与解码。
+        if limit <= 0:
+            return []
+        md5hex = messages.chat_md5(chat_id)
         chat_map = {md5hex: chat_id}
         if before_ts is not None:
             _load_hints()                      # 上次进程记下的「这片里没有更早的」
@@ -909,7 +918,7 @@ class MessageReader:
         self.audit_marks = {}
         chat_map = self.md5_map()
         sticker_names = self.sticker_captions()   # **循环外取一次**（同 recent）
-        want_md5 = messages.md5_of(chat_id) if chat_id else None
+        want_md5 = messages.chat_md5(chat_id) if chat_id else None
         for shard in paths.message_shards(self.acct):
             with self._open(f"message/{shard.name}") as con:
                 tables = self._shard_tables(con, want_md5)
@@ -950,12 +959,13 @@ class MessageReader:
                             f"SELECT {_EXPORT_COLUMNS} FROM '{table}' "
                             f"WHERE local_id > ? ORDER BY local_id LIMIT ?",
                             (a_start, int(audit_rows))).fetchall()
-                        self.audit_marks[(shard.name, md5hex)] = (
-                            0 if len(got) < audit_rows else int(got[-1][0]))
                         for a_rows, a_refs in self._batched(
                                 got, batch=batch, shard=shard.name, md5hex=md5hex,
                                 chat_map=chat_map, n2i=n2i, sticker_names=sticker_names):
                             audit_sink(a_rows, a_refs)
+                        # 仅在 audit_sink 全部提交成功后推进游标，防止中途异常跳过未提交段
+                        self.audit_marks[(shard.name, md5hex)] = (
+                            0 if len(got) < audit_rows else int(got[-1][0]))
 
     @staticmethod
     def _table_rebuilt(con: decrypt.ReadConnection, table: str, local_id: int,
@@ -969,16 +979,29 @@ class MessageReader:
         """按 `(chat_md5, local_id)` 取**解压后的原始** `message_content`；分片只解密一次。
 
         给贴纸回源用（`media.sticker_cdn_urls`）：凭据在原始 XML 里，`_decode_row` 产出的
-        `content` 已经是显示串。行不在 → 值为 None；分片打不开 / 表不在照常抛，由调用方
-        按「分片读不出来」记账。原始 XML 只在返回值里存在，不落盘。
+        `content` 已经是显示串。行不在 / 坏 zstd 帧 → 值为 None；分片打不开 / 表不在照常抛，
+        由调用方按「分片读不出来」记账。原始 XML 只在返回值里存在，不落盘。
         """
+        if not shard or "/" in shard or "\\" in shard or ".." in shard:
+            raise errors.SearchInputError(f"非法的分片文件名：{shard}")
+        rel = f"message/{shard}"
         out: dict[tuple[str, int], str | None] = {}
-        with self._open(f"message/{shard}") as con:
+        with self._open(rel) as con:
             for chat_md5, local_id in wanted:
+                if not chat_md5 or any(c not in "0123456789abcdefABCDEF" for c in chat_md5):
+                    raise errors.SearchInputError(f"非法的会话 md5：{chat_md5}")
+                table = f"Msg_{chat_md5.lower()}"
                 row = con.execute(
-                    f"SELECT message_content, WCDB_CT_message_content FROM 'Msg_{chat_md5}' "
-                    f"WHERE local_id = ?", (local_id,)).fetchone()
-                out[(chat_md5, local_id)] = _decode_content(*row) if row else None
+                    f'SELECT message_content, WCDB_CT_message_content FROM "{table}" '
+                    "WHERE local_id = ?", (local_id,)).fetchone()
+                if not row:
+                    out[(chat_md5, local_id)] = None
+                    continue
+                try:
+                    out[(chat_md5, local_id)] = _decode_content(*row)
+                except errors.DecryptError:
+                    self._record_source_degrade("messages", rel)
+                    out[(chat_md5, local_id)] = None
         return out
 
     def iter_extras_input(self) -> Iterator[tuple[str, int, bytes]]:
@@ -1007,7 +1030,11 @@ class MessageReader:
                         t = ltype & 0xffffffff
                         if t not in msgextra.KINDS or mc is None:
                             continue
-                        raw = _decode_content(mc, ct)
+                        try:
+                            raw = _decode_content(mc, ct)
+                        except errors.DecryptError:
+                            self._record_source_degrade("messages", f"message/{shard.name}")
+                            continue
                         if not raw:
                             continue
                         yield (messages.row_key(self.acct, md5hex, shard.name, lid, ts), t,
@@ -1040,8 +1067,13 @@ class MessageReader:
                     for lid, ltype, sid, ts, mc, ct in con.execute(
                             f"SELECT local_id, local_type, server_id, create_time, "
                             f"message_content, WCDB_CT_message_content FROM '{table}'"):
-                        raw = (_decode_content(mc, ct)
-                               if (ltype & 0xffffffff) == messages.TYPE_APPMSG
-                               and mc is not None else None)
+                        if (ltype & 0xffffffff) == messages.TYPE_APPMSG and mc is not None:
+                            try:
+                                raw = _decode_content(mc, ct)
+                            except errors.DecryptError:
+                                self._record_source_degrade("messages", f"message/{shard.name}")
+                                raw = None
+                        else:
+                            raw = None
                         yield (sid, messages.row_key(self.acct, md5hex, shard.name, lid, ts),
                                raw)

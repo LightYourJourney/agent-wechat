@@ -117,7 +117,7 @@ def search(query: str, chat_id: str | None = None, limit: int = 20,
                    f"{store._SENDER_JOIN} "
                    f"WHERE messages_fts MATCH ? AND {w} "
                    f"ORDER BY m.ts DESC LIMIT ?")
-            rows = con.execute(sql, [fts_phrase(query), *args, limit]).fetchall()
+            rows = con.execute(sql, [fts_phrase(query.strip()), *args, limit]).fetchall()
         except sqlite3.OperationalError as exc:
             # EA-013：只吞「**确认可降级**」的那一种，且把降级说出来（mode 不再是 fts）。
             # 此前吞掉**全部** OperationalError：索引损坏与将来的 SQL 拼装错误都静默成
@@ -138,7 +138,7 @@ def search(query: str, chat_id: str | None = None, limit: int = 20,
             notes.append({"capability": "search_fts",
                           "effect": "首次导出进行中：全文索引在导出结束时一次建好，"
                                     "此前逐行扫描检索（结果只含已入库的部分，较慢）"})
-        if not rows and (len(query.strip()) <= 2 or bulk):
+        if not rows and (mode == "like" or len(query.strip()) <= 2 or bulk):
             # trigram 无法匹配 <3 字符 → LIKE 兜底（有 chat 过滤则快，无过滤为全表扫）
             mode = "like"
             q = query.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")

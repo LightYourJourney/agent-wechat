@@ -71,10 +71,14 @@ _OL_START = re.compile(r"\d+\.")          # 行首的 `1.` / `12.`（有序列�
 # `\v` `\f` `\x1c` ` ` 切，那是 Python 的口径，不是规范的口径，会把一行内容劈成两行）。
 _LINE_BREAK = re.compile(r"\r\n|\r|\n")
 
-# Markdown 的**链接目的地**（`](…)`）在源码层面装不下的字符：ASCII 控制字符（空白与行结束
-# 都在其中，`\v` `\f` 也是空白）、DEL、以及 `(` `)` `<` `>`——前两者改变嵌套层级、后两者
-# 改变定界。见 `_md_dest_ok`。
-_MD_DEST_UNSAFE = frozenset(map(chr, range(0x20))) | frozenset("\x7f()<>")
+# Markdown 的**链接目的地**（`](…)`）在源码层面装不下的字符：ASCII 控制字符与空格
+# （0x00..0x20）、DEL、反斜杠（会转义闭合括号）、引号以及 `(` `)` `<` `>`。
+_MD_DEST_UNSAFE = frozenset(map(chr, range(0x21))) | frozenset("\x7f()<>\\\"'")
+
+
+def _esc_md_inline(text: str | None) -> str:
+    """单行槽位（标题 / 昵称 / 链接文字）：折叠换行避免劈裂标题、加粗或链接语法。"""
+    return _esc_md(_LINE_BREAK.sub(" ", text or ""))
 
 # 打断缩进代码块用的实体：把行首那**一个**空白字符写成实体（详见 `_esc_md` 的缩进档）。
 _WS_ENTITY = {" ": "&#32;", "\t": "&#9;"}
@@ -220,40 +224,35 @@ def _appmsg_lines(a: AppMsg, ref_anchor: str | None) -> list[str]:
     """appmsg 的结构化呈现（具名块优先，其余叶子进列表）。"""
     head = _t(appmsg.kind_name(a.kind))
     if a.title:
-        head += "：" + _esc_md(a.title)
+        head += "：" + _esc_md_inline(a.title)
     out = [f"**{head}**"]
     if a.quote is not None:
-        who = _esc_md(a.quote.displayname) or chat_text.QUOTE_UNSIGNED
-        out.append(f"> **{who}**：{_esc_md(a.quote.content)}")
+        who = _esc_md_inline(a.quote.displayname) or chat_text.QUOTE_UNSIGNED
+        # 多段引用逐行加 `> ` 前缀，防止空行让后半段脱离 blockquote 混成当前消息正文
+        q_lines = _LINE_BREAK.split(_esc_md(a.quote.content))
+        out.append(f"> **{who}**：{q_lines[0]}")
+        for ql in q_lines[1:]:
+            out.append(f"> {ql}" if ql else ">")
         if not ref_anchor:
-            # **不用 `> ` 前缀**：这条是「没有跳转目标」的元说明，不是被引用的内容。
-            # 若它也写成 blockquote，用例里的 `"> " in out` 就会被这一行满足，
-            # 于是「引用退化成 blockquote」这半个断言永远红不了（实测确认过）。
             out.append(f"（{chat_text.QUOTE_UNRESOLVED}）")
     if a.link is not None:
         url, title = a.link.url, a.link.title or a.link.url
         if url:
-            # EA-034（复审）：MD 侧此前**没有** URL 守卫——`[title](javascript:…)` 与
-            # HTML 侧同一类输入，一个被拦一个可点。判据与 HTML/朋友圈共用。
-            # 修轮 2：再加一道**目的地**判据（`_md_dest_ok`）——两个读者问的不是同一件事，
-            # 复验实测换行/空格/`)` 三种都能从目的地里逃出去变成真的 `<img>`。
-            # 目的地原样写 `url`（不加 `_t`）：`_md_dest_ok` 已排除 `<`/`>`，`_t` 在这是空操作，
-            # 而它会把 URL 里合法的 `&` 之外的实体写法搅乱——不写更诚实。
             if chat_text.url_is_safe(url) and _md_dest_ok(url):
                 # 主机徽章（同 HTML 侧）：锚文本可伪造，真实主机要印出来
-                out.append(f"[{_esc_md(title)}]({url})（{_esc_md(chat_text.link_host(url))}）")
+                out.append(f"[{_esc_md_inline(title)}]({url})（{_esc_md_inline(chat_text.link_host(url))}）")
             else:
-                out.append(f"[链接：{_esc_md(url)}]")
+                out.append(f"[链接：{_esc_md_inline(url)}]")
         if a.link.des:
             out.append(_esc_md(a.link.des))
     if a.file is not None:
         line = chat_text.file_summary(a.file.title, a.file.fileext, a.file.totallen)
         if line:
-            out.append("文件名：" + _esc_md(line))
+            out.append("文件名：" + _esc_md_inline(line))
     if a.transfer is not None:
         out.append(_transfer_line(a.transfer))
     for k, v in a.fields:
-        out.append(f"- {_esc_md(k)}：{_esc_md(v)}")
+        out.append(f"- {_esc_md_inline(k)}：{_esc_md_inline(v)}")
     return out
 
 
@@ -262,7 +261,7 @@ def _message_lines(m: ViewMsg, prefix: str, out_dir: str) -> list[str]:
     `self` / `other` 同一件事（Markdown 没有对齐，只能用标记）。"""
     who = chat_text.sender_label(m.is_self, m.sender)
     tag = "（自己）" if m.is_self else ""
-    out = [f"## {_esc_md(who)}{tag} · {chat_text.when(m.ts)} · {_t(m.kind)}", ""]
+    out = [f"## {_esc_md_inline(who)}{tag} · {chat_text.when(m.ts)} · {_t(m.kind)}", ""]
     # appmsg 的 `text` 是 `[appmsg: 标题]` 形态的提示，解析成功时与下面的结构化块逐字重复。
     # 位置/名片同理：`[location]` / `[type42]` 占位（`content` 契约不变）在结构化块出现时
     # 也是重复的一句，故一并收进同一个条件。

@@ -70,6 +70,7 @@ def standalone(db_path: pathlib.Path | None = None) -> Iterator[sqlite3.Connecti
     重定向，默认值跟着 import 期常量走会读到真实数据目录。
     """
     p = path_for(db_path) if db_path is not None else path()
+    con: sqlite3.Connection | None = None
     try:
         con = sqlite3.connect(":memory:")
         if p.exists():
@@ -78,6 +79,9 @@ def standalone(db_path: pathlib.Path | None = None) -> Iterator[sqlite3.Connecti
             con.execute("ATTACH DATABASE ':memory:' AS exclusions")
             con.executescript(SCHEMA)
     except (sqlite3.Error, OSError) as exc:
+        if con is not None:
+            with contextlib.suppress(sqlite3.Error):
+                con.close()
         # A 矩阵：连接 / ATTACH / executescript 三处此前裸穿（磁盘满、权限、库损坏都实测到）。
         # 排除清单是本地状态库，进不去就没有降级可言——按 core 契约只能是项目异常。
         raise errors.IndexUnavailable(

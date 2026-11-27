@@ -102,16 +102,32 @@ def container_verdict(p: str | pathlib.Path) -> bool | None:
         return True
     if guard.is_relative_to(resolved):
         return True                       # 祖先链：一路到 `/`（含 `/` 本身）
+    import errno as _errno
+    _ABSENT_ERRNOS = (_errno.ENOENT, _errno.ENOTDIR, _errno.ENAMETOOLONG)
     try:
         if not guard.exists():
             return False                      # 容器不在 ⇒ 没有可写进去的东西
-        if any(anc.exists() and os.path.samefile(anc, guard)
-               for anc in (resolved, *resolved.parents)):
-            return True
-        return any(node.exists() and os.path.samefile(node, resolved)
-                   for node in (guard, *guard.parents))
-    except OSError:
-        return False                       # samefile/exists 出错：维持既有语义（只读问路同样是 False）
+    except OSError as exc:
+        if exc.errno in _ABSENT_ERRNOS:
+            return False
+        return None                           # 判不出来（权限/IO 错误）：写闸门按 fail-closed 拒绝
+    for anc in (resolved, *resolved.parents):
+        try:
+            if anc.exists() and os.path.samefile(anc, guard):
+                return True
+        except OSError as exc:
+            if exc.errno in _ABSENT_ERRNOS:
+                continue
+            return None
+    for node in (guard, *guard.parents):
+        try:
+            if node.exists() and os.path.samefile(node, resolved):
+                return True
+        except OSError as exc:
+            if exc.errno in _ABSENT_ERRNOS:
+                continue
+            return None
+    return False
 
 
 def _write_gate_refuses(p: str | pathlib.Path) -> bool:
@@ -149,7 +165,7 @@ def _require_guard_resolvable() -> None:
     """
     try:
         container_bundle().resolve(strict=False)
-    except (OSError, RuntimeError) as exc:
+    except (OSError, RuntimeError, ValueError) as exc:
         raise ContainerWriteRefused(
             f"无法确认容器目录的位置：{container_bundle()}",
             hint=f"{exc}；为安全起见拒绝写入，请检查路径解析（符号链接 / 权限）后重试"
@@ -220,14 +236,14 @@ def refuse_mcp_out(out_dir: str | None, default_root: pathlib.Path | None = None
     if not out_dir:
         return
     try:
-        target = pathlib.Path(out_dir).resolve()
-    except (RuntimeError, OSError):
+        target = pathlib.Path(out_dir).expanduser().resolve()
+    except (RuntimeError, OSError, ValueError):
         return
     for root in mcp_out_roots():
         try:
             if target.is_relative_to(root.resolve()):
                 return
-        except (RuntimeError, OSError):
+        except (RuntimeError, OSError, ValueError):
             continue
     raise OutDirRefused(
         f"MCP 只允许把产物写到数据目录之下或显式放行的目录：{out_dir}",
@@ -512,7 +528,7 @@ def atomic_write(dest: pathlib.Path, data: str | bytes, *, mode: int = 0o600) ->
     - `os.replace` 换的是**名字**：`dest` 是符号链接时替换链接本身，不会写穿到链接目标。
     """
     if isinstance(data, str):
-        _atomic(dest, lambda tmp: tmp.write_text(data), mode)
+        _atomic(dest, lambda tmp: tmp.write_text(data, encoding="utf-8"), mode)
     else:
         _atomic(dest, lambda tmp: tmp.write_bytes(data), mode)
 
@@ -529,7 +545,11 @@ def _atomic(dest: pathlib.Path, fill: Callable[[pathlib.Path], object], mode: in
     # 失败清理会踩掉另一方的，成功的写被报成失败。`sweep_stale_tmp` 只看第一段的 pid。
     tmp = dest.with_name(f"{dest.name}.{os.getpid()}.{threading.get_native_id()}.tmp")
     try:
-        os.close(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode))
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, mode)
+        try:
+            os.fchmod(fd, mode)
+        finally:
+            os.close(fd)
         fill(tmp)
         tmp.chmod(mode)
         # 先落盘再换名：否则断电后可能是「新名字、空内容」——rename 先于数据持久化，

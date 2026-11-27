@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import ast
 import pathlib
-import re
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent / "src" / "agent_wechat"
@@ -100,11 +99,22 @@ def classify(path: pathlib.Path) -> dict[str, set[str]]:
             elif isinstance(s, ast.If) and _is_type_checking(s.test):
                 for sub in s.body:
                     walk([sub], "tc")
+                if s.orelse:
+                    walk(s.orelse, ctx)
             else:
-                if isinstance(s, ast.ImportFrom) and s.level >= 1:
-                    add(ctx, resolve(s.level, s.module, [a.name for a in s.names]))
+                if isinstance(s, ast.ImportFrom):
+                    if s.level >= 1:
+                        add(ctx, resolve(s.level, s.module, [a.name for a in s.names]))
+                    elif s.module == "agent_wechat":
+                        add(ctx, [a.name.split(".")[0] for a in s.names])
+                    elif s.module and s.module.startswith("agent_wechat."):
+                        rel = s.module.removeprefix("agent_wechat.")
+                        add(ctx, [rel])
+                        if (ROOT / rel).is_dir() and _is_package(ROOT / rel):
+                            add(ctx, [f"{rel}.{a.name}" for a in s.names
+                                      if (ROOT / rel / f"{a.name}.py").exists()])
                 elif isinstance(s, ast.Import):
-                    add(ctx, [a.name.split(".")[1] for a in s.names
+                    add(ctx, [a.name.removeprefix("agent_wechat.") for a in s.names
                               if a.name.startswith("agent_wechat.")])
                 walk([n for n in ast.iter_child_nodes(s) if isinstance(n, ast.stmt)], ctx)
 
@@ -150,15 +160,28 @@ def runtime_cycles(edges: dict[str, set[str]]) -> list[list[str]]:
     return found
 
 
+def _imports_mcp(path: pathlib.Path) -> bool:
+    """AST 检查该文件是否导入了 `mcp` 包（覆盖 `import os, mcp` 与所有子包）。"""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            if any(a.name == "mcp" or a.name.startswith("mcp.") for a in node.names):
+                return True
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            if node.module == "mcp" or node.module.startswith("mcp."):
+                return True
+    return False
+
+
 def main() -> int:
-    # **包内的文件也要扫**：`usecases` 2026-11-21 拆成包之后，`ROOT.glob("*.py")`
-    # 看不见它，整包的 import 边一条都不进环检查（曾让本门禁对 `usecases` 完全失明）。
-    # 模块身份用 `包名.文件名`，与 `classify` 里包内兄弟的命名同一套。
+    # **包内的文件也要扫**，且 `pkg/__init__.py` 以包名 `pkg` 作为节点身份，使
+    # `from . import usecases` 的目标 `"usecases"` 与 `usecases/__init__.py` 的出边连通。
     sources = {p.stem: p for p in sorted(ROOT.glob("*.py"))}
     for pkg_dir in sorted(p for p in ROOT.iterdir() if p.is_dir() and
                           (p / "__init__.py").exists()):
         for f in sorted(pkg_dir.glob("*.py")):
-            sources[f"{pkg_dir.name}.{f.stem}"] = f
+            key = pkg_dir.name if f.stem == "__init__" else f"{pkg_dir.name}.{f.stem}"
+            sources[key] = f
     mods = {name: classify(p) for name, p in sources.items()}
     rt = {m: v["rt"] for m, v in mods.items()}
     cycles = runtime_cycles(rt)
@@ -174,10 +197,9 @@ def main() -> int:
         for m in comp:
             back = sorted(d for d in comp if d in rt.get(m, ()))
             print(f"     {m} → {back}", file=sys.stderr)
-    # `import mcp` 只许出现在 mcp_server：无 mcp 依赖也要能跑其余命令（spec §7）
-    leaked = [p.stem for p in sorted(ROOT.glob("*.py"))
-              if p.stem != "mcp_server"          # 它自己就该有
-              and re.search(r"^\s*(from|import)\s+mcp\b", p.read_text(), re.M)]
+    # `import mcp` 只许出现在 mcp_server：覆盖顶层与全部子包模块
+    leaked = [name for name, p in sorted(sources.items())
+              if name != "mcp_server" and _imports_mcp(p)]
     if leaked:
         print(f"❌ 只有 mcp_server.py 可以 import mcp，实际还有：{'、'.join(leaked)}",
               file=sys.stderr)

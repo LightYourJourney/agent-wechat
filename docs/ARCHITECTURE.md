@@ -33,7 +33,7 @@ src/agent_wechat/
 ├── reader.py       消息读取：表发现、内容解码、流式产出（按语义**解码消息内容**的唯一模块——`inspect` 也会读库，但它只 dump 结构与样例行；结构与探测声明在 schema.py）
 ├── media.py        媒体导出：图片 dat 解密（密钥纯磁盘推导 + 样本验证）、语音 SILK→WAV、视频定位、**贴纸 CDN 取件（本项目唯一为贴纸联网的路径，默认关）**（唯一接触媒体容器与媒体密钥的模块；reader import 它抽 `media_refs`、并借 `extract_sticker_ref` 解析贴纸 XML 的**三个安全字段**，不反向**顶层** import；唯一的反向是 `media` 在贴纸回源一处**函数内惰性** import `reader` 现取原始 XML——为避开模块级环，见 `media.py` 模块头）
 ├── moments.py      朋友圈解析：sns.db 的 `TimelineObject` XML → 结构化动态（纯读取，不联网）
-├── sns_media.py    朋友圈远程媒体：URL 构造 → 下载 → WX-ISAAC64 解密（朋友圈远程媒体：HTTP、默认关；本项目三条零网络例外之一，均为入站下载、不上传任何内容——另两条是 `media.py` 的贴纸 CDN 取件与首次建索引时的模型下载，见 SECURITY.md §1。隔离带）
+├── sns_media.py    朋友圈远程媒体：URL 构造 → 下载 → WX-ISAAC64 解密（朋友圈远程媒体：HTTPS、默认关；本项目三条零网络例外之一，均为入站下载、不上传任何内容——另两条是 `media.py` 的贴纸 CDN 取件（明文 HTTP）与首次建索引时的模型下载，见 SECURITY.md §1。隔离带）
 ├── moments_html.py 朋友圈渲染：单文件自包含 HTML 时间线（纯函数，不写文件、不联网）
 ├── chat_text.py    两个会话模板共享的措辞与纯函数（时间格式化 / 相对路径 / 媒体状态与降级文案）
 ├── chatview.py     会话时间线：`ChatView` 组装 + `write`（唯一决定产物布局的地方）
@@ -164,8 +164,8 @@ vector.semantic_search(query, chat_id, limit, account)
   → 按 msg_rowid 回查 messages 取正文 → 截断到 limit，返回 distance（cosine）
 ```
 
-嵌入文本里的「上文」前缀只解决**同一轮运行内**的短消息语义（「好的」「在吗」），
-跨运行的连续性由 `rebuild` 保证（见 §7）。
+嵌入文本里的「上文」前缀解决短消息语义（「好的」「在吗」）；增量续跑时会自动回查水位线前
+同会话最近一条可嵌入消息（最多回扫 500 条），无需为此全量 `rebuild`（见 §7）。
 
 ### 3.7 媒体导出（图片 / 语音 / 视频）
 
@@ -306,9 +306,9 @@ decrypt.open_db(db, passphrase)                     # reader / 语音 / 朋友�
   （`SNAPSHOT_TRIES`，见 §3.10），仍在变才报 `source_unavailable`；重跑即可
 - `key_info.db` 明文库的存在说明微信本地留存了被包裹的密钥材料；若未来微信改为
   更强的包裹算法，LLDB 路线不受影响（它读的是内存中已解出的 passphrase）
-- **增量嵌入的上下文前缀不连续**：`上文:` 前缀在单次运行内按会话累积，增量运行从水位线
-  开始，各会话本轮第一条被嵌入的消息没有前缀（即便确有前一条）；需要连续上下文时用
-  `vector-build --rebuild` 全量重建
+- **增量嵌入的上下文前缀回查有界**：增量运行从水位线续跑时，各会话本轮首条可嵌入消息会自动回查
+  水位线前的上一条可嵌入消息（最多回扫 `DIRTY_PREV_SCAN = 500` 条）；仅在连续超过 500 条不可嵌入
+  消息或旧库同会话真名与 `md5:` 混存时取不到前文，`rebuild` 主要用于换模型或整表重建
 - **历史改写会修正 SQLite/FTS，并在下一次 `vector-build` 重嵌**：Phase 02 把改写投递到
   `pending_reembed`，Phase 03 在每次构建里消费它（每轮最多 4 批）。**不是实时**：没跑
   `vector-build` 之前，旧向量仍在（检索可能返回旧语义），`vector-status` 会显示积压。

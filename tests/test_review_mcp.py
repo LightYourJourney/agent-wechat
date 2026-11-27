@@ -237,4 +237,5 @@ def test_search_history_full_page_in_one_second_does_not_loop(wx):
     wx([(i, T0 + 10, "同秒") for i in range(1, 5)])
     export.run_export(ACCT)
     res = _call("search_history", {"query": "同秒", "account": ACCT, "limit": 2})
-    assert len(res["hits"]) == 4 and res["next_before_ts"] == T0 + 10   # 整秒给全，从它之前接着搜
+    # 整秒给全；该秒之前已没有更早命中，故不再给虚假的 next_before_ts（避免 Agent 多翻一次空页）
+    assert len(res["hits"]) == 4 and "next_before_ts" not in res

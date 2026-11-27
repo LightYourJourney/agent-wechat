@@ -22,13 +22,14 @@ import hashlib
 import os
 import pathlib
 import re
-import select
+import selectors
 import shutil
 import sqlite3
 import stat
 import subprocess
 import sys
 import tempfile
+import time
 import http.client
 import urllib.error
 from collections.abc import Callable, Sequence
@@ -243,7 +244,10 @@ def derive_keys(account: str) -> MediaKeys:
 
 def month_of(ts: int) -> str:
     """时间戳 → 本地时区 YYYY-MM。微信按**本机本地月**建目录，用 UTC 会在月初/月末错位。"""
-    return datetime.datetime.fromtimestamp(ts).strftime("%Y-%m")
+    try:
+        return datetime.datetime.fromtimestamp(ts).strftime("%Y-%m")
+    except (ValueError, OverflowError, OSError):
+        return "1970-01"
 
 
 def _shift_month(mon: str, delta: int) -> str:
@@ -548,9 +552,10 @@ def _find_ffmpeg() -> str | None:
         _ffmpeg_cache = None
         for c in FFMPEG_CANDIDATES:
             try:
-                subprocess.run([c, "-version"], capture_output=True, timeout=10)
-                _ffmpeg_cache = c
-                break
+                r = subprocess.run([c, "-version"], capture_output=True, timeout=10)
+                if r.returncode == 0:
+                    _ffmpeg_cache = c
+                    break
             except (OSError, subprocess.TimeoutExpired):
                 continue
     return _ffmpeg_cache
@@ -592,16 +597,20 @@ def _wxgf_to_jpeg(data: bytes, dest: pathlib.Path) -> bool:
 
 
 def _chmod_quiet(p: pathlib.Path) -> None:
-    """尽力收紧权限（Ruling 15）：失败只意味着这一级没收紧，不是导出失败。
-
-    典型场景：`--out` 指向用户不拥有的既有目录——`mkdir(exist_ok=True)` 对它无害，
-    但 `chmod` 会被拒。裸 OSError 逃出 core 层是契约违规，而权限到底有没有收紧由
-    `export_media` 在开头的一次 stat 检查如实告知（恰好一条 degraded，含路径）。
-    """
+    """尽力收紧权限（Ruling 15）：失败只意味着这一级没收紧，不是导出失败。符号链接跳过不改目标。"""
+    if p.is_symlink():
+        return
     try:
         p.chmod(0o700)
     except OSError:
         pass
+
+
+def _safe_part(part: str) -> str:
+    """校验导出路径单段，拒绝空段、`.`/`..`、路径分隔符与 NUL，防止路径穿越。"""
+    if not part or part in (".", "..") or "/" in part or "\\" in part or "\x00" in part:
+        raise errors.MediaOutputError(f"非法输出路径段：{part!r}")
+    return part
 
 
 def export_root() -> pathlib.Path:
@@ -646,8 +655,12 @@ def ensure_tree(root: pathlib.Path, *parts: str) -> pathlib.Path:
             f"输出目录不可用：{p}",
             hint="请检查该路径的权限与磁盘空间，或用 --out 指定一个可写目录") from exc
     _chmod_quiet(p)
+    root_resolved = root.resolve()
     for part in parts:
+        _safe_part(part)
         p = p / part
+        if not p.resolve().is_relative_to(root_resolved):
+            raise errors.MediaOutputError(f"输出目录越出目标根：{p}")
         try:
             p.mkdir(mode=0o700, exist_ok=True)
         except OSError as exc:
@@ -674,12 +687,11 @@ def _safe_iter(d: pathlib.Path, pattern: str | None = None) -> list[pathlib.Path
 
 def _out_path(out_root: pathlib.Path, cm: str, kind: str, mon: str,
               stem: str, ext: str) -> pathlib.Path:
-    """导出终路径的**纯计算**——不建目录、不写盘、不 stat。
-
-    与 `_dest` 是同一条路径的两种用法：`_dest` 先 `ensure_tree` 再拼名（写盘用），
-    本函数只拼名（**探测**用）。探测若走 `_dest`，一次 skip 判定就会在 `out_root`
-    下凭空造出空目录树。
-    """
+    """导出终路径的**纯计算**——不建目录、不写盘、不 stat。"""
+    for seg in (cm, kind, mon, stem):
+        _safe_part(seg)
+    if ext and (ext in (".", "..") or "/" in ext or "\\" in ext or "\x00" in ext):
+        raise errors.MediaOutputError(f"非法输出扩展名：{ext!r}")
     return out_root / cm / kind / mon / f"{stem}.{ext}"
 
 
@@ -812,9 +824,26 @@ def exported_path(out_root: pathlib.Path, *, chat_md5: str, kind: str, ts: int,
         cands = _out_candidates(kind, file_key)
     else:
         return None
+    if kind == "video":
+        # 视频类优先全月窗找本体（.mp4 / _raw.mp4），避免当月 _thumb.jpg 盖住相邻月已导出本体
+        body_cands = tuple(c for c in cands if not c[0].endswith("_thumb"))
+        thumb_cands = tuple(c for c in cands if c[0].endswith("_thumb"))
+        for group in (body_cands, thumb_cands):
+            for mon in months:
+                for stem, ext in group:
+                    try:
+                        p = _out_path(out_root, chat_md5, kind, mon, stem, ext)
+                    except errors.MediaOutputError:
+                        return None
+                    if p.exists():
+                        return p
+        return None
     for mon in months:                     # 月份外层、候选内层 —— 与 resolve_* 的嵌套顺序一致
         for stem, ext in cands:
-            p = _out_path(out_root, chat_md5, kind, mon, stem, ext)
+            try:
+                p = _out_path(out_root, chat_md5, kind, mon, stem, ext)
+            except errors.MediaOutputError:
+                return None
             if p.exists():
                 return p
     return None
@@ -1039,7 +1068,7 @@ def _export_images(st: _ExportState, chat_ids: list[str]) -> None:
                 "图片密钥只验了 xorKey（样本里没有 V2 dat，aesKey 未经验证）："
                 "V2 图片可能解不开，失败会计入 image.failed")
         for chat in chat_ids:
-            cm = messages.md5_of(chat)
+            cm = messages.chat_md5(chat)
             base = paths.XWECHAT_FILES / st.account / "msg/attach" / cm
             if not base.is_dir():
                 continue
@@ -1148,7 +1177,7 @@ def _export_videos_from_refs(st: _ExportState, chat_ids: list[str],
         st.report.degraded.append(note)
     seen: set[tuple[str, str, str]] = set()
     for chat in chat_ids:
-        cm = messages.md5_of(chat)
+        cm = messages.chat_md5(chat)
         for _msg_key, ts, file_key in refs_by_chat.get(chat, ()):
             mon = month_of(ts)
             if st.want is not None and mon not in st.want:
@@ -1201,7 +1230,7 @@ def _export_videos_by_account_scan(st: _ExportState, chat_ids: list[str], *,
     if not can_place:
         st.report.degraded.append("视频为账号级枚举，无法归属具体会话；请逐个会话导出")
         return
-    cm = messages.md5_of(chat_ids[0])
+    cm = messages.chat_md5(chat_ids[0])
     vbase = paths.XWECHAT_FILES / st.account / "msg/video"
     # 不在入口判 full()：此刻只是「上限已到」，还没看见任何条目——真要有视频被跳过，
     # 下面两个循环里的逐项检查会如实置位 truncated（此处置位会把「一个视频都没剩」
@@ -1351,6 +1380,9 @@ class _AllowlistedRedirect(urllib.request.HTTPRedirectHandler):
                          msg: str, headers: http.client.HTTPMessage,
                          newurl: str) -> urllib.request.Request | None:
         if not _cdn_url_allowed(newurl):
+            return None
+        # 禁止从 https 降级重定向到明文 http
+        if req.full_url.lower().startswith("https://") and newurl.lower().startswith("http://"):
             return None
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
@@ -1525,7 +1557,7 @@ def _export_stickers(st: _ExportState, chat_ids: list[str],
     # 就会白白失败——实测某会话有 5 个正是这样（那 5 个的响应体与 md5 都完全正常）。
     all_keys: dict[tuple[str, str], list[str]] = {}
     for chat in chat_ids:
-        cm = messages.md5_of(chat)
+        cm = messages.chat_md5(chat)
         for msg_key, _ts, file_key in refs.get(chat, ()):
             if msg_key.count("|") in (3, 4):          # 4 段旧键 / 5 段（v10）
                 all_keys.setdefault((cm, file_key), []).append(msg_key)
@@ -1533,7 +1565,7 @@ def _export_stickers(st: _ExportState, chat_ids: list[str],
     order: list[tuple[str, str, str]] = []                  # (cm, mon, md5)，保序
     cands: dict[tuple[str, str, str], list[str]] = {}       # -> 候选 msg_key（跨月）
     for chat in chat_ids:
-        cm = messages.md5_of(chat)
+        cm = messages.chat_md5(chat)
         for msg_key, ts, file_key in refs.get(chat, ()):
             mon = month_of(ts)               # 与 exported_path 同源，见下方注释
             if st.want is not None and mon not in st.want:
@@ -1696,14 +1728,20 @@ class _VoiceWorker:
         if proc is None or proc.stdout is None:
             return None
         fd = proc.stdout.fileno()
-        while b"\n" not in self._buf:
-            ready, _, _ = select.select([fd], [], [], self.TIMEOUT)
-            if not ready:
-                return None                       # 卡死
-            chunk = os.read(fd, 4096)
-            if not chunk:
-                return None                       # 崩溃 / 退出
-            self._buf += chunk
+        deadline = time.monotonic() + self.TIMEOUT
+        # 用 selectors（macOS 下走 kqueue）替代 select.select，避免长生命周期进程 fd >= 1024 抛 ValueError
+        with selectors.DefaultSelector() as sel:
+            sel.register(fd, selectors.EVENT_READ)
+            while b"\n" not in self._buf:
+                rem = deadline - time.monotonic()
+                if rem <= 0:
+                    return None
+                if not sel.select(rem):
+                    return None                       # 卡死
+                chunk = os.read(fd, 4096)
+                if not chunk:
+                    return None                       # 崩溃 / 退出
+                self._buf += chunk
         line, _, self._buf = self._buf.partition(b"\n")
         return line.decode("ascii", "replace")
 
@@ -1774,9 +1812,14 @@ def _export_voices(st: _ExportState, chat_ids: list[str]) -> None:
     # 前缀**必须带 pid**：`decrypt.sweep_stale_tempdirs` 靠它判「持有者还在不在」。
     # 不带 pid 的目录在 SIGKILL / daemon 线程被丢弃时残留，且没有任何清扫路径
     # 能认领它（同一类明文残留，`awdec-` 那条早有兜底）。
-    with tempfile.TemporaryDirectory(dir=decrypt.tmp_dir(),
-                                     prefix=f"awvoice-{os.getpid()}-") as td, \
-            _VoiceWorker() as worker:
+    try:
+        td_cm = tempfile.TemporaryDirectory(dir=decrypt.tmp_dir(),
+                                            prefix=f"awvoice-{os.getpid()}-")
+    except OSError as exc:
+        st.report.degraded.append(
+            f"语音临时目录创建失败（{errors.redact(str(exc))}），本次未导出语音")
+        return
+    with td_cm as td, _VoiceWorker() as worker:
         for db in _voice_db_paths(st.account):
             try:
                 passphrase = keys_mod.get_passphrase(st.account)
@@ -1803,6 +1846,9 @@ def _export_voices(st: _ExportState, chat_ids: list[str]) -> None:
             f"{st.report.voice.decode_failed} 条语音 pilk 解码失败，已存原始 .slk；下次导出会重试")
 
 
+_MAX_PCM_BYTES = 50 * 1024 * 1024        # 24kHz 16-bit 单声道 ~17 分钟上限，防 SILK 解压炸弹
+
+
 def _decode_voice(worker: _VoiceWorker, td: pathlib.Path, blob: bytes) -> bytes | None:
     """一条 silk → WAV 字节；失败返回 None。临时文件在 `td` 里逐条覆盖。"""
     tmp_silk, tmp_pcm = td / "v.silk", td / "v.pcm"
@@ -1810,6 +1856,8 @@ def _decode_voice(worker: _VoiceWorker, td: pathlib.Path, blob: bytes) -> bytes 
         tmp_pcm.unlink(missing_ok=True)   # 上一条的 pcm 不许被当成这一条的结果
         tmp_silk.write_bytes(blob)
         if worker.decode(tmp_silk, tmp_pcm) and tmp_pcm.exists():
+            if tmp_pcm.stat().st_size > _MAX_PCM_BYTES:
+                return None
             return _wav_bytes(tmp_pcm.read_bytes())
         return None
     except OSError:
@@ -1825,12 +1873,14 @@ def _decode_voice(worker: _VoiceWorker, td: pathlib.Path, blob: bytes) -> bytes 
 def _export_voices_from(st: _ExportState, con: decrypt.ReadConnection,
                         chat_ids: list[str], td: pathlib.Path, worker: _VoiceWorker) -> None:
     name2id = {u.decode("utf-8", "replace") if isinstance(u, bytes) else u: rid
-               for rid, u in con.execute("SELECT rowid, user_name FROM Name2Id")}
+               for rid, u in con.execute("SELECT rowid, user_name FROM Name2Id")
+               if u is not None}
+    md52id = {messages.md5_of(u): rid for u, rid in name2id.items()}
     for chat in chat_ids:
-        rid = name2id.get(chat)
+        cm = messages.chat_md5(chat)
+        rid = name2id.get(chat) if chat in name2id else md52id.get(cm)
         if rid is None:
             continue                     # 本分片没有它：别的分片可能还有（Ruling 22）
-        cm = messages.md5_of(chat)
         for ts, lid, blob in con.execute(
                 "SELECT create_time, local_id, voice_data FROM VoiceInfo "
                 "WHERE chat_name_id=? ORDER BY create_time, local_id", (rid,)):
@@ -1854,8 +1904,8 @@ def _export_voices_from(st: _ExportState, con: decrypt.ReadConnection,
                     st.report.voice.failed += 1         # 落盘失败（Ruling 20）
                     continue
                 st.report.voice.ok += 1
-            elif _PILK is not None and _out_path(st.out_root, cm, "voice", mon,
-                                                 f"{ts}_{lid}", "slk").exists():
+            elif (_PILK is not None and not st.force
+                  and _out_path(st.out_root, cm, "voice", mon, f"{ts}_{lid}", "slk").exists()):
                 # 上一轮已存过 `.slk`、这次重试又失败：不重写、**不占 limit**——否则最老的
                 # 一批坏语音每轮都把名额用光，后面的永远轮不到（truncated 恒真）。
                 st.report.voice.decode_failed += 1

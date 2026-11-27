@@ -126,7 +126,7 @@
   scheme 本就是 `http`，故当前一律明文 HTTP。**请求 URL 携带该贴纸的 `filekey`——
   它会在网络上明文可见。** 这是既知且被显式接受的代价；**不要把这条描述成加密传输**。
   - 范围说明：**只实测过 `vweixinf.tc.qq.com` 这一个主机名**。另一个 host
-    `wxapp.tc.qq.com` 在下面第 2 条的白名单里、其 https 行为**未实测**——所以
+    `wxapp.tc.qq.com` 在上面第 2 条的白名单里、其 https 行为**未实测**——所以
     「贴纸 CDN 一律不支持 https」是不准确的推广。
 - **发送内容**：请求只携带该条贴纸的下载 `filekey`（在 URL 查询串里）与固定
   `User-Agent`，**不含本机任何聊天 / 索引 / 密钥内容**，无请求体。
@@ -210,8 +210,7 @@
 > SQLite < 3.42 没有这个开关，那时 trigram 也会在活跃页里留到下一次段合并；在这种 SQLite 上
 > 升到 v8 的库，之后换成新版 SQLite 也**不会**自动补开——要补就 `purge --index` 后重跑 `export`）
 > （**不是**本工具的检索还能搜到：索引查询里它已经没有了）。要字节级清除只能 `purge --index`
-> 后重跑 `export`（实测与取舍见下
-> §2.2b / §5.7）。
+> 后重跑 `export`。
 
 > **「删名字」与「删字节」是两件事**（EA-030）：`purge` 删的是**目录项**。待删树上若有
 > **硬链接**（同一 inode 的另一个名字——`cp -l`、`rsync -H --link-dest` 的产物，或手工
@@ -347,7 +346,8 @@ Time Machine 的排除是绑在 **inode** 上的扩展属性，文件一旦被�
 
 ## Phase 07 补充：本地工作台的信任边界
 
-- 只监听 loopback：CLI `ui` 绑 `127.0.0.1`，`webui.create_server` 也接受 `::1`（走 IPv6 套接字），其它地址拒绝；`Host`/`Origin` 钉死在本机地址，防 DNS rebinding 与跨站请求。
+- 只监听 loopback：CLI `ui` 默认绑 `127.0.0.1`，通过 `--host ::1` 也支持 IPv6 loopback（走 IPv6 套接字），其它地址拒绝；`Host`/`Origin` 钉死在本机地址，防 DNS rebinding 与跨站请求。
+- 访问边界与能力：工作台提供只读检索浏览 + 派生文本删除（唯一 POST 接口）；其中 `/api/media` 探测语音四态时与 `media locate` 同源，会临时快照并解密本机 `media_*.db`（不落明文，用后即焚）；受 `AGENT_WECHAT_DENY` 约束。
 - **访问令牌**：loopback 挡不住**本机的其他账户与进程**（它们一样连得上 `127.0.0.1`，Host 校验也挡不住）。所以每次启动生成一个随机令牌，只出现在终端打印的链接里（`/?token=…`，同 Jupyter）；首次打开时换成 HttpOnly、SameSite=Strict 的 cookie（`aw_token_<端口>`）并 302 到不带令牌的 `/`，令牌不留在地址栏与历史里。没有它，首页、静态资源与接口一律 403。令牌的边界：看得到这个终端输出的人拿得到它；同一账户下的进程本就能直接读 `~/.agent-wechat/`，不在它的防护范围内。
 - 每进程随机 CSRF 令牌：**`/api/*` 的 GET 也要带**（`X-AW-CSRF` 头）——Host 校验挡不住跨站的简单 GET，任意网页都能触发检索与模型加载；POST 另加 Origin 校验，唯一 POST 是派生文本删除。
 - 不服务文件系统、无路径拼接；CSP `default-src 'none'`；页面无外部资源、`no-store`。

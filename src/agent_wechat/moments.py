@@ -366,30 +366,25 @@ def iter_posts(account: str, *, chat_filter: str | None = None,
     want = set(months) if months else None
     with decrypt.open_db(db, keys.get_passphrase(account)) as con:
         con.text_factory = bytes          # 库内含非 UTF-8 字节，统一按 bytes 取
+        out = []
         try:
             rows = con.execute("SELECT tid, content FROM SnsTimeLine")
+            for tid, content in rows:
+                p = parse_post(_dec(tid), _dec(content))
+                if p is None:
+                    if report is not None:
+                        report.failed += 1
+                    continue
+                if chat_filter and p.username != chat_filter:
+                    continue
+                if want and (p.create_time <= 0 or media.month_of(p.create_time) not in want):
+                    continue
+                out.append(p)
         except sqlite3.Error as exc:
-            # 旧版微信的 sns.db 没有这张表（或列被改名）；**损坏的库**抛的是
-            # `DatabaseError`（`file is not a database`），不是 `OperationalError`
-            # ——EA-105：按 `sqlite3.Error` 宽口径收口，别让裸 sqlite3 异常穿透到适配层
-            # （CLI 印 traceback、MCP 退化成通用内部错误）。「core 只抛 AgentWeChatError
-            # 子类」这条契约在此收口（spec §5 的原话就是 SchemaDrift）。
             raise errors.SchemaDrift(
                 "朋友圈", str(db), "SnsTimeLine",
                 detail="读不出来（不是 SQLite 库，或文件已损坏）",
                 hint="该库可能损坏：从备份恢复，或确认它是否是有效的 sns.db") from exc
-        out = []
-        for tid, content in rows:
-            p = parse_post(str(tid), _dec(content))
-            if p is None:
-                if report is not None:
-                    report.failed += 1
-                continue
-            if chat_filter and p.username != chat_filter:
-                continue
-            if want and media.month_of(p.create_time) not in want:
-                continue
-            out.append(p)
     out.sort(key=lambda p: p.create_time, reverse=True)   # 稳定：同一时刻保持扫描序
     yield from out
 

@@ -21,8 +21,10 @@
 [docs/schema-4.1.13.md](docs/schema-4.1.13.md)。
 
 ## msg_key
-一行 messages 的去重主键：`"<account>|<chat_md5>|<shard>|<local_id>"`，四字段
-缺一不可。出处：`messages.row_key`、[docs/DATA_MODEL.md](docs/DATA_MODEL.md) §4。
+一行 messages 的去重主键（schema v10 起为五段）：`"<account>|<chat_md5>|<shard>|<local_id>|<create_time>"`
+（追加 `create_time` 防微信删表重建撞键，兼容 v10 前的 4 段旧键与旧墓碑）。MCP 对外输出返回短键
+`<chat_md5前8位>:<local_id>:<create_time>`，回传时短键/4 段/5 段均接受。出处：`messages.row_key` /
+`messages.short_key`、[docs/DATA_MODEL.md](docs/DATA_MODEL.md) §4。
 
 ## 水位线（watermark）
 「已处理到哪里」的游标。**本仓库有两个互不相干的东西，符号/表名都带限定词区分：**
@@ -53,8 +55,8 @@ MCP 与 CLI 两个入口共享的一层：参数归一化、账号/会话解析�
 
 ## 上文前缀
 向量入库文本的确定性前缀，形如 `[2025-09-10 张三] 上文: … | 正文`——用前一条消息给
-短消息补语义（单次运行内按会话累积）。出处：`vector.doc_text`、
-[docs/TOOLS.md](docs/TOOLS.md) §7。
+短消息补语义（增量续跑时会自动回查水位线前同会话最近一条可嵌入消息，最多回扫 500 条）。
+出处：`vector.doc_text`、`vector._prev_text`、[docs/TOOLS.md](docs/TOOLS.md) §7。
 
 ## 分区键（partition key）
 `vec_messages` 的 `acct_chat` 列，`"{account}|{chat_md5}"`——把 KNN 扫描面缩到单会话；
@@ -74,9 +76,9 @@ MCP 与 CLI 两个入口共享的一层：参数归一化、账号/会话解析�
 2026-11-21 随代码一起删除——要判断一段 `content` 是不是贴纸显示串，直接用前缀常量比。
 
 ## 任务注册表（tasks）
-长任务的内存记录 + `~/.agent-wechat/tasks.json` 持久化（首次使用时载入，所以重启后
-`get_task_status` 仍答得上来）。`rows` 有**两个写入方**：运行中 `tasks.update(rows=)`
-写进度（本轮已处理行数，单调递增），跑完由 runner 返回值覆盖为终值。载入时把遗留的
-`running` 收割为 `failed`（无 `interrupted` 枚举值）。**任务登记归 usecases**，core 模块
-只提供管道（`export.run_export` / `vector.build_index`）。出处：`tasks.py`、
-`usecases/chat.py`（export 任务）、`usecases/retrieve.py`（vector 任务）。
+长任务与互斥任务的内存记录 + `~/.agent-wechat/tasks.json` 持久化（通过独立锁文件 `tasks.json.lock`
+每次操作跨进程重读合并写回，重启后 `get_task_status` 仍答得上来）。`rows` 有**两个写入方**：运行中
+`tasks.update(rows=)` 写进度（本轮已处理行数，单调递增），跑完由 runner 返回值覆盖为终值。`_harvest()`
+按 PID 存活（`pid_alive`）、进程启动时刻（防 PID 复用）与 24 小时心跳过期把死掉的 `running` 收割为
+`failed`（无 `interrupted` 枚举值），不会误杀另一进程正在跑的任务。**任务登记归 usecases / 运维编排**，
+core 管道只负责执行。出处：`tasks.py`、`usecases/chat.py`、`usecases/retrieve.py`。

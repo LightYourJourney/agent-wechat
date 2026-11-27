@@ -28,7 +28,7 @@ import subprocess
 import time
 import uuid
 
-from . import errors, exclusions, media, messages, paths, search, store
+from . import errors, exclusions, media, messages, paths, search, store, tasks
 
 MAX_FILE_BYTES = 20 * 1024 * 1024
 MIN_FREE_BYTES = 50 * 1024 * 1024
@@ -115,8 +115,10 @@ class WhisperCliAsr:
     def extract(self, path: pathlib.Path) -> tuple[str | None, float | None]:
         out = _run(["whisper-cli", "-m", str(self.model), "-f", str(path),
                     "-l", "zh", "-nt"])
+        if out is None:
+            return None, None
         # whisper-cli 在没有语音时会打印 `[BLANK_AUDIO]` 之类的标记，保留原样。
-        return (out or "").strip(), None
+        return out.strip(), None
 
 
 def _first_line(argv: list[str]) -> str | None:
@@ -305,14 +307,16 @@ def _insert(con: sqlite3.Connection, *, row: sqlite3.Row, kind: str, text: str,
         " SELECT ?,?,?,?,?,?,?,?,?,?, 'auto', ?"
         " WHERE EXISTS (SELECT 1 FROM messages WHERE msg_key = ?)"
         " AND NOT EXISTS (SELECT 1 FROM exclusions.excluded WHERE msg_key IN (?, ?))"
+        " AND NOT EXISTS (SELECT 1 FROM derived_tombstone WHERE msg_key IN (?, ?) AND kind = ?)"
         " ON CONFLICT(derivation_id) DO UPDATE SET"
         " text=excluded.text, engine=excluded.engine,"
         " engine_version=excluded.engine_version, source=excluded.source,"
         " quality=excluded.quality, status='auto', created_at=excluded.created_at"
-        " WHERE derived_text.status != 'deleted'",
+        " WHERE derived_text.status = 'auto'",
         (f"{row['msg_key']}|{kind}", row["msg_key"], row["account"], row["chat_id"],
          kind, text, engine, version, str(source), quality, now,
-         row["msg_key"], row["msg_key"], messages.legacy_key(row["msg_key"])))
+         row["msg_key"], row["msg_key"], messages.legacy_key(row["msg_key"]),
+         row["msg_key"], messages.legacy_key(row["msg_key"]), kind))
     return cur.rowcount > 0
 
 
@@ -344,7 +348,7 @@ def ingest(account: str, chat: str | None = None, *,
     def skip(reason: str) -> None:
         result["skipped"][reason] = result["skipped"].get(reason, 0) + 1
 
-    with _lock():
+    with _lock(), tasks.claim("derived_ingest", account=account):
         free = _free_bytes()
         # 0 = 探测失败（未知），与 sync 同一口径放行：当成「磁盘满」会报出一句错话。
         if free and free < MIN_FREE_BYTES:
@@ -528,6 +532,7 @@ def delete_derived(derivation_id: str, *, now: int | None = None) -> dict:
 
 
 def search_derived(query: str, *, account: str, chat_id: str | None = None,
+                   after_ts: int | None = None, before_ts: int | None = None,
                    limit: int = 20, exclude_chats: Collection[str] = ()) -> dict:
     """在派生文本里检索，返回带 `msg_key` 的证据片段（供 retrieve 融合与 CLI 使用）。
 
@@ -535,6 +540,10 @@ def search_derived(query: str, *, account: str, chat_id: str | None = None,
     `search.search`。"""
     if not query or not query.strip():
         raise errors.DerivedInputError("检索串不能为空")
+    if "\x00" in query:
+        raise errors.DerivedInputError("检索串不能包含 NUL 字符")
+    search.check_ts("after_ts", after_ts)
+    search.check_ts("before_ts", before_ts)
     limit = max(1, min(int(limit), 100))
     # 投影与 JOIN 两路（FTS / LIKE）共用：此前各写一份，改一处就得记得改另一处。
     cols = ("SELECT d.derivation_id, d.msg_key, d.chat_id, d.kind, d.text, d.engine, m.ts,"
@@ -545,30 +554,36 @@ def search_derived(query: str, *, account: str, chat_id: str | None = None,
     if chat_id:
         filt += " AND d.chat_id = ?"
         args.append(chat_id)
+    if after_ts is not None:
+        filt += " AND m.ts >= ?"
+        args.append(int(after_ts))
+    if before_ts is not None:
+        filt += " AND m.ts < ?"
+        args.append(int(before_ts))
     if exclude_chats:
         # 按 `chat_md5` 判：派生表的 `chat_id` 可能停在退化形态 `md5:<hex>`，两种形态共享
         # 同一个 md5，一个谓词覆盖两者（同 `search.search`）。
         filt += f" AND m.chat_md5 NOT IN ({','.join('?' * len(exclude_chats))})"
         args.extend(messages.chat_md5(c) for c in exclude_chats)
     base = cols + " FROM derived_text d" + joins + " WHERE d.account = ?" + filt
+    q_stripped = query.strip()
     with store.open() as con:
         rows: list[sqlite3.Row] = []
-        if len(query.strip()) >= 3:
+        fts_failed = False
+        if len(q_stripped) >= 3:
             try:
                 rows = con.execute(
                     cols + " FROM derived_fts JOIN derived_text d"
                     " ON d.rowid = derived_fts.rowid" + joins
                     + " WHERE derived_fts MATCH ? AND d.account = ?" + filt
                     + " ORDER BY rank LIMIT ?",
-                    # 与关键词路（search.py）同一份转义：包成短语做 trigram 子串匹配。
-                    # 裸串交给 MATCH 时 `world hello` 按 AND 命中、`hel*` 走前缀语法、
-                    # `a-b` 直接语法错——同一个查询在两路给出不同答案。
-                    (search.fts_phrase(query), *args, limit)).fetchall()
+                    (search.fts_phrase(q_stripped), *args, limit)).fetchall()
             except sqlite3.OperationalError:
-                rows = []       # FTS 表缺失/不可用：走 LIKE；其它 sqlite 错误照旧抛
-        if not rows:                     # 1-2 字或 FTS 不可用：LIKE 兜底
+                rows = []
+                fts_failed = True
+        if not rows and (len(q_stripped) <= 2 or fts_failed):
             # 转义 `%`/`_`：与 search.py 同立场——查询里的通配符不该被当语法。
-            needle = (query.strip().replace("\\", "\\\\")
+            needle = (q_stripped.replace("\\", "\\\\")
                       .replace("%", "\\%").replace("_", "\\_"))
             try:
                 rows = con.execute(
@@ -604,6 +619,10 @@ def add_claim(account: str, claim: str, *, evidence: list[str],
         # 证据判据与写入同一把写锁（同 `store.upsert_batch` 的立场）：判完、写之前 `purge --chat`
         # 若删完了证据所在的会话，主张与证据会落在已销毁的会话上，核查早已报过 ✅。
         store._begin_immediate(con)
+        if excluded := exclusions.excluded_keys(con, evidence):
+            raise errors.DataNotFound(
+                f"证据 {next(iter(excluded))} 已被 purge 排除，不能作为事实记忆证据",
+                hint="被 purge 的消息不能作为证据")
         rows = con.execute(
             "SELECT msg_key, chat_id FROM messages WHERE msg_key IN ("
             + ",".join("?" * len(evidence)) + ") AND account=?",
@@ -652,7 +671,7 @@ def set_claim_status(claim_id: str, status: str, *, conflicts_with: str | None =
             f"未知状态：{status}", hint=f"可用：{', '.join(CLAIM_STATUSES)}")
     stamp = int(now if now is not None else time.time())
     with store.open() as con:
-        row = con.execute("SELECT status FROM fact_claim WHERE claim_id=?",
+        row = con.execute("SELECT status, account FROM fact_claim WHERE claim_id=?",
                           (claim_id,)).fetchone()
         if row is None:
             raise errors.DataNotFound(f"找不到主张 {claim_id}", hint=_CLAIM_ID_HINT)
@@ -662,11 +681,18 @@ def set_claim_status(claim_id: str, status: str, *, conflicts_with: str | None =
                 f"不能从 {current} 迁到 {status}",
                 hint="允许：candidate→confirmed/retracted/disputed；"
                      "confirmed→retracted/disputed；retracted/disputed→confirmed")
+        if status in ("confirmed", "disputed"):
+            ev_count = con.execute(
+                "SELECT count(*) FROM fact_evidence WHERE claim_id=?", (claim_id,)).fetchone()[0]
+            if ev_count == 0:
+                raise errors.DerivedInputError(
+                    "该主张已无任何有效证据（可能已被 purge 销毁），不能恢复为有效状态",
+                    hint="没有证据的主张只能保持 retracted 或删除")
         if conflicts_with:
             if conflicts_with == claim_id:
                 raise errors.DerivedInputError("主张不能与自己冲突")
-            if con.execute("SELECT 1 FROM fact_claim WHERE claim_id=?",
-                           (conflicts_with,)).fetchone() is None:
+            if con.execute("SELECT 1 FROM fact_claim WHERE claim_id=? AND account=?",
+                           (conflicts_with, row["account"])).fetchone() is None:
                 raise errors.DataNotFound(f"冲突主张 {conflicts_with} 不存在", hint=_CLAIM_ID_HINT)
         con.execute(
             "UPDATE fact_claim SET status=?, conflicts_with=COALESCE(?, conflicts_with),"

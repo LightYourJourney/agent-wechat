@@ -5,7 +5,6 @@
 """
 from __future__ import annotations
 
-import datetime
 import html
 from typing import Iterable
 
@@ -30,11 +29,11 @@ padding:12px;margin-bottom:16px;font-size:13px}
 
 
 def _esc(v: str | None) -> str:
-    return html.escape(v or "", quote=True)
+    return html.escape(chat_text.scrub_controls(v or ""), quote=True)
 
 
 def _when(ts: int) -> str:
-    return datetime.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M") if ts else ""
+    return chat_text.when(ts) if ts else ""
 
 
 def _media_block(m: moments.SnsMedia) -> str:

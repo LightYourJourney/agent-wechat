@@ -716,11 +716,21 @@ def fts_bulk(con: sqlite3.Connection, *, enabled: bool = True) -> Iterator[bool]
     失败时**原异常优先**、标记留着：下一次 `connect()`（本进程或别的进程）会补做。
     """
     global _bulk_active
-    if not (enabled and fts_bulk_begin(con)):
+    if not enabled:
         yield False
         return
     with _bulk_lock:
         _bulk_active += 1
+    try:
+        if not fts_bulk_begin(con):
+            with _bulk_lock:
+                _bulk_active -= 1
+            yield False
+            return
+    except BaseException:
+        with _bulk_lock:
+            _bulk_active -= 1
+        raise
     try:
         try:
             yield True
@@ -902,8 +912,11 @@ def upsert_batch(con: sqlite3.Connection, rows: list[messages.MessageRow]) -> in
     skip = _filter_excluded(con, [r["msg_key"] for r in rows])
     keep = [r for r in rows if r["msg_key"] not in skip]
     if keep:
-        con.executemany(_INSERT_SQL, [{**r, "exported_at": now} for r in keep])
-        _heal_degraded_chat_ids(con, keep)
+        try:
+            con.executemany(_INSERT_SQL, [{**r, "exported_at": now} for r in keep])
+            _heal_degraded_chat_ids(con, keep)
+        except (sqlite3.Error, OSError) as exc:
+            raise index_unavailable(exc) from exc
     wm: dict[tuple[str, str, str], tuple[int, int]] = {}
     for r in rows:  # 水位线：批内按会话聚合后一条语句推进（单调 max）
         k = (r["account"], r["shard"], r["chat_md5"])
@@ -911,19 +924,19 @@ def upsert_batch(con: sqlite3.Connection, rows: list[messages.MessageRow]) -> in
             wm[k] = (r["local_id"], int(r["ts"] or 0))
     # `anchor_ts` 跟着 max 那一行走（reader 据它识别表重建）；max 没前进就不动。
     # UPSERT 的 SET 里引用的列都是**旧值**，两条赋值互不影响。
-    con.executemany(
-        """INSERT INTO watermark (account, shard, chat_md5, max_local_id, anchor_ts, updated_at)
-           VALUES (?,?,?,?,?,?)
-           ON CONFLICT(account, shard, chat_md5) DO UPDATE SET
-             anchor_ts=CASE WHEN excluded.max_local_id >= max_local_id
-                            THEN excluded.anchor_ts ELSE anchor_ts END,
-             max_local_id=max(max_local_id, excluded.max_local_id),
-             updated_at=excluded.updated_at""",
-        [(a, s, m, mx, ts, now) for (a, s, m), (mx, ts) in wm.items()])
     try:
+        con.executemany(
+            """INSERT INTO watermark (account, shard, chat_md5, max_local_id, anchor_ts, updated_at)
+               VALUES (?,?,?,?,?,?)
+               ON CONFLICT(account, shard, chat_md5) DO UPDATE SET
+                 anchor_ts=CASE WHEN excluded.max_local_id >= max_local_id
+                                THEN excluded.anchor_ts ELSE anchor_ts END,
+                 max_local_id=max(max_local_id, excluded.max_local_id),
+                 updated_at=excluded.updated_at""",
+            [(a, s, m, mx, ts, now) for (a, s, m), (mx, ts) in wm.items()])
         con.commit()
     except (sqlite3.Error, OSError) as exc:
-        # R2-A-004：提交失败此前裸穿（实测 EIO）。这里与 `open()` 的出口同一口径。
+        # R2-A-004：提交/写入失败此前裸穿（实测 EIO）。这里与 `open()` 的出口同一口径。
         raise index_unavailable(exc) from exc
     return len(rows) - len(keep)
 
@@ -966,8 +979,14 @@ def _vec_exec(con: sqlite3.Connection, sql: str, args: tuple = ()) -> sqlite3.Cu
                  "（store.connect() 不加载扩展）") from e
 
 
-def chat_row_counts(con: sqlite3.Connection, account: str, chat_id: str) -> dict[str, int]:
+def chat_row_counts(con: sqlite3.Connection, account: str, chat_id: str,
+                    *, only_excluded: bool = False) -> dict[str, int]:
     """该会话在各张表里的存活条数。核查与测试共用，避免各处各写一套判据。
+
+    `only_excluded=True`（给 `purge.verify_chat` 用）：只统计「已被立碑但仍未删掉」的残留，
+    删除事务提交之后并发写入的新消息（不在墓碑里）不算残留；无 `msg_key` 的表（`display_names`、
+    `fact_claim`）仅在会话没有新到达的非排除消息时计为残留，`vec_messages` 统计对应消息在墓碑里
+    或已无对应 `messages` 行的孤儿向量。
 
     **`msg_parts` / `media_refs` 必须按 `msg_key` 前缀数，不能经 `messages` 子查询数。**
     子查询那版有个致命的盲区（Task 3 的实现者用变异证明了）：`messages` 一删，子查询立刻为空，
@@ -982,44 +1001,80 @@ def chat_row_counts(con: sqlite3.Connection, account: str, chat_id: str) -> dict
     """
     def n(sql: str, args: tuple) -> int:
         return con.execute(sql, args).fetchone()[0]
-    md5 = messages.chat_md5(chat_id)
-    acct_chat = messages.acct_chat(account, md5)
-    p = messages.msg_key_prefix(account, md5)
-    # **同一个会话在索引里可能有两种 `chat_id`**：真名与退化形态 `md5:<hex>`（见 upsert 的
-    # EA-012 注释——名字源临时读不出来时解码结果退回退化 id，之后名字恢复了才自愈）。
-    # 按单个 `chat_id` 计数会漏掉另一种形态的整批行，而**核查也会继承这个盲区**：一份
-    # 漏删的会话对着「剩下 0 条」报 ✅。两种形态共享同一个 `chat_md5`，所以一次算出来、
-    # 所有按 `chat_id` 过滤的表都用 `IN (?, ?)` 覆盖。
-    # 谓词是**并集**：`chat_md5` 覆盖「同一会话分裂成两种 chat_id」的全部形态，`chat_id IN`
-    # 兜住历史/夹具里 `chat_md5` 与 `chat_id` 不匹配的行（真实数据两者恒一致，但索引是
-    # 长期演进的，不能假设）。只用 md5 会在 `chat_md5` 不一致时**静默一条不中**。
     ident = messages.ChatIdentity.of(account, chat_id)
     md5 = ident.md5
+    acct_chat = messages.acct_chat(account, md5)
+    p = messages.msg_key_prefix(account, md5)
+    if not only_excluded:
+        return {
+            "messages": n(f"SELECT count(*) FROM messages WHERE account=? AND {ident.messages_where}",
+                          ident.messages_args),
+            "vectors": (_vec_exec(con, "SELECT count(*) FROM vec_messages WHERE acct_chat=?",
+                                  (acct_chat,)).fetchone()[0]
+                        if has_table(con, "vec_messages") else 0),
+            "parts": n("SELECT count(*) FROM msg_parts WHERE substr(msg_key, 1, ?) = ?", (len(p), p)),
+            "refs": n("SELECT count(*) FROM media_refs WHERE substr(msg_key, 1, ?) = ?", (len(p), p)),
+            "extras": n("SELECT count(*) FROM msg_extras WHERE substr(msg_key, 1, ?) = ?", (len(p), p)),
+            "display_names": n(
+                f"SELECT count(*) FROM display_names WHERE account=? AND {ident.chat_id_where}",
+                ident.chat_id_args),
+            # Phase 06：派生文本与事实记忆同属「删了就要核实真的没了」的那类数据。
+            "derived": n("SELECT count(*) FROM derived_text WHERE substr(msg_key, 1, ?) = ?",
+                         (len(p), p)),
+            "claims": n(
+                f"SELECT count(*) FROM fact_claim WHERE account=? AND {ident.chat_id_where}",
+                ident.chat_id_args),
+            "evidence": n("SELECT count(*) FROM fact_evidence WHERE substr(msg_key, 1, ?) = ?",
+                          (len(p), p)),
+            "derived_tombstones": n(
+                "SELECT count(*) FROM derived_tombstone WHERE substr(msg_key, 1, ?) = ?",
+                (len(p), p)),
+            # 全局不变量：FTS 行没有对应的 derived_text 行 = 触发器失效、正文可能已删而索引还在。
+            # 它不是「本会话」的计数（FTS 没有 msg_key 列），但 purge 的核查要求它恒为 0。
+            "derived_fts_orphans": n(
+                "SELECT count(*) FROM derived_fts_content c"
+                " LEFT JOIN derived_text d ON d.rowid = c.id WHERE d.rowid IS NULL", ()),
+        }
+    ex_pred_msg = ("EXISTS (SELECT 1 FROM exclusions.excluded x WHERE x.msg_key IN "
+                   f"(t.msg_key, {messages.LEGACY_KEY_SQL.format(p='t.')}))")
+    # 旁路表只有 msg_key 列：精确命中 5 段新墓碑，或按 `旧4段|` 前缀命中 v10 前旧墓碑
+    ex_pred_key = ("EXISTS (SELECT 1 FROM exclusions.excluded x WHERE x.msg_key = t.msg_key "
+                   "OR substr(t.msg_key, 1, length(x.msg_key) + 1) = x.msg_key || '|')")
+    has_fresh = n(
+        f"SELECT count(*) FROM messages t WHERE t.account=? AND {ident.messages_where} "
+        f"AND NOT {ex_pred_msg}", ident.messages_args) > 0
+    if has_table(con, "vec_messages"):
+        vec_cnt = _vec_exec(
+            con,
+            "SELECT count(*) FROM vec_messages v LEFT JOIN messages t ON t.id = v.msg_rowid "
+            f"WHERE v.acct_chat=? AND (t.id IS NULL OR {ex_pred_msg})",
+            (acct_chat,)).fetchone()[0]
+    else:
+        vec_cnt = 0
     return {
-        "messages": n(f"SELECT count(*) FROM messages WHERE account=? AND {ident.messages_where}",
-                      ident.messages_args),
-        "vectors": (_vec_exec(con, "SELECT count(*) FROM vec_messages WHERE acct_chat=?",
-                              (acct_chat,)).fetchone()[0]
-                    if has_table(con, "vec_messages") else 0),
-        "parts": n("SELECT count(*) FROM msg_parts WHERE substr(msg_key, 1, ?) = ?", (len(p), p)),
-        "refs": n("SELECT count(*) FROM media_refs WHERE substr(msg_key, 1, ?) = ?", (len(p), p)),
-        "extras": n("SELECT count(*) FROM msg_extras WHERE substr(msg_key, 1, ?) = ?", (len(p), p)),
-        "display_names": n(
+        "messages": n(
+            f"SELECT count(*) FROM messages t WHERE t.account=? AND {ident.messages_where} "
+            f"AND {ex_pred_msg}", ident.messages_args),
+        "vectors": vec_cnt,
+        "parts": n(f"SELECT count(*) FROM msg_parts t WHERE substr(t.msg_key, 1, ?) = ? AND {ex_pred_key}",
+                   (len(p), p)),
+        "refs": n(f"SELECT count(*) FROM media_refs t WHERE substr(t.msg_key, 1, ?) = ? AND {ex_pred_key}",
+                  (len(p), p)),
+        "extras": n(f"SELECT count(*) FROM msg_extras t WHERE substr(t.msg_key, 1, ?) = ? AND {ex_pred_key}",
+                    (len(p), p)),
+        "display_names": (0 if has_fresh else n(
             f"SELECT count(*) FROM display_names WHERE account=? AND {ident.chat_id_where}",
-            ident.chat_id_args),
-        # Phase 06：派生文本与事实记忆同属「删了就要核实真的没了」的那类数据。
-        "derived": n("SELECT count(*) FROM derived_text WHERE substr(msg_key, 1, ?) = ?",
+            ident.chat_id_args)),
+        "derived": n(f"SELECT count(*) FROM derived_text t WHERE substr(t.msg_key, 1, ?) = ? AND {ex_pred_key}",
                      (len(p), p)),
-        "claims": n(
+        "claims": (0 if has_fresh else n(
             f"SELECT count(*) FROM fact_claim WHERE account=? AND {ident.chat_id_where}",
-            ident.chat_id_args),
-        "evidence": n("SELECT count(*) FROM fact_evidence WHERE substr(msg_key, 1, ?) = ?",
+            ident.chat_id_args)),
+        "evidence": n(f"SELECT count(*) FROM fact_evidence t WHERE substr(t.msg_key, 1, ?) = ? AND {ex_pred_key}",
                       (len(p), p)),
         "derived_tombstones": n(
-            "SELECT count(*) FROM derived_tombstone WHERE substr(msg_key, 1, ?) = ?",
+            f"SELECT count(*) FROM derived_tombstone t WHERE substr(t.msg_key, 1, ?) = ? AND {ex_pred_key}",
             (len(p), p)),
-        # 全局不变量：FTS 行没有对应的 derived_text 行 = 触发器失效、正文可能已删而索引还在。
-        # 它不是「本会话」的计数（FTS 没有 msg_key 列），但 purge 的核查要求它恒为 0。
         "derived_fts_orphans": n(
             "SELECT count(*) FROM derived_fts_content c"
             " LEFT JOIN derived_text d ON d.rowid = c.id WHERE d.rowid IS NULL", ()),
@@ -1054,6 +1109,18 @@ def accounts_holding_chat(con: sqlite3.Connection, chat_id: str) -> list[str]:
     for t in ("display_names", "fact_claim"):
         parts.append(f"SELECT account FROM {t} WHERE {ident.chat_id_where}")
         args += [ident.chat_id, ident.degraded_id]
+    if has_table(con, "vec_messages"):
+        # 孤儿向量也可能只留在 vec_messages 里（仅当连接加载了 sqlite-vec 时可读）
+        with contextlib.suppress(sqlite3.Error, errors.IndexUnavailable):
+            suffix = "|" + ident.md5
+            for (acct,) in _vec_exec(
+                    con,
+                    "SELECT DISTINCT substr(acct_chat, 1, length(acct_chat) - ?) "
+                    "FROM vec_messages WHERE substr(acct_chat, -?) = ?",
+                    (len(suffix), len(suffix), suffix)):
+                if acct:
+                    parts.append("SELECT ?")
+                    args.append(acct)
     return [r[0] for r in con.execute(" UNION ".join(parts) + " ORDER BY 1", args)]
 
 
@@ -1202,7 +1269,7 @@ def message_page(con: sqlite3.Connection, account: str, chat_id: str, *,
         " m.media_hint, m.msg_type, " + _SENDER_EXPR + " AS sender"
         " FROM messages m " + _SENDER_JOIN +
         " WHERE " + " AND ".join(where) +
-        " ORDER BY m.ts DESC, m.local_id DESC LIMIT ?", args).fetchall()
+        " ORDER BY m.ts DESC, m.local_id DESC, m.msg_key DESC LIMIT ?", args).fetchall()
     more = len(rows) > limit
     rows = rows[:limit]
     cursor = None
@@ -1241,10 +1308,13 @@ def upsert_media_refs(con: sqlite3.Connection,
     skip = _filter_excluded(con, [r[0] for r in rows])
     keep = [r for r in rows if r[0] not in skip]
     if keep:
-        con.executemany(
-            "INSERT INTO media_refs (msg_key, media_kind, file_key, xml_md5) VALUES (?,?,?,?) "
-            "ON CONFLICT(msg_key) DO UPDATE SET media_kind=excluded.media_kind, "
-            "file_key=excluded.file_key, xml_md5=excluded.xml_md5", keep)
+        try:
+            con.executemany(
+                "INSERT INTO media_refs (msg_key, media_kind, file_key, xml_md5) VALUES (?,?,?,?) "
+                "ON CONFLICT(msg_key) DO UPDATE SET media_kind=excluded.media_kind, "
+                "file_key=excluded.file_key, xml_md5=excluded.xml_md5", keep)
+        except (sqlite3.Error, OSError) as exc:
+            raise index_unavailable(exc) from exc
     return len(rows) - len(keep)
 
 
@@ -1364,10 +1434,13 @@ def upsert_extras(con: sqlite3.Connection,
     skip = _filter_excluded(con, [r[0] for r in rows])
     keep = [r for r in rows if r[0] not in skip]
     if keep:
-        con.executemany(
-            "INSERT INTO msg_extras (msg_key, msg_type, payload) VALUES (?,?,?) "
-            "ON CONFLICT(msg_key) DO UPDATE SET msg_type=excluded.msg_type, "
-            "payload=excluded.payload", keep)
+        try:
+            con.executemany(
+                "INSERT INTO msg_extras (msg_key, msg_type, payload) VALUES (?,?,?) "
+                "ON CONFLICT(msg_key) DO UPDATE SET msg_type=excluded.msg_type, "
+                "payload=excluded.payload", keep)
+        except (sqlite3.Error, OSError) as exc:
+            raise index_unavailable(exc) from exc
     return len(rows) - len(keep)
 
 
@@ -1411,12 +1484,15 @@ def upsert_msg_parts(con: sqlite3.Connection,
     skip = _filter_excluded(con, [r[0] for r in rows])
     keep = [r for r in rows if r[0] not in skip]
     if keep:
-        con.executemany(
-            "INSERT INTO msg_parts (msg_key, appmsg_type, ref_svrid, ref_msg_key, raw_xml) "
-            "VALUES (?,?,?,?,?) "
-            "ON CONFLICT(msg_key) DO UPDATE SET appmsg_type=excluded.appmsg_type, "
-            "ref_svrid=excluded.ref_svrid, ref_msg_key=excluded.ref_msg_key, "
-            "raw_xml=excluded.raw_xml", keep)
+        try:
+            con.executemany(
+                "INSERT INTO msg_parts (msg_key, appmsg_type, ref_svrid, ref_msg_key, raw_xml) "
+                "VALUES (?,?,?,?,?) "
+                "ON CONFLICT(msg_key) DO UPDATE SET appmsg_type=excluded.appmsg_type, "
+                "ref_svrid=excluded.ref_svrid, ref_msg_key=excluded.ref_msg_key, "
+                "raw_xml=excluded.raw_xml", keep)
+        except (sqlite3.Error, OSError) as exc:
+            raise index_unavailable(exc) from exc
     return len(rows) - len(keep)
 
 
@@ -1660,30 +1736,35 @@ def queued_reembed(con: sqlite3.Connection, account: str | None = None,
 
 
 def reembed_queue_stats(con: sqlite3.Connection, account: str | None = None) -> dict:
-    """队列深度与失败分布（新鲜度诊断用）。表不存在时返回零（轻装安装）。"""
+    """队列深度与失败分布（新鲜度诊断用）。表/列不存在时兼容降级（轻装安装或 v3/v4 旧库）。"""
     if not has_table(con, "pending_reembed"):
-        return {"pending": 0, "failed": 0, "max_attempts": 0}
+        return {"pending": 0, "failed": 0, "max_attempts": 0, "by_reason": {}}
+    has_fails = has_table(con, "reembed_failures")
     if account is None:
         pending = con.execute("SELECT count(*) FROM pending_reembed").fetchone()[0]
-        fails = con.execute(
+        fails = (con.execute(
             "SELECT count(*), COALESCE(max(attempts), 0) FROM reembed_failures").fetchone()
+            if has_fails else (0, 0))
     else:
         p = f"{account}|"
         pending = con.execute(
             "SELECT count(*) FROM pending_reembed WHERE substr(msg_key, 1, ?) = ?",
             (len(p), p)).fetchone()[0]
-        fails = con.execute(
+        fails = (con.execute(
             "SELECT count(*), COALESCE(max(attempts), 0) FROM reembed_failures "
             "WHERE substr(msg_key, 1, ?) = ?", (len(p), p)).fetchone()
+            if has_fails else (0, 0))
     by_reason: dict[str, int] = {}
     if pending:
-        sql = "SELECT reason, count(*) FROM pending_reembed"
-        args: tuple = ()
-        if account is not None:
-            p = f"{account}|"
-            sql += " WHERE substr(msg_key, 1, ?) = ?"
-            args = (len(p), p)
-        by_reason = dict(con.execute(sql + " GROUP BY reason", args).fetchall())
+        cols = {r[1] for r in con.execute("PRAGMA table_info(pending_reembed)")}
+        if "reason" in cols:
+            sql = "SELECT reason, count(*) FROM pending_reembed"
+            args: tuple = ()
+            if account is not None:
+                p = f"{account}|"
+                sql += " WHERE substr(msg_key, 1, ?) = ?"
+                args = (len(p), p)
+            by_reason = dict(con.execute(sql + " GROUP BY reason", args).fetchall())
     return {"pending": pending, "failed": fails[0], "max_attempts": fails[1],
             "by_reason": by_reason}
 
